@@ -156,6 +156,51 @@ describeOnBun("process runner", () => {
     }
   })
 
+  it("does not report completion while a same-group descendant can still mutate", async () => {
+    const cwd = await mkdtemp(`${process.cwd()}/.process-test-`)
+    const target = `${cwd}/late.txt`
+    try {
+      const started = Date.now()
+      const receipt = await execute(
+        request({
+          executable: "/bin/sh",
+          args: ["-c", `(sleep 0.15; printf late > "${target}") >/dev/null 2>&1 & exit 0`],
+          cwd,
+          timeoutMs: 2_000
+        })
+      )
+
+      expect(receipt.exitCode).toBe(0)
+      expect(Date.now() - started).toBeGreaterThanOrEqual(100)
+      expect(await readFile(target, "utf8")).toBe("late")
+    } finally {
+      await rm(cwd, { recursive: true, force: true })
+    }
+  })
+
+  it("times out a surviving group after its direct leader exits", async () => {
+    const cwd = await mkdtemp(`${process.cwd()}/.process-test-`)
+    const pidFile = `${cwd}/child.pid`
+    const started = Date.now()
+    try {
+      const error = await fail(
+        request({
+          executable: "/bin/sh",
+          args: ["-c", `sleep 5 >/dev/null 2>&1 & printf %s "$!" > "${pidFile}"; exit 0`],
+          cwd,
+          timeoutMs: 50
+        })
+      )
+      const childPid = Number(await readFile(pidFile, "utf8"))
+
+      expect(error).toBeInstanceOf(ProcessTimedOut)
+      expect(Date.now() - started).toBeLessThan(1_500)
+      expect(() => process.kill(childPid, 0)).toThrow()
+    } finally {
+      await rm(cwd, { recursive: true, force: true })
+    }
+  })
+
   it("rejects paths and arguments that cannot be represented safely", async () => {
     const error = await fail(
       request({ executable: "echo", args: ["bad\0atom"] })

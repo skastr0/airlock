@@ -215,21 +215,29 @@ const runNativeProcess = async (
 
   let stopReason: "timeout" | "cancelled" | "output" | undefined
   let killTimer: ReturnType<typeof setTimeout> | undefined
-  const terminateGroup = () => {
-    if (child.exitCode !== null) return
+  const groupExists = () => {
     try {
-      // `detached: true` makes the direct child the POSIX session/group leader.
-      globalThis.process.kill(-child.pid, "SIGTERM")
-    } catch {
-      child.kill("SIGTERM")
+      globalThis.process.kill(-child.pid, 0)
+      return true
+    } catch (cause) {
+      return (cause as NodeJS.ErrnoException).code !== "ESRCH"
     }
+  }
+  const signalGroup = (signal: NodeJS.Signals) => {
+    try {
+      globalThis.process.kill(-child.pid, signal)
+      return
+    } catch {
+      if (child.exitCode === null) child.kill(signal)
+    }
+  }
+  const terminateGroup = () => {
+    // The group may outlive its leader. Signalling must therefore be keyed to
+    // the stable process-group id rather than `child.exitCode`.
+    signalGroup("SIGTERM")
+    if (killTimer !== undefined) return
     killTimer = setTimeout(() => {
-      if (child.exitCode !== null) return
-      try {
-        globalThis.process.kill(-child.pid, "SIGKILL")
-      } catch {
-        child.kill("SIGKILL")
-      }
+      if (groupExists()) signalGroup("SIGKILL")
     }, options.killGraceMs ?? 500)
   }
 
@@ -279,6 +287,12 @@ const runNativeProcess = async (
   const stdoutRead = request.stdout === "capture" ? capture(child.stdout) : Promise.resolve(new Uint8Array())
   const stderrRead = request.stderr === "capture" ? capture(child.stderr) : Promise.resolve(new Uint8Array())
   await child.exited
+  // A direct-child receipt is not closure completion. Same-group descendants
+  // retain inherited descriptors and Cell authority, so wait until the group
+  // is empty. The still-active timeout/cancellation paths terminate it.
+  while (groupExists()) {
+    await new Promise((resolve) => setTimeout(resolve, 10))
+  }
   const [stdout, stderr] = await Promise.all([stdoutRead, stderrRead])
   if (timeout !== undefined) clearTimeout(timeout)
   if (killTimer !== undefined) clearTimeout(killTimer)
