@@ -142,6 +142,10 @@ export class Cell extends Context.Tag("airlock/Cell")<
       request: CellRequest,
       options?: CellRunOptions
     ) => Effect.Effect<CellReceipt, CellError>
+    /** Rebinds the live workspace immediately before an Apply consumes a delta. */
+    readonly revalidate: (
+      receipt: CellReceipt
+    ) => Effect.Effect<ReadonlyArray<WorkspaceDrift>, WorkspaceFingerprintFailed>
   }
 >() {}
 
@@ -189,7 +193,9 @@ const fingerprintEntry = (absolutePath: string, displayPath: string): WorkspaceE
   })
 }
 
-const fingerprintWorkspace = (root: string): Effect.Effect<WorkspaceFingerprint, WorkspaceFingerprintFailed> =>
+export const fingerprintWorkspace = (
+  root: string
+): Effect.Effect<WorkspaceFingerprint, WorkspaceFingerprintFailed> =>
   Effect.try({
     try: () => {
       const canonical = realpathSync(root)
@@ -402,6 +408,12 @@ export const CellLive = Layer.effect(
   Effect.gen(function* () {
     const platform = yield* MacosPlatform
     const runner = yield* ProcessRunner
-    return Cell.of({ run: (request, options) => runCell(platform, runner, request, options) })
+    return Cell.of({
+      run: (request, options) => runCell(platform, runner, request, options),
+      revalidate: (receipt) =>
+        fingerprintWorkspace(receipt.sourceWorkspace).pipe(
+          Effect.map((live) => driftEvidence(receipt.baseline, live))
+        )
+    })
   })
 )
