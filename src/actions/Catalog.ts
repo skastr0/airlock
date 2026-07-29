@@ -1,0 +1,551 @@
+import { Effect, Schema } from "effect"
+import { ArtifactId, HandleKind, Right } from "../plan/index.ts"
+
+/**
+ * Native action vocabulary is a pure lowering seam. It describes requested
+ * work but imports no filesystem, process, network, Hold, or Outbox adapter.
+ * Authority is still only introduced by Plan admission.
+ */
+
+export const NativeActionName = Schema.Literal(
+  "file.inspect",
+  "file.read",
+  "file.list",
+  "file.glob",
+  "file.stat",
+  "file.write",
+  "file.remove",
+  "file.move",
+  "file.copy",
+  "file.mkdir",
+  "process.run",
+  "http.stage"
+)
+export type NativeActionName = typeof NativeActionName.Type
+
+export const ObservationActionName = Schema.Literal(
+  "file.inspect",
+  "file.read",
+  "file.list",
+  "file.glob",
+  "file.stat"
+)
+export type ObservationActionName = typeof ObservationActionName.Type
+
+export const MutationActionName = Schema.Literal(
+  "file.write",
+  "file.remove",
+  "file.move",
+  "file.copy",
+  "file.mkdir"
+)
+export type MutationActionName = typeof MutationActionName.Type
+
+export class ResourceNeed extends Schema.Class<ResourceNeed>("ResourceNeed")({
+  kind: HandleKind,
+  realm: Schema.String,
+  selector: Schema.String,
+  rights: Schema.Array(Right)
+}) {}
+
+const PathCall = { path: Schema.String, realm: Schema.optionalWith(Schema.String, { default: () => "local" }) }
+
+export const FileInspectAction = Schema.Struct({ action: Schema.Literal("file.inspect"), ...PathCall })
+export type FileInspectAction = typeof FileInspectAction.Type
+
+export const FileReadAction = Schema.Struct({
+  action: Schema.Literal("file.read"),
+  ...PathCall,
+  format: Schema.optionalWith(Schema.Literal("text", "bytes", "json"), { default: () => "text" as const })
+})
+export type FileReadAction = typeof FileReadAction.Type
+
+export const FileListAction = Schema.Struct({ action: Schema.Literal("file.list"), ...PathCall })
+export type FileListAction = typeof FileListAction.Type
+
+export const FileGlobAction = Schema.Struct({
+  action: Schema.Literal("file.glob"),
+  root: Schema.String,
+  pattern: Schema.String,
+  realm: Schema.optionalWith(Schema.String, { default: () => "local" })
+})
+export type FileGlobAction = typeof FileGlobAction.Type
+
+export const FileStatAction = Schema.Struct({
+  action: Schema.Literal("file.stat"),
+  ...PathCall,
+  followSymlinks: Schema.optionalWith(Schema.Boolean, { default: () => false })
+})
+export type FileStatAction = typeof FileStatAction.Type
+
+export const FileWriteAction = Schema.Struct({
+  action: Schema.Literal("file.write"),
+  ...PathCall,
+  content: Schema.optional(Schema.String),
+  sourceArtifact: Schema.optional(ArtifactId)
+})
+export type FileWriteAction = typeof FileWriteAction.Type
+
+export const FileRemoveAction = Schema.Struct({ action: Schema.Literal("file.remove"), ...PathCall })
+export type FileRemoveAction = typeof FileRemoveAction.Type
+
+export const FileMoveAction = Schema.Struct({
+  action: Schema.Literal("file.move"),
+  source: Schema.String,
+  destination: Schema.String,
+  realm: Schema.optionalWith(Schema.String, { default: () => "local" })
+})
+export type FileMoveAction = typeof FileMoveAction.Type
+
+export const FileCopyAction = Schema.Struct({
+  action: Schema.Literal("file.copy"),
+  source: Schema.String,
+  destination: Schema.String,
+  realm: Schema.optionalWith(Schema.String, { default: () => "local" })
+})
+export type FileCopyAction = typeof FileCopyAction.Type
+
+export const FileMkdirAction = Schema.Struct({
+  action: Schema.Literal("file.mkdir"),
+  ...PathCall,
+  parents: Schema.optionalWith(Schema.Boolean, { default: () => false })
+})
+export type FileMkdirAction = typeof FileMkdirAction.Type
+
+export const ProcessRunAction = Schema.Struct({
+  action: Schema.Literal("process.run"),
+  /** Absolute executable identity; argument atoms live separately in `args`. */
+  executable: Schema.String,
+  args: Schema.Array(Schema.String),
+  cwd: Schema.String,
+  env: Schema.optionalWith(
+    Schema.Record({ key: Schema.String, value: Schema.String }),
+    { default: () => ({}) }
+  ),
+  cellProfile: Schema.optionalWith(Schema.String, { default: () => "compatibility" }),
+  timeoutMs: Schema.optional(Schema.Number),
+  /** An artifact is resolved by runtime; the other choices require no input. */
+  stdin: Schema.optionalWith(Schema.Union(Schema.Literal("discard", "inherit"), ArtifactId), {
+    default: () => "discard" as const
+  }),
+  stdout: Schema.optionalWith(Schema.Literal("capture", "discard", "inherit"), {
+    default: () => "capture" as const
+  }),
+  stderr: Schema.optionalWith(Schema.Literal("capture", "discard", "inherit"), {
+    default: () => "capture" as const
+  }),
+  outputLimitBytes: Schema.optionalWith(Schema.Number, { default: () => 1_048_576 }),
+  readable: Schema.optionalWith(Schema.Array(ResourceNeed), { default: () => [] }),
+  writable: Schema.optionalWith(Schema.Array(ResourceNeed), { default: () => [] }),
+  realm: Schema.optionalWith(Schema.String, { default: () => "local" })
+})
+export type ProcessRunAction = typeof ProcessRunAction.Type
+
+export const HttpStageAction = Schema.Struct({
+  action: Schema.Literal("http.stage"),
+  endpoint: Schema.String,
+  method: Schema.Literal("GET", "POST", "PUT", "PATCH", "DELETE"),
+  headers: Schema.optionalWith(
+    Schema.Record({ key: Schema.String, value: Schema.String }),
+    { default: () => ({}) }
+  ),
+  body: Schema.optional(Schema.String),
+  bodyArtifact: Schema.optional(ArtifactId),
+  holdMillis: Schema.optionalWith(Schema.Number, { default: () => 30_000 }),
+  realm: Schema.optionalWith(Schema.String, { default: () => "external" })
+})
+export type HttpStageAction = typeof HttpStageAction.Type
+
+export const NativeActionCall = Schema.Union(
+  FileInspectAction,
+  FileReadAction,
+  FileListAction,
+  FileGlobAction,
+  FileStatAction,
+  FileWriteAction,
+  FileRemoveAction,
+  FileMoveAction,
+  FileCopyAction,
+  FileMkdirAction,
+  ProcessRunAction,
+  HttpStageAction
+)
+export type NativeActionCall = typeof NativeActionCall.Type
+
+export class CaptureLowering extends Schema.TaggedClass<CaptureLowering>()("Capture", {
+  action: ObservationActionName,
+  locator: Schema.String,
+  requirements: Schema.Array(ResourceNeed)
+}) {}
+
+export class ApplyLowering extends Schema.TaggedClass<ApplyLowering>()("Apply", {
+  action: MutationActionName,
+  requirements: Schema.Array(ResourceNeed),
+  target: Schema.String,
+  source: Schema.optional(Schema.String),
+  sourceArtifact: Schema.optional(ArtifactId),
+  content: Schema.optional(Schema.String),
+  parents: Schema.optional(Schema.Boolean)
+}) {}
+
+export class InvokeLowering extends Schema.TaggedClass<InvokeLowering>()("Invoke", {
+  action: Schema.Literal("process.run"),
+  executable: Schema.String,
+  args: Schema.Array(Schema.String),
+  cwd: Schema.String,
+  env: Schema.Record({ key: Schema.String, value: Schema.String }),
+  cellProfile: Schema.String,
+  timeoutMs: Schema.optional(Schema.Number),
+  stdin: Schema.Union(ArtifactId, Schema.Literal("discard", "inherit")),
+  stdout: Schema.Literal("capture", "discard", "inherit"),
+  stderr: Schema.Literal("capture", "discard", "inherit"),
+  outputLimitBytes: Schema.Number,
+  requirements: Schema.Array(ResourceNeed)
+}) {}
+
+export class RequestExternalLowering extends Schema.TaggedClass<RequestExternalLowering>()(
+  "RequestExternal",
+  {
+    action: Schema.Literal("http.stage"),
+    endpoint: Schema.String,
+    method: Schema.Literal("GET", "POST", "PUT", "PATCH", "DELETE"),
+    headers: Schema.Record({ key: Schema.String, value: Schema.String }),
+    body: Schema.optional(Schema.String),
+    bodyArtifact: Schema.optional(ArtifactId),
+    holdMillis: Schema.Number,
+    requirements: Schema.Array(ResourceNeed)
+  }
+) {}
+
+export const LoweredActionNode = Schema.Union(
+  CaptureLowering,
+  ApplyLowering,
+  InvokeLowering,
+  RequestExternalLowering
+)
+export type LoweredActionNode = typeof LoweredActionNode.Type
+
+export class NativeActionLowering extends Schema.Class<NativeActionLowering>("NativeActionLowering")({
+  action: NativeActionName,
+  nodes: Schema.Array(LoweredActionNode)
+}) {}
+
+export class ActionCallDecodeFailed extends Schema.TaggedError<ActionCallDecodeFailed>()(
+  "ActionCallDecodeFailed",
+  { source: Schema.String, message: Schema.String }
+) {}
+
+export class UnknownNativeAction extends Schema.TaggedError<UnknownNativeAction>()(
+  "UnknownNativeAction",
+  { action: Schema.String }
+) {}
+
+export class InvalidActionInput extends Schema.TaggedError<InvalidActionInput>()(
+  "InvalidActionInput",
+  { action: NativeActionName, field: Schema.String, reason: Schema.String }
+) {}
+
+export type ActionLoweringError = InvalidActionInput
+
+export class NativeActionDescriptor extends Schema.Class<NativeActionDescriptor>("NativeActionDescriptor")({
+  name: NativeActionName,
+  node: Schema.Literal("Capture", "Apply", "Invoke", "RequestExternal"),
+  summary: Schema.String
+}) {}
+
+export const NativeActionCatalog: ReadonlyArray<NativeActionDescriptor> = [
+  new NativeActionDescriptor({ name: "file.inspect", node: "Capture", summary: "Capture an identity-safe filesystem inspection." }),
+  new NativeActionDescriptor({ name: "file.read", node: "Capture", summary: "Capture file bytes, text, or JSON." }),
+  new NativeActionDescriptor({ name: "file.list", node: "Capture", summary: "Capture a directory listing." }),
+  new NativeActionDescriptor({ name: "file.glob", node: "Capture", summary: "Capture a glob expansion rooted at an explicit path." }),
+  new NativeActionDescriptor({ name: "file.stat", node: "Capture", summary: "Capture filesystem metadata without following symlinks by default." }),
+  new NativeActionDescriptor({ name: "file.write", node: "Apply", summary: "Apply a held file write from content or an artifact." }),
+  new NativeActionDescriptor({ name: "file.remove", node: "Apply", summary: "Apply a held removal." }),
+  new NativeActionDescriptor({ name: "file.move", node: "Apply", summary: "Apply a managed move." }),
+  new NativeActionDescriptor({ name: "file.copy", node: "Apply", summary: "Apply a managed copy." }),
+  new NativeActionDescriptor({ name: "file.mkdir", node: "Apply", summary: "Apply managed directory creation." }),
+  new NativeActionDescriptor({ name: "process.run", node: "Invoke", summary: "Invoke one structured executable + args contract inside a Cell." }),
+  new NativeActionDescriptor({ name: "http.stage", node: "RequestExternal", summary: "Stage an HTTP intent; it cannot dispatch from this lowering." })
+]
+
+const pathNeed = (selector: string, realm: string, rights: ReadonlyArray<typeof Right.Type>) =>
+  new ResourceNeed({ kind: "path", selector, realm, rights: [...rights] })
+
+const executableNeed = (selector: string, realm: string) =>
+  new ResourceNeed({ kind: "executable", selector, realm, rights: ["execute"] })
+
+const endpointNeed = (selector: string, realm: string) =>
+  new ResourceNeed({ kind: "endpoint", selector, realm, rights: ["connect", "emit"] })
+
+const requireNonBlank = (action: NativeActionName, field: string, value: string) =>
+  value.trim().length === 0
+    ? Effect.fail(new InvalidActionInput({ action, field, reason: "must not be blank" }))
+    : Effect.void
+
+const uniqueNeeds = (needs: ReadonlyArray<ResourceNeed>) =>
+  needs.filter(
+    (need, index) =>
+      needs.findIndex(
+        (candidate) =>
+          candidate.kind === need.kind &&
+          candidate.realm === need.realm &&
+          candidate.selector === need.selector &&
+          candidate.rights.join("/") === need.rights.join("/")
+      ) === index
+  )
+
+/**
+ * Lowers a decoded native call to the four existing operational categories.
+ * The result is inert: it has no plan ids, handles, adapters, or authority.
+ */
+export const lowerNativeAction = (
+  call: NativeActionCall
+): Effect.Effect<NativeActionLowering, ActionLoweringError> =>
+  Effect.gen(function* () {
+    switch (call.action) {
+      case "file.inspect":
+      case "file.list":
+      case "file.stat": {
+        yield* requireNonBlank(call.action, "path", call.path)
+        const locator =
+          call.action === "file.inspect"
+            ? `inspect:${call.path}`
+            : call.action === "file.list"
+              ? `list:${call.path}`
+              : `stat:${call.path};followSymlinks=${call.followSymlinks}`
+        return new NativeActionLowering({
+          action: call.action,
+          nodes: [
+            new CaptureLowering({
+              action: call.action,
+              locator,
+              requirements: [pathNeed(call.path, call.realm, ["read"])]
+            })
+          ]
+        })
+      }
+      case "file.read": {
+        yield* requireNonBlank(call.action, "path", call.path)
+        return new NativeActionLowering({
+          action: call.action,
+          nodes: [
+            new CaptureLowering({
+              action: call.action,
+              locator: `read:${call.format}:${call.path}`,
+              requirements: [pathNeed(call.path, call.realm, ["read"])]
+            })
+          ]
+        })
+      }
+      case "file.glob": {
+        yield* requireNonBlank(call.action, "root", call.root)
+        yield* requireNonBlank(call.action, "pattern", call.pattern)
+        return new NativeActionLowering({
+          action: call.action,
+          nodes: [
+            new CaptureLowering({
+              action: call.action,
+              locator: `glob:${call.root}:${call.pattern}`,
+              requirements: [pathNeed(call.root, call.realm, ["read"])]
+            })
+          ]
+        })
+      }
+      case "file.write": {
+        yield* requireNonBlank(call.action, "path", call.path)
+        const supplied = Number(call.content !== undefined) + Number(call.sourceArtifact !== undefined)
+        if (supplied !== 1) {
+          return yield* new InvalidActionInput({
+            action: call.action,
+            field: "content/sourceArtifact",
+            reason: "provide exactly one content source"
+          })
+        }
+        return new NativeActionLowering({
+          action: call.action,
+          nodes: [
+            new ApplyLowering({
+              action: call.action,
+              target: call.path,
+              content: call.content,
+              sourceArtifact: call.sourceArtifact,
+              requirements: [pathNeed(call.path, call.realm, ["write"])]
+            })
+          ]
+        })
+      }
+      case "file.remove": {
+        yield* requireNonBlank(call.action, "path", call.path)
+        return new NativeActionLowering({
+          action: call.action,
+          nodes: [
+            new ApplyLowering({
+              action: call.action,
+              target: call.path,
+              requirements: [pathNeed(call.path, call.realm, ["write"])]
+            })
+          ]
+        })
+      }
+      case "file.move":
+      case "file.copy": {
+        yield* requireNonBlank(call.action, "source", call.source)
+        yield* requireNonBlank(call.action, "destination", call.destination)
+        return new NativeActionLowering({
+          action: call.action,
+          nodes: [
+            new ApplyLowering({
+              action: call.action,
+              source: call.source,
+              target: call.destination,
+              requirements: [
+                pathNeed(
+                  call.source,
+                  call.realm,
+                  call.action === "file.move" ? ["read", "write"] : ["read"]
+                ),
+                pathNeed(call.destination, call.realm, ["write"])
+              ]
+            })
+          ]
+        })
+      }
+      case "file.mkdir": {
+        yield* requireNonBlank(call.action, "path", call.path)
+        return new NativeActionLowering({
+          action: call.action,
+          nodes: [
+            new ApplyLowering({
+              action: call.action,
+              target: call.path,
+              parents: call.parents,
+              requirements: [pathNeed(call.path, call.realm, ["write"])]
+            })
+          ]
+        })
+      }
+      case "process.run": {
+        yield* requireNonBlank(call.action, "executable", call.executable)
+        yield* requireNonBlank(call.action, "cwd", call.cwd)
+        if (!call.executable.startsWith("/")) {
+          return yield* new InvalidActionInput({
+            action: call.action,
+            field: "executable",
+            reason: "must be an absolute path; PATH lookup is not part of the action contract"
+          })
+        }
+        if (!call.cwd.startsWith("/")) {
+          return yield* new InvalidActionInput({
+            action: call.action,
+            field: "cwd",
+            reason: "must be an absolute path; ambient working directories are not part of the action contract"
+          })
+        }
+        if (call.timeoutMs !== undefined && call.timeoutMs <= 0) {
+          return yield* new InvalidActionInput({
+            action: call.action,
+            field: "timeoutMs",
+            reason: "must be positive when provided"
+          })
+        }
+        if (!Number.isSafeInteger(call.outputLimitBytes) || call.outputLimitBytes < 0) {
+          return yield* new InvalidActionInput({
+            action: call.action,
+            field: "outputLimitBytes",
+            reason: "must be a non-negative safe integer"
+          })
+        }
+        for (const [index, argument] of call.args.entries()) {
+          if (argument.includes("\u0000")) {
+            return yield* new InvalidActionInput({
+              action: call.action,
+              field: `args[${index}]`,
+              reason: "must not contain NUL"
+            })
+          }
+        }
+        for (const [key, value] of Object.entries(call.env)) {
+          if (key.length === 0 || key.includes("=") || key.includes("\u0000") || value.includes("\u0000")) {
+            return yield* new InvalidActionInput({
+              action: call.action,
+              field: "env",
+              reason: "environment keys cannot be blank, contain '=', or contain NUL; values cannot contain NUL"
+            })
+          }
+        }
+        const requirements = uniqueNeeds([
+          executableNeed(call.executable, call.realm),
+          pathNeed(call.cwd, call.realm, ["read"]),
+          ...call.readable,
+          ...call.writable
+        ])
+        return new NativeActionLowering({
+          action: call.action,
+          nodes: [
+            new InvokeLowering({
+              action: call.action,
+              executable: call.executable,
+              args: call.args,
+              cwd: call.cwd,
+              env: call.env,
+              cellProfile: call.cellProfile,
+              timeoutMs: call.timeoutMs,
+              stdin: call.stdin,
+              stdout: call.stdout,
+              stderr: call.stderr,
+              outputLimitBytes: call.outputLimitBytes,
+              requirements
+            })
+          ]
+        })
+      }
+      case "http.stage": {
+        yield* requireNonBlank(call.action, "endpoint", call.endpoint)
+        if (call.holdMillis < 0) {
+          return yield* new InvalidActionInput({
+            action: call.action,
+            field: "holdMillis",
+            reason: "must be non-negative"
+          })
+        }
+        const supplied = Number(call.body !== undefined) + Number(call.bodyArtifact !== undefined)
+        if (supplied > 1) {
+          return yield* new InvalidActionInput({
+            action: call.action,
+            field: "body/bodyArtifact",
+            reason: "provide at most one body source"
+          })
+        }
+        return new NativeActionLowering({
+          action: call.action,
+          nodes: [
+            new RequestExternalLowering({
+              action: call.action,
+              endpoint: call.endpoint,
+              method: call.method,
+              headers: call.headers,
+              body: call.body,
+              bodyArtifact: call.bodyArtifact,
+              holdMillis: call.holdMillis,
+              requirements: [endpointNeed(call.endpoint, call.realm)]
+            })
+          ]
+        })
+      }
+    }
+  })
+
+export const decodeAndLowerNativeAction = (source: string, input: unknown) =>
+  Schema.decodeUnknown(NativeActionCall)(input).pipe(
+    Effect.mapError(
+      (error) => new ActionCallDecodeFailed({ source, message: error.message })
+    ),
+    Effect.flatMap(lowerNativeAction)
+  )
+
+export const nativeAction = (name: string): Effect.Effect<NativeActionDescriptor, UnknownNativeAction> => {
+  const descriptor = NativeActionCatalog.find((candidate) => candidate.name === name)
+  return descriptor === undefined
+    ? Effect.fail(new UnknownNativeAction({ action: name }))
+    : Effect.succeed(descriptor)
+}
