@@ -13,6 +13,7 @@ import {
   Handle,
   HandleId,
   HandleResolution,
+  InvalidApplyContract,
   InvalidInvokeContract,
   InvokeNode,
   NodeId,
@@ -48,9 +49,14 @@ const apply = new ApplyNode({
   operation: "write", target: "README.md", sourceArtifact: ArtifactId.make("artifact/input")
 })
 const invoke = new InvokeNode({
-  id: id("format"), dependsOn: [capture.id], requires: [], produces: [],
+  id: id("format"), dependsOn: [capture.id], requires: [], produces: [
+    ArtifactId.make("artifact/format-stdout"),
+    ArtifactId.make("artifact/format-delta")
+  ],
   executable: "/usr/bin/true", args: ["--version"], cwd: "/workspace",
   env: { LANG: "C" }, stdout: "capture", stderr: "discard",
+  stdoutArtifact: ArtifactId.make("artifact/format-stdout"),
+  deltaArtifact: ArtifactId.make("artifact/format-delta"),
   outputLimitBytes: 4096, timeoutMs: 2_000, cellProfile: "native-contained"
 })
 
@@ -80,6 +86,8 @@ describe("Plan v1 kernel", () => {
         env: { LANG: "C" },
         stdout: "capture",
         stderr: "discard",
+        stdoutArtifact: ArtifactId.make("artifact/format-stdout"),
+        deltaArtifact: ArtifactId.make("artifact/format-delta"),
         outputLimitBytes: 4096,
         timeoutMs: 2_000,
         cellProfile: "native-contained"
@@ -94,6 +102,66 @@ describe("Plan v1 kernel", () => {
       const invalidTimeout = new InvokeNode({ ...invoke, id: id("invalid-timeout"), timeoutMs: 0 })
       const timeoutFailure = yield* orderPlan(draft([invalidTimeout])).pipe(Effect.flip)
       expect(timeoutFailure).toMatchObject({ _tag: "InvalidInvokeContract", field: "timeoutMs" })
+
+      const streamWithoutCapture = new InvokeNode({
+        ...invoke, id: id("invalid-stream"), stdout: "discard"
+      })
+      const streamFailure = yield* orderPlan(draft([streamWithoutCapture])).pipe(Effect.flip)
+      expect(streamFailure).toMatchObject({ _tag: "InvalidInvokeContract", field: "stdoutArtifact" })
+
+      const outputOutsideProduces = new InvokeNode({
+        ...invoke, id: id("missing-output"), stdoutArtifact: ArtifactId.make("artifact/not-declared")
+      })
+      const missingOutput = yield* orderPlan(draft([outputOutsideProduces])).pipe(Effect.flip)
+      expect(missingOutput).toMatchObject({ _tag: "InvalidInvokeContract", field: "stdoutArtifact" })
+
+      const repeatedInProduces = new InvokeNode({
+        ...invoke, id: id("repeated-output"), produces: [
+          ArtifactId.make("artifact/format-stdout"),
+          ArtifactId.make("artifact/format-stdout"),
+          ArtifactId.make("artifact/format-delta")
+        ]
+      })
+      const repeatedFailure = yield* orderPlan(draft([repeatedInProduces])).pipe(Effect.flip)
+      expect(repeatedFailure).toMatchObject({ _tag: "InvalidInvokeContract", field: "stdoutArtifact" })
+
+      const duplicateOutput = new InvokeNode({
+        ...invoke, id: id("duplicate-output"), stderr: "capture", stderrArtifact: invoke.stdoutArtifact
+      })
+      const duplicateFailure = yield* orderPlan(draft([duplicateOutput])).pipe(Effect.flip)
+      expect(duplicateFailure).toMatchObject({ _tag: "InvalidInvokeContract", field: "produces" })
+
+      const unnamedOutput = new InvokeNode({
+        ...invoke,
+        id: id("unnamed-output"),
+        produces: [...invoke.produces, ArtifactId.make("artifact/unnamed")]
+      })
+      const unnamedFailure = yield* orderPlan(draft([unnamedOutput])).pipe(Effect.flip)
+      expect(unnamedFailure).toMatchObject({ _tag: "InvalidInvokeContract", field: "produces" })
+
+      const compatibilityDelta = new InvokeNode({ ...invoke, id: id("compatibility-delta"), cellProfile: "compatibility" })
+      const deltaFailure = yield* orderPlan(draft([compatibilityDelta])).pipe(Effect.flip)
+      expect(deltaFailure).toMatchObject({ _tag: "InvalidInvokeContract", field: "deltaArtifact" })
+    })
+  )
+
+  it.effect("treats a contained Cell delta as an explicit Apply.merge input", () =>
+    Effect.gen(function* () {
+      const merge = new ApplyNode({
+        id: id("merge"), dependsOn: [invoke.id], requires: [req("workspace")], produces: [],
+        operation: "merge", target: "/workspace", sourceArtifact: invoke.deltaArtifact
+      })
+      const ordered = yield* orderPlan(draft([capture, invoke, merge]))
+      expect(ordered.map((node) => node.id)).toEqual([capture.id, invoke.id, merge.id])
+
+      const missingInput = new ApplyNode({ ...merge, id: id("merge-missing"), sourceArtifact: undefined })
+      const missingFailure = yield* orderPlan(draft([capture, invoke, missingInput])).pipe(Effect.flip)
+      expect(missingFailure).toBeInstanceOf(InvalidApplyContract)
+      expect(missingFailure).toMatchObject({ field: "sourceArtifact" })
+
+      const unrelated = new ApplyNode({ ...merge, id: id("merge-unrelated"), dependsOn: [capture.id] })
+      const dependencyFailure = yield* orderPlan(draft([capture, invoke, unrelated])).pipe(Effect.flip)
+      expect(dependencyFailure).toMatchObject({ _tag: "InvalidApplyContract", field: "dependsOn" })
     })
   )
 

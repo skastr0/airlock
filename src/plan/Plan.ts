@@ -105,6 +105,16 @@ export class InvokeNode extends Schema.TaggedClass<InvokeNode>("InvokeNode")("In
   }),
   /** Stdin can only be a previously captured/staged artifact in Plan v1. */
   stdin: Schema.optional(ArtifactId),
+  /**
+   * Captured process streams are named artifacts when later Plan nodes need
+   * them. They are deliberately not inferred from their position in
+   * `produces`: a Cell receipt can always describe the streams it observed,
+   * while the Plan declares only the streams it exports as dataflow.
+   */
+  stdoutArtifact: Schema.optional(ArtifactId),
+  stderrArtifact: Schema.optional(ArtifactId),
+  /** A private Cell workspace delta, consumable only by Apply.merge. */
+  deltaArtifact: Schema.optional(ArtifactId),
   stdout: Schema.optionalWith(StreamDisposition, { default: () => "capture" as const }),
   stderr: Schema.optionalWith(StreamDisposition, { default: () => "capture" as const }),
   outputLimitBytes: Schema.optionalWith(Schema.Number, { default: () => 1_048_576 }),
@@ -114,7 +124,12 @@ export class InvokeNode extends Schema.TaggedClass<InvokeNode>("InvokeNode")("In
 
 export class ApplyNode extends Schema.TaggedClass<ApplyNode>("ApplyNode")("Apply", {
   ...NodeBase,
-  operation: Schema.Literal("write", "remove", "move"),
+  /**
+   * `merge` applies an opaque private-Cell delta to the target workspace.
+   * It remains Apply physics: the runtime must still transition live state
+   * through Hold rather than installing the delta directly.
+   */
+  operation: Schema.Literal("write", "remove", "move", "merge"),
   target: Schema.String,
   sourceArtifact: Schema.optional(ArtifactId)
 }) {}
@@ -259,6 +274,10 @@ export class InvalidInvokeContract extends Schema.TaggedError<InvalidInvokeContr
   "InvalidInvokeContract",
   { nodeId: Schema.String, field: Schema.String, reason: Schema.String }
 ) {}
+export class InvalidApplyContract extends Schema.TaggedError<InvalidApplyContract>()(
+  "InvalidApplyContract",
+  { nodeId: Schema.String, field: Schema.String, reason: Schema.String }
+) {}
 export class RequirementUnresolved extends Schema.TaggedError<RequirementUnresolved>()(
   "RequirementUnresolved",
   { requirement: Schema.String }
@@ -283,12 +302,16 @@ export type PlanValidationError =
   | UnknownRequirement
   | DuplicateRequirementId
   | InvalidInvokeContract
+  | InvalidApplyContract
 
 const duplicates = (values: ReadonlyArray<string>) =>
   [...new Set(values.filter((value, index) => values.indexOf(value) !== index))].sort()
 
 const invalidInvoke = (node: InvokeNode, field: string, reason: string) =>
   new InvalidInvokeContract({ nodeId: node.id, field, reason })
+
+const invalidApply = (node: ApplyNode, field: string, reason: string) =>
+  new InvalidApplyContract({ nodeId: node.id, field, reason })
 
 /**
  * Checks the facts Schema cannot cheaply express and keeps the process
@@ -320,6 +343,87 @@ const validateInvoke = (node: InvokeNode): InvalidInvokeContract | undefined => 
   if (node.timeoutMs !== undefined && (!Number.isSafeInteger(node.timeoutMs) || node.timeoutMs <= 0)) {
     return invalidInvoke(node, "timeoutMs", "must be a positive safe integer when provided")
   }
+
+  const namedArtifacts: ReadonlyArray<readonly ["stdoutArtifact" | "stderrArtifact" | "deltaArtifact", ArtifactId | undefined]> = [
+    ["stdoutArtifact", node.stdoutArtifact],
+    ["stderrArtifact", node.stderrArtifact],
+    ["deltaArtifact", node.deltaArtifact]
+  ]
+  for (const [field, artifact] of namedArtifacts) {
+    if (artifact !== undefined) {
+      const declarations = node.produces.filter((produced) => produced === artifact).length
+      if (declarations !== 1) {
+        return invalidInvoke(node, field, "must be declared exactly once in produces")
+      }
+    }
+  }
+  const outputIds = namedArtifacts.flatMap(([, artifact]) => artifact === undefined ? [] : [artifact])
+  const duplicateOutput = duplicates(outputIds)[0]
+  if (duplicateOutput !== undefined) {
+    return invalidInvoke(node, "produces", `named output artifact ${duplicateOutput} must be unique`)
+  }
+  const unnamedOutput = node.produces.find((produced) => !outputIds.includes(produced))
+  if (unnamedOutput !== undefined) {
+    return invalidInvoke(
+      node,
+      "produces",
+      `artifact ${unnamedOutput} must be bound as stdoutArtifact, stderrArtifact, or deltaArtifact`
+    )
+  }
+  if (node.stdoutArtifact !== undefined && node.stdout !== "capture") {
+    return invalidInvoke(node, "stdoutArtifact", "requires stdout disposition capture")
+  }
+  if (node.stderrArtifact !== undefined && node.stderr !== "capture") {
+    return invalidInvoke(node, "stderrArtifact", "requires stderr disposition capture")
+  }
+  if (node.deltaArtifact !== undefined && node.cellProfile === "compatibility") {
+    return invalidInvoke(node, "deltaArtifact", "requires a contained Cell profile")
+  }
+  return undefined
+}
+
+const dependencyClosure = (nodes: ReadonlyArray<PlanNode>, node: PlanNode): ReadonlySet<NodeId> => {
+  const byId = new Map(nodes.map((candidate) => [candidate.id, candidate]))
+  const reachable = new Set<NodeId>()
+  const visit = (id: NodeId): void => {
+    if (reachable.has(id)) return
+    reachable.add(id)
+    for (const dependency of byId.get(id)?.dependsOn ?? []) visit(dependency)
+  }
+  for (const dependency of node.dependsOn) visit(dependency)
+  return reachable
+}
+
+/**
+ * A merge never receives arbitrary bytes: only a delta produced by a contained
+ * Cell can cross from Invoke to Apply. This makes the process/commit boundary
+ * explicit without creating a fifth Plan node.
+ */
+const validateApply = (
+  node: ApplyNode,
+  nodes: ReadonlyArray<PlanNode>
+): InvalidApplyContract | undefined => {
+  if (node.operation !== "merge") return undefined
+  if (node.sourceArtifact === undefined) {
+    return invalidApply(node, "sourceArtifact", "merge requires a Cell delta artifact")
+  }
+  const producers = nodes.filter(
+    (candidate): candidate is InvokeNode =>
+      candidate._tag === "Invoke" && candidate.deltaArtifact === node.sourceArtifact
+  )
+  if (producers.length !== 1) {
+    return invalidApply(
+      node,
+      "sourceArtifact",
+      producers.length === 0
+        ? "must name exactly one contained Invoke delta artifact"
+        : "is ambiguous across multiple Invoke delta artifacts"
+    )
+  }
+  const producer = producers[0]!
+  if (!dependencyClosure(nodes, node).has(producer.id)) {
+    return invalidApply(node, "dependsOn", "must depend on the Invoke that produced its delta artifact")
+  }
   return undefined
 }
 
@@ -343,6 +447,10 @@ export const orderPlan = (
     for (const node of draft.nodes) {
       if (node._tag === "Invoke") {
         const invalid = validateInvoke(node)
+        if (invalid !== undefined) return yield* invalid
+      }
+      if (node._tag === "Apply") {
+        const invalid = validateApply(node, draft.nodes)
         if (invalid !== undefined) return yield* invalid
       }
       for (const dependency of node.dependsOn) {
