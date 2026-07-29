@@ -54,7 +54,7 @@ const executable = new ResourceRequirement({
 
 const invoke = new InvokeNode({
   id: id("invoke"), dependsOn: [], requires: [executable.id], produces: [ArtifactId.make("stdout")],
-  executable: "/usr/bin/rg", args: ["Airlock"], cellProfile: "native-contained"
+  executable: "/usr/bin/rg", args: ["Airlock"], stdoutArtifact: ArtifactId.make("stdout"), cellProfile: "native-contained"
 })
 
 describe("Admission candidate", () => {
