@@ -400,7 +400,9 @@ const normalizeRequestExternalInput = (
     } else if (holdMillis !== undefined) {
       normalized.holdMillis = holdMillis
     }
-    if (body !== undefined) normalized.body = canonical(body)
+    if (body !== undefined) {
+      normalized.body = typeof body === "string" ? body : canonical(body)
+    }
     return normalized
   })
 
@@ -413,7 +415,12 @@ export const decodeProgramAction = (
     if (nativeNames.has(action as NativeActionName)) {
       if (args.length !== 1) return yield* new ProgramActionDecodeFailed({ action, reason: "expects exactly one record argument" })
       const input = yield* record(args[0], action)
-      return yield* strictNativeAction(action, { ...object(input), action })
+      const normalized = action === "process.run"
+        ? yield* normalizeProcessRunInput(action, input)
+        : action === "http.stage"
+          ? yield* normalizeRequestExternalInput(action, input)
+          : object(input)
+      return yield* strictNativeAction(action, { ...normalized, action })
     }
     switch (action) {
       case "run": {

@@ -2,11 +2,14 @@
 import { Args, Command, Options } from "@effect/cli"
 import { BunContext } from "@effect/platform-bun"
 import { FileSystem } from "@effect/platform"
-import { Console, Effect, Layer, ManagedRuntime, Option, Schema } from "effect"
+import { Console, Effect, JSONSchema, Layer, ManagedRuntime, Option, Schema } from "effect"
 import * as nodePath from "node:path"
 import * as nodeOs from "node:os"
 import { AdmissionPolicy } from "./admission/index.ts"
-import { NativeActionCatalog } from "./actions/index.ts"
+import {
+  NativeActionCatalog,
+  nativeActionSchema
+} from "./actions/index.ts"
 import { AirlockHome, layerFromEnv } from "./AirlockHome.ts"
 import { ActId, EmissionId, EmissionRequest, ScopeEscape } from "./domain.ts"
 import { Hold } from "./Hold.ts"
@@ -191,6 +194,25 @@ const projectProgramRun = (run: {
       artifacts: record.result.artifacts.map(projectInlineArtifact)
     }
   })),
+  artifacts: run.artifacts.map(projectInlineArtifact),
+  ...(run.failure === undefined ? {} : { failure: run.failure })
+})
+
+const projectCompactProgramRun = (
+  run: Parameters<typeof projectProgramRun>[0]
+) => ({
+  state: run.state,
+  result: run.result,
+  plans: run.plans.map((plan) => ({
+    id: plan.id,
+    actionReference: plan.actionReference,
+    nodeCount: plan.nodes.length
+  })),
+  counts: {
+    plans: run.plans.length,
+    actions: run.actions.length,
+    artifacts: run.artifacts.length
+  },
   artifacts: run.artifacts.map(projectInlineArtifact),
   ...(run.failure === undefined ? {} : { failure: run.failure })
 })
@@ -565,15 +587,40 @@ const actions = Command.make("actions", {
   }))
 ))).pipe(Command.withDescription("List built-in actions plus inert discovered tool definitions"))
 
+const nativeActionInputSchema = (
+  name: (typeof NativeActionCatalog)[number]["name"]
+) => {
+  const canonical = JSONSchema.make(nativeActionSchema(name) as Schema.Schema.Any, {
+    target: "jsonSchema2020-12"
+  })
+  if (!("properties" in canonical)) return canonical
+  const { action: _discriminator, ...properties } = canonical.properties
+  return {
+    ...canonical,
+    required: canonical.required.filter((field) => field !== "action"),
+    properties
+  }
+}
+
 const schema = Command.make(
   "schema",
   { subject: Args.text({ name: "subject" }).pipe(Args.optional) },
-  ({ subject }) => rendered(Effect.suspend(() => {
+  ({ subject }) => rendered(Effect.gen(function* () {
     const requested = Option.getOrElse(subject, () => "all")
-    if (!(["all", "actions", "plan", "language"] as const).includes(requested as "all" | "actions" | "plan" | "language")) {
-      return failInput("subject", "expected actions, plan, language, or all")
+    const native = NativeActionCatalog.find((action) => action.name === requested)
+    if (native !== undefined) {
+      return {
+        schemaVersion: "airlock/discovery/v1",
+        action: {
+          ...native,
+          inputSchema: nativeActionInputSchema(native.name)
+        }
+      }
     }
-    return Effect.succeed({
+    if (!(["all", "actions", "plan", "language"] as const).includes(requested as "all" | "actions" | "plan" | "language")) {
+      return yield* failInput("subject", "expected actions, plan, language, all, or a native action name")
+    }
+    return {
       schemaVersion: "airlock/discovery/v1",
       ...(requested === "all" || requested === "actions" ? { actions: NativeActionCatalog } : {}),
       ...(requested === "all" || requested === "plan" ? {
@@ -602,7 +649,7 @@ const schema = Command.make(
           ]
         }
       } : {})
-    })
+    }
   }))
 ).pipe(Command.withDescription("Discover versioned action, Plan, and language contracts"))
 
@@ -686,7 +733,8 @@ const executeProgram = (
   source: string,
   rawBindings: Option.Option<string>,
   profile: "compatibility" | "native-contained" | "vm-enclosed",
-  requestedWorkspace: string
+  requestedWorkspace: string,
+  compact = false
 ) =>
   Effect.gen(function* () {
     const home = yield* AirlockHome
@@ -723,7 +771,9 @@ const executeProgram = (
       schemaVersion: "airlock/program-run/v1",
       profile,
       workspace,
-      result: projectProgramRun(result)
+      result: compact
+        ? projectCompactProgramRun(result)
+        : projectProgramRun(result)
     }
   })
 
@@ -764,9 +814,10 @@ const agentRun = Command.make(
   {
     program: Args.file({ name: "program.air" }),
     bindings: Options.text("bindings").pipe(Options.optional),
+    compact: Options.boolean("compact"),
     workspace: Options.text("workspace").pipe(Options.withDefault(process.cwd()))
   },
-  ({ program, bindings, workspace: requestedWorkspace }) =>
+  ({ program, bindings, compact, workspace: requestedWorkspace }) =>
     renderedProgram(
       Effect.gen(function* () {
         const profile = yield* agentProgramProfile
@@ -783,7 +834,8 @@ const agentRun = Command.make(
           source,
           bindings,
           profile,
-          requestedWorkspace
+          requestedWorkspace,
+          compact
         )
       })
     )
@@ -798,13 +850,14 @@ const agentEvalProgram = Command.make(
   {
     source: Options.text("source"),
     bindings: Options.text("bindings").pipe(Options.optional),
+    compact: Options.boolean("compact"),
     workspace: Options.text("workspace").pipe(Options.withDefault(process.cwd()))
   },
-  ({ source, bindings, workspace }) =>
+  ({ source, bindings, compact, workspace }) =>
     renderedProgram(
       agentProgramProfile.pipe(
         Effect.flatMap((profile) =>
-          executeProgram(source, bindings, profile, workspace)
+          executeProgram(source, bindings, profile, workspace, compact)
         )
       )
     )
@@ -819,13 +872,22 @@ const agentEvalProgram = Command.make(
 const ledger = Command.make("ledger", {}, () => rendered(Effect.flatMap(Ledger, (l) => l.entries)))
   .pipe(Command.withDescription("The append-only record of every act"))
 
-const runs = Command.make("runs", {}, () =>
+const recentRunLimit = Options.integer("limit").pipe(
+  Options.withDefault(10),
+  Options.withDescription("Latest Runtime Plans to return (1-100)")
+)
+
+const runs = Command.make("runs", { limit: recentRunLimit }, ({ limit }) =>
   rendered(
     Effect.gen(function* () {
+      if (limit < 1 || limit > 100) {
+        return yield* failInput("limit", "must be an integer from 1 through 100")
+      }
       const home = yield* AirlockHome
-      return yield* makeFileRuntimeRunJournal(
+      const recent = yield* makeFileRuntimeRunJournal(
         nodePath.join(home.home, "runs")
       ).recent
+      return recent.slice(0, limit)
     })
   )
 ).pipe(

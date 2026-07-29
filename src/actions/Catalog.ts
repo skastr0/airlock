@@ -191,6 +191,31 @@ export const NativeActionCall = Schema.Union(
 )
 export type NativeActionCall = typeof NativeActionCall.Type
 
+/**
+ * Canonical Schema ownership for each native action. Discovery and decoding
+ * both read from these definitions; the CLI never hand-maintains a parallel
+ * description of action fields.
+ */
+export const NativeActionSchemas = {
+  "file.inspect": FileInspectAction,
+  "file.read": FileReadAction,
+  "file.list": FileListAction,
+  "file.glob": FileGlobAction,
+  "file.stat": FileStatAction,
+  "file.write": FileWriteAction,
+  "file.remove": FileRemoveAction,
+  "file.move": FileMoveAction,
+  "file.copy": FileCopyAction,
+  "file.mkdir": FileMkdirAction,
+  "process.run": ProcessRunAction,
+  "http.stage": HttpStageAction
+} as const
+
+export const nativeActionSchema = (
+  name: NativeActionName
+): (typeof NativeActionSchemas)[NativeActionName] =>
+  NativeActionSchemas[name]
+
 export class CaptureLowering extends Schema.TaggedClass<CaptureLowering>()("Capture", {
   action: ObservationActionName,
   locator: Schema.String,

@@ -48,6 +48,88 @@ describe("agent-only CLI surface", () => {
     })
   })
 
+  it("normalizes Duration sugar for namespaced actions without weakening strict decoding", { timeout: 30_000 }, () => {
+    const home = mkdtempSync(join(tmpdir(), "airlock-agent-duration-"))
+    const processRun = run([
+      "eval",
+      "--workspace", home,
+      "--source",
+      `return process.run({ executable: "/usr/bin/true", args: [], cwd: ${JSON.stringify(home)}, timeout: 2s })`
+    ], home)
+
+    expect(processRun.status, processRun.stderr).toBe(0)
+    expect(json(processRun.stdout)).toMatchObject({
+      result: {
+        actions: [{
+          request: {
+            call: {
+              input: {
+                action: "process.run",
+                timeoutMs: 2_000
+              }
+            }
+          }
+        }]
+      }
+    })
+
+    const body = "plain staged body"
+    const staged = run([
+      "eval",
+      "--workspace", home,
+      "--source",
+      `return http.stage({ endpoint: "https://example.test/body", method: "POST", body: ${JSON.stringify(body)}, hold: 3s })`
+    ], home)
+    expect(staged.status, staged.stderr).toBe(0)
+    expect(json(staged.stdout)).toMatchObject({
+      result: {
+        result: {
+          state: "staged",
+          hold_millis: 3_000
+        },
+        actions: [{
+          request: {
+            call: {
+              input: {
+                action: "http.stage",
+                body,
+                holdMillis: 3_000
+              }
+            }
+          }
+        }]
+      }
+    })
+
+    const pending = run(["pending"], home)
+    expect(pending.status, pending.stderr).toBe(0)
+    expect(JSON.parse(pending.stdout)).toEqual([
+      expect.objectContaining({
+        intent: expect.objectContaining({
+          bodyBytes: new TextEncoder().encode(body).byteLength
+        })
+      })
+    ])
+
+    for (const source of [
+      `return process.run({ executable: "/usr/bin/true", args: [], cwd: ${JSON.stringify(home)}, timeout: 2s, unexpected: true })`,
+      'return http.stage({ endpoint: "https://example.test/body", method: "POST", hold: 3s, unexpected: true })'
+    ]) {
+      const rejected = run(["eval", "--workspace", home, "--source", source], home)
+      expect(rejected.status).toBe(1)
+      expect(json(rejected.stdout)).toMatchObject({
+        result: {
+          state: "failed",
+          failure: {
+            phase: "contract",
+            causeTag: "ProgramActionDecodeFailed",
+            reason: expect.stringContaining("unexpected")
+          }
+        }
+      })
+    }
+  })
+
   it("does not expose raw execution, terminal dispatch, mutation, undo, or reaping", { timeout: 30_000 }, () => {
     const home = mkdtempSync(join(tmpdir(), "airlock-agent-cli-"))
     const target = join(home, "keep.txt")
@@ -98,6 +180,139 @@ describe("agent-only CLI surface", () => {
     })
   })
 
+  it("derives a queryable native action input contract from its Effect Schema", { timeout: 30_000 }, () => {
+    const home = mkdtempSync(join(tmpdir(), "airlock-agent-action-schema-"))
+    const discovered = run(["schema", "process.run"], home)
+
+    expect(discovered.status, discovered.stderr).toBe(0)
+    const contract = json(discovered.stdout)
+    expect(contract).toMatchObject({
+      schemaVersion: "airlock/discovery/v1",
+      action: {
+        name: "process.run",
+        node: "Invoke",
+        inputSchema: {
+          type: "object",
+          required: ["executable", "args", "cwd"],
+          properties: {
+            executable: { type: "string" },
+            args: {
+              type: "array",
+              items: { type: "string" }
+            },
+            timeoutMs: { type: "number" }
+          },
+          additionalProperties: false
+        }
+      }
+    })
+    const inputSchema = (contract.action as {
+      readonly inputSchema: {
+        readonly properties: Readonly<Record<string, unknown>>
+      }
+    }).inputSchema
+    expect(inputSchema.properties).not.toHaveProperty("action")
+    expect(contract.action).not.toHaveProperty("resultSchema")
+
+    const rejected = run(["schema", "not.an.action"], home)
+    expect(rejected.status).toBe(1)
+    expect(json(rejected.stderr)).toMatchObject({
+      _tag: "CliInputError",
+      field: "subject",
+      reason: expect.stringContaining("native action name")
+    })
+  })
+
+  it("offers compact agent run and eval projections without changing the full default", { timeout: 30_000 }, () => {
+    const home = mkdtempSync(join(tmpdir(), "airlock-agent-compact-"))
+    const source = [
+      'let first = file.write({ path: "first.txt", content: "one" })',
+      'let second = file.write({ path: "second.txt", content: "two" })',
+      'let observed = file.read({ path: "second.txt", format: "text" })',
+      "return { first: first, second: second, observed: observed }"
+    ].join("\n")
+    const full = run([
+      "eval",
+      "--workspace", home,
+      "--source", source
+    ], home)
+    const compact = run([
+      "eval",
+      "--compact",
+      "--workspace", home,
+      "--source", source
+    ], home)
+
+    expect(full.status, full.stderr).toBe(0)
+    expect(compact.status, compact.stderr).toBe(0)
+    const fullReport = json(full.stdout) as {
+      readonly result: Readonly<Record<string, unknown>>
+    }
+    const compactReport = json(compact.stdout) as {
+      readonly result: Readonly<Record<string, unknown>>
+    }
+    expect(fullReport.result).toHaveProperty("actions")
+    expect(compactReport.result).not.toHaveProperty("actions")
+    expect(compactReport).toMatchObject({
+      schemaVersion: "airlock/program-run/v1",
+      profile: "compatibility",
+      workspace: resolve(home),
+      result: {
+        state: "succeeded",
+        result: {
+          observed: "two"
+        },
+        counts: {
+          plans: 3,
+          actions: 3,
+          artifacts: 2
+        }
+      }
+    })
+    const compactResult = compactReport.result as {
+      readonly plans: ReadonlyArray<unknown>
+      readonly artifacts: ReadonlyArray<unknown>
+    }
+    expect(compactResult.plans).toHaveLength(3)
+    expect(compactResult.plans).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        id: expect.any(String),
+        actionReference: expect.any(String),
+        nodeCount: 1
+      })
+    ]))
+    expect(compactResult.artifacts).toHaveLength(2)
+    expect(compactResult.artifacts).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        id: expect.any(String),
+        mediaType: "text/plain; charset=utf-8",
+        byteLength: 3,
+        provenance: "program:inline-content"
+      })
+    ]))
+    expect(compact.stdout.length).toBeLessThan(full.stdout.length)
+    expect(full.stdout.length - compact.stdout.length).toBeGreaterThan(1_000)
+
+    const program = join(home, "compact.air")
+    writeFileSync(program, source)
+    const compactRun = run([
+      "run",
+      "--compact",
+      "--workspace", home,
+      program
+    ], home)
+    expect(compactRun.status, compactRun.stderr).toBe(0)
+    expect(json(compactRun.stdout)).toMatchObject({
+      result: {
+        state: "succeeded",
+        counts: {
+          plans: 3,
+          actions: 3
+        }
+      }
+    })
+  })
+
   it("exposes redacted durable Runtime receipts by Plan id", { timeout: 30_000 }, () => {
     const home = mkdtempSync(join(tmpdir(), "airlock-agent-runs-"))
     const executed = run([
@@ -130,11 +345,27 @@ describe("agent-only CLI surface", () => {
         })
       ]
     })
-    const listed = run(["runs"], home)
+    const second = run([
+      "eval",
+      "--workspace", home,
+      "--source",
+      'return file.read({ path: "journaled.txt", format: "text" })'
+    ], home)
+    expect(second.status, second.stderr).toBe(0)
+
+    const listed = run(["runs", "--limit", "1"], home)
     expect(listed.status, listed.stderr).toBe(0)
     expect(JSON.parse(listed.stdout)).toEqual([
-      expect.objectContaining({ planId })
+      expect.objectContaining({ state: "succeeded" })
     ])
+
+    const invalid = run(["runs", "--limit", "0"], home)
+    expect(invalid.status).toBe(1)
+    expect(json(invalid.stderr)).toMatchObject({
+      _tag: "CliInputError",
+      field: "limit",
+      reason: "must be an integer from 1 through 100"
+    })
   })
 
   it.skipIf(
