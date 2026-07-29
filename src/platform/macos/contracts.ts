@@ -1,13 +1,30 @@
 import { Schema } from "effect"
 
 // The platform seam is deliberately small: these are observed host facts and
-// reversible workspace preparation, never an assertion that a Cell is fenced.
+// reversible workspace preparation. A capability claim always says what is
+// enforced, what merely remains available, and where the claim stops.
 
-export const CapabilityAvailability = Schema.Literal(
+/**
+ * Capability reports are evidence, not a product check-box. In particular,
+ * `enforced` says that the selected native Cell has a concrete mechanism;
+ * it does not promote that mechanism to VM-equivalent confinement.
+ */
+export const CapabilityPosture = Schema.Literal(
+  "enforced",
   "available",
-  "unavailable"
+  "allowed",
+  "bounded",
+  "unavailable",
+  "not-provided"
 )
-export type CapabilityAvailability = typeof CapabilityAvailability.Type
+export type CapabilityPosture = typeof CapabilityPosture.Type
+
+export class CapabilityClaim extends Schema.Class<CapabilityClaim>("CapabilityClaim")({
+  posture: CapabilityPosture,
+  mechanism: Schema.String,
+  scope: Schema.String,
+  caveats: Schema.Array(Schema.String)
+}) {}
 
 export class MacosVolume extends Schema.Class<MacosVolume>("MacosVolume")({
   path: Schema.String,
@@ -31,28 +48,36 @@ export class SameVolumeReport extends Schema.Class<SameVolumeReport>(
 export class NativeContainment extends Schema.Class<NativeContainment>(
   "NativeContainment"
 )({
-  privateWritableView: Schema.Literal("clone-or-copy"),
-  filesystemFence: CapabilityAvailability,
-  networkFence: CapabilityAvailability,
-  processTreeFence: CapabilityAvailability,
-  guarantee: Schema.Literal("workspace-isolation-only")
+  /** `/usr/bin/sandbox-exec` availability for the native Cell. */
+  seatbelt: CapabilityClaim,
+  /** A fresh clone/copy workspace receives Cell writes before any Apply. */
+  privateWritableView: CapabilityClaim,
+  /** The source workspace is denied `file-write*` by the Seatbelt profile. */
+  liveWorkspaceWriteFence: CapabilityClaim,
+  /** `network: deny` emits `(deny network*)` in the Seatbelt profile. */
+  deniedNetworkFence: CapabilityClaim,
+  /** Native Cell intentionally permits `file-read*` for Unix compatibility. */
+  ambientHostReads: CapabilityClaim,
+  /** No confidentiality claim follows from ambient host reads. */
+  confidentiality: CapabilityClaim,
+  /** Cancellation terminates the owned POSIX process group, not escaped daemons. */
+  processCancellation: CapabilityClaim
 }) {}
 
 export class VmEnclosureAvailability extends Schema.Class<VmEnclosureAvailability>(
   "VmEnclosureAvailability"
 )({
-  hardwareVirtualization: CapabilityAvailability,
-  backend: CapabilityAvailability,
-  available: CapabilityAvailability,
-  reason: Schema.String
+  hardwareVirtualization: CapabilityClaim,
+  backend: CapabilityClaim
 }) {}
 
 export class MacosCapabilityReport extends Schema.Class<MacosCapabilityReport>(
   "MacosCapabilityReport"
 )({
+  schemaVersion: Schema.Literal("airlock/macos-capabilities/v2"),
   platform: Schema.Literal("darwin"),
-  apfsInspection: CapabilityAvailability,
-  cloneOrCopyWorkspace: CapabilityAvailability,
+  apfsInspection: CapabilityClaim,
+  cloneOrCopyWorkspace: CapabilityClaim,
   nativeContainment: NativeContainment,
   vmEnclosure: VmEnclosureAvailability
 }) {}
@@ -72,7 +97,8 @@ export class PrivateWorkspaceReceipt extends Schema.Class<PrivateWorkspaceReceip
   sourceVolume: MacosVolume,
   destinationVolume: MacosVolume,
   sameVolume: Schema.Boolean,
-  strategy: Schema.Literal("clone-or-copy")
+  /** The actual preparation strategy, never a vague "clone-or-copy" claim. */
+  strategy: Schema.Literal("clone", "copy")
 }) {}
 
 export class MacosUnavailable extends Schema.TaggedError<MacosUnavailable>()(

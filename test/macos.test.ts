@@ -12,14 +12,29 @@ import { PrivateWorkspaceRequest } from "../src/platform/macos/contracts.ts"
 const darwin = process.platform === "darwin"
 
 describe.skipIf(!darwin)("macOS platform substrate", () => {
-  it.effect("reports only workspace isolation; no unverified Cell fence", () =>
+  it.effect("reports the native Cell boundary precisely instead of a single availability flag", () =>
     Effect.gen(function* () {
       const platform = yield* MacosPlatform
       const report = yield* platform.capabilityReport
       expect(report.platform).toBe("darwin")
-      expect(report.nativeContainment.guarantee).toBe("workspace-isolation-only")
-      expect(report.nativeContainment.networkFence).toBe("unavailable")
-      expect(report.vmEnclosure.available).toBe("unavailable")
+      expect(report.schemaVersion).toBe("airlock/macos-capabilities/v2")
+      expect(report.nativeContainment.seatbelt.posture).toBe(
+        existsSync("/usr/bin/sandbox-exec") ? "enforced" : "unavailable"
+      )
+      expect(report.nativeContainment.privateWritableView.posture).toBe("enforced")
+      expect(report.nativeContainment.liveWorkspaceWriteFence.posture).toBe(
+        existsSync("/usr/bin/sandbox-exec") ? "enforced" : "unavailable"
+      )
+      expect(report.nativeContainment.deniedNetworkFence.posture).toBe(
+        existsSync("/usr/bin/sandbox-exec") ? "enforced" : "unavailable"
+      )
+      expect(report.nativeContainment.ambientHostReads.posture).toBe("allowed")
+      expect(report.nativeContainment.confidentiality.posture).toBe("not-provided")
+      expect(report.nativeContainment.processCancellation.posture).toBe("bounded")
+      expect(report.nativeContainment.processCancellation.caveats).toEqual(
+        expect.arrayContaining([expect.stringContaining("daemonize")])
+      )
+      expect(report.vmEnclosure.backend.posture).toBe("not-provided")
     }).pipe(Effect.provide(MacosPlatformLive))
   )
 
@@ -34,7 +49,7 @@ describe.skipIf(!darwin)("macOS platform substrate", () => {
     }).pipe(Effect.provide(MacosPlatformLive))
   )
 
-  it.effect("prepares a private workspace using macOS clone-or-copy semantics", () =>
+  it.effect("prepares a private workspace and records the actual clone or copy strategy", () =>
     Effect.gen(function* () {
       const platform = yield* MacosPlatform
       const root = mkdtempSync(join(tmpdir(), "airlock-macos-"))
@@ -48,7 +63,7 @@ describe.skipIf(!darwin)("macOS platform substrate", () => {
       const receipt = yield* platform.preparePrivateWorkspace(
         new PrivateWorkspaceRequest({ source, destination })
       )
-      expect(receipt.strategy).toBe("clone-or-copy")
+      expect(["clone", "copy"]).toContain(receipt.strategy)
       expect(receipt.sameVolume).toBe(true)
       expect(readFileSync(join(destination, "input.txt"), "utf8")).toBe("original")
       expect(existsSync(destination)).toBe(true)
