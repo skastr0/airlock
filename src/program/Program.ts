@@ -1,6 +1,12 @@
 import { Context, Effect, Layer, Schema } from "effect"
 import { createHash } from "node:crypto"
-import { admit, AdmissionPolicy } from "../admission/index.ts"
+import {
+  admit,
+  AdmissionPolicy,
+  bindAdmissionForUse,
+  ExecutionAuthority,
+  revalidateNodeAuthority
+} from "../admission/index.ts"
 import { parse, type Program, type Statement, type Expression } from "../language/index.ts"
 import { LanguageDiagnostic } from "../language/lexer.ts"
 import {
@@ -171,11 +177,16 @@ export class ProgramActionExecutor extends Context.Tag("airlock/ProgramActionExe
   }
 >() {}
 
-/** Admission adapter: this is deliberately narrower than the admission policy component. */
+/**
+ * Admission adapter: a bare Plan is deliberately not part of this seam.
+ * Grants and resolved handles remain attached through execution.
+ */
 export class ProgramAdmission extends Context.Tag("airlock/ProgramAdmission")<
   ProgramAdmission,
   {
-    readonly admit: (draft: PlanDraft) => Effect.Effect<Plan, ProgramActionExecutionFailed>
+    readonly admit: (
+      draft: PlanDraft
+    ) => Effect.Effect<ExecutionAuthority, ProgramActionExecutionFailed>
   }
 >() {}
 
@@ -189,7 +200,7 @@ export class ProgramPlanRuntime extends Context.Tag("airlock/ProgramPlanRuntime"
   {
     readonly execute: (
       request: ProgramActionRequest,
-      plan: Plan
+      authority: ExecutionAuthority
     ) => Effect.Effect<ProgramActionResult, ProgramActionExecutionFailed>
   }
 >() {}
@@ -225,7 +236,7 @@ const executionFailure = (
 export const ProgramAdmissionLive = (policy: AdmissionPolicy) =>
   Layer.succeed(ProgramAdmission, ProgramAdmission.of({
     admit: (draft) => admit(draft, policy).pipe(
-      Effect.map((result) => result.plan),
+      Effect.flatMap((result) => bindAdmissionForUse(result)),
       Effect.mapError(executionFailure(draft.actionReference, "admission"))
     )
   }))
@@ -242,7 +253,7 @@ export const ProgramPlanExecutorLive = Layer.effect(
     const runtime = yield* ProgramPlanRuntime
     return ProgramActionExecutor.of({
       execute: (request) => admission.admit(request.draft).pipe(
-        Effect.flatMap((plan) => runtime.execute(request, plan))
+        Effect.flatMap((authority) => runtime.execute(request, authority))
       )
     })
   })
@@ -929,8 +940,27 @@ export const ProgramPlanRuntimeLive = Layer.effect(
     const nativeFailure = (action: string) => executionFailure(action, "native-filesystem")
 
     return ProgramPlanRuntime.of({
-      execute: (request, plan) =>
+      execute: (request, requestedAuthority) =>
         Effect.gen(function* () {
+          // Rebuild every binding at the last shared adapter boundary. Native
+          // one-node actions use it immediately; Runtime must repeat the same
+          // check per node so a long Invoke cannot outlive its grant.
+          const bindings = yield* Effect.forEach(
+            requestedAuthority.admission.plan.nodes,
+            (node) => revalidateNodeAuthority(requestedAuthority, node.id),
+            { concurrency: 1 }
+          ).pipe(
+            Effect.mapError(executionFailure(
+              request.call.action,
+              "admission"
+            ))
+          )
+          const authority = new ExecutionAuthority({
+            ...requestedAuthority,
+            bindings,
+            boundAt: bindings[0]?.boundAt ?? requestedAuthority.boundAt
+          })
+          const plan = authority.admission.plan
           const call = yield* validateRuntimeRequest(request, plan)
           switch (call.action) {
             case "file.inspect":

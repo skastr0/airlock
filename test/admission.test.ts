@@ -1,12 +1,16 @@
 import { describe, expect, it } from "@effect/vitest"
 import { Effect } from "effect"
 import {
+  AdmissionContractInvalid,
   AdmissionDenied,
   AdmissionPolicy,
+  AdmissionResult,
   HandleExpired,
   ProfileUnavailable,
   UndeclaredNodeAuthority,
   admit,
+  bindAdmissionForUse,
+  revalidateNodeAuthority,
   resolveHandle
 } from "../src/admission/index.ts"
 import {
@@ -99,7 +103,7 @@ describe("Admission candidate", () => {
       })
       const remoteEndpoint = new ResourceRequirement({
         id: req("endpoint/remote"), kind: "endpoint", realm: "remote/api.example.test",
-        selector: external.endpoint, rights: ["emit"]
+        selector: external.endpoint, rights: ["connect", "emit"]
       })
       const remote = yield* admit(draft([remoteEndpoint], external), policy())
       expect(remote.plan.handles[0]?.realm).toBe("remote/api.example.test")
@@ -135,6 +139,138 @@ describe("Admission candidate", () => {
         draft([executable], invoke), policy({ profile: "vm-enclosed" })
       ).pipe(Effect.flip)
       expect(unavailable).toBeInstanceOf(ProfileUnavailable)
+    })
+  )
+
+  it.effect("requires authority for every resource-bearing Plan operand", () =>
+    Effect.gen(function* () {
+      const cwdInvoke = new InvokeNode({
+        ...invoke,
+        cwd: "/workspace",
+        requires: [executable.id]
+      })
+      const missingCwd = yield* admit(
+        draft([executable], cwdInvoke),
+        policy()
+      ).pipe(Effect.flip)
+      expect(missingCwd).toMatchObject({
+        _tag: "UndeclaredNodeAuthority",
+        selector: "/workspace",
+        right: "read"
+      })
+
+      const target = new ResourceRequirement({
+        id: req("copy/target"),
+        kind: "path",
+        realm: "macos/local",
+        selector: "/workspace/destination",
+        rights: ["write"]
+      })
+      const copy = new ApplyNode({
+        id: id("copy"),
+        dependsOn: [],
+        requires: [target.id],
+        produces: [],
+        operation: "copy",
+        source: "/workspace/source",
+        target: "/workspace/destination"
+      })
+      const missingCopySource = yield* admit(
+        draft([target], copy),
+        policy()
+      ).pipe(Effect.flip)
+      expect(missingCopySource).toMatchObject({
+        _tag: "UndeclaredNodeAuthority",
+        selector: "/workspace/source",
+        right: "read"
+      })
+
+      const source = new ResourceRequirement({
+        id: req("move/source"),
+        kind: "path",
+        realm: "macos/local",
+        selector: "/workspace/source",
+        rights: ["read"]
+      })
+      const move = new ApplyNode({
+        ...copy,
+        id: id("move"),
+        operation: "move",
+        requires: [source.id, target.id]
+      })
+      const missingMoveWrite = yield* admit(
+        draft([source, target], move),
+        policy()
+      ).pipe(Effect.flip)
+      expect(missingMoveWrite).toMatchObject({
+        _tag: "UndeclaredNodeAuthority",
+        selector: "/workspace/source",
+        right: "write"
+      })
+
+      const emissionOnly = new ResourceRequirement({
+        id: req("endpoint/emit-only"),
+        kind: "endpoint",
+        realm: "remote/api.example.test",
+        selector: "https://api.example.test/v1/send",
+        rights: ["emit"]
+      })
+      const external = new RequestExternalNode({
+        id: id("external/emit-only"),
+        dependsOn: [],
+        requires: [emissionOnly.id],
+        produces: [],
+        method: "POST",
+        endpoint: emissionOnly.selector,
+        holdMillis: 5_000
+      })
+      const missingConnect = yield* admit(
+        draft([emissionOnly], external),
+        policy()
+      ).pipe(Effect.flip)
+      expect(missingConnect).toMatchObject({
+        _tag: "UndeclaredNodeAuthority",
+        selector: emissionOnly.selector,
+        right: "connect"
+      })
+    })
+  )
+
+  it.effect("retains and revalidates the exact grant closure at node use", () =>
+    Effect.gen(function* () {
+      const at = new Date("2026-07-29T00:00:00.000Z")
+      const admitted = yield* admit(
+        draft([executable], invoke),
+        policy({ grantTtlMillis: 10 }),
+        at
+      )
+      const authority = yield* bindAdmissionForUse(
+        admitted,
+        new Date(at.getTime() + 9)
+      )
+      expect(authority.admission.grants).toEqual(admitted.grants)
+      expect(authority.bindings[0]?.handles).toEqual(admitted.plan.handles)
+
+      const binding = yield* revalidateNodeAuthority(
+        authority,
+        invoke.id,
+        new Date(at.getTime() + 9)
+      )
+      expect(binding.nodeId).toBe(invoke.id)
+
+      const expired = yield* revalidateNodeAuthority(
+        authority,
+        invoke.id,
+        new Date(at.getTime() + 10)
+      ).pipe(Effect.flip)
+      expect(expired).toBeInstanceOf(HandleExpired)
+
+      const altered = new AdmissionResult({
+        ...admitted,
+        grants: []
+      })
+      const drift = yield* bindAdmissionForUse(altered, at).pipe(Effect.flip)
+      expect(drift).toBeInstanceOf(AdmissionContractInvalid)
     })
   )
 })
