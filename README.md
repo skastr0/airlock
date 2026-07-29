@@ -12,14 +12,15 @@ It is not a confidentiality boundary: the current Seatbelt profile permits
 ambient host reads. A VM backend is a future, stronger enclosure and is not a
 macOS v1 release prerequisite.
 
-The repository has two runnable Vouch-derived local proofs, ten checked-in
-shell-parity workloads, a 50-execution agent-surface repeatability campaign, a
-direct 16-process macOS proof of the shared `O_EXLOCK` lease, bounded
-Hold/Outbox recovery tests, and construction checks for the mutation and wire
-gateways. The final integrated gate passes 52 test files plus one skipped file,
-254 tests plus 16 skipped tests, and all four Bun/macOS boundary suites. It
-does not yet have the representative corpus, exhaustive crash/overlap matrix,
-or red-team evidence needed for a strong shell-replacement claim.
+The repository has two runnable Vouch-derived local proofs, eleven checked-in
+and executed shell-parity workloads, a 50-execution agent-surface repeatability
+campaign, a direct 16-process macOS proof of the shared `O_EXLOCK` lease,
+bounded Hold/Outbox recovery tests, and construction checks for the mutation
+and wire gateways. The final integrated gate passes 52 test files plus one
+skipped file, 254 tests plus 16 skipped tests, and all four Bun/macOS boundary
+suites. It does not yet have the representative corpus, exhaustive
+crash/overlap matrix, or red-team evidence needed for a strong
+shell-replacement claim.
 
 ## Install from npm
 
@@ -242,22 +243,26 @@ bounded-output partial process receipt.
 These are local host-operation fixtures, not a real Vouch/OpenShell replacement
 run. They do not prove endpoint brokerage, confidentiality, complete execution
 closure, exhaustive crash recovery, concurrent multi-entry atomicity, metadata
-fidelity, or broad task coverage. On the final integrated revision, the first
-proof passed 20/20 consecutive repetitions and the second passed 10/10. That
-supports repeatability of these two local fixtures, not real remote Vouch or
-OpenShell replacement.
+fidelity, or broad task coverage. Both proof tests pass in the final integrated
+automated gate. No repeated-run report is checked in, so the repository claims
+two executed local fixtures, not campaign-level repeatability or real remote
+Vouch/OpenShell replacement.
 
-Five additional agent-only workloads exercise repository observation/search
-and an artifact pipeline, native `sed` editing, tar round-trip, local Git,
-and `make` with descendant processes. A destructive native fixture also proves
-recursive removal remains Hold-backed and exactly undoable by the supervisor.
+Five foundational top-level workloads exercise generic filesystem actions,
+explicit process pipelines, bounded range and captured-list control, and
+native-contained rewriting. Five further agent-only corpus workloads exercise
+repository observation/search and an artifact pipeline, native `sed` editing,
+tar round-trip, local Git, and `make` with descendant processes. An eleventh
+destructive native workload proves recursive removal remains Hold-backed and
+exactly undoable by the supervisor.
 
 The repeatability proof launches the real `airlock-agent` entrypoint in 50
 fresh Bun subprocesses: exactly ten deterministic scripted cases, repeated
 five times each. It records 40 compatibility and 10 native-contained
-successes; the measured cold campaign took 110.52 seconds. This is not 50
-unique or model-generated tasks, a direct-shell A/B, or a held-out corpus.
-See [the exact parity evidence and claim boundary](docs/evidence/parity-50.md).
+successes, and the automated gate requires the cold campaign to finish within
+five minutes. This is not 50 unique or model-generated tasks, a direct-shell
+A/B, or a held-out corpus. See
+[the exact parity evidence and claim boundary](docs/evidence/parity-50.md).
 
 Every Plan Runtime execution also requires persistent run-journal storage and
 claims a SHA-256-derived Plan identity with a kernel-backed `O_EXLOCK` lease

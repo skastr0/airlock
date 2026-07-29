@@ -955,22 +955,23 @@ collapsed:
    to Plans, validate, and compatibility-admit. Eight unsupported classes are
    explicit. This shows breadth of the current vocabulary and contracts, not
    that a model completed 72 tasks or that the runtime executed them.
-2. Ten **executed parity workloads** exercise common local file, control,
-   repository search/pipeline, native edit/removal, archive, local Git, and
-   build-descendant work.
+2. Eleven **executed parity workloads** comprise five foundational top-level
+   file/process/control/native-rewrite fixtures, five agent-only repository,
+   edit, archive, local-Git, and build-descendant fixtures, and one destructive
+   native-removal fixture.
 3. Two **Vouch-derived local proofs** exercise the generic restore and host
    workflow decomposition without running real Vouch/OpenShell remote work.
-   On the final integrated revision they passed 20/20 and 10/10 consecutive
-   repetitions respectively.
+   Both pass as individual tests in the final integrated gate. No repeated-run
+   report is checked in, so they are not described as repetition campaigns.
 4. Bun/macOS boundary proofs exercise the private write/network/temp fence,
    exact executable descendants and shebang chains, and the admitted
    interpreter/in-process-code boundary.
 5. One [**50-execution repeatability
    campaign**](docs/evidence/parity-50.md) launches the real agent CLI as a
    fresh Bun subprocess for exactly ten deterministic scripted cases, five
-   repetitions each: 40 compatibility and 10 native-contained successes in
-   110.52 seconds cold. It is not 50 unique/model-generated tasks, a
-   direct-shell A/B, or a held-out corpus.
+   repetitions each: 40 compatibility and 10 native-contained successes. The
+   automated gate enforces a five-minute cold-campaign ceiling. It is not 50
+   unique/model-generated tasks, a direct-shell A/B, or a held-out corpus.
 
 The final integrated `bun run verify` gate passes 52 test files plus one
 skipped file and 254 tests plus 16 skipped tests. Its explicit Bun/macOS

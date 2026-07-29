@@ -59,20 +59,22 @@ Evidence present today:
   delta, and stages a replacement request without dispatch;
 - a second Vouch-derived program executes 12 generic host operations / 16 Plan
   nodes and separately proves process timeout, cancellation, and bounded-output
-  receipts; the two local proofs passed 20/20 and 10/10 consecutive
-  repetitions respectively on the final integrated revision, without becoming
-  real remote Vouch/OpenShell evidence;
-- four checked-in parity fixtures exercise common file/process/control/native
-  rewrite shapes;
-- five further agent-only workloads exercise repository observation/search and
-  artifact piping, native `sed`, tar, local Git, and `make` descendants;
-- a destructive native workload proves recursive removal is Hold-backed and
-  exactly undoable through the supervisor;
+  receipts; both local proof tests pass in the final integrated gate, but no
+  repeated-run report is checked in and neither becomes real remote
+  Vouch/OpenShell evidence;
+- five foundational top-level parity workloads exercise generic filesystem
+  actions, explicit process pipelines, bounded range and captured-list control,
+  and native-contained rewriting;
+- five further agent-only corpus workloads exercise repository
+  observation/search and artifact piping, native `sed`, tar, local Git, and
+  `make` descendants;
+- an eleventh destructive native workload proves recursive removal is
+  Hold-backed and exactly undoable through the supervisor;
 - a [separate repeatability campaign](evidence/parity-50.md) launches the real
   `airlock-agent` subprocess 50 times: exactly ten deterministic scripted cases
-  repeated five times, with 40 compatibility and 10 native-contained successes
-  in 110.52 seconds cold; these are not 50 unique or model-generated tasks, a
-  direct-shell A/B, or a held-out corpus;
+  repeated five times, with 40 compatibility and 10 native-contained
+  successes under a five-minute automated-gate ceiling; these are not 50
+  unique or model-generated tasks, a direct-shell A/B, or a held-out corpus;
 - Hold and Outbox have bounded cross-process lease, stale-owner recovery, and
   journal/recovery tests, including cancellation of contended waiters without
   stealing the live owner;
