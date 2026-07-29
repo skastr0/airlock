@@ -9,7 +9,8 @@ import { AdmissionPolicy } from "./admission/index.ts"
 import { NativeActionCatalog } from "./actions/index.ts"
 import { layerFromEnv } from "./AirlockHome.ts"
 import { ActId, EmissionId, EmissionRequest, ScopeEscape } from "./domain.ts"
-import { Hold, HoldLive } from "./Hold.ts"
+import { Hold } from "./Hold.ts"
+import { HoldLive } from "./HoldLive.ts"
 import {
   type LanguageValue,
   LanguageValueSchema
@@ -442,19 +443,19 @@ const undo = Command.make(
   "undo",
   { id: Args.text({ name: "act-id" }).pipe(Args.optional) },
   ({ id }) =>
-    rendered(Effect.flatMap(Hold, (hold) =>
-      Option.isNone(id)
-        ? hold.undoLast
-        : Schema.decodeUnknown(ActId)(id.value).pipe(
-            Effect.mapError((cause) =>
-              new CliInputError({
-                field: "act-id",
-                reason: cause.message
-              })
-            ),
-            Effect.flatMap((actId) => hold.undo(actId))
-          )
-    ))
+    rendered(Effect.gen(function* () {
+      const hold = yield* Hold
+      if (Option.isNone(id)) return yield* hold.undoLast
+      const actId = yield* Schema.decodeUnknown(ActId)(id.value).pipe(
+        Effect.mapError((cause) =>
+          new CliInputError({
+            field: "act-id",
+            reason: cause.message
+          })
+        )
+      )
+      return yield* hold.undo(actId)
+    }))
 ).pipe(Command.withDescription("Restore a held act (defaults to the most recent)"))
 
 const held = Command.make("held", {}, () =>
