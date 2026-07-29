@@ -1599,53 +1599,81 @@ const make = Effect.gen(function* () {
     const reaped: ActId[] = []
     for (const journal of expired) {
       const id = journal.manifest.id
-      // The single physical deletion site in this component.
-      yield* fs
-        .remove(actDir(id), { recursive: true })
-        .pipe(
-          Effect.mapError((cause) =>
-            new HoldReapRecoveryRequired({
-              reaped,
-              current: id,
-              phase: "remove",
-              currentRemoval: "possible",
-              at: now,
-              reason: reasonOf(cause)
-            })
+      /*
+       * Selection and lock waiting remain interruptible. Once terminal
+       * authority enters this region, however, cancellation cannot surface as
+       * a bare interrupt after the unique recovery bytes may have disappeared.
+       * Removal and its directory sync are uninterruptible; Ledger publication
+       * is restored so cancellation becomes an exact partial/recovery receipt.
+       */
+      yield* Effect.uninterruptibleMask((restore) =>
+        Effect.gen(function* () {
+          // The single physical deletion site in this component.
+          yield* fs
+            .remove(actDir(id), { recursive: true })
+            .pipe(
+              Effect.mapError((cause) =>
+                new HoldReapRecoveryRequired({
+                  reaped,
+                  current: id,
+                  phase: "remove",
+                  currentRemoval: "possible",
+                  at: now,
+                  reason: reasonOf(cause)
+                })
+              )
+            )
+          reaped.push(id)
+          yield* syncDirectory(
+            home.holdDir,
+            "reap hold act directory sync"
+          ).pipe(
+            Effect.mapError((cause) =>
+              new HoldReapRecoveryRequired({
+                reaped,
+                current: id,
+                phase: "sync",
+                currentRemoval: "confirmed",
+                at: now,
+                reason: reasonOf(cause)
+              })
+            )
           )
-        )
-      reaped.push(id)
-      yield* syncDirectory(home.holdDir, "reap hold act directory sync").pipe(
-        Effect.mapError((cause) =>
-          new HoldReapRecoveryRequired({
-            reaped,
-            current: id,
-            phase: "sync",
-            currentRemoval: "confirmed",
-            at: now,
-            reason: reasonOf(cause)
-          })
-        )
-      )
-      yield* ledger.record(
-        new LedgerEntry({
-          at: now,
-          effect: "mutation",
-          act: "reap",
-          ref: id,
-          detail: journal.manifest.target
+          const recorded = yield* restore(
+            ledger.record(
+              new LedgerEntry({
+                at: now,
+                effect: "mutation",
+                act: "reap",
+                ref: id,
+                detail: journal.manifest.target
+              })
+            ).pipe(
+              Effect.mapError((cause) =>
+                new HoldReapRecoveryRequired({
+                  reaped,
+                  current: id,
+                  phase: "ledger",
+                  currentRemoval: "confirmed",
+                  at: now,
+                  reason: reasonOf(cause)
+                })
+              )
+            )
+          ).pipe(Effect.exit)
+          if (Exit.isSuccess(recorded)) return
+          return yield* Cause.isInterruptedOnly(recorded.cause)
+            ? new HoldReapRecoveryRequired({
+                reaped,
+                current: id,
+                phase: "ledger",
+                currentRemoval: "confirmed",
+                at: now,
+                reason:
+                  "Interrupt: ledger append interrupted after confirmed reap"
+              })
+            : Effect.failCause(recorded.cause)
         })
-      ).pipe(
-        Effect.mapError((cause) =>
-          new HoldReapRecoveryRequired({
-            reaped,
-            current: id,
-            phase: "ledger",
-            currentRemoval: "confirmed",
-            at: now,
-            reason: reasonOf(cause)
-          })
-        )
       )
     }
     return new ReapReport({ reaped, at: now })
