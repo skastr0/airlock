@@ -291,7 +291,23 @@ const resolveResource = (
       resource.kind === "executable" &&
       !executableConstraints.some(
         (constraint) =>
-          constraint.realm === resource.realm && constraint.selector === selector
+          constraint.role === "descendant" &&
+          constraint.realm === resource.realm &&
+          constraint.selector === selector
+      )
+    ) {
+      return yield* new ToolExecutableRejected({
+        definitionId: context.definitionId,
+        action: context.action,
+        executable: selector,
+        reason: "not-declared"
+      })
+    }
+    if (
+      resource.kind === "executable" &&
+      (
+        resource.rights.length !== 1 ||
+        resource.rights[0] !== "execute"
       )
     ) {
       return yield* new ToolExecutableRejected({
@@ -332,7 +348,11 @@ const selectExecutableConstraint = (
         reason: "contains-nul"
       })
     }
-    const matches = constraints.filter((candidate) => candidate.selector === executable)
+    const matches = constraints.filter(
+      (candidate) =>
+        candidate.role === "root" &&
+        candidate.selector === executable
+    )
     if (matches.length === 0) {
       return yield* new ToolExecutableRejected({
         definitionId,
@@ -477,6 +497,14 @@ export const lowerToolAction = (
         resolveResource(context, resource, index, definition.executables),
       { concurrency: 1 }
     )
+    const descendantExecutables = resources
+      .filter(
+        (resource) =>
+          resource.kind === "executable" &&
+          resource.rights.length === 1 &&
+          resource.rights[0] === "execute"
+      )
+      .map((resource) => resource.selector)
     const stdin =
       typeof action.stdin === "string"
         ? action.stdin
@@ -497,6 +525,7 @@ export const lowerToolAction = (
       action: "process.run",
       executable: request.executable,
       args,
+      descendantExecutables,
       cwd,
       env: Object.fromEntries(envEntries),
       cellProfile: request.cellProfile,
@@ -505,8 +534,16 @@ export const lowerToolAction = (
       stdout: action.stdout,
       stderr: action.stderr,
       outputLimitBytes: action.outputLimitBytes,
-      readable: resources.filter((resource) => !resource.rights.includes("write")),
-      writable: resources.filter((resource) => resource.rights.includes("write")),
+      readable: resources.filter(
+        (resource) =>
+          resource.kind !== "executable" &&
+          !resource.rights.includes("write")
+      ),
+      writable: resources.filter(
+        (resource) =>
+          resource.kind !== "executable" &&
+          resource.rights.includes("write")
+      ),
       realm: executableConstraint.realm
     }
     const lowering = yield* lowerNativeAction(call).pipe(

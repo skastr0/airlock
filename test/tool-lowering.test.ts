@@ -128,7 +128,7 @@ describe("inert tool action lowering", () => {
         expect.objectContaining({
           kind: "executable",
           selector: "/usr/bin/tar",
-          rights: ["execute"]
+          rights: ["invoke"]
         }),
         expect.objectContaining({
           kind: "path",
@@ -190,6 +190,91 @@ describe("inert tool action lowering", () => {
       ).pipe(Effect.flip)
       expect(helper).toBeInstanceOf(ToolExecutableRejected)
       expect(helper).toMatchObject({
+        executable: "/usr/bin/python3",
+        reason: "not-declared"
+      })
+    })
+  )
+
+  it.effect("binds declared descendants without allowing them to become roots", () =>
+    Effect.gen(function* () {
+      const base = archiveDefinition().actions[0]!
+      const helperResource = {
+        kind: "executable",
+        realm: "machine",
+        selector: { _tag: "Literal", value: "/usr/bin/python3" },
+        rights: ["execute"]
+      }
+      const loaded = yield* load({
+        ...archiveDefinition(),
+        executables: [
+          {
+            realm: "machine",
+            selector: "/usr/bin/tar",
+            role: "root"
+          },
+          {
+            realm: "machine",
+            selector: "/usr/bin/python3",
+            role: "descendant"
+          }
+        ],
+        actions: [
+          {
+            ...base,
+            resources: [
+              ...(base.resources as ReadonlyArray<Record<string, unknown>>),
+              helperResource
+            ]
+          }
+        ]
+      })
+      const input = {
+        archive: "state.tgz",
+        destination: "/sandbox/.hermes",
+        cwd: "/sandbox",
+        attempt: 1
+      }
+
+      const lowered = yield* lowerToolAction(request(loaded, input))
+      expect(lowered.call.descendantExecutables).toEqual([
+        "/usr/bin/python3"
+      ])
+      expect(lowered.lowering.nodes[0]).toMatchObject({
+        _tag: "Invoke",
+        executable: "/usr/bin/tar",
+        descendantExecutables: ["/usr/bin/python3"]
+      })
+      expect(lowered.lowering.nodes[0]?.requirements).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            kind: "executable",
+            selector: "/usr/bin/tar",
+            rights: ["invoke"]
+          }),
+          expect.objectContaining({
+            kind: "executable",
+            selector: "/usr/bin/python3",
+            rights: ["execute"]
+          })
+        ])
+      )
+      expect(lowered.call.readable).not.toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ kind: "executable" })
+        ])
+      )
+      expect(lowered.call.writable).not.toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ kind: "executable" })
+        ])
+      )
+
+      const helperAsRoot = yield* lowerToolAction(
+        request(loaded, input, { executable: "/usr/bin/python3" })
+      ).pipe(Effect.flip)
+      expect(helperAsRoot).toBeInstanceOf(ToolExecutableRejected)
+      expect(helperAsRoot).toMatchObject({
         executable: "/usr/bin/python3",
         reason: "not-declared"
       })

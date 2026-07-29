@@ -15,7 +15,13 @@ import {
   type NodeAuthorityBinding,
   revalidateNodeAuthority
 } from "../admission/index.ts"
-import { Cell, CellReceipt, CellRequest, WorkspaceDeltaCandidate } from "../cell/index.ts"
+import {
+  Cell,
+  CellExecutableBinding,
+  CellReceipt,
+  CellRequest,
+  WorkspaceDeltaCandidate
+} from "../cell/index.ts"
 import { Hold, HoldRecoveryRequired } from "../Hold.ts"
 import { ActId, EmissionRequest, RemoveReceipt } from "../domain.ts"
 import {
@@ -153,7 +159,11 @@ export class RuntimeProcessEvidence extends Schema.Class<RuntimeProcessEvidence>
 )({
   nodeId: Schema.String,
   outcome: RuntimeProcessOutcome,
-  receipt: ProcessReceipt
+  receipt: ProcessReceipt,
+  executableBindings: Schema.optionalWith(
+    Schema.Array(CellExecutableBinding),
+    { default: () => [] }
+  )
 }) {}
 
 export class RuntimeMergeEvidence extends Schema.Class<RuntimeMergeEvidence>(
@@ -1332,7 +1342,8 @@ const make = Effect.gen(function* () {
     node: PlanNode & { readonly _tag: "Invoke" },
     artifacts: Map<ArtifactId, RuntimeArtifact>,
     cellWorkspaces: Map<NodeId, RuntimeCellWorkspace>,
-    processes: Map<NodeId, RuntimeProcessEvidence>
+    processes: Map<NodeId, RuntimeProcessEvidence>,
+    handles: ReadonlyArray<Handle>
   ): Effect.Effect<ReadonlyArray<ArtifactId>, RuntimeError> =>
     Effect.gen(function* () {
       const stdin = node.stdin === undefined ? undefined : artifacts.get(node.stdin)
@@ -1377,6 +1388,16 @@ const make = Effect.gen(function* () {
           sourceWorkspace: workspace,
           privateWorkspace,
           process: request,
+          descendantExecutables: handles
+            .filter(
+              (handle) =>
+                handle.kind === "executable" &&
+                handle.rights.includes("execute")
+            )
+            .map((handle) => handle.constraints.selector)
+            .filter((selector): selector is string =>
+              selector !== undefined
+            ),
           network: "deny"
         })).pipe(
           Effect.map((receipt) => ({
@@ -1431,7 +1452,8 @@ const make = Effect.gen(function* () {
       processes.set(node.id, new RuntimeProcessEvidence({
         nodeId: node.id,
         outcome: "exited",
-        receipt: outcome.process
+        receipt: outcome.process,
+        executableBindings: outcome.cell?.executableBindings ?? []
       }))
       if (outcome.cell !== undefined) {
         yield* bindCellWorkspaceIdentity(
@@ -1553,7 +1575,8 @@ const make = Effect.gen(function* () {
     artifacts: Map<ArtifactId, RuntimeArtifact>,
     cellWorkspaces: Map<NodeId, RuntimeCellWorkspace>,
     processes: Map<NodeId, RuntimeProcessEvidence>,
-    recovery: Array<RuntimeRecoveryEvidence>
+    recovery: Array<RuntimeRecoveryEvidence>,
+    handles: ReadonlyArray<Handle>
   ): Effect.Effect<ReadonlyArray<ArtifactId>, RuntimeError> =>
     Effect.gen(function* () {
       yield* enforce(node)
@@ -1654,7 +1677,13 @@ const make = Effect.gen(function* () {
           }
         }
         case "Invoke":
-          return yield* runInvoke(node, artifacts, cellWorkspaces, processes)
+          return yield* runInvoke(
+            node,
+            artifacts,
+            cellWorkspaces,
+            processes,
+            handles
+          )
         case "Apply": {
           switch (node.operation) {
             case "write": {
@@ -2011,7 +2040,8 @@ const make = Effect.gen(function* () {
             artifacts,
             cellWorkspaces,
             processes,
-            recovery
+            recovery,
+            handles
           ).pipe(Effect.either)
         const materialized = [...artifacts.keys()].filter(
           (id) => !artifactsBefore.has(id)

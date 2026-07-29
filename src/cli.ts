@@ -580,7 +580,12 @@ const schema = Command.make(
         plan: {
           schemaVersion: "airlock/plan/v1",
           nodes: ["Capture", "Invoke", "Apply", "RequestExternal"],
-          invoke: { executable: "absolute path", args: "string[]", commandString: false }
+          invoke: {
+            executable: "absolute path",
+            args: "string[]",
+            descendantExecutables: "additional absolute executable paths",
+            commandString: false
+          }
         }
       } : {}),
       ...(requested === "all" || requested === "language" ? {
@@ -599,13 +604,25 @@ const exec = Command.make(
   {
     executable: Options.text("executable"),
     arg: Options.text("arg").pipe(Options.repeated),
+    descendantExecutable: Options.text("descendant-executable").pipe(
+      Options.repeated
+    ),
     cwd: Options.text("cwd"),
     profile: profileOption,
     privateWorkspace: Options.text("private-workspace").pipe(Options.optional),
     timeout: Options.text("timeout").pipe(Options.optional),
     outputLimitBytes: Options.integer("output-limit-bytes").pipe(Options.withDefault(1_048_576))
   },
-  ({ executable, arg, cwd, profile, privateWorkspace, timeout, outputLimitBytes }) =>
+  ({
+    executable,
+    arg,
+    descendantExecutable,
+    cwd,
+    profile,
+    privateWorkspace,
+    timeout,
+    outputLimitBytes
+  }) =>
     rendered(Effect.gen(function* () {
       const timeoutMs: number | undefined = yield* (
         Option.isNone(timeout) ? Effect.succeed<number | undefined>(undefined) : parseDuration("timeout", timeout.value)
@@ -640,6 +657,7 @@ const exec = Command.make(
           sourceWorkspace: cwd,
           privateWorkspace: privateWorkspace.value,
           process: request,
+          descendantExecutables: descendantExecutable,
           network: "deny"
         }))
         return {

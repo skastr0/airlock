@@ -69,7 +69,13 @@ describe("inert tool definitions", () => {
     Effect.gen(function* () {
       const loaded = yield* decodeToolDefinition(document(definition()))
       const action = loaded.definition.actions[0]!
-      expect(loaded.definition.executables).toEqual([{ realm: "machine", selector: "/usr/bin/tar" }])
+      expect(loaded.definition.executables).toEqual([
+        {
+          realm: "machine",
+          selector: "/usr/bin/tar",
+          role: "root"
+        }
+      ])
       expect(action).toMatchObject({
         name: "extract",
         args: [{ _tag: "Literal", value: "-xf" }, { _tag: "Input", path: ["archive"] }],
@@ -122,6 +128,81 @@ describe("inert tool definitions", () => {
 
       const dotted = yield* decodeToolDefinition(document(definition({ id: "unix.archive" })))
       expect(dotted.definition.id).toBe("unix.archive")
+
+      const withDescendant = yield* decodeToolDefinition(
+        document(
+          definition({
+            executables: [
+              {
+                realm: "machine",
+                selector: "/usr/bin/tar",
+                role: "root"
+              },
+              {
+                realm: "machine",
+                selector: "/usr/bin/python3",
+                role: "descendant"
+              }
+            ]
+          })
+        )
+      )
+      expect(withDescendant.definition.executables).toEqual([
+        {
+          realm: "machine",
+          selector: "/usr/bin/tar",
+          role: "root"
+        },
+        {
+          realm: "machine",
+          selector: "/usr/bin/python3",
+          role: "descendant"
+        }
+      ])
+
+      const duplicateSelector = yield* decodeToolDefinition(
+        document(
+          definition({
+            executables: [
+              {
+                realm: "machine",
+                selector: "/usr/bin/tar",
+                role: "root"
+              },
+              {
+                realm: "machine",
+                selector: "/usr/bin/tar",
+                role: "descendant"
+              }
+            ]
+          })
+        )
+      ).pipe(Effect.flip)
+      expect(duplicateSelector).toBeInstanceOf(InvalidToolDefinition)
+      expect(duplicateSelector).toMatchObject({ field: "executables" })
+
+      const crossRealmDescendant = yield* decodeToolDefinition(
+        document(
+          definition({
+            executables: [
+              {
+                realm: "machine",
+                selector: "/usr/bin/tar",
+                role: "root"
+              },
+              {
+                realm: "other-machine",
+                selector: "/usr/bin/python3",
+                role: "descendant"
+              }
+            ]
+          })
+        )
+      ).pipe(Effect.flip)
+      expect(crossRealmDescendant).toBeInstanceOf(InvalidToolDefinition)
+      expect(crossRealmDescendant).toMatchObject({
+        field: "executables[].realm"
+      })
     })
   )
 

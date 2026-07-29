@@ -20,7 +20,16 @@ export type ReceiptId = typeof ReceiptId.Type
 export const Digest = Schema.String.pipe(Schema.brand("Digest"))
 export type Digest = typeof Digest.Type
 
-export const Right = Schema.Literal("read", "write", "execute", "connect", "emit")
+export const Right = Schema.Literal(
+  "read",
+  "write",
+  /** Authority to select this executable as the root of an Invoke. */
+  "invoke",
+  /** Authority to execute this identity only as a declared descendant edge. */
+  "execute",
+  "connect",
+  "emit"
+)
 export type Right = typeof Right.Type
 
 export const HandleKind = Schema.Literal(
@@ -109,6 +118,14 @@ export class InvokeNode extends Schema.TaggedClass<InvokeNode>("InvokeNode")("In
   executable: Schema.String,
   /** Individual argument atoms. The executable is never embedded here. */
   args: Schema.Array(Schema.String),
+  /**
+   * Additional descendant executable identities admitted for a contained
+   * invocation. The root executable is admitted independently with `invoke`.
+   * Compatibility records this declaration but does not claim to enforce it.
+   */
+  descendantExecutables: Schema.optionalWith(Schema.Array(Schema.String), {
+    default: () => []
+  }),
   /** Omitted means the Cell's admitted working directory. */
   cwd: Schema.optional(Schema.String),
   /** An explicit environment overlay; no inherited ambient environment is implied. */
@@ -396,6 +413,36 @@ const validateInvoke = (node: InvokeNode): InvalidInvokeContract | undefined => 
   }
   if (node.executable.includes("\0")) {
     return invalidInvoke(node, "executable", "must not contain NUL")
+  }
+  for (const [index, executable] of node.descendantExecutables.entries()) {
+    if (!executable.startsWith("/")) {
+      return invalidInvoke(
+        node,
+        `descendantExecutables[${index}]`,
+        "must be an absolute executable identity"
+      )
+    }
+    if (executable.includes("\0")) {
+      return invalidInvoke(
+        node,
+        `descendantExecutables[${index}]`,
+        "must not contain NUL"
+      )
+    }
+    if (executable === node.executable) {
+      return invalidInvoke(
+        node,
+        `descendantExecutables[${index}]`,
+        "must not repeat the root executable"
+      )
+    }
+    if (node.descendantExecutables.indexOf(executable) !== index) {
+      return invalidInvoke(
+        node,
+        `descendantExecutables[${index}]`,
+        "must not contain duplicate executable identities"
+      )
+    }
   }
   if (node.cwd !== undefined && (!node.cwd.startsWith("/") || node.cwd.includes("\0"))) {
     return invalidInvoke(node, "cwd", "must be an absolute path without NUL when provided")

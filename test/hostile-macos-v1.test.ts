@@ -83,6 +83,7 @@ type Fixture = Readonly<{
 }>
 
 let helperExecutable = ""
+let developerGitExecutable = "/usr/bin/git"
 
 const makeFixture = (
   executables: ReadonlyArray<string> = [],
@@ -220,6 +221,11 @@ describe.skipIf(!supported)("hostile macOS v1 — actual agent entrypoint", () =
       { encoding: "utf8" }
     )
     expect(compiled.status, compiled.stderr).toBe(0)
+    const locatedGit = spawnSync("/usr/bin/xcrun", ["-f", "git"], {
+      encoding: "utf8"
+    })
+    expect(locatedGit.status, locatedGit.stderr).toBe(0)
+    developerGitExecutable = realpathSync(locatedGit.stdout.trim())
   })
 
   it(
@@ -511,10 +517,10 @@ describe.skipIf(!supported)("hostile macOS v1 — actual agent entrypoint", () =
   )
 
   it(
-    "documents that a persisted Git hook executes in a later admitted Cell",
+    "blocks a persisted Git hook from laundering /bin/sh authority into a later Cell",
     { timeout: 90_000 },
     () => {
-      const fixture = makeFixture(["/bin/chmod", "/usr/bin/git"])
+      const fixture = makeFixture(["/bin/chmod", developerGitExecutable])
       const git = (...args: ReadonlyArray<string>) =>
         spawnSync("/usr/bin/git", ["-C", fixture.workspace, ...args], {
           encoding: "utf8"
@@ -533,6 +539,19 @@ describe.skipIf(!supported)("hostile macOS v1 — actual agent entrypoint", () =
           "initial"
         ).status
       ).toBe(0)
+
+      const baseline = evalAgent(
+        fixture,
+        `return process.run({ executable: ${JSON.stringify(developerGitExecutable)}, args: ["status", "--short"], cwd: workspace, cellProfile: "native-contained", stdout: "capture", stderr: "capture" })`
+      )
+      expect(
+        baseline.status,
+        `${baseline.stderr}\n${baseline.stdout}`
+      ).toBe(0)
+      expect(decodeRuntime(baseline.stdout)).toMatchObject({
+        state: "succeeded",
+        exit_code: 0
+      })
 
       const hook = join(fixture.workspace, ".git", "hooks", "pre-commit")
       const persisted = evalAgent(
@@ -555,13 +574,56 @@ describe.skipIf(!supported)("hostile macOS v1 — actual agent entrypoint", () =
       writeFileSync(join(fixture.workspace, "tracked.txt"), "after\n")
       const committed = evalAgent(
         fixture,
-        'return process.run({ executable: "/usr/bin/git", args: ["-c", "user.name=Airlock Test", "-c", "user.email=airlock@example.invalid", "commit", "-am", "second"], cwd: workspace, cellProfile: "native-contained", timeoutMs: 30000, stdout: "capture", stderr: "capture" })'
+        `return process.run({ executable: ${JSON.stringify(developerGitExecutable)}, args: ["-c", "user.name=Airlock Test", "-c", "user.email=airlock@example.invalid", "commit", "-am", "second"], cwd: workspace, cellProfile: "native-contained", timeoutMs: 30000, stdout: "capture", stderr: "capture" })`
       )
       expect(
         committed.status,
         `${committed.stderr}\n${committed.stdout}`
       ).toBe(0)
       expect(decodeRuntime(committed.stdout).state).toBe("succeeded")
+      expect(existsSync(join(fixture.workspace, "hook-fired.txt"))).toBe(false)
+
+      writeFileSync(
+        fixture.policy,
+        JSON.stringify({
+          schemaVersion: "airlock/admission-policy/v1",
+          profile: "native-contained",
+          principal: "agent:hostile-macos-v1",
+          realm: "local",
+          admittedBy: "operator:hostile-macos-v1",
+          pathAllowlist: [`${fixture.workspace}/**`],
+          executableAllowlist: ["/bin/chmod", developerGitExecutable],
+          executableEdges: [
+            {
+              root: developerGitExecutable,
+              descendants: [hook, "/bin/sh", "/bin/bash"]
+            }
+          ],
+          endpointAllowlist: []
+        })
+      )
+      const rootEscalation = evalAgent(
+        fixture,
+        'return process.run({ executable: "/bin/sh", args: ["-c", "true"], cwd: workspace, cellProfile: "native-contained", stdout: "capture", stderr: "capture" })'
+      )
+      expect(rootEscalation.status).toBe(1)
+      expect(
+        decodeReport(rootEscalation.stdout).result.failure
+      ).toMatchObject({
+        phase: "admission",
+        causeTag: "AdmissionDenied"
+      })
+
+      writeFileSync(join(fixture.workspace, "tracked.txt"), "third\n")
+      const explicitlyAllowed = evalAgent(
+        fixture,
+        `return process.run({ executable: ${JSON.stringify(developerGitExecutable)}, args: ["-c", "user.name=Airlock Test", "-c", "user.email=airlock@example.invalid", "commit", "-am", "third"], descendantExecutables: [${JSON.stringify(hook)}, "/bin/sh", "/bin/bash"], cwd: workspace, cellProfile: "native-contained", timeoutMs: 30000, stdout: "capture", stderr: "capture" })`
+      )
+      expect(
+        explicitlyAllowed.status,
+        `${explicitlyAllowed.stderr}\n${explicitlyAllowed.stdout}`
+      ).toBe(0)
+      expect(decodeRuntime(explicitlyAllowed.stdout).state).toBe("succeeded")
       expect(
         readFileSync(join(fixture.workspace, "hook-fired.txt"), "utf8")
       ).toBe("executed\n")

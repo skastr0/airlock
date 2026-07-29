@@ -1,7 +1,15 @@
 import { Context, Effect, Layer, Schema } from "effect"
 import { createHash } from "node:crypto"
-import { existsSync, lstatSync, readdirSync, readFileSync, readlinkSync, realpathSync } from "node:fs"
-import { relative, resolve, sep } from "node:path"
+import {
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  readlinkSync,
+  realpathSync
+} from "node:fs"
+import { join, relative, resolve, sep } from "node:path"
 import {
   MacosPlatform,
   type MacosUnavailable,
@@ -81,17 +89,35 @@ export class CellRequest extends Schema.Class<CellRequest>("CellRequest")({
   sourceWorkspace: Schema.String,
   privateWorkspace: Schema.String,
   process: ProcessRequest,
+  descendantExecutables: Schema.optionalWith(Schema.Array(Schema.String), {
+    default: () => []
+  }),
   tempPaths: Schema.optionalWith(Schema.Array(Schema.String), { default: () => [] }),
   network: Schema.optionalWith(CellNetwork, { default: () => "deny" as const })
+}) {}
+
+export class CellExecutableBinding extends Schema.Class<CellExecutableBinding>(
+  "CellExecutableBinding"
+)({
+  role: Schema.Literal("root", "descendant"),
+  requested: Schema.String,
+  launch: Schema.String,
+  allowedPaths: Schema.Array(Schema.String),
+  workspaceRebased: Schema.Boolean
 }) {}
 
 export class CellReceipt extends Schema.Class<CellReceipt>("CellReceipt")({
   sourceWorkspace: Schema.String,
   privateWorkspace: Schema.String,
+  privateTempDirectory: Schema.optional(Schema.String),
   network: CellNetwork,
   readAuthority: CellReadAuthority,
   process: ProcessRequest,
   processReceipt: ProcessReceipt,
+  executableBindings: Schema.optionalWith(
+    Schema.Array(CellExecutableBinding),
+    { default: () => [] }
+  ),
   baseline: WorkspaceFingerprint,
   live: WorkspaceFingerprint,
   private: WorkspaceFingerprint,
@@ -194,12 +220,14 @@ const fingerprintEntry = (absolutePath: string, displayPath: string): WorkspaceE
 }
 
 export const fingerprintWorkspace = (
-  root: string
+  root: string,
+  excludedTopLevel: ReadonlySet<string> = new Set()
 ): Effect.Effect<WorkspaceFingerprint, WorkspaceFingerprintFailed> =>
   Effect.try({
     try: () => {
       const canonical = realpathSync(root)
       const entries = readdirSync(canonical)
+        .filter((entry) => !excludedTopLevel.has(entry))
         .sort()
         .map((entry) => fingerprintEntry(`${canonical}${sep}${entry}`, entry))
       return new WorkspaceFingerprint({
@@ -281,6 +309,12 @@ export const validateCellRequest = (request: CellRequest) =>
       "process.cwd",
       "must be sourceWorkspace; Cell rewrites it to privateWorkspace"
     )
+    yield* assertion(
+      request.process.executable.startsWith("/") &&
+        !request.process.executable.includes("\0"),
+      "process.executable",
+      "must be an absolute executable identity without NUL"
+    )
     for (const [index, tempPath] of request.tempPaths.entries()) {
       const temporary = resolve(tempPath)
       yield* assertion(tempPath.startsWith("/"), `tempPaths[${index}]`, "must be absolute")
@@ -296,7 +330,33 @@ export const validateCellRequest = (request: CellRequest) =>
         "must not overlap privateWorkspace"
       )
     }
-    return { source, privateWorkspace, tempPaths: request.tempPaths.map((path) => resolve(path)) }
+    for (const [index, executable] of request.descendantExecutables.entries()) {
+      yield* assertion(
+        executable.startsWith("/"),
+        `descendantExecutables[${index}]`,
+        "must be an absolute executable path"
+      )
+      yield* assertion(
+        !executable.includes("\0"),
+        `descendantExecutables[${index}]`,
+        "must not contain NUL"
+      )
+      yield* assertion(
+        executable !== request.process.executable,
+        `descendantExecutables[${index}]`,
+        "must not repeat the root executable"
+      )
+      yield* assertion(
+        request.descendantExecutables.indexOf(executable) === index,
+        `descendantExecutables[${index}]`,
+        "must not contain duplicate executable identities"
+      )
+    }
+    return {
+      source,
+      privateWorkspace,
+      tempPaths: request.tempPaths.map((path) => resolve(path))
+    }
   })
 
 // JSON string escaping is valid SBPL quoting and prevents profile injection.
@@ -310,7 +370,8 @@ const sbpl = (value: string) => JSON.stringify(value)
 export const renderSeatbeltProfile = (
   privateWorkspace: string,
   tempPaths: ReadonlyArray<string>,
-  network: CellNetwork
+  network: CellNetwork,
+  allowedExecutables: ReadonlyArray<string>
 ) => {
   const writable = [privateWorkspace, ...tempPaths]
     .map((path) => `(allow file-write* (subpath ${sbpl(path)}))`)
@@ -318,9 +379,14 @@ export const renderSeatbeltProfile = (
   return [
     "(version 1)",
     "(deny default)",
-    // Existing Unix programs retain their algorithms and can fork/exec their
-    // declared closure. ProcessRunner still owns the original process group.
-    "(allow process*)",
+    // Forking remains available, but every new exec identity must be listed.
+    // This is executable-edge fencing, not a claim about dylibs or code an
+    // already-admitted interpreter reads and executes in-process.
+    "(allow process-fork)",
+    ...allowedExecutables.map(
+      (executable) =>
+        `(allow process-exec (literal ${sbpl(executable)}))`
+    ),
     "(allow file-read*)",
     writable,
     // Common programs may direct diagnostics here without gaining a general
@@ -348,6 +414,14 @@ const runCell = (
       )
     }
     const paths = yield* validateCellRequest(request)
+    const sourceWorkspace = yield* Effect.try({
+      try: () => realpathSync(paths.source),
+      catch: (cause) =>
+        new WorkspaceFingerprintFailed({
+          root: paths.source,
+          cause: cause instanceof Error ? cause.message : String(cause)
+        })
+    })
     const baseline = yield* fingerprintWorkspace(paths.source)
     const prepared = yield* platform.preparePrivateWorkspace(
       new PrivateWorkspaceRequest({ source: paths.source, destination: paths.privateWorkspace })
@@ -372,13 +446,113 @@ const runCell = (
           })
       })
     )
+    const privateTempName = `.airlock-runtime-tmp-${crypto.randomUUID()}`
+    const privateTempDirectory = join(privateWorkspace, privateTempName)
+    yield* Effect.try({
+      try: () => mkdirSync(privateTempDirectory, { mode: 0o700 }),
+      catch: (cause) =>
+        new CellContractViolation({
+          field: "process.env",
+          reason:
+            `could not create private runtime temp directory: ` +
+            `${cause instanceof Error ? cause.message : String(cause)}`
+        })
+    })
+    const executableBindings = yield* Effect.forEach(
+      [...new Set([
+        request.process.executable,
+        ...request.descendantExecutables
+      ])],
+      (executable) =>
+        Effect.try({
+          try: () => {
+            const requested = resolve(executable)
+            let relativeExecutable: string | undefined
+            if (isSameOrWithin(requested, paths.source)) {
+              relativeExecutable = relative(paths.source, requested)
+            } else if (existsSync(requested)) {
+              const canonical = realpathSync(requested)
+              if (isSameOrWithin(canonical, sourceWorkspace)) {
+                relativeExecutable = relative(sourceWorkspace, canonical)
+              }
+            }
+
+            if (relativeExecutable !== undefined) {
+              const contained = join(privateWorkspace, relativeExecutable)
+              let cursor = privateWorkspace
+              for (const component of relativeExecutable.split(sep)) {
+                if (component.length === 0) continue
+                cursor = join(cursor, component)
+                if (!existsSync(cursor)) break
+                if (lstatSync(cursor).isSymbolicLink()) {
+                  throw new Error(
+                    `${executable} crosses a symlink inside the private workspace`
+                  )
+                }
+              }
+              const canonicalContained = existsSync(contained)
+                ? realpathSync(contained)
+                : contained
+              if (!isSameOrWithin(canonicalContained, privateWorkspace)) {
+                throw new Error(
+                  `${executable} resolves outside the private workspace`
+                )
+              }
+              return {
+                requested: executable,
+                launch: canonicalContained,
+                policy: [contained, canonicalContained],
+                workspaceRebased: true
+              }
+            }
+
+            const canonical = realpathSync(requested)
+            return {
+              requested: executable,
+              launch: executable,
+              policy: [requested, canonical],
+              workspaceRebased: false
+            }
+          },
+          catch: (cause) =>
+            new CellContractViolation({
+              field: "descendantExecutables",
+              reason:
+                `${executable} must resolve before execution: ` +
+                `${cause instanceof Error ? cause.message : String(cause)}`
+            })
+        })
+    )
+    const rootExecutable = executableBindings.find(
+      (binding) => binding.requested === request.process.executable
+    )
+    if (rootExecutable === undefined) {
+      return yield* new CellContractViolation({
+        field: "process.executable",
+        reason: "root executable did not bind into the executable edge set"
+      })
+    }
+    const canonicalExecutables = [
+      ...new Set(executableBindings.flatMap((binding) => binding.policy))
+    ]
     const containedRequest = new ProcessRequest({
       ...request.process,
       executable: sandboxExec,
+      env: {
+        ...request.process.env,
+        TMPDIR: privateTempDirectory,
+        TMP: privateTempDirectory,
+        TEMP: privateTempDirectory
+      },
       args: [
         "-p",
-        renderSeatbeltProfile(privateWorkspace, canonicalTemps, request.network),
-        request.process.executable,
+        renderSeatbeltProfile(
+          privateWorkspace,
+          canonicalTemps,
+          request.network,
+          canonicalExecutables
+        ),
+        rootExecutable.launch,
         ...request.process.args
       ],
       cwd: privateWorkspace
@@ -386,15 +560,29 @@ const runCell = (
     const processReceipt = yield* runner.run(containedRequest, options)
     const [live, privateView] = yield* Effect.all([
       fingerprintWorkspace(paths.source),
-      fingerprintWorkspace(privateWorkspace)
+      fingerprintWorkspace(
+        privateWorkspace,
+        new Set([privateTempName])
+      )
     ])
     return new CellReceipt({
       sourceWorkspace: paths.source,
       privateWorkspace,
+      privateTempDirectory,
       network: request.network,
       readAuthority: "ambient-host-read",
       process: request.process,
       processReceipt,
+      executableBindings: executableBindings.map(
+        (binding, index) =>
+          new CellExecutableBinding({
+            role: index === 0 ? "root" : "descendant",
+            requested: binding.requested,
+            launch: binding.launch,
+            allowedPaths: [...new Set(binding.policy)],
+            workspaceRebased: binding.workspaceRebased
+          })
+      ),
       baseline,
       live,
       private: privateView,

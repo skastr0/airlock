@@ -98,6 +98,9 @@ export type ToolResultDecoder = typeof ToolResultDecoder.Type
 export const ToolStreamPolicy = Schema.Literal("capture", "inherit", "discard")
 export type ToolStreamPolicy = typeof ToolStreamPolicy.Type
 
+export const ToolExecutableRole = Schema.Literal("root", "descendant")
+export type ToolExecutableRole = typeof ToolExecutableRole.Type
+
 export const ToolStdin = Schema.Union(
   Schema.Literal("discard", "inherit"),
   ArtifactTemplate
@@ -108,7 +111,10 @@ export class ToolExecutableConstraint extends Schema.Class<ToolExecutableConstra
   "ToolExecutableConstraint"
 )({
   realm: Schema.String,
-  selector: Schema.String
+  selector: Schema.String,
+  role: Schema.optionalWith(ToolExecutableRole, {
+    default: () => "root" as const
+  })
 }) {}
 
 export class ToolActionDefinition extends Schema.Class<ToolActionDefinition>(
@@ -416,20 +422,47 @@ export const validateToolDefinition = (
         reason: "must declare at least one compatible executable selector"
       })
     }
-    if (definition.executables.length !== 1) {
+    const roots = definition.executables.filter(
+      (executable) => executable.role === "root"
+    )
+    if (roots.length !== 1) {
       return yield* new InvalidToolDefinition({
         id: definition.id,
         field: "executables",
-        reason: "v1 definitions must declare exactly one executable selector"
+        reason: "must declare exactly one root executable selector"
       })
     }
-    const selector = definition.executables[0]!.selector
-    if (!selector.startsWith("/") || selector.includes("\0")) {
+    const duplicateExecutable = duplicates(
+      definition.executables.map((executable) => executable.selector)
+    )[0]
+    if (duplicateExecutable !== undefined) {
       return yield* new InvalidToolDefinition({
         id: definition.id,
-        field: "executables[].selector",
-        reason: "must be one absolute executable path without NUL"
+        field: "executables",
+        reason: `selector ${duplicateExecutable} must have exactly one role`
       })
+    }
+    for (const executable of definition.executables) {
+      if (
+        !executable.selector.startsWith("/") ||
+        executable.selector.includes("\0")
+      ) {
+        return yield* new InvalidToolDefinition({
+          id: definition.id,
+          field: "executables[].selector",
+          reason: "must be an absolute executable path without NUL"
+        })
+      }
+      if (
+        executable.role === "descendant" &&
+        executable.realm !== roots[0]!.realm
+      ) {
+        return yield* new InvalidToolDefinition({
+          id: definition.id,
+          field: "executables[].realm",
+          reason: "descendants must execute in the root executable realm"
+        })
+      }
     }
     if (definition.actions.length === 0) {
       return yield* new InvalidToolDefinition({

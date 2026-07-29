@@ -53,7 +53,7 @@ const draft = (requirements: ReadonlyArray<ResourceRequirement>, node: PlanNode)
   })
 
 const executable = new ResourceRequirement({
-  id: req("exec/rg"), kind: "executable", realm: "macos/local", selector: "/usr/bin/rg", rights: ["execute"]
+  id: req("exec/rg"), kind: "executable", realm: "macos/local", selector: "/usr/bin/rg", rights: ["invoke"]
 })
 
 const invoke = new InvokeNode({
@@ -123,6 +123,128 @@ describe("Admission candidate", () => {
       // paths are intentionally fail-closed: relative executable authority
       // can never receive a grant.
       expect(rejected._tag).toBe("InvalidInvokeContract")
+    })
+  )
+
+  it.effect("binds each descendant executable to its root and denies ungranted edges", () =>
+    Effect.gen(function* () {
+      const shell = new ResourceRequirement({
+        id: req("exec/sh"),
+        kind: "executable",
+        realm: "macos/local",
+        selector: "/bin/sh",
+        rights: ["execute"]
+      })
+      const withClosure = new InvokeNode({
+        ...invoke,
+        descendantExecutables: ["/bin/sh"]
+      })
+
+      const undeclared = yield* admit(
+        draft([executable], withClosure),
+        policy({ executableAllowlist: ["/usr/bin/rg", "/bin/sh"] })
+      ).pipe(Effect.flip)
+      expect(undeclared).toMatchObject({
+        _tag: "UndeclaredNodeAuthority",
+        selector: "/bin/sh",
+        right: "execute"
+      })
+
+      const denied = yield* admit(
+        draft([executable, shell], new InvokeNode({
+          ...withClosure,
+          requires: [executable.id, shell.id]
+        })),
+        policy()
+      ).pipe(Effect.flip)
+      expect(denied).toBeInstanceOf(AdmissionDenied)
+
+      const admitted = yield* admit(
+        draft([executable, shell], new InvokeNode({
+          ...withClosure,
+          requires: [executable.id, shell.id]
+        })),
+        policy({
+          executableAllowlist: ["/usr/bin/rg"],
+          executableEdges: [
+            { root: "/usr/bin/rg", descendants: ["/bin/sh"] }
+          ]
+        })
+      )
+      const authority = yield* bindAdmissionForUse(admitted)
+      const binding = yield* revalidateNodeAuthority(
+        authority,
+        withClosure.id
+      )
+      expect(
+        binding.handles
+          .filter((handle) => handle.kind === "executable")
+          .map((handle) => handle.constraints.selector)
+      ).toEqual(["/usr/bin/rg", "/bin/sh"])
+
+      const shellRoot = new ResourceRequirement({
+        ...shell,
+        id: req("invoke/sh"),
+        rights: ["invoke"]
+      })
+      const escalatedRoot = new InvokeNode({
+        ...invoke,
+        executable: "/bin/sh",
+        args: ["-c", "true"],
+        descendantExecutables: [],
+        requires: [shellRoot.id]
+      })
+      const rootEscalation = yield* admit(
+        draft([shellRoot], escalatedRoot),
+        policy({
+          executableAllowlist: ["/usr/bin/rg"],
+          executableEdges: [
+            { root: "/usr/bin/rg", descendants: ["/bin/sh"] }
+          ]
+        })
+      ).pipe(Effect.flip)
+      expect(rootEscalation).toBeInstanceOf(AdmissionDenied)
+
+      const findRoot = new ResourceRequirement({
+        ...executable,
+        id: req("invoke/find"),
+        selector: "/usr/bin/find"
+      })
+      const wrongParent = new InvokeNode({
+        ...invoke,
+        executable: "/usr/bin/find",
+        descendantExecutables: ["/bin/sh"],
+        requires: [findRoot.id, shell.id]
+      })
+      const parentMismatch = yield* admit(
+        draft([findRoot, shell], wrongParent),
+        policy({
+          executableAllowlist: ["/usr/bin/rg", "/usr/bin/find"],
+          executableEdges: [
+            { root: "/usr/bin/rg", descendants: ["/bin/sh"] }
+          ]
+        })
+      ).pipe(Effect.flip)
+      expect(parentMismatch).toMatchObject({
+        _tag: "AdmissionDenied",
+        requirementId: shell.id
+      })
+
+      const compatible = yield* admit(
+        draft([executable, shell], new InvokeNode({
+          ...withClosure,
+          requires: [executable.id, shell.id]
+        })),
+        policy({
+          profile: "compatibility",
+          executableAllowlist: [],
+          executableEdges: []
+        })
+      )
+      expect(compatible.plan.nodes[0]).toMatchObject({
+        _tag: "Invoke",
+        descendantExecutables: ["/bin/sh"]
+      })
     })
   )
 

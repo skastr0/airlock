@@ -81,11 +81,13 @@ if (process.platform !== "darwin" || !existsSync("/usr/bin/sandbox-exec")) {
             privateWorkspace,
             tempPaths: [explicitTemp],
             network: "deny",
+            descendantExecutables: ["/bin/bash", "/usr/bin/curl"],
             process: command(
               source,
               [
                 'if printf live > "$AIRLOCK_LIVE/forbidden.txt"; then echo live-write; else echo live-denied; fi',
                 'printf private > "$AIRLOCK_PRIVATE/created.txt"',
+                'printf temporary > "$TMPDIR/isolated-temp.txt"',
                 `if /usr/bin/curl --connect-timeout 1 --max-time 1 -fsS http://127.0.0.1:${server.port}/ >/dev/null; then echo network-open; else echo network-denied; fi`
               ].join("; "),
               { AIRLOCK_LIVE: source, AIRLOCK_PRIVATE: privateWorkspace }
@@ -96,6 +98,7 @@ if (process.platform !== "darwin" || !existsSync("/usr/bin/sandbox-exec")) {
     )
 
     const output = new TextDecoder().decode(receipt.processReceipt.stdout)
+    const processError = new TextDecoder().decode(receipt.processReceipt.stderr)
     const assertions = {
       liveWriteDenied: output.includes("live-denied") && !existsSync(join(source, "forbidden.txt")),
       privateWriteSucceeded:
@@ -104,6 +107,16 @@ if (process.platform !== "darwin" || !existsSync("/usr/bin/sandbox-exec")) {
       loopbackDenied: output.includes("network-denied"),
       sourceUnchanged: readFileSync(join(source, "unchanged.txt"), "utf8") === "baseline",
       deltaObserved: receipt.delta.some((item) => item.path === "created.txt" && item.kind === "created"),
+      privateTempIsolated:
+        receipt.privateTempDirectory !== undefined &&
+        receipt.privateTempDirectory.startsWith(`${receipt.privateWorkspace}/`) &&
+        readFileSync(
+          join(receipt.privateTempDirectory, "isolated-temp.txt"),
+          "utf8"
+        ) === "temporary",
+      privateTempExcludedFromDelta: receipt.delta.every(
+        (item) => !item.path.startsWith(".airlock-runtime-tmp-")
+      ),
       driftAbsent: receipt.drift.length === 0
     }
     const ok = Object.values(assertions).every(Boolean)
@@ -115,8 +128,10 @@ if (process.platform !== "darwin" || !existsSync("/usr/bin/sandbox-exec")) {
       evidence: {
         root,
         privateWorkspace: receipt.privateWorkspace,
+        privateTempDirectory: receipt.privateTempDirectory,
         processExitCode: receipt.processReceipt.exitCode,
         processOutput: output.trim(),
+        processError: processError.trim(),
         delta: receipt.delta.map(({ path, kind }) => ({ path, kind })),
         drift: receipt.drift.map(({ path }) => path)
       }

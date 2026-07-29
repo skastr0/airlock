@@ -103,6 +103,32 @@ describe("Plan v1 kernel", () => {
       expect(executableFailure).toBeInstanceOf(InvalidInvokeContract)
       expect(executableFailure).toMatchObject({ _tag: "InvalidInvokeContract", field: "executable" })
 
+      const relativeDescendant = new InvokeNode({
+        ...invoke,
+        id: id("invalid-descendant"),
+        descendantExecutables: ["python3"]
+      })
+      const descendantFailure = yield* orderPlan(
+        draft([relativeDescendant])
+      ).pipe(Effect.flip)
+      expect(descendantFailure).toMatchObject({
+        _tag: "InvalidInvokeContract",
+        field: "descendantExecutables[0]"
+      })
+
+      const repeatedRoot = new InvokeNode({
+        ...invoke,
+        id: id("repeated-root"),
+        descendantExecutables: [invoke.executable]
+      })
+      const repeatedRootFailure = yield* orderPlan(
+        draft([repeatedRoot])
+      ).pipe(Effect.flip)
+      expect(repeatedRootFailure).toMatchObject({
+        _tag: "InvalidInvokeContract",
+        field: "descendantExecutables[0]"
+      })
+
       const invalidTimeout = new InvokeNode({ ...invoke, id: id("invalid-timeout"), timeoutMs: 0 })
       const timeoutFailure = yield* orderPlan(draft([invalidTimeout])).pipe(Effect.flip)
       expect(timeoutFailure).toMatchObject({ _tag: "InvalidInvokeContract", field: "timeoutMs" })

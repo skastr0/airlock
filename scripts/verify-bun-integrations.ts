@@ -80,9 +80,47 @@ const CellProof = Schema.Struct({
     loopbackDenied: Schema.Literal(true),
     sourceUnchanged: Schema.Literal(true),
     deltaObserved: Schema.Literal(true),
+    privateTempIsolated: Schema.Literal(true),
+    privateTempExcludedFromDelta: Schema.Literal(true),
     driftAbsent: Schema.Literal(true)
   }),
   evidence: Schema.optional(Schema.Record({ key: Schema.String, value: Schema.Unknown }))
+})
+
+const ExecutableEdgesProof = Schema.Struct({
+  proof: Schema.Literal("airlock-executable-edges-v1"),
+  ok: Schema.Literal(true),
+  platform: Schema.Literal("darwin"),
+  assertions: Schema.Struct({
+    unlistedDescendantDenied: Schema.Literal(true),
+    listedDescendantAllowed: Schema.Literal(true),
+    unlistedShebangChainDenied: Schema.Literal(true),
+    listedShebangChainAllowed: Schema.Literal(true),
+    deniedReceiptOmitsTouch: Schema.Literal(true),
+    allowedReceiptBindsTouchAsDescendant: Schema.Literal(true),
+    workspaceRootRebased: Schema.Literal(true)
+  })
+})
+
+const InProcessBoundaryProof = Schema.Struct({
+  _tag: Schema.Literal("Succeeded"),
+  proof: Schema.Literal("airlock-inprocess-boundary-macos-v1"),
+  ok: Schema.Literal(true),
+  platform: Schema.Literal("darwin"),
+  boundary: Schema.Literal(
+    "declared exec-edge fencing does not mediate code interpreted in-process by an admitted executable"
+  ),
+  assertions: Schema.Struct({
+    processSucceeded: Schema.Literal(true),
+    bashEnvSourced: Schema.Literal(true),
+    onlyRootExecutableBound: Schema.Literal(true),
+    privateWriteSucceeded: Schema.Literal(true),
+    liveWriteDenied: Schema.Literal(true),
+    networkDenied: Schema.Literal(true),
+    sourceUnchanged: Schema.Literal(true),
+    deltaObserved: Schema.Literal(true),
+    driftAbsent: Schema.Literal(true)
+  })
 })
 
 const cellResult = run(["run", "scripts/prove-cell.ts"])
@@ -101,6 +139,48 @@ console.log(
   JSON.stringify({
     gate: "macos-native-cell",
     status: "passed",
-    assertions: 6
+    assertions: 8
+  })
+)
+
+const edgeResult = run(["run", "scripts/prove-executable-edges.ts"])
+const edgeProofLine = edgeResult.stdout
+  .trim()
+  .split("\n")
+  .findLast((line) => line.trim().startsWith("{"))
+if (edgeProofLine === undefined) {
+  throw new Error(
+    `executable-edge proof emitted no JSON evidence:\n${edgeResult.stderr || edgeResult.stdout}`
+  )
+}
+Schema.decodeUnknownSync(ExecutableEdgesProof)(
+  JSON.parse(edgeProofLine)
+)
+console.log(
+  JSON.stringify({
+    gate: "macos-executable-edges",
+    status: "passed",
+    assertions: 7
+  })
+)
+
+const inProcessResult = run(["run", "scripts/prove-inprocess-boundary.ts"])
+const inProcessProofLine = inProcessResult.stdout
+  .trim()
+  .split("\n")
+  .findLast((line) => line.trim().startsWith("{"))
+if (inProcessProofLine === undefined) {
+  throw new Error(
+    `in-process boundary proof emitted no JSON evidence:\n${inProcessResult.stderr || inProcessResult.stdout}`
+  )
+}
+Schema.decodeUnknownSync(InProcessBoundaryProof)(
+  JSON.parse(inProcessProofLine)
+)
+console.log(
+  JSON.stringify({
+    gate: "macos-inprocess-boundary",
+    status: "passed",
+    assertions: 9
   })
 )

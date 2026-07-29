@@ -36,6 +36,14 @@ export const AdmissionProfile = Schema.Literal(
 )
 export type AdmissionProfile = typeof AdmissionProfile.Type
 
+export const ExecutableEdgePolicy = Schema.Struct({
+  /** A selector separately admitted as the root of an Invoke. */
+  root: Schema.String,
+  /** Exact executable identities this root may spawn as descendants. */
+  descendants: Schema.Array(Schema.String)
+})
+export type ExecutableEdgePolicy = typeof ExecutableEdgePolicy.Type
+
 export class AdmissionPolicy extends Schema.Class<AdmissionPolicy>("AdmissionPolicy")({
   schemaVersion: Schema.Literal("airlock/admission-policy/v1"),
   profile: AdmissionProfile,
@@ -48,6 +56,15 @@ export class AdmissionPolicy extends Schema.Class<AdmissionPolicy>("AdmissionPol
   pathAllowlist: Schema.Array(Schema.String),
   /** Explicit executable selectors. Entries must be absolute executable paths. */
   executableAllowlist: Schema.Array(Schema.String),
+  /**
+   * Executables admitted only as descendants of a separately admitted root.
+   * Keeping this distinct prevents a helper grant from becoming a new root
+   * Invoke authority in a later agent-authored Plan.
+   */
+  executableEdges: Schema.optionalWith(
+    Schema.Array(ExecutableEdgePolicy),
+    { default: () => [] }
+  ),
   /** Explicit endpoint selectors. Exact match or a trailing `*` prefix selector. */
   endpointAllowlist: Schema.Array(Schema.String),
   // VM backend discovery belongs to the privileged runtime, not agent-provided
@@ -169,7 +186,17 @@ const allowedBy = (policy: AdmissionPolicy, requirement: ResourceRequirement) =>
         policy.pathAllowlist.some((scope) => pathContains(scope, requirement.selector))
     case "executable":
       return requirement.realm === policy.realm &&
-        isAbsolutePath(requirement.selector) && policy.executableAllowlist.includes(requirement.selector)
+        isAbsolutePath(requirement.selector) &&
+        requirement.rights.every((right) =>
+          right === "invoke"
+            ? policy.executableAllowlist.includes(requirement.selector)
+            : right === "execute"
+              ? policy.executableEdges.some(
+                  (edge) =>
+                    edge.descendants.includes(requirement.selector)
+                )
+              : false
+        )
     case "endpoint":
       // Endpoint realms name the remote system, not the local Cell. The
       // explicit endpoint allowlist—not a misleading local-realm check—is
@@ -212,7 +239,16 @@ export const nodeAuthorityNeeds = (node: PlanNode): ReadonlyArray<NodeAuthorityN
         : []
     case "Invoke":
       return [
-        { kind: "executable", selector: node.executable, right: "execute" },
+        {
+          kind: "executable",
+          selector: node.executable,
+          right: "invoke"
+        },
+        ...node.descendantExecutables.map((selector) => ({
+          kind: "executable" as const,
+          selector,
+          right: "execute" as const
+        })),
         ...(node.cwd === undefined
           ? []
           : [{ kind: "path" as const, selector: node.cwd, right: "read" as const }])
@@ -303,6 +339,39 @@ const validateNodeRequirements = (
           return yield* new UndeclaredNodeAuthority({ nodeId: node.id, ...required })
         }
       }
+      if (node._tag === "Invoke") {
+        const expectedExecutableNeeds = nodeAuthorityNeeds(node).filter(
+          (need) => need.kind === "executable"
+        )
+        const executableRequirements = draft.requirements.filter(
+          (requirement) =>
+            node.requires.includes(requirement.id) &&
+            requirement.kind === "executable"
+        )
+        for (const requirement of executableRequirements) {
+          const expected = expectedExecutableNeeds.find(
+            (need) => need.selector === requirement.selector
+          )
+          if (
+            expected === undefined ||
+            requirement.rights.length !== 1 ||
+            requirement.rights[0] !== expected.right
+          ) {
+            return yield* contractInvalid(
+              draft.id,
+              `nodes.${node.id}.requires`,
+              `executable ${requirement.selector} must match exactly one declared root or descendant role`
+            )
+          }
+        }
+        if (executableRequirements.length !== expectedExecutableNeeds.length) {
+          return yield* contractInvalid(
+            draft.id,
+            `nodes.${node.id}.requires`,
+            "executable requirements must exactly match the declared executable edge set"
+          )
+        }
+      }
     }
     for (const requirement of draft.requirements) {
       if (!referencedRequirements.has(requirement.id)) {
@@ -340,6 +409,63 @@ export const admit = (
       })
     }
     yield* validateNodeRequirements(draft)
+    if (policy.profile !== "compatibility") {
+      const duplicateRoot = duplicates(
+        policy.executableEdges.map((edge) => edge.root)
+      )[0]
+      if (duplicateRoot !== undefined) {
+        return yield* contractInvalid(
+          draft.id,
+          "policy.executableEdges",
+          `root ${duplicateRoot} must appear exactly once`
+        )
+      }
+      for (
+        const [index, edge] of policy.executableEdges.entries()
+      ) {
+        if (
+          !isAbsolutePath(edge.root) ||
+          edge.root.includes("\0")
+        ) {
+          return yield* contractInvalid(
+            draft.id,
+            `policy.executableEdges[${index}].root`,
+            "must be an absolute executable path without NUL"
+          )
+        }
+        if (!policy.executableAllowlist.includes(edge.root)) {
+          return yield* contractInvalid(
+            draft.id,
+            `policy.executableEdges[${index}].root`,
+            "must also be admitted as an Invoke root"
+          )
+        }
+        const duplicateDescendant = duplicates(edge.descendants)[0]
+        if (duplicateDescendant !== undefined) {
+          return yield* contractInvalid(
+            draft.id,
+            `policy.executableEdges[${index}].descendants`,
+            `descendant ${duplicateDescendant} must appear exactly once`
+          )
+        }
+        for (
+          const [descendantIndex, descendant] of
+            edge.descendants.entries()
+        ) {
+          if (
+            !isAbsolutePath(descendant) ||
+            descendant.includes("\0") ||
+            descendant === edge.root
+          ) {
+            return yield* contractInvalid(
+              draft.id,
+              `policy.executableEdges[${index}].descendants[${descendantIndex}]`,
+              "must be an absolute non-root executable path without NUL"
+            )
+          }
+        }
+      }
+    }
     const policyDigest = digest({
       schemaVersion: policy.schemaVersion,
       profile: policy.profile,
@@ -348,6 +474,7 @@ export const admit = (
       grantTtlMillis: policy.grantTtlMillis,
       pathAllowlist: policy.pathAllowlist,
       executableAllowlist: policy.executableAllowlist,
+      executableEdges: policy.executableEdges,
       endpointAllowlist: policy.endpointAllowlist
     })
     const validUntil = policy.grantTtlMillis === undefined
@@ -367,6 +494,36 @@ export const admit = (
         })
       }
     }
+    if (policy.profile !== "compatibility") {
+      for (const node of draft.nodes) {
+        if (
+          node._tag !== "Invoke" ||
+          node.descendantExecutables.length === 0
+        ) {
+          continue
+        }
+        const edge = policy.executableEdges.find(
+          (candidate) => candidate.root === node.executable
+        )
+        for (const descendant of node.descendantExecutables) {
+          if (edge?.descendants.includes(descendant)) continue
+          const requirement = draft.requirements.find(
+            (candidate) =>
+              node.requires.includes(candidate.id) &&
+              candidate.kind === "executable" &&
+              candidate.selector === descendant &&
+              candidate.rights.includes("execute")
+          )
+          return yield* new AdmissionDenied({
+            requirementId:
+              requirement?.id ?? `${node.id}/executable-edge`,
+            reason:
+              `descendant ${descendant} is not admitted for root ` +
+              node.executable
+          })
+        }
+      }
+    }
     const grants = draft.requirements.map((requirement) => new Grant({
       id: GrantId.make(`grant/${draft.id}/${requirement.id}/${policyDigest.slice(-16)}`),
       principal: policy.principal,
@@ -376,6 +533,13 @@ export const admit = (
       constraints: {
         profile: policy.profile,
         identityBinding: "lexical-only; Cell must rebind before use",
+        ...(requirement.kind === "executable"
+          ? {
+              executionRole: requirement.rights.includes("invoke")
+                ? "root"
+                : "descendant"
+            }
+          : {}),
         policyDigest
       },
       issuedBy: policy.admittedBy,
@@ -389,7 +553,14 @@ export const admit = (
       rights: requirement.rights,
       constraints: {
         binding: "lexical-only; Cell must rebind before use",
-        selector: requirement.selector
+        selector: requirement.selector,
+        ...(requirement.kind === "executable"
+          ? {
+              executionRole: requirement.rights.includes("invoke")
+                ? "root"
+                : "descendant"
+            }
+          : {})
       },
       grantId: grants[index]!.id,
       publicProvenance: `admission:${policy.admittedBy}:${policyDigest}`

@@ -1,6 +1,13 @@
 import { describe, expect, it } from "@effect/vitest"
 import { Effect, Layer } from "effect"
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs"
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  writeFileSync
+} from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import {
@@ -34,10 +41,19 @@ const command = (source: string, script: string, env: Record<string, string>) =>
 describe("Cell construction", () => {
   it("renders a deny-network Seatbelt profile with JSON-escaped path literals", () => {
     const privateWorkspace = '/private/airlock/"quoted"'
-    const profile = renderSeatbeltProfile(privateWorkspace, ["/private/airlock-temp"], "deny")
+    const profile = renderSeatbeltProfile(
+      privateWorkspace,
+      ["/private/airlock-temp"],
+      "deny",
+      ["/bin/echo"]
+    )
 
     expect(profile).toContain(`(subpath ${JSON.stringify(privateWorkspace)})`)
     expect(profile).toContain('(allow file-read*)')
+    expect(profile).toContain(
+      `(allow process-exec (literal ${JSON.stringify("/bin/echo")}))`
+    )
+    expect(profile).not.toContain("(allow process*)")
     expect(profile).toContain("(deny network*)")
     expect(profile).not.toContain("(allow network*)")
   })
@@ -59,6 +75,23 @@ describe("Cell construction", () => {
       ),
       Effect.asVoid
     )
+  )
+
+  it.effect("rejects a root executable repeated as its own descendant", () =>
+    Effect.gen(function* () {
+      const error = yield* validateCellRequest(
+        new CellRequest({
+          sourceWorkspace: "/workspace",
+          privateWorkspace: "/private-workspace",
+          descendantExecutables: ["/bin/sh"],
+          process: command("/workspace", "true", {})
+        })
+      ).pipe(Effect.flip)
+      expect(error).toMatchObject({
+        _tag: "CellContractViolation",
+        field: "descendantExecutables[0]"
+      })
+    })
   )
 })
 
@@ -84,6 +117,7 @@ describe.skipIf(!darwinBun)("macOS native-contained Cell", () => {
             privateWorkspace,
             tempPaths: [explicitTemp],
             network: "deny",
+            descendantExecutables: ["/bin/bash", "/usr/bin/curl"],
             process: command(
               source,
               [
@@ -135,6 +169,106 @@ describe.skipIf(!darwinBun)("macOS native-contained Cell", () => {
         )
         .pipe(Effect.flip)
       expect(error._tag).toBe("CellContractViolation")
+    }).pipe(Effect.provide(CellTestLive))
+  )
+
+  it.effect("denies unlisted descendant execs and permits explicit executable edges", () =>
+    Effect.gen(function* () {
+      const root = mkdtempSync(join(tmpdir(), "airlock-cell-edges-"))
+      const source = join(root, "source")
+      mkdirSync(source)
+      const deniedPrivate = join(root, "denied-private")
+      const allowedPrivate = join(root, "allowed-private")
+      const cell = yield* Cell
+
+      const denied = yield* cell.run(
+        new CellRequest({
+          sourceWorkspace: source,
+          privateWorkspace: deniedPrivate,
+          descendantExecutables: ["/bin/bash"],
+          process: command(
+            source,
+            'if /usr/bin/touch "$AIRLOCK_PRIVATE/descendant"; then printf allowed; else printf denied; fi',
+            { AIRLOCK_PRIVATE: deniedPrivate }
+          )
+        })
+      )
+      expect(new TextDecoder().decode(denied.processReceipt.stdout)).toBe("denied")
+      expect(existsSync(join(deniedPrivate, "descendant"))).toBe(false)
+
+      const allowed = yield* cell.run(
+        new CellRequest({
+          sourceWorkspace: source,
+          privateWorkspace: allowedPrivate,
+          descendantExecutables: ["/bin/bash", "/usr/bin/touch"],
+          process: command(
+            source,
+            'if /usr/bin/touch "$AIRLOCK_PRIVATE/descendant"; then printf allowed; else printf denied; fi',
+            { AIRLOCK_PRIVATE: allowedPrivate }
+          )
+        })
+      )
+      expect(new TextDecoder().decode(allowed.processReceipt.stdout)).toBe("allowed")
+      expect(existsSync(join(allowedPrivate, "descendant"))).toBe(true)
+    }).pipe(Effect.provide(CellTestLive))
+  )
+
+  it.effect("requires an admitted shebang chain instead of laundering interpreter authority", () =>
+    Effect.gen(function* () {
+      const root = mkdtempSync(join(tmpdir(), "airlock-cell-shebang-"))
+      const source = join(root, "source")
+      const deniedPrivate = join(root, "denied-private")
+      const allowedPrivate = join(root, "allowed-private")
+      mkdirSync(source)
+      const script = join(source, "agent-script")
+      writeFileSync(
+        script,
+        '#!/bin/sh\nprintf shebang-ran > "$AIRLOCK_PRIVATE/shebang-ran"\n'
+      )
+      chmodSync(script, 0o700)
+
+      const cell = yield* Cell
+      const denied = yield* cell.run(
+        new CellRequest({
+          sourceWorkspace: source,
+          privateWorkspace: deniedPrivate,
+          process: new ProcessRequest({
+            executable: script,
+            args: [],
+            cwd: source,
+            env: { AIRLOCK_PRIVATE: deniedPrivate },
+            stdout: "capture",
+            stderr: "capture",
+            outputLimitBytes: 64 * 1024,
+            timeoutMs: 5_000
+          })
+        })
+      )
+
+      expect(denied.processReceipt.exitCode).not.toBe(0)
+      expect(existsSync(join(deniedPrivate, "shebang-ran"))).toBe(false)
+
+      const allowed = yield* cell.run(
+        new CellRequest({
+          sourceWorkspace: source,
+          privateWorkspace: allowedPrivate,
+          descendantExecutables: ["/bin/sh", "/bin/bash"],
+          process: new ProcessRequest({
+            executable: script,
+            args: [],
+            cwd: source,
+            env: { AIRLOCK_PRIVATE: allowedPrivate },
+            stdout: "capture",
+            stderr: "capture",
+            outputLimitBytes: 64 * 1024,
+            timeoutMs: 5_000
+          })
+        })
+      )
+      expect(allowed.processReceipt.exitCode).toBe(0)
+      expect(readFileSync(join(allowedPrivate, "shebang-ran"), "utf8")).toBe(
+        "shebang-ran"
+      )
     }).pipe(Effect.provide(CellTestLive))
   )
 })
