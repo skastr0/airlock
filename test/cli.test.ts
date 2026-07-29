@@ -74,6 +74,22 @@ describe("agent-facing CLI", () => {
     expect(json(refused.stderr)).toMatchObject({ _tag: "CliInputError", field: "profile" })
   })
 
+  it("inherits the supervisor environment only in compatibility mode", () => {
+    const home = mkdtempSync(join(tmpdir(), "airlock-cli-"))
+    const executed = run([
+      "exec",
+      "--executable", "/usr/bin/printenv",
+      "--arg", "AIRLOCK_PARITY_SENTINEL",
+      "--cwd", "/tmp"
+    ], home, { AIRLOCK_PARITY_SENTINEL: "visible-in-compatibility" })
+
+    expect(executed.status).toBe(0)
+    expect(json(executed.stdout)).toMatchObject({
+      profile: "compatibility",
+      stdout: "visible-in-compatibility\n"
+    })
+  })
+
   it("runs pure Airlock programs with Schema-decoded JSON bindings", () => {
     const home = mkdtempSync(join(tmpdir(), "airlock-cli-"))
     const program = join(home, "program.air")

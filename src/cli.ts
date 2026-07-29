@@ -51,6 +51,18 @@ const rendered = <A, E extends { readonly _tag: string }, R>(
 const failInput = (field: string, reason: string) =>
   Effect.fail(new CliInputError({ field, reason }))
 
+/**
+ * Compatibility is the migration posture, so it preserves the supervisor's
+ * process environment. Contained profiles never call this helper: their
+ * environment remains an explicit capability supplied by the admitted Plan.
+ */
+const compatibilityEnvironment = (): Readonly<Record<string, string>> =>
+  Object.fromEntries(
+    Object.entries(process.env).filter(
+      (entry): entry is [string, string] => entry[1] !== undefined
+    )
+  )
+
 const parseDuration = (field: string, raw: string): Effect.Effect<number, CliInputError> => {
   const match = raw.match(/^(\d+)(ms|s|m|h|d)$/)
   if (match === null) return failInput(field, "must be an integer duration such as 250ms, 30s, 5m, 1h, or 7d")
@@ -318,7 +330,7 @@ const exec = Command.make(
           executable,
           args: arg,
           cwd,
-          env: {},
+          env: profile === "compatibility" ? compatibilityEnvironment() : {},
           stdout: "capture",
           stderr: "capture",
           outputLimitBytes,
@@ -380,7 +392,11 @@ const run = Command.make(
           Effect.mapError((error) => new CliInputError({ field: "program.air", reason: String(error) }))
         )
         const runtimeLayer = RuntimeLive.pipe(
-          Layer.provideMerge(RuntimeConfigLive(new RuntimeConfig({ workspace, profile })))
+          Layer.provideMerge(RuntimeConfigLive(new RuntimeConfig({
+            workspace,
+            profile,
+            environment: profile === "compatibility" ? compatibilityEnvironment() : {}
+          })))
         )
         const programLayer = ProgramExecutionLive(policy).pipe(
           Layer.provideMerge(NativeFileSystemLive(new NativeFilesystemConfig({ workspace }))),
