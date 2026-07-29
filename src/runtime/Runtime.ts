@@ -252,6 +252,7 @@ export class RuntimeRunSnapshot extends Schema.Class<RuntimeRunSnapshot>(
   planId: Schema.String,
   state: Schema.Literal(
     "running",
+    "finalizing",
     "succeeded",
     "failed",
     "partial",
@@ -436,6 +437,116 @@ const runJournalDirectory = (root: string, planId: string) =>
     createHash("sha256").update(planId).digest("hex")
   )
 
+type RuntimeRunSnapshotCandidate = Readonly<{
+  readonly file: string
+  readonly snapshot: RuntimeRunSnapshot
+}>
+
+const readRunSnapshot = (
+  file: string,
+  operation: "inspect" | "list"
+): Effect.Effect<RuntimeRunSnapshotCandidate, RuntimeRunJournalError> =>
+  Effect.tryPromise({
+    try: () => readFile(file, "utf8"),
+    catch: (cause) =>
+      new RuntimeRunJournalError({
+        operation,
+        path: file,
+        reason: journalReason(cause)
+      })
+  }).pipe(
+    Effect.flatMap((encoded) =>
+      decodeRunSnapshot(encoded).pipe(
+        Effect.mapError((cause) =>
+          new RuntimeRunJournalError({
+            operation: "decode",
+            path: file,
+            reason: String(cause)
+          })
+        ),
+        Effect.map((snapshot) => ({ file, snapshot }))
+      )
+    )
+  )
+
+const selectLatestRunSnapshot = (
+  directory: string,
+  candidates: ReadonlyArray<RuntimeRunSnapshotCandidate>
+): Effect.Effect<RuntimeRunSnapshot | undefined, RuntimeRunJournalError> => {
+  if (candidates.length === 0) return Effect.succeed(undefined)
+  const greatestSequence = Math.max(
+    ...candidates.map(({ snapshot }) => snapshot.sequence)
+  )
+  const latest = candidates.filter(
+    ({ snapshot }) => snapshot.sequence === greatestSequence
+  )
+  if (latest.length > 1) {
+    const first = JSON.stringify(latest[0]!.snapshot)
+    if (latest.some(({ snapshot }) => JSON.stringify(snapshot) !== first)) {
+      return Effect.fail(
+        new RuntimeRunJournalError({
+          operation: "decode",
+          path: directory,
+          reason: `ambiguous snapshots at sequence ${greatestSequence}`
+        })
+      )
+    }
+  }
+  return Effect.succeed(latest[0]!.snapshot)
+}
+
+const latestSnapshotInDirectory = (
+  root: string,
+  directory: string,
+  entries: ReadonlyArray<string>,
+  operation: "inspect" | "list",
+  expectedPlanId?: string
+) =>
+  Effect.forEach(
+    entries.filter((entry) => entry.endsWith(".json")),
+    (entry) => readRunSnapshot(nodePath.join(directory, entry), operation),
+    { concurrency: 8 }
+  ).pipe(
+    Effect.flatMap((candidates) =>
+      Effect.forEach(
+        candidates,
+        (candidate) => {
+          const { snapshot } = candidate
+          if (
+            expectedPlanId !== undefined &&
+            snapshot.planId !== expectedPlanId
+          ) {
+            return Effect.fail(
+              new RuntimeRunJournalError({
+                operation: "decode",
+                path: candidate.file,
+                reason:
+                  "snapshot Plan identity does not match its journal directory"
+              })
+            )
+          }
+          if (
+            runJournalDirectory(root, snapshot.planId) !== directory
+          ) {
+            return Effect.fail(
+              new RuntimeRunJournalError({
+                operation: "decode",
+                path: candidate.file,
+                reason:
+                  "snapshot Plan identity does not match its journal directory"
+              })
+            )
+          }
+          return Effect.succeed(candidate)
+        },
+        { concurrency: 1 }
+      )
+    ),
+    Effect.flatMap((candidates) =>
+      selectLatestRunSnapshot(directory, candidates)
+    )
+  )
+
 const latestRunSnapshot = (
   root: string,
   planId: string
@@ -458,40 +569,17 @@ const latestRunSnapshot = (
               reason: journalReason(cause)
             })
     })
-    const latest = entries
-      .filter((entry) => entry.endsWith(".json"))
-      .sort()
-      .at(-1)
+    const latest = yield* latestSnapshotInDirectory(
+      root,
+      directory,
+      entries,
+      "inspect",
+      planId
+    )
     if (latest === undefined) {
       return yield* new RuntimeRunNotFound({ planId })
     }
-    const file = nodePath.join(directory, latest)
-    const encoded = yield* Effect.tryPromise({
-      try: () => readFile(file, "utf8"),
-      catch: (cause) =>
-        new RuntimeRunJournalError({
-          operation: "inspect",
-          path: file,
-          reason: journalReason(cause)
-        })
-    })
-    const snapshot = yield* decodeRunSnapshot(encoded).pipe(
-      Effect.mapError((cause) =>
-        new RuntimeRunJournalError({
-          operation: "decode",
-          path: file,
-          reason: String(cause)
-        })
-      )
-    )
-    if (snapshot.planId !== planId) {
-      return yield* new RuntimeRunJournalError({
-        operation: "decode",
-        path: file,
-        reason: "snapshot Plan identity does not match its journal directory"
-      })
-    }
-    return snapshot
+    return latest
   })
 
 export const makeFileRuntimeRunJournal = (root: string) => {
@@ -509,10 +597,12 @@ export const makeFileRuntimeRunJournal = (root: string) => {
             try: async () => {
               const directory = runJournalDirectory(root, snapshot.planId)
               await mkdir(directory, { recursive: true, mode: 0o700 })
+              const sequence = String(snapshot.sequence).padStart(16, "0")
+              const observedAt = String(
+                DateTime.toEpochMillis(snapshot.observedAt)
+              ).padStart(16, "0")
               const identity =
-                `${DateTime.toEpochMillis(snapshot.observedAt)}`.padStart(16, "0") +
-                `-${String(snapshot.sequence).padStart(8, "0")}` +
-                `-${crypto.randomUUID()}`
+                `${sequence}-${observedAt}-${crypto.randomUUID()}`
               const temporary = nodePath.join(directory, `.${identity}.next`)
               const published = nodePath.join(directory, `${identity}.json`)
               const handle = await open(temporary, "wx", 0o600)
@@ -566,32 +656,12 @@ export const makeFileRuntimeRunJournal = (root: string) => {
                 })
             }).pipe(
               Effect.flatMap((files) => {
-                const latest = files
-                  .filter((file) => file.endsWith(".json"))
-                  .sort()
-                  .at(-1)
-                if (latest === undefined) return Effect.succeed(undefined)
-                const file = nodePath.join(root, entry.name, latest)
-                return Effect.tryPromise({
-                  try: () => readFile(file, "utf8"),
-                  catch: (cause) =>
-                    new RuntimeRunJournalError({
-                      operation: "list",
-                      path: file,
-                      reason: journalReason(cause)
-                    })
-                }).pipe(
-                  Effect.flatMap((encoded) =>
-                    decodeRunSnapshot(encoded).pipe(
-                      Effect.mapError((cause) =>
-                        new RuntimeRunJournalError({
-                          operation: "decode",
-                          path: file,
-                          reason: String(cause)
-                        })
-                      )
-                    )
-                  )
+                const directory = nodePath.join(root, entry.name)
+                return latestSnapshotInDirectory(
+                  root,
+                  directory,
+                  files,
+                  "list"
                 )
               })
             ),
@@ -622,10 +692,38 @@ export const makeFileRuntimeRunJournal = (root: string) => {
 const makeMemoryRuntimeRunJournal = () => {
   const snapshots = new Map<string, RuntimeRunSnapshot>()
   return RuntimeRunJournal.of({
-    record: (snapshot) =>
-      Effect.sync(() => {
+    record: (snapshot) => {
+      const previous = snapshots.get(snapshot.planId)
+      if (
+        previous !== undefined &&
+        snapshot.sequence < previous.sequence
+      ) {
+        return Effect.fail(
+          new RuntimeRunJournalError({
+            operation: "record",
+            path: "memory",
+            reason:
+              `snapshot sequence ${snapshot.sequence} precedes ${previous.sequence}`
+          })
+        )
+      }
+      if (
+        previous !== undefined &&
+        snapshot.sequence === previous.sequence &&
+        JSON.stringify(snapshot) !== JSON.stringify(previous)
+      ) {
+        return Effect.fail(
+          new RuntimeRunJournalError({
+            operation: "record",
+            path: "memory",
+            reason: `ambiguous snapshots at sequence ${snapshot.sequence}`
+          })
+        )
+      }
+      return Effect.sync(() => {
         snapshots.set(snapshot.planId, snapshot)
-      }),
+      })
+    },
     inspect: (planId) => {
       const snapshot = snapshots.get(planId)
       return snapshot === undefined
@@ -1904,9 +2002,7 @@ const make = Effect.gen(function* () {
     const cellWorkspaces = new Map<NodeId, RuntimeCellWorkspace>()
     let ordered: ReadonlyArray<PlanNode> = []
     let startedAt: DateTime.Utc | undefined
-    const artifacts = new Map<ArtifactId, RuntimeArtifact>(
-      initialArtifacts.map((input) => [input.id, materializeInitialArtifact(input)])
-    )
+    const artifacts = new Map<ArtifactId, RuntimeArtifact>()
     const receipts: Receipt[] = []
     const stateByNode = new Map<NodeId, NodeState>()
     const processes = new Map<NodeId, RuntimeProcessEvidence>()
@@ -1953,9 +2049,6 @@ const make = Effect.gen(function* () {
 
     const runPlan = Effect.gen(function* () {
       ordered = yield* validatePlan(plan, config.profile, workspace)
-      const beganAt = yield* DateTime.now
-      startedAt = beganAt
-      yield* persistSnapshot("running")
       const producedIds = new Set(ordered.flatMap((node) => node.produces))
       const inputIds = initialArtifacts.map((input) => input.id)
       const duplicateInput = inputIds.find((id, index) => inputIds.indexOf(id) !== index)
@@ -1972,6 +2065,24 @@ const make = Effect.gen(function* () {
           reason: `initial artifact is also produced by a node: ${collidingInput}`
         })
       }
+      for (const input of initialArtifacts) {
+        artifacts.set(input.id, materializeInitialArtifact(input))
+      }
+      snapshotSequence = yield* runJournal.inspect(plan.id).pipe(
+        Effect.map((snapshot) => snapshot.sequence),
+        Effect.catchTag("RuntimeRunNotFound", () => Effect.succeed(0)),
+        Effect.mapError(
+          (error) =>
+            new RuntimeLifecycleFailure({
+              planId: plan.id,
+              privateWorkspaces: [],
+              reason: `${error._tag}: ${error.reason}`
+            })
+        )
+      )
+      const beganAt = yield* DateTime.now
+      startedAt = beganAt
+      yield* persistSnapshot("running")
       for (const node of ordered) {
         currentNode = node
         const retainedBinding = yield* retainedBindingFor(
@@ -2120,7 +2231,7 @@ const make = Effect.gen(function* () {
         processes: [...processes.values()],
         recovery
       })
-      yield* persistSnapshot(run.state)
+      yield* persistSnapshot("finalizing")
       return run
     })
 

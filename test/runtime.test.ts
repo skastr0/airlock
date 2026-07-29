@@ -216,6 +216,89 @@ describe("runtime Plan interpreter", () => {
     )
   )
 
+  it.effect("rejects duplicate and produced-artifact inputs before publishing a running snapshot", () =>
+    Effect.sync(() => mkdtempSync(join(tmpdir(), "airlock-runtime-preflight-"))).pipe(
+      Effect.flatMap((workspace) =>
+        Effect.gen(function* () {
+          const home = join(workspace, ".airlock-home")
+          const layer = compatibilityLayer(workspace, home)
+          const duplicateAuthority = plan([
+            new CaptureNode({
+              id: node("duplicate-preflight"),
+              dependsOn: [],
+              requires: [],
+              produces: [artifact("captured-after-duplicate")],
+              source: "file",
+              locator: "never-read.txt"
+            })
+          ])
+          const duplicateId = artifact("duplicate-input")
+          const duplicate = [
+            new RuntimeInitialArtifact({
+              id: duplicateId,
+              bytes: new TextEncoder().encode("first"),
+              mediaType: "text/plain",
+              provenance: "test:duplicate:first"
+            }),
+            new RuntimeInitialArtifact({
+              id: duplicateId,
+              bytes: new TextEncoder().encode("second"),
+              mediaType: "text/plain",
+              provenance: "test:duplicate:second"
+            })
+          ]
+          const collisionId = artifact("captured-collision")
+          const collisionAuthority = plan([
+            new CaptureNode({
+              id: node("collision-preflight"),
+              dependsOn: [],
+              requires: [],
+              produces: [collisionId],
+              source: "file",
+              locator: "never-read.txt"
+            })
+          ])
+          const collision = new RuntimeInitialArtifact({
+            id: collisionId,
+            bytes: new TextEncoder().encode("collision"),
+            mediaType: "text/plain",
+            provenance: "test:collision"
+          })
+
+          yield* Effect.gen(function* () {
+            const runtime = yield* Runtime
+            const duplicateError = yield* runtime
+              .execute(duplicateAuthority, duplicate)
+              .pipe(Effect.flip)
+            expect(duplicateError).toMatchObject({
+              _tag: "RuntimePlanInvalid",
+              reason: expect.stringContaining("duplicate initial artifact")
+            })
+            const duplicateJournal = yield* runtime
+              .inspect(duplicateAuthority.admission.plan.id)
+              .pipe(Effect.flip)
+            expect(duplicateJournal._tag).toBe("RuntimeRunNotFound")
+
+            const collisionError = yield* runtime
+              .execute(collisionAuthority, [collision])
+              .pipe(Effect.flip)
+            expect(collisionError).toMatchObject({
+              _tag: "RuntimePlanInvalid",
+              reason: expect.stringContaining(
+                "initial artifact is also produced"
+              )
+            })
+            const collisionJournal = yield* runtime
+              .inspect(collisionAuthority.admission.plan.id)
+              .pipe(Effect.flip)
+            expect(collisionJournal._tag).toBe("RuntimeRunNotFound")
+            expect(yield* runtime.recent).toEqual([])
+          }).pipe(Effect.provide(layer))
+        })
+      )
+    )
+  )
+
   it.effect("stages external work through Outbox and never dispatches it", () =>
     Effect.sync(() => mkdtempSync(join(tmpdir(), "airlock-runtime-"))).pipe(
       Effect.flatMap((workspace) => Effect.gen(function* () {
@@ -705,6 +788,138 @@ describe("native-contained runtime", () => {
           }))
         )
       })
+    )
+  )
+
+  it.effect("journals finalizing, never terminal, while Cell retention is incomplete", () =>
+    Effect.sync(() => {
+      const root = mkdtempSync(join(tmpdir(), "airlock-runtime-finalizing-"))
+      const workspace = join(root, "workspace")
+      mkdirSync(workspace)
+      return { workspace, home: join(root, ".airlock-home") }
+    }).pipe(
+      Effect.flatMap(({ workspace, home }) =>
+        Effect.gen(function* () {
+          const retentionStarted = yield* Deferred.make<string>()
+          const releaseRetention = yield* Deferred.make<void>()
+          const successfulCell = Layer.succeed(Cell, Cell.of({
+            run: (request) => Effect.sync(() => {
+              mkdirSync(request.privateWorkspace)
+              writeFileSync(
+                join(request.privateWorkspace, "private"),
+                "await lifecycle"
+              )
+              return noDeltaReceipt(request, workspace)
+            }),
+            revalidate: () => Effect.succeed([])
+          }))
+          const unused = () => Effect.die("unused Hold operation")
+          const blockingRetention = Layer.succeed(Hold, Hold.of({
+            remove: unused,
+            overwrite: unused,
+            retireRuntimePrivate: (target) =>
+              Deferred.succeed(retentionStarted, target).pipe(
+                Effect.zipRight(Deferred.await(releaseRetention)),
+                Effect.zipRight(
+                  Effect.fail(
+                    new HoldFilesystemError({
+                      operation: "retain runtime-private workspace",
+                      target,
+                      reason: "injected post-finalizing retention failure"
+                    })
+                  )
+                )
+              ),
+            replaceFrom: unused,
+            replaceByStaging: unused,
+            undo: unused,
+            undoLast: Effect.die("unused Hold operation"),
+            held: Effect.die("unused Hold operation"),
+            reap: unused
+          }))
+          const layer = nativeLayer(
+            workspace,
+            home,
+            successfulCell,
+            blockingRetention
+          )
+          yield* Effect.gen(function* () {
+            const runtime = yield* Runtime
+            const authority = plan([
+              new InvokeNode({
+                id: node("finalizing-invoke"),
+                dependsOn: [],
+                requires: [],
+                produces: [artifact("finalizing-delta")],
+                executable: "/bin/true",
+                args: [],
+                cwd: workspace,
+                env: {},
+                deltaArtifact: artifact("finalizing-delta"),
+                stdout: "discard",
+                stderr: "discard",
+                cellProfile: "native-contained"
+              })
+            ])
+            const fiber = yield* runtime.execute(authority).pipe(Effect.fork)
+            const privateWorkspace = yield* Deferred.await(retentionStarted)
+            const during = yield* runtime.inspect(
+              authority.admission.plan.id
+            )
+            expect(during).toMatchObject({
+              state: "finalizing",
+              lifecycle: []
+            })
+
+            const runDirectory = join(
+              home,
+              "runs",
+              createHash("sha256")
+                .update(authority.admission.plan.id)
+                .digest("hex")
+            )
+            const durableStates = readdirSync(runDirectory)
+              .filter((entry) => entry.endsWith(".json"))
+              .map((entry) =>
+                (JSON.parse(readFileSync(join(runDirectory, entry), "utf8")) as {
+                  readonly state: string
+                }).state
+            )
+            expect(durableStates).toContain("finalizing")
+            expect(
+              durableStates.some((state) =>
+                ["succeeded", "failed", "partial", "cancelled"].includes(
+                  state
+                )
+              )
+            ).toBe(false)
+
+            yield* Deferred.succeed(releaseRetention, undefined)
+            const run = yield* Fiber.join(fiber)
+            expect(run.state).toBe("partial")
+            expect(run.lifecycle).toEqual([
+              expect.objectContaining({
+                state: "failed",
+                privateWorkspace,
+                reason: expect.stringContaining(
+                  "post-finalizing retention failure"
+                )
+              })
+            ])
+            expect(yield* runtime.inspect(
+              authority.admission.plan.id
+            )).toMatchObject({
+              state: "partial",
+              lifecycle: [
+                expect.objectContaining({
+                  state: "failed",
+                  privateWorkspace
+                })
+              ]
+            })
+          }).pipe(Effect.provide(layer))
+        })
+      )
     )
   )
 
