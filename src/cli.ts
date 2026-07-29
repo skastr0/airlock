@@ -815,10 +815,16 @@ const StateLayer = Layer.mergeAll(
 
 const MacosExecutionLayer = Layer.mergeAll(ProcessRunnerLive, MacosPlatformLive)
 const CellLayer = Layer.provide(CellLive, MacosExecutionLayer)
+const PlatformLayer = Layer.merge(HomeLayer, BunContext.layer)
+const ReadyStateLayer = StateLayer.pipe(Layer.provideMerge(PlatformLayer))
+const StateWithNativeFileSystemLayer = NativeFileSystemLive(
+  new NativeFilesystemConfig({ workspace: process.cwd() })
+).pipe(Layer.provideMerge(ReadyStateLayer))
 
-const MainLayer = Layer.mergeAll(StateLayer, MacosExecutionLayer, CellLayer).pipe(
-  Layer.provideMerge(HomeLayer),
-  Layer.provideMerge(BunContext.layer)
+const MainLayer = Layer.mergeAll(
+  StateWithNativeFileSystemLayer,
+  MacosExecutionLayer,
+  CellLayer
 )
 
 const main = process.env["AIRLOCK_AGENT_SURFACE"] === "1"
