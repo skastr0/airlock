@@ -438,7 +438,19 @@ const undo = Command.make(
   "undo",
   { id: Args.text({ name: "act-id" }).pipe(Args.optional) },
   ({ id }) =>
-    rendered(Effect.flatMap(Hold, (hold) => Option.isSome(id) ? hold.undo(ActId.make(id.value)) : hold.undoLast))
+    rendered(Effect.flatMap(Hold, (hold) =>
+      Option.isNone(id)
+        ? hold.undoLast
+        : Schema.decodeUnknown(ActId)(id.value).pipe(
+            Effect.mapError((cause) =>
+              new CliInputError({
+                field: "act-id",
+                reason: cause.message
+              })
+            ),
+            Effect.flatMap((actId) => hold.undo(actId))
+          )
+    ))
 ).pipe(Command.withDescription("Restore a held act (defaults to the most recent)"))
 
 const held = Command.make("held", {}, () =>
