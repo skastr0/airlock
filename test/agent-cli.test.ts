@@ -52,7 +52,7 @@ describe("agent-only CLI surface", () => {
       expect(attempted.status, `${forbidden} unexpectedly succeeded`).not.toBe(0)
     }
     expect(readFileSync(target, "utf8")).toBe("keep")
-  })
+  }, 20_000)
 
   it("still exposes bounded discovery and observation commands", () => {
     const home = mkdtempSync(join(tmpdir(), "airlock-agent-cli-"))

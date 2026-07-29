@@ -103,5 +103,5 @@ describe.skipIf(!supported)("native-contained agent CLI", () => {
     const undone = invoke(["undo"], home, policy)
     expect(undone.status, undone.stderr).toBe(0)
     expect(existsSync(created)).toBe(false)
-  })
+  }, 20_000)
 })

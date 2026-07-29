@@ -1,112 +1,198 @@
 # Architecture feedback disposition
 
-Four independent model reviews and the earlier design discussion were
-reconciled into the macOS-first v1 architecture. Review opinions are inputs,
-not authority; repository laws and current implementation evidence remain the
-ground truth.
+> Status: decision record. Review opinions are inputs; repository laws and
+> executable evidence remain the authority.
 
-## Consensus adopted
+This revision normalizes earlier reviews against the macOS implementation that
+exists now. It distinguishes decisions from candidates and removes the
+unimplemented VM backend from the v1 claim gate.
 
-- Keep the core synthesis: typed plans, explicit grants, existing Unix tools,
-  recoverable local changes, staged external intent, honest uncertainty, and
-  durable receipts.
-- Treat computation as enclosure rather than inventing a fifth world-boundary
-  effect.
-- Build/freeze Plan, Admission, Cell, Hold, Outbox, Journal, crash, and
-  concurrency seams before polishing syntax.
-- Require complete harness mediation before removing shell permission.
-- Keep tool definitions inert; enforcement comes from the Cell and brokers,
-  not declarations about opaque tool behavior.
-- Measure real task completion, escape pressure, recovery, attribution,
-  duplicate dispatch, uncertainty, latency, and resource cost.
+## Status corrections
 
-## Corrections adopted
+### Preserved as repository laws
 
-### Two algebras and three planes
+- **Only the reaper unlinks.** Every managed mutation remains a rename through
+  Hold; `Hold.reap` owns the sole irreversible removal site.
+- **The ratchet law.** Compatibility is zero-configuration and broad.
+  Restrictions require explicit profile/policy input and cannot silently
+  downgrade.
 
-Agent requests and trusted lifecycle transitions are different algebras.
-Authoring, authority/lifecycle, and enforcement are separate planes.
-`RequestExternal` lowers to local staging; Dispatch crosses the unmanaged
-boundary.
+No review elevated another design preference to the same status.
 
-### Capability parity is scoped
+### Established by current implementation
 
-Universal Unix parity is not credible. v1 claims measured task parity inside a
-published platform/profile/resource envelope with explicit exclusions.
+- structured executable-plus-argv execution without a command-string form;
+- a parser/evaluator and `airlock run` path for effectful programs;
+- generic native actions lowering to `Capture`, `Invoke`, `Apply`, and
+  `RequestExternal`;
+- Admission policies, grants, handles, and runtime interpretation;
+- compatibility execution;
+- a narrow native-contained macOS Cell with private writes, live-write denial,
+  network denial, delta generation, drift checks, and Hold-backed Apply;
+- durable HTTP Outbox staging with the wire site inside commit;
+- inert JSON tool-definition loading and lowering; and
+- one Vouch-derived native restore/apply/stage/undo proof.
 
-### Execution is a closure
+These facts narrow the old statement that all Plan, language, Cell, native, and
+Vouch paths were merely candidate architecture.
 
-Executable identity alone is insufficient. Admission and containment cover
-loaders, shebangs, configuration, libraries, descendants, hooks, plugins,
-helpers, pagers, editors, credential discovery, environment, and descriptors.
+### Still candidate or acceptance work
 
-### Two doors are not enough
+- the four-node algebra as a complete account of the representative corpus;
+- complete execution closure;
+- end-to-end information-label enforcement;
+- persistent authority-laundering prevention;
+- endpoint brokerage and non-extractable credentials;
+- a crash-safe concurrent Journal;
+- atomic or explicitly partial multi-entry Apply semantics;
+- a real Vouch/OpenShell remote replacement; and
+- broad shell-free task coverage.
 
-Separating live mutation from endpoint authority does not prevent secret
-exfiltration or an old low-authority write from executing under a later
-high-authority Plan. Coarse confidentiality/integrity labels and persistent
-authority classification are first-class contracts.
+### Still open
 
-### Enclosed endpoints are brokered
+- final language expressiveness beyond implemented forms;
+- filesystem metadata, hardlink, liveness, mount, and batch semantics;
+- label selector/issuance/revocation persistence;
+- tool-definition provenance, signing, precedence, and distribution;
+- remote-realm transport;
+- protocol-aware endpoint classes; and
+- the exact future VM backend and image lifecycle.
 
-Raw sockets produce weak hostname semantics and can import file descriptors
-over Unix sockets. Contained v1 uses broker leases issued only by Outbox
-commit. Receipts remain invocation-level unless Airlock actually mediates the
-application protocol.
+## Feedback adopted
 
-### Managed state includes liveness
+### Keep Unix programs as implementations
 
-A regular file may be live protocol state. The supported envelope requires
-quiescence or a format-aware action; active database sidecars, foreign writers,
-and advisory-lock semantics cannot be hand-waved.
+Airlock remains a structured runtime around existing programs. Tar, Git,
+SQLite, Python, OpenShell, and similar tools keep their application semantics.
+Airlock owns admission, execution boundaries, recoverable local finality,
+external staging, and receipts.
 
-### Granularity is a product constraint
+### Separate authoring from terminal authority
 
-Package/build deltas need transaction grouping and aggregated evidence without
-weakening attribution or recovery. Hold/receipt overhead belongs in acceptance
-metrics.
+Agent-authored `RequestExternal` stages local intent. Only Outbox commit may
+touch the wire. Agent-authored Apply requests a managed transition; Hold owns
+the live replacement. Reaping remains a separate irreversible authority.
 
-## Adjudications
+### Treat computation as enclosure
 
-### macOS first
+`Invoke` is computation inside a selected execution profile, not a fifth
+world-boundary effect. Captures, proposed deltas, and external requests remain
+explicit Plan dataflow.
 
-Several reviews preferred Linux-first because its enforcement primitives are
-easier to reason about. Product direction explicitly selects macOS first.
-The architecture resolves the concern with a VM-enclosed default and an
-honestly narrower native-contained profile; Linux follows v1.
+### Scope capability claims
+
+Universal Unix parity is not credible. Compatibility coverage and native
+containment are reported separately:
+
+- compatibility may earn broad structured-task coverage but no containment;
+- native-contained may earn claims only for its published, tested capability
+  matrix; and
+- unsupported native work must fail without fallback.
+
+### Make execution a closure
+
+Executable identity alone is not enough for a strong security claim. Loaders,
+shebangs, descendants, helpers, hooks, plugins, configuration, lifecycle
+scripts, pagers, editors, credentials, environment, and descriptors belong in
+the acceptance model.
+
+The current native backend has not yet earned that complete-closure claim. It
+allows `process*` and ambient file reads, so this remains an explicit gate.
+
+### Keep information flow distinct
+
+Separating network from live writes does not prevent confidential-read plus
+external-write exfiltration or persisted low-integrity bytes from influencing
+later stronger work. The pure label component is useful, but runtime
+propagation, enforcement, capability authenticity, and cross-plan persistence
+remain acceptance work.
+
+### Keep endpoint claims honest
+
+Current native Cells deny network. Current Outbox dispatches HTTP itself. No
+general EndpointBroker exists. DNS, redirect, proxy, loopback, Unix-socket,
+descriptor-passing, budget, credential, and actual-destination guarantees
+cannot be claimed until a broker is implemented and tested.
+
+### Treat liveness and granularity as resource semantics
+
+A regular file can be live protocol state. SQLite WAL/SHM, foreign writers,
+locks, active mailboxes, and multi-entry directory transitions require explicit
+contracts. Individually recoverable renames do not automatically form an ACID
+transaction.
+
+## Adjudications changed by evidence
+
+### macOS v1 is native-contained plus compatibility
+
+Earlier architecture made `vm-enclosed` the broad v1 shell-replacement gate.
+The repository now has a working narrow native backend and compatibility path,
+while the VM backend is explicitly unavailable.
+
+Decision:
+
+- macOS v1 documents and evaluates compatibility and native-contained;
+- native-contained claims are bounded by its capability matrix;
+- VM-enclosed is a future stronger backend; and
+- absence of a VM does not block an honest native v1, nor may a nonexistent VM
+  be used to imply stronger v1 guarantees.
+
+### Strong confidence remains unearned
+
+The Vouch-derived proof is real and useful, but it is one controlled fixture.
+There is no complete representative corpus, crash/concurrency campaign, or
+red-team result. The correct current judgment is:
+
+```text
+usable developer preview — broad claim not yet earned
+```
 
 ### Airlock remains the agent language
 
-Reviews disagreed between language-last, host-language SDKs, and a restricted
-TypeScript surface. The final product surface remains Airlock. The sequencing
-critique is accepted: Plan/runtime contracts and workload measurement precede
-syntax, and the concrete language remains open until model reliability is
-measured.
+The checked-in parser, evaluator, native action resolver, and `airlock run`
+path now establish a real language surface. Its current pure/control forms are
+implemented; broader expressiveness is still evidence-led. The language
+cannot add authority outside Plan, Admission, and Runtime.
 
 ### The rename/Reaper law remains
 
-One review proposed a backend-neutral recovery invariant using snapshots or
-reflinks. The repository explicitly requires every live mutation verb to be a
-rename and only Reaper to unlink. That law remains. Changing it later requires
-an explicit architecture decision and construction evidence, not a silent
-generalization.
+Suggestions to generalize recovery into backend-neutral snapshots or reflinks
+were not adopted. Clone/copy may prepare a private Cell workspace, but managed
+live finality still uses rename through Hold. Changing that requires an
+explicit architecture decision and construction evidence.
 
 ### Curation does not gate compatibility
 
-Contained profiles may require known execution contracts or brokerable
-endpoints, but zero-config compatibility keeps unknown tools runnable and
-ledgered. Curated definitions remove friction; they do not define all Unix
-capability.
+Tool definitions improve typed ergonomics but remain inert and incomplete by
+design. Compatibility may run unknown tools. Native-contained may reject a
+tool when its requested authority or execution shape exceeds the implemented
+profile; that is enforcement, not a registry-completeness requirement.
 
-## Still open
+## Effect and PCMI disposition
 
-- concrete language syntax and minimal model-reliable pure control;
-- exact macOS VM image and native enforcement implementations;
-- persistent Cell/checkpoint/owned endpoint semantics;
-- the label selectors and promotion/declassification policy language;
-- which endpoints earn protocol-aware brokers;
-- resource liveness, metadata, and batch-delta operational envelopes;
-- definition provenance/distribution and remote realm transport.
+The architecture keeps three strata:
 
-These remain questions or candidate mechanics. They are not elevated to
-invariants by their presence in the architecture.
+| Stratum | Current disposition |
+| --- | --- |
+| domain capabilities | Hold and Outbox are implemented nuclei; Plan, Admission, labels, native actions, and definitions are evidence-seeking candidates |
+| interaction seams | Schema-first Plans, handles, artifacts, receipts, deltas, and tagged failures carry ordering/authority/uncertainty contracts |
+| adapter glue | CLI, Bun process runner, Seatbelt/APFS glue, file readers, Vouch harness, and future broker/VM remain local and replaceable |
+
+Effect supplies runtime Schema validation, tagged expected failures, explicit
+service requirements, Layer composition, and scoped/cancellable execution.
+PCMI does not excuse ambiguous glue: policy, authorization, ordering,
+idempotency, crash semantics, and uncertainty belong in typed seams.
+
+## Evidence next
+
+The next decisions should be made from:
+
+- a frozen shell-free task corpus and direct-shell baseline;
+- a disposable real Vouch/OpenShell fixture;
+- fault injection and overlapping-operation tests;
+- hostile interpreter, config, descriptor, path-race, and resource tests;
+- end-to-end label and persistent-authority workloads; and
+- endpoint-broker evidence if contained networking is added.
+
+Until those exist, the remaining candidates and open questions stay labeled as
+such rather than becoming invariants by repetition in documentation.

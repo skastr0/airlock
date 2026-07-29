@@ -1,80 +1,148 @@
-# Vouch-first adoption
+# Vouch-first adoption and evidence
 
-> Status: first adoption contract, not a Vouch-specific architecture.
+> Status: first adoption corpus and one runnable native-contained proof.
+> Vouch supplies workload evidence; it does not define Airlock's ontology.
 
 ## Why Vouch goes first
 
-Vouch supplies a real agent workload with local snapshots, external transport,
-credentials, validation, replacement, and recovery. It exercises all four
-Airlock effect classes and both terminal authorities without requiring a new
-physics node.
+Vouch's state-preserving replacement flow combines the four kinds of work
+Airlock is meant to express:
 
-Vouch is an acceptance corpus, not the source of Airlock vocabulary. No
-`Vouch*` Plan constructor, runtime operation, resource kind, or terminal
-authority is permitted.
+- observe local state;
+- run existing archive, SQLite, Python, and controller programs;
+- install recovered local state; and
+- request a consequential remote replacement.
 
-## Vertical slice
+That makes Vouch a useful vertical slice. It does not justify `Vouch*`,
+`sandbox.*`, `archive.*`, `sqlite.*`, or replacement-specific Plan nodes.
+
+## Generic lowering
 
 ```text
 snapshot → upload → restore → validate → replace
 ```
 
-Candidate general lowering:
+| Workload step | Generic Airlock composition |
+| --- | --- |
+| inspect state/archive | `Capture` through an admitted path |
+| create or extract archive | structured `Invoke` of an existing tool in a private view |
+| SQLite-consistent snapshot | structured `Invoke` of the existing helper or SQLite tool |
+| upload/download/controller work | structured invocation or a staged remote-realm request, depending on the actual authority boundary |
+| validate output | captured process artifacts plus pure program checks |
+| retain/replace local state | `Apply` through Hold |
+| request remote replacement | `RequestExternal`, followed by separately authorized commit |
+| recover local failure | typed reconciliation or Hold undo; never guessed success |
 
-| Vouch step | general Airlock composition |
-|---|---|
-| inspect source state | `Capture` labeled files/metadata and bind identities |
-| create snapshot | `Invoke` an existing archive/tool closure in a private view; capture artifact |
-| upload | `RequestExternal` with a frozen invocation; `Outbox.commit` issues endpoint/credential leases; capture receipt |
-| restore candidate | `Invoke` existing tool into a private view; produce `LocalDelta` |
-| validate | `Invoke` validation closure with no live mutation authority; capture result |
-| replace | `Apply` validated delta through Hold |
-| recover conflict/failure | typed reconciliation or another recoverable `Apply`; never guessed success |
+Application semantics stay in tar, Python, SQLite, OpenShell, or the remote
+service. Airlock owns admission, structured argv, execution bounds, private
+state, local finality, external staging, and receipts.
 
-Credentials should be brokered as non-extractable capabilities when the
-provider/tool seam permits it. Raw projection is an explicit compatibility
-fallback.
+## What runs today
 
-## Adoption stages
+`scripts/prove-vouch.ts` executes one fixed, safe, local proof on supported
+macOS hosts. The test is `test/vouch-e2e.test.ts`; the operation inventory is
+`examples/vouch/OPERATIONS.md`.
 
-1. Observe real Vouch shell work with shell still available.
-2. Shadow-lower every effect to Plan and measure translation/task coverage,
-   unsupported semantics, definition demand, and granularity cost.
-3. Run the vertical slice in `vm-enclosed` with the agent receiving only
-   Airlock.
-4. Run the enforceable subset in `native-contained` and publish the capability
-   difference.
-5. Add definitions only for repeated, stable actions; definitions remain inert
-   and authority-free.
-6. Freeze the initial vocabulary and run an unrelated held-out repository
-   workload.
-7. Remove Vouch's direct shell permission only after the full macOS acceptance
-   contract earns strong confidence.
+The admitted Plan contains five generic nodes:
 
-## Required evidence
+1. `Capture` reads a fixed state archive through an explicit path grant.
+2. `Invoke` runs `/usr/bin/tar -xzf - -C hermes` with the archive as stdin in
+   a native-contained Cell.
+3. A second `Capture` reads live `SOUL.md` after Invoke and before Apply.
+4. `Apply.merge` installs the private `hermes` directory delta through Hold.
+5. `RequestExternal` stages a body-bearing HTTPS replacement request.
 
-- no Vouch-specific Plan/runtime node;
-- every live local replacement through Hold;
-- every external activation through Outbox and EndpointBroker;
-- secret/credential disclosure recorded at the actual precision;
-- complete execution closure for archive, validation, and transport tools;
-- persisted restore output cannot become trusted policy/config/execution
-  without endorsement;
-- byte/metadata recovery for the supported resource envelope;
-- honest partial/uncertain outcomes across crash injection;
-- completion, escape, latency, and resource metrics against the direct-shell
-  baseline.
+The proof then invokes Hold undo as an administrative transition.
+
+### Receipts established by the fixture
+
+The proof asserts:
+
+- five admitted grants and five handles;
+- five succeeded Plan-node receipts in sequence;
+- one admitted resource identity per node;
+- the archive digest is attached to the Invoke input;
+- the actual executable and args are recorded;
+- network is denied;
+- the Cell reports `ambient-host-read`, making the confidentiality limitation
+  explicit;
+- the process proposes one top-level modified directory;
+- live state remains unchanged before Apply;
+- restored content and the introduced session appear after Apply;
+- the HTTP request remains `staged`;
+- no `fetch` call occurs;
+- private dispatch data preserves body/headers and is mode `0600`;
+- Hold undo restores the prior content and removes the introduced session; and
+- Ledger contains mutation, staging, and undo entries.
+
+This is concrete evidence for the current native Plan/Runtime/Hold/Outbox path.
+It is candidate-level evidence because it is one controlled fixture.
+
+## What the proof does not do
+
+It does not:
+
+- run Vouch itself;
+- invoke OpenShell or a real remote sandbox;
+- perform an online SQLite backup;
+- test image-owned permission collisions;
+- use a contained endpoint broker;
+- dispatch the replacement request;
+- validate remote health or replacement completion;
+- run the whole lifecycle through the checked-in `.air` examples;
+- prove complete execution closure for tar or Python;
+- prove confidentiality;
+- exercise crash injection or concurrent merges/commits;
+- prove ACL, xattr, hardlink, symlink, special-file, or live-writer semantics;
+  or
+- measure a representative shell-free corpus.
+
+The `.invalid` endpoint and fetch guard make the local proof safe. They also
+mean it cannot be cited as external replacement evidence.
+
+## Program corpus
+
+`examples/vouch/snapshot.air`, `restore.air`, and `replace.air` are parser-
+backed workload examples. Their companion contract test verifies:
+
+- no shell escape or Vouch-specific runtime action;
+- structured `run` calls with executable, args, streams, timeout, and profile;
+- staged external requests; and
+- lowering to the four generic Plan nodes.
+
+Some example calls describe the intended full controller workflow and exceed
+today's integrated native capability. Parser-backed is not the same as
+executed end to end.
+
+## Next evidence steps
+
+1. Run a disposable OpenShell fixture with an admitted executable/config/
+   helper closure.
+2. Exercise the real SQLite-safe snapshot and collision-skipping restore
+   semantics in the existing helpers.
+3. Keep the replacement request staged until its endpoint/credential authority
+   has an honest broker or remote-realm contract.
+4. Run snapshot, upload, restore, receipt decoding, validation, replacement,
+   and post-replacement health as one shell-free Airlock program.
+5. Inject crashes and concurrent conflicts at every Hold/Apply/Outbox boundary.
+6. Publish latency, retention, escape, and recovery evidence against the
+   direct-shell workflow.
+7. Freeze vocabulary and run an unrelated held-out repository workload.
+
+Direct shell permission should be removed from a Vouch agent harness only
+after the applicable [macOS acceptance gates](acceptance.md) pass. A future VM
+may widen or strengthen the backend, but it is not required to evaluate the
+current native-contained v1 envelope.
 
 ## Overfitting tripwire
 
-If the Vouch slice requires a new primitive, the first response is to test
-whether it is:
+If a Vouch step appears to require a new primitive, classify it first as:
 
-1. pure composition missing from the authoring language;
-2. a resource or endpoint classification missing from Admission;
-3. a lifecycle transition missing from the trusted runtime;
-4. an adapter/tool definition; or
-5. genuinely new physics.
+1. pure composition missing from the language;
+2. a resource/endpoint classification missing from Admission;
+3. a trusted lifecycle transition;
+4. an adapter or inert tool definition; or
+5. genuinely new machine physics.
 
-Only the fifth can contest the closed algebra, and it requires an unrelated
+Only the fifth can contest the four-node algebra, and it requires an unrelated
 Unix counterexample plus contract review.

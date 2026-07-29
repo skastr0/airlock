@@ -1,128 +1,205 @@
 # macOS v1 runtime contract
 
-> Status: v1 release contract. Backend mechanisms are candidates until the
-> acceptance evidence identifies the exact tested implementation.
+> Status: current implementation envelope plus release acceptance conditions.
+> Compatibility and native-contained are implemented. VM enclosure is a future
+> stronger backend, not a v1 claim gate.
 
-## What ships first
+## What macOS v1 is
 
-Airlock v1 targets macOS. Apple silicon is the primary tested platform; the
-standalone builder also emits an x86_64 target. The installation provides one
-agent-facing RPC/CLI surface and three explicit profiles over the same Plan,
-runtime, Hold, Outbox, label, and receipt contracts.
+macOS v1 exposes one Unix-shaped CLI and Airlock program surface over the same
+Plan, Admission, Runtime, Hold, Outbox, and receipt contracts.
 
-Profile selection is external to the agent and is part of the ratchet. A
-selected contained profile never silently falls back to compatibility.
+The two available profiles serve different jobs:
 
-## Compatibility
+- `compatibility` keeps zero-config host capability and makes no containment
+  claim.
+- `native-contained` provides an explicitly selected, fail-closed subset using
+  a private workspace and macOS Seatbelt enforcement.
 
-`compatibility` is the zero-configuration profile:
+The runtime never silently changes profiles. The agent program cannot widen
+the supervisor-selected profile or policy.
 
-- broad structured invocation under the user's existing host authority;
-- unknown tools remain runnable;
-- recovery, staging, labels, and receipts where they preserve capability;
-- restrictions only when explicitly enabled;
-- no containment or complete-mediation claim.
+## Install and probe
 
-Automatic expiry-based Outbox flush, if enabled, is reported as a cancellation
-window rather than an affirmative gate.
+The standalone builder emits a Darwin binary for `bun-darwin-arm64` or
+`bun-darwin-x64`. Build support is not test evidence; release reports must name
+the architecture and macOS build that actually ran.
 
-## VM-enclosed
-
-`vm-enclosed` is the broad shell-replacement profile.
-
-### Realm
-
-- An Airlock-owned macOS VM has an identified base image.
-- Each run uses a private working view; a persistent Cell has an explicit
-  identity, lifetime, checkpoint, and cleanup policy.
-- The guest receives no ambient host mount, host loopback, Unix socket,
-  clipboard, keychain, launchd, Docker socket, device, or management channel.
-- Host resources enter through typed brokers and runtime-minted handles.
-
-### Files
-
-- Declared host inputs are exposed read-only or materialized as labeled
-  artifacts.
-- Writable work occurs in the private guest view.
-- The Cell emits a finite `LocalDelta`.
-- The host validates expected identities, labels, resource kinds, liveness,
-  and writable envelope.
-- Only Hold applies the delta to live host state.
-
-Guest unlink is disposal inside the private realm. It has no live-host meaning
-until the resulting absence is represented in an admitted Apply.
-
-### Execution
-
-The complete execution closure remains inside the VM. Unknown guest binaries
-and descendants may run, but they cannot acquire undeclared host handles or
-broker leases. The Cell finishes only after its descendants exit or are
-terminated.
-
-Every process starts from the structured
-`{ executable, args, stdin, stdout, stderr, timeout }` contract. `args` excludes
-the executable; there is no shell text or implicit `argv[0]` convention in the
-agent-facing seam.
-
-### Endpoints
-
-The guest has no ambient route to host or internet endpoints. Its gateway
-accepts only EndpointBroker leases issued by `Outbox.commit`. The broker owns
-DNS, redirects, proxies, destination checks, byte/connection/time budgets, and
-actual-destination receipts.
-
-## Native-contained
-
-`native-contained` is the lower-overhead subset:
-
-- private APFS-backed writable view;
-- runtime-constructed environment and descriptors;
-- owned process closure and resource budgets;
-- admitted filesystem handles;
-- only brokerable endpoint classes;
-- no unknown/unmediated helper execution;
-- all live changes still merge through Hold.
-
-It is not a promise of VM equivalence. If the active macOS backend cannot
-enforce a requested filesystem, process, endpoint, or descriptor property, the
-capability is unavailable.
-
-## Capability probe
-
-Before a contained run, the runtime publishes a Schema-validated capability
-report:
-
-```text
-platform and OS build
-Airlock/runtime/backend versions
-CPU architecture
-profile
-VM/native backend and base-image identity
-supported resource kinds and metadata
-supported endpoint classes and broker precision
-execution-closure limitations
-label enforcement
-Hold volume/retention properties
-known semantic coarsenings
-evidence-suite version
+```sh
+bun install
+bun run verify
+bun run build:macos
+sh scripts/install-macos.sh
+airlock doctor
 ```
 
-The agent can inspect this report but cannot alter it. Plans bind its digest.
-Backend drift between plan and run is a typed refusal.
+`airlock doctor` and `airlock capabilities` return the same machine-readable
+report. It distinguishes an enforced mechanism from something merely present
+or allowed. Relevant fields include:
+
+- APFS inspection and clone/copy support;
+- Seatbelt availability;
+- private writable view;
+- live-workspace write fence;
+- denied-network fence;
+- ambient host read posture;
+- confidentiality posture;
+- process cancellation limits; and
+- VM backend availability.
+
+## Compatibility: implemented
+
+Compatibility is the default:
+
+```sh
+airlock exec \
+  --executable /bin/echo \
+  --arg "hello world" \
+  --cwd /tmp
+```
+
+The executable and argument atoms remain separate, streams and timeout are
+explicit, and the process emits a receipt. The child otherwise runs under the
+user's existing host authority. Unknown tools remain runnable. Compatibility
+does not claim filesystem, process, network, secret, or configuration
+containment.
+
+An Airlock program in compatibility receives a generated broad policy unless
+`AIRLOCK_POLICY_FILE` is supplied. If a supplied policy names another profile,
+execution is refused rather than reinterpreted.
+
+## Native-contained: implemented subset
+
+Native-contained program execution requires:
+
+1. `--profile native-contained`;
+2. a Schema-valid policy in `AIRLOCK_POLICY_FILE`;
+3. a matching `profile` field in that policy; and
+4. available native enforcement reported by `airlock doctor`.
+
+Minimal policy shape:
+
+```json
+{
+  "schemaVersion": "airlock/admission-policy/v1",
+  "profile": "native-contained",
+  "principal": "agent:example",
+  "realm": "local",
+  "admittedBy": "operator:example",
+  "pathAllowlist": ["/absolute/workspace/**"],
+  "executableAllowlist": ["/usr/bin/touch"],
+  "endpointAllowlist": []
+}
+```
+
+Minimal effectful program:
+
+```text
+return process.run({ executable: "/usr/bin/touch", args: ["created.txt"], cwd: workspace, cellProfile: "native-contained", stdout: "capture", stderr: "capture" })
+```
+
+Run it with:
+
+```sh
+AIRLOCK_POLICY_FILE=/absolute/policy.json \
+  airlock run /absolute/create.air \
+  --workspace /absolute/workspace \
+  --profile native-contained \
+  --bindings '{"workspace":"/absolute/workspace"}'
+```
+
+The program lowers to an admitted `Invoke` followed by `Apply`. The Apply is
+part of the effectful program path; it is not a direct post-process copy.
+
+### Native mechanism
+
+For each contained Invoke, the current runtime:
+
+1. fingerprints the live workspace;
+2. creates a fresh same-volume private workspace by APFS clone or copy;
+3. generates a Seatbelt profile using JSON-escaped path literals;
+4. permits process execution and ambient file reads;
+5. permits writes in the private workspace, declared temp paths, and
+   `/dev/null`;
+6. denies network;
+7. runs the requested executable in the private workspace;
+8. fingerprints the live and private views;
+9. emits a delta plus drift evidence; and
+10. applies an admitted delta only through Hold.
+
+Before Apply, the runtime fingerprints the live workspace again. It refuses
+drift, unsupported types, overlapping paths, stale private output, or a target
+whose current identity no longer matches the baseline.
+
+### Advertised native envelope
+
+Established by implementation and tests:
+
+- private workspace preparation;
+- live source-workspace write denial during Invoke;
+- network denial during Invoke;
+- separate executable and argv atoms;
+- output capture and limits;
+- top-level regular-file/directory delta detection;
+- preflight drift and source checks;
+- live merge through recoverable Hold transitions; and
+- explicit refusal when VM or native requirements are unavailable.
+
+Not established:
+
+- confidentiality or secret isolation, because `file-read*` is ambient;
+- complete loader/helper/hook/plugin/config execution closure;
+- daemonization-proof descendant ownership;
+- endpoint leases or contained network access;
+- symlink, special-file, hardlink, ACL, xattr, sparse-file, device, mount, or
+  remote-filesystem Apply;
+- live SQLite/WAL, foreign writers, or other active protocol state;
+- atomic all-or-nothing multi-entry merge;
+- crash reconciliation and retained private-workspace lifecycle across every
+  transition; or
+- resource-exhaustion resistance beyond current process/output bounds.
+
+Unsupported work returns a typed error. It does not fall back to compatibility.
+
+## VM-enclosed: future backend
+
+The capability report currently marks the VM backend `not-provided`. Both
+`airlock exec --profile vm-enclosed` and `airlock run --profile vm-enclosed`
+fail explicitly.
+
+A future VM backend may offer a stronger realm:
+
+- no ambient host reads;
+- broader execution of unknown guest tools;
+- brokered host files, secrets, sockets, and endpoints;
+- stronger descendant and descriptor mediation; and
+- guest-private loopback and filesystem state.
+
+Those are design goals. No current documentation or acceptance result may
+attribute them to macOS v1.
 
 ## Failure posture
 
-- Missing enforcement is `CapabilityUnavailable`, not a downgrade.
-- A host/guest/broker crash reconciles to a proven terminal state,
-  `recovery-required`, or `uncertain`.
-- A VM loss cannot invent a successful Apply or dispatch.
-- A dispatch that may have reached a recipient remains `uncertain`.
-- Resource pressure invokes declared budgets and retention policy; it never
-  silently destroys the last managed copy.
+- Missing enforcement is refusal, never downgrade.
+- A compatibility result carries no containment claim.
+- A native result applies only to the capability report and resource envelope
+  exercised by that run.
+- A live-workspace drift blocks Apply.
+- Each accepted merge transition is recoverable through Hold; multi-entry
+  atomicity is not claimed.
+- HTTP intent remains staged until Outbox commit.
+- A recovered `committing` Outbox entry is `uncertain`.
+- Reaping retained recovery material remains a separate terminal authority.
 
-## v1 boundary
+## v1 evidence boundary
 
-The public v1 claim is earned by `vm-enclosed`. Native-contained is published
-as a capability matrix. Linux, remote realms, GUI automation, kernel/admin
-work, and unsupported live or device state are later or explicitly excluded
-surfaces.
+The release may describe the implemented compatibility and native-contained
+profiles only after the [acceptance contract](acceptance.md) clears for their
+published envelopes. Today the accurate judgment is:
+
+> usable developer preview — broad claim not yet earned
+
+The current Vouch-derived proof is one valuable native-contained fixture. It
+does not replace the missing representative corpus, repeated macOS runs,
+fault-injection matrix, concurrent-operation evidence, or hostile containment
+tests.

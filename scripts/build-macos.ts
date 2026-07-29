@@ -1,8 +1,9 @@
 #!/usr/bin/env bun
 /**
  * Build glue, not runtime policy. Produces one self-contained Apple-silicon
- * executable plus detached, inspectable provenance files. It never removes or
- * replaces an existing artifact: callers choose a fresh --out directory.
+ * supervisor and agent-only executables plus detached, inspectable provenance
+ * files. It never removes or replaces an existing artifact: callers choose a
+ * fresh --out directory.
  */
 import { createHash } from "node:crypto"
 import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs"
@@ -11,7 +12,8 @@ import { AIRLOCK_VERSION } from "../src/version.ts"
 
 const usage = `usage: bun scripts/build-macos.ts [--out <directory>] [--target <bun-target>]
 
-Builds a self-contained Airlock executable and detached SHA-256 manifest.
+Builds self-contained Airlock supervisor and agent executables plus a detached
+SHA-256 manifest.
 Defaults: --out dist and the Bun Darwin target matching this Mac`
 
 const args = process.argv.slice(2)
@@ -50,10 +52,13 @@ if (target === undefined || !/^bun-darwin-(arm64|x64)$/.test(target)) {
     "macOS builds require --target bun-darwin-arm64 or bun-darwin-x64"
   )
 }
-const executable = resolve(out, "airlock")
+const executables = [
+  { name: "airlock", source: "./src/cli.ts", path: resolve(out, "airlock") },
+  { name: "airlock-agent", source: "./src/agent-cli.ts", path: resolve(out, "airlock-agent") }
+] as const
 
 const outputs = [
-  executable,
+  ...executables.map((entry) => entry.path),
   resolve(out, "airlock.sha256"),
   resolve(out, "airlock.manifest.json")
 ]
@@ -64,39 +69,49 @@ if (existing !== undefined) {
 
 mkdirSync(out, { recursive: true })
 
-const build = Bun.spawnSync({
-  cmd: [
-    process.execPath,
-    "build",
-    "--compile",
-    "--target",
-    target,
-    "--outfile",
-    executable,
-    "./src/cli.ts"
-  ],
-  cwd: resolve(import.meta.dir, ".."),
-  stdout: "inherit",
-  stderr: "inherit"
-})
+for (const executable of executables) {
+  const build = Bun.spawnSync({
+    cmd: [
+      process.execPath,
+      "build",
+      "--compile",
+      "--target",
+      target,
+      "--outfile",
+      executable.path,
+      executable.source
+    ],
+    cwd: resolve(import.meta.dir, ".."),
+    stdout: "inherit",
+    stderr: "inherit"
+  })
 
-if (build.exitCode !== 0) {
-  throw new Error(`Bun compile failed with exit ${build.exitCode}`)
+  if (build.exitCode !== 0) {
+    throw new Error(`Bun compile failed for ${executable.name} with exit ${build.exitCode}`)
+  }
 }
 
-const bytes = readFileSync(executable)
-const sha256 = createHash("sha256").update(bytes).digest("hex")
+const built = executables.map((executable) => {
+  const bytes = readFileSync(executable.path)
+  return {
+    name: basename(executable.path),
+    sha256: createHash("sha256").update(bytes).digest("hex"),
+    bytes: statSync(executable.path).size
+  }
+})
 const manifest = {
   schema_version: 1,
   product: "airlock",
   version: AIRLOCK_VERSION,
   target,
-  executable: basename(executable),
-  sha256,
-  bytes: statSync(executable).size
+  executables: built
 }
 
-writeFileSync(resolve(out, "airlock.sha256"), `${sha256}  airlock\n`, "utf8")
+writeFileSync(
+  resolve(out, "airlock.sha256"),
+  built.map((entry) => `${entry.sha256}  ${entry.name}`).join("\n") + "\n",
+  "utf8"
+)
 writeFileSync(
   resolve(out, "airlock.manifest.json"),
   `${JSON.stringify(manifest, null, 2)}\n`,

@@ -88,7 +88,14 @@ const NodeBase = {
 export class CaptureNode extends Schema.TaggedClass<CaptureNode>("CaptureNode")("Capture", {
   ...NodeBase,
   source: Schema.Literal("file", "environment", "clock", "process-output"),
-  locator: Schema.String
+  locator: Schema.String,
+  /** Unix-shaped observation interpreted by the native filesystem service. */
+  operation: Schema.optionalWith(
+    Schema.Literal("read", "inspect", "stat", "list", "glob"),
+    { default: () => "read" as const }
+  ),
+  /** Required only by file.glob; it remains a bounded native pattern. */
+  pattern: Schema.optional(Schema.String)
 }) {}
 
 export class InvokeNode extends Schema.TaggedClass<InvokeNode>("InvokeNode")("Invoke", {
@@ -129,9 +136,13 @@ export class ApplyNode extends Schema.TaggedClass<ApplyNode>("ApplyNode")("Apply
    * It remains Apply physics: the runtime must still transition live state
    * through Hold rather than installing the delta directly.
    */
-  operation: Schema.Literal("write", "remove", "move", "merge"),
+  operation: Schema.Literal("write", "remove", "copy", "move", "mkdir", "merge"),
   target: Schema.String,
-  sourceArtifact: Schema.optional(ArtifactId)
+  sourceArtifact: Schema.optional(ArtifactId),
+  /** Filesystem source path for copy/move; never overloaded as artifact data. */
+  source: Schema.optional(Schema.String),
+  /** mkdir-only parent creation policy. */
+  parents: Schema.optionalWith(Schema.Boolean, { default: () => false })
 }) {}
 
 // RequestExternal is intent only. Its adapter must stage through Outbox before
@@ -281,6 +292,10 @@ export class InvalidInvokeContract extends Schema.TaggedError<InvalidInvokeContr
   "InvalidInvokeContract",
   { nodeId: Schema.String, field: Schema.String, reason: Schema.String }
 ) {}
+export class InvalidCaptureContract extends Schema.TaggedError<InvalidCaptureContract>()(
+  "InvalidCaptureContract",
+  { nodeId: Schema.String, field: Schema.String, reason: Schema.String }
+) {}
 export class InvalidApplyContract extends Schema.TaggedError<InvalidApplyContract>()(
   "InvalidApplyContract",
   { nodeId: Schema.String, field: Schema.String, reason: Schema.String }
@@ -312,12 +327,16 @@ export type PlanValidationError =
   | CyclicPlan
   | UnknownRequirement
   | DuplicateRequirementId
+  | InvalidCaptureContract
   | InvalidInvokeContract
   | InvalidApplyContract
   | InvalidRequestExternalContract
 
 const duplicates = (values: ReadonlyArray<string>) =>
   [...new Set(values.filter((value, index) => values.indexOf(value) !== index))].sort()
+
+const invalidCapture = (node: CaptureNode, field: string, reason: string) =>
+  new InvalidCaptureContract({ nodeId: node.id, field, reason })
 
 const invalidInvoke = (node: InvokeNode, field: string, reason: string) =>
   new InvalidInvokeContract({ nodeId: node.id, field, reason })
@@ -327,6 +346,23 @@ const invalidApply = (node: ApplyNode, field: string, reason: string) =>
 
 const invalidRequestExternal = (node: RequestExternalNode, field: string, reason: string) =>
   new InvalidRequestExternalContract({ nodeId: node.id, field, reason })
+
+const validateCapture = (node: CaptureNode): InvalidCaptureContract | undefined => {
+  if (node.locator.length === 0 || node.locator.includes("\0")) {
+    return invalidCapture(node, "locator", "must be non-empty and contain no NUL")
+  }
+  if (node.source !== "file" && node.operation !== "read") {
+    return invalidCapture(node, "operation", `${node.source} Capture only supports read`)
+  }
+  if (node.operation === "glob") {
+    if (node.pattern === undefined || node.pattern.length === 0) {
+      return invalidCapture(node, "pattern", "file.glob requires a non-empty pattern")
+    }
+  } else if (node.pattern !== undefined) {
+    return invalidCapture(node, "pattern", "is valid only for file.glob")
+  }
+  return undefined
+}
 
 /**
  * Checks the facts Schema cannot cheaply express and keeps the process
@@ -418,7 +454,31 @@ const validateApply = (
   node: ApplyNode,
   nodes: ReadonlyArray<PlanNode>
 ): InvalidApplyContract | undefined => {
-  if (node.operation !== "merge") return undefined
+  if (node.target.length === 0 || node.target.includes("\0")) {
+    return invalidApply(node, "target", "must be non-empty and contain no NUL")
+  }
+  if (node.operation === "write") {
+    if (node.sourceArtifact === undefined) {
+      return invalidApply(node, "sourceArtifact", "write requires an explicit artifact")
+    }
+    if (node.source !== undefined) return invalidApply(node, "source", "write consumes an artifact, not a path")
+    return undefined
+  }
+  if (node.operation === "copy" || node.operation === "move") {
+    if (node.source === undefined || node.source.length === 0 || node.source.includes("\0")) {
+      return invalidApply(node, "source", `${node.operation} requires a non-empty source path without NUL`)
+    }
+    if (node.sourceArtifact !== undefined) {
+      return invalidApply(node, "sourceArtifact", `${node.operation} consumes a path, not an artifact`)
+    }
+    return undefined
+  }
+  if (node.operation === "remove" || node.operation === "mkdir") {
+    if (node.source !== undefined || node.sourceArtifact !== undefined) {
+      return invalidApply(node, "source", `${node.operation} does not accept a source`)
+    }
+    return undefined
+  }
   if (node.sourceArtifact === undefined) {
     return invalidApply(node, "sourceArtifact", "merge requires a Cell delta artifact")
   }
@@ -505,6 +565,10 @@ export const orderPlan = (
     const knownNodes = new Set(nodeIds)
     const knownRequirements = new Set(requirementIds)
     for (const node of draft.nodes) {
+      if (node._tag === "Capture") {
+        const invalid = validateCapture(node)
+        if (invalid !== undefined) return yield* invalid
+      }
       if (node._tag === "Invoke") {
         const invalid = validateInvoke(node)
         if (invalid !== undefined) return yield* invalid

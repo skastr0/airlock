@@ -1,97 +1,186 @@
 # Airlock
 
-Airlock is the chamber between agents and the world: local mutations are held
-for recovery, external intent is staged before dispatch, and machine effects
-produce structured receipts.
+Airlock is a macOS-first, Unix-shaped runtime for agent-authored machine work.
+It runs structured programs, routes managed local changes through recoverable
+Hold transitions, stages HTTP intent in Outbox, and records receipts.
 
-**Current maturity: usable physics prototype; macOS v1 is under active
-implementation.** The repository contains implemented Hold, Outbox, Ledger, Plan,
-process, and language slices, but the integrated checkout must pass
-`bun run verify` before any build is treated as usable. The macOS
-shell-replacement claim is a published acceptance target and remains unearned
-until the complete Plan/Cell/broker/profile corpus passes.
+**Current maturity: usable developer preview.** Compatibility execution and
+the native-contained macOS path are implemented. The native path uses a private
+workspace, denies writes to the live workspace while the process runs, denies
+network, derives a delta, and applies supported top-level changes through Hold.
+It is not a confidentiality boundary: the current Seatbelt profile permits
+ambient host reads. A VM backend is a future, stronger enclosure and is not a
+macOS v1 release prerequisite.
 
-## Run the prototype
+The repository has one runnable Vouch-derived proof, unit and integration
+coverage, and construction checks for the two destructive gateways. It does
+not yet have the representative corpus, crash matrix, or red-team evidence
+needed for a strong shell-replacement claim.
 
-Requirements: Bun 1.3.x and a repository checkout.
+## Install from a checkout
+
+Requirements: macOS and Bun 1.3.11.
 
 ```sh
 bun install
 bun run verify
+bun run build:macos
+sh scripts/install-macos.sh
+export PATH="$HOME/.local/bin:$PATH"
+airlock doctor
+```
+
+`build:macos` creates a standalone binary plus a SHA-256 manifest in a fresh
+`dist/` directory. The installer verifies the checksum and refuses to replace
+an existing binary unless `--replace` is supplied. The builder accepts
+`--target bun-darwin-x64`, but the published evidence must say which
+architecture actually ran.
+
+For development, replace `airlock` below with `bun run src/cli.ts`.
+
+## Run an effectful program
+
+This example is the same native-contained shape exercised by the CLI
+integration test. It requires a supervisor-owned policy file; the program
+cannot select its own grants.
+
+```sh
+WORKSPACE="$(pwd)/airlock-demo"
+mkdir -p "$WORKSPACE"
+
+cat > "$WORKSPACE/create.air" <<'AIR'
+return process.run({ executable: "/usr/bin/touch", args: ["created.txt"], cwd: workspace, cellProfile: "native-contained", stdout: "capture", stderr: "capture" })
+AIR
+
+cat > "$WORKSPACE/policy.json" <<EOF
+{
+  "schemaVersion": "airlock/admission-policy/v1",
+  "profile": "native-contained",
+  "principal": "agent:demo",
+  "realm": "local",
+  "admittedBy": "operator:demo",
+  "pathAllowlist": ["$WORKSPACE/**"],
+  "executableAllowlist": ["/usr/bin/touch"],
+  "endpointAllowlist": []
+}
+EOF
+
+AIRLOCK_POLICY_FILE="$WORKSPACE/policy.json" \
+  airlock run "$WORKSPACE/create.air" \
+  --workspace "$WORKSPACE" \
+  --profile native-contained \
+  --bindings "{\"workspace\":\"$WORKSPACE\"}"
+
+test -f "$WORKSPACE/created.txt"
+airlock held
+airlock undo
+test ! -e "$WORKSPACE/created.txt"
+```
+
+`airlock run` parses the program, lowers the action to `Invoke` plus
+`Apply`, admits the executable and path requirements, runs the executable in a
+native Cell, and merges the resulting delta through Hold. A missing policy,
+profile mismatch, unavailable native mechanism, unsupported delta, or live
+workspace drift is a typed refusal; it does not fall back to compatibility.
+
+Compatibility is the zero-configuration profile:
+
+```sh
+airlock exec \
+  --executable /bin/echo \
+  --arg "hello world" \
+  --cwd /tmp
+```
+
+It preserves broad host capability and makes no containment claim.
+
+## Inspect the surface
+
+```sh
+airlock doctor
+airlock actions
+airlock schema plan
+airlock ledger
 ```
 
 All CLI output is JSON. `AIRLOCK_HOME` overrides the state directory; the
 default is `~/.airlock`.
 
-## Recover a local mutation
+The current program action vocabulary is generic:
+
+- observations: `file.inspect`, `file.read`, `file.list`, `file.glob`,
+  `file.stat`;
+- managed mutations: `file.write`, `file.remove`, `file.move`, `file.copy`,
+  `file.mkdir`;
+- computation: `process.run`; and
+- external intent: `http.stage`.
+
+There are no Vouch-, archive-, SQLite-, Git-, or OpenShell-specific runtime
+verbs. Existing Unix programs keep those application semantics.
+
+## Hold and Outbox
+
+Direct maintenance commands remain available:
 
 ```sh
-bun run src/cli.ts write ./example.txt 'first'
-bun run src/cli.ts write ./example.txt 'second'
-bun run src/cli.ts held
-bun run src/cli.ts undo
+airlock write ./example.txt first
+airlock write ./example.txt second
+airlock held
+airlock undo
+airlock reap --older-than 7d
 ```
 
-The previous binding enters Hold before replacement. Undo restores it without
-blindly destroying a newer value. `reap` is the only operation that
-irreversibly discards retained recovery material:
+Every managed replacement displaces the prior binding by rename. `Hold.reap`
+contains the repository's only irreversible removal site.
 
 ```sh
-bun run src/cli.ts reap --older-than 7d
-```
-
-## Stage an external request
-
-```sh
-bun run src/cli.ts send https://api.example.com/hook \
+airlock send https://api.example.com/hook \
   --body '{"x":1}' \
   --hold 30s
-bun run src/cli.ts pending
-bun run src/cli.ts cancel emi_...
+airlock pending
+airlock cancel emi_...
 # or:
-bun run src/cli.ts commit emi_...
+airlock commit emi_...
 ```
 
-`send` stages local data; nothing reaches the wire until `commit` or an
-explicitly configured expiry flush. Cancellation before dispatch does not need
-to pretend it can reverse a send.
+`send` and `http.stage` create durable local intent. The only wire-capable
+call is inside `Outbox.commit`. The current Outbox dispatch is bounded HTTP
+with manual redirects; it is not the proposed general endpoint broker.
 
-## What macOS v1 means
+## What is proved today
 
-The first release keeps one contract across three profiles:
+On a supported macOS host, `scripts/prove-vouch.ts` executes a fixed
+Vouch-derived restore plan:
 
-- `compatibility` — zero-config capability parity; no containment claim.
-- `vm-enclosed` — broad existing-tool support inside an Airlock-owned macOS VM
-  with brokered host files and endpoints.
-- `native-contained` — a faster, narrower subset backed by enforceable native
-  macOS capabilities.
+- an archive is captured through an admitted path;
+- `/usr/bin/tar` receives it as stdin in a native-contained Cell;
+- a pre-Apply capture shows the live state was unchanged;
+- the private directory delta is applied through Hold;
+- a body-bearing HTTP replacement request is staged without dispatch;
+- the dispatch document is owner-only (`0600`); and
+- undo restores the prior directory and removes the newly introduced entry.
 
-All profiles lower to the same four Plan nodes—Capture, Invoke, Apply, and
-RequestExternal—and the same terminal laws: only Hold changes managed live
-bindings, only Outbox commit dispatches external intent, and only Reaper
-irreversibly discards recovery material.
-
-Airlock will claim that v1 “replaces most shell usage for agents” only after an
-agent with no shell or alternate machine-effect tool completes at least 90% of
-the fixed representative corpus and every construction, containment, recovery,
-endpoint, label, and persistent-authority gate passes three clean repetitions
-on each published macOS/backend combination.
+This is one local fixture, not a real Vouch/OpenShell replacement run. It does
+not prove endpoint brokerage, confidentiality, complete execution closure,
+crash recovery, concurrent multi-entry atomicity, metadata fidelity, or broad
+task coverage.
 
 ## Documentation
 
 - [Design and the two laws](DESIGN.md)
-- [macOS-first architecture](ARCHITECTURE.md)
+- [Implemented architecture and design direction](ARCHITECTURE.md)
 - [macOS runtime profiles](docs/macos-v1.md)
 - [Plan/runtime contract](docs/contracts/plan-runtime.md)
 - [Security model](docs/security-model.md)
 - [v1 acceptance contract](docs/acceptance.md)
-- [Vouch-first adoption](docs/vouch-first.md)
+- [Vouch-first evidence](docs/vouch-first.md)
 - [Feedback disposition](docs/feedback-disposition.md)
 
 ## Known gaps
 
-The checked-in prototype does not yet prove complete harness mediation,
-production crash/concurrency durability, full execution closure, endpoint
-brokerage, persistent-authority prevention, information-flow enforcement, or
-the published VM/native shell-free corpus. See the acceptance contract for the
-exact line between a developer preview and a release claim.
+Strong confidence remains unearned. The project has not yet published a
+50-task shell-free corpus, repeated runs across supported macOS builds,
+fault-injection at every durable transition, concurrent Apply/commit evidence,
+hostile execution-closure tests, endpoint-broker tests, or cross-plan
+information-flow and authority-laundering tests. See the
+[acceptance contract](docs/acceptance.md) for the claim boundary.

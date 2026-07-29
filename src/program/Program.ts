@@ -421,18 +421,26 @@ export const draftForAction = (
       case "file.glob":
       case "file.stat": {
         const locator = call.action === "file.glob" ? call.root : call.path
+        const operation =
+          call.action === "file.inspect" ? "inspect" as const
+            : call.action === "file.stat" ? "stat" as const
+              : call.action === "file.list" ? "list" as const
+                : call.action === "file.glob" ? "glob" as const
+                  : "read" as const
         nodes.push(new CaptureNode({
           id: nodeId(id, 0),
           dependsOn: [],
           requires: baseRequirementIds,
           produces: [artifactId(id, 0)],
           source: "file",
-          locator
+          locator,
+          operation,
+          ...(call.action === "file.glob" ? { pattern: call.pattern } : {})
         }))
         break
       }
       case "file.write": {
-        const sourceArtifact = call.sourceArtifact ?? artifactId(id, 0)
+        const sourceArtifact = call.sourceArtifact ?? inputArtifactId(id, "content")
         if (call.content !== undefined) {
           inlineArtifacts.push(new InlineArtifact({
             id: sourceArtifact,
@@ -445,7 +453,7 @@ export const draftForAction = (
           id: nodeId(id, 0),
           dependsOn: [],
           requires: baseRequirementIds,
-          produces: [],
+          produces: [artifactId(id, 0)],
           operation: "write",
           target: call.path,
           sourceArtifact
@@ -457,7 +465,7 @@ export const draftForAction = (
           id: nodeId(id, 0),
           dependsOn: [],
           requires: baseRequirementIds,
-          produces: [],
+          produces: [artifactId(id, 0)],
           operation: "remove",
           target: call.path
         }))
@@ -466,15 +474,19 @@ export const draftForAction = (
       case "file.copy":
       case "file.mkdir": {
         const target = call.action === "file.mkdir" ? call.path : call.destination
-        // The exact native operation remains in the digested ActionCall. Plan
-        // still classifies it as Apply without pretending to parse libraries.
         nodes.push(new ApplyNode({
           id: nodeId(id, 0),
           dependsOn: [],
           requires: baseRequirementIds,
-          produces: [],
-          operation: call.action === "file.move" ? "move" : "write",
-          target
+          produces: [artifactId(id, 0)],
+          operation:
+            call.action === "file.move" ? "move"
+              : call.action === "file.copy" ? "copy"
+                : "mkdir",
+          target,
+          ...(call.action === "file.mkdir"
+            ? { parents: call.parents }
+            : { source: call.source })
         }))
         break
       }
@@ -566,7 +578,7 @@ export const draftForAction = (
           id: nodeId(id, 0),
           dependsOn: [],
           requires: baseRequirementIds,
-          produces: [],
+          produces: [artifactId(id, 0)],
           method: call.method,
           endpoint: call.endpoint,
           headers: call.headers,
