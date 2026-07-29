@@ -64,6 +64,44 @@ describe("ProgramRunner", () => {
     expect(calls[0]!.draft.nodes[0]).toMatchObject({ _tag: "Invoke", executable: "/usr/bin/printf", args: ["ok"] })
   })
 
+  it("returns a partial run report with completed action records when a later language failure aborts evaluation", async () => {
+    calls.length = 0
+    const result = await Effect.runPromise(
+      Effect.gen(function* () {
+        const runner = yield* ProgramRunner
+        return yield* runner.run(new ProgramRequest({
+          source: `
+            let written = file.write({ path: "out.txt", content: "done" })
+            let staged = http.stage({ endpoint: "https://example.test/collect", method: "POST", body: "payload", holdMillis: 5000 })
+            assert false, "stop after the admitted actions"
+            return { written: written, staged: staged }
+          `
+        }))
+      }).pipe(Effect.provide(TestLayer))
+    )
+
+    expect(result.state).toBe("partial")
+    expect(result.result).toBeNull()
+    expect(result.failure).toMatchObject({
+      action: "program",
+      phase: "language",
+      causeTag: "AssertionFailed"
+    })
+    expect(result.actions).toHaveLength(2)
+    expect(result.actions[0]!.result.value).toMatchObject({
+      state: "succeeded",
+      action: "file.write",
+      planId: expect.any(String)
+    })
+    expect(result.actions[1]!.result.value).toMatchObject({
+      state: "succeeded",
+      action: "http.stage",
+      planId: expect.any(String)
+    })
+    expect(result.plans).toHaveLength(2)
+    expect(calls).toHaveLength(2)
+  })
+
   it("decodes aliases through the native Schema boundary", async () => {
     const raw = await Effect.runPromise(decodeProgramAction("run", ["/usr/bin/true", [], { cwd: "/tmp" }]))
     const call = await Effect.runPromise(canonicalizeProgramAction("run", raw))

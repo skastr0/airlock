@@ -89,10 +89,25 @@ export class ProgramActionResult extends Schema.Class<ProgramActionResult>("Prog
   artifacts: Schema.Array(InlineArtifact)
 }) {}
 
+export class ProgramActionRecord extends Schema.Class<ProgramActionRecord>("ProgramActionRecord")({
+  request: ProgramActionRequest,
+  result: ProgramActionResult
+}) {}
+
+export class ProgramRunFailure extends Schema.Class<ProgramRunFailure>("ProgramRunFailure")({
+  action: Schema.String,
+  phase: Schema.Literal("language", "admission", "native-filesystem", "runtime", "outbox", "contract"),
+  causeTag: Schema.optional(Schema.String),
+  reason: Schema.String
+}) {}
+
 export class ProgramRunResult extends Schema.Class<ProgramRunResult>("ProgramRunResult")({
+  state: Schema.Literal("succeeded", "failed", "partial"),
   result: LanguageValueSchema,
   plans: Schema.Array(PlanDraft),
-  artifacts: Schema.Array(InlineArtifact)
+  actions: Schema.Array(ProgramActionRecord),
+  artifacts: Schema.Array(InlineArtifact),
+  failure: Schema.optional(ProgramRunFailure)
 }) {}
 
 export class UnknownProgramAction extends Schema.TaggedError<UnknownProgramAction>()(
@@ -660,6 +675,11 @@ const actionResult = (
   artifacts: ReadonlyArray<InlineArtifact> = []
 ) => new ProgramActionResult({ value, artifacts: [...artifacts] })
 
+const actionRecord = (
+  request: ProgramActionRequest,
+  result: ProgramActionResult
+) => new ProgramActionRecord({ request, result })
+
 const runtimeInlineArtifacts = (
   run: RuntimeRun
 ): ReadonlyArray<InlineArtifact> =>
@@ -1077,6 +1097,48 @@ const runProgram = (executor: {
         artifacts.set(input.id, input)
       }
       let sequence = 0
+      const actions: ProgramActionRecord[] = []
+      const failureFromCause = (cause: unknown): ProgramRunFailure => {
+        if (cause instanceof ProgramActionExecutionFailed) {
+          return new ProgramRunFailure({
+            action: cause.action,
+            phase: cause.phase,
+            ...(cause.causeTag === undefined ? {} : { causeTag: cause.causeTag }),
+            reason: cause.reason
+          })
+        }
+        if (cause instanceof ProgramActionDecodeFailed) {
+          return new ProgramRunFailure({
+            action: cause.action,
+            phase: "contract",
+            causeTag: cause._tag,
+            reason: cause.reason
+          })
+        }
+        if (cause instanceof UnknownProgramAction) {
+          return new ProgramRunFailure({
+            action: cause.action,
+            phase: "contract",
+            causeTag: cause._tag,
+            reason: `unknown action ${cause.action}`
+          })
+        }
+        if (cause instanceof LanguageDiagnostic) {
+          return new ProgramRunFailure({
+            action: "program",
+            phase: "language",
+            causeTag: cause._tag,
+            reason: cause.detail
+          })
+        }
+        const tag = causeTag(cause)
+        return new ProgramRunFailure({
+          action: "program",
+          phase: "language",
+          ...(tag === undefined ? {} : { causeTag: tag }),
+          reason: causeReason(cause)
+        })
+      }
       const resolver: ActionResolver<never, UnknownProgramAction | ProgramActionDecodeFailed | ProgramActionExecutionFailed> = {
         resolve: (action, args) => Effect.gen(function* () {
           const decoded = yield* decodeProgramAction(action, args)
@@ -1091,16 +1153,30 @@ const runProgram = (executor: {
           for (const input of next.inlineArtifacts) artifacts.set(input.id, input)
           const executed = yield* executor.execute(next)
           for (const output of executed.artifacts) artifacts.set(output.id, output)
+          actions.push(actionRecord(next, executed))
           return executed.value
         })
       }
-      const evaluation: EvaluationResult = yield* evaluate(normalizeProgramActions(parsed), resolver, {
+      const evaluation = yield* evaluate(normalizeProgramActions(parsed), resolver, {
         ...(request.maxLoopIterations === undefined ? {} : { maxLoopIterations: request.maxLoopIterations }),
         bindings: request.bindings
-      })
+      }).pipe(Effect.either)
+      if (evaluation._tag === "Left") {
+        const failure = failureFromCause(evaluation.left)
+        return new ProgramRunResult({
+          state: actions.length > 0 ? "partial" : "failed",
+          result: null,
+          plans,
+          actions,
+          artifacts: [...artifacts.values()],
+          failure
+        })
+      }
       return new ProgramRunResult({
-        result: evaluation.value,
+        state: "succeeded",
+        result: evaluation.right.value,
         plans,
+        actions,
         artifacts: [...artifacts.values()]
       })
     })

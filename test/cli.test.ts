@@ -103,6 +103,55 @@ describe("agent-facing CLI", () => {
     })
   })
 
+  it("returns a typed partial report when a later program failure aborts after completed actions", () => {
+    const home = mkdtempSync(join(tmpdir(), "airlock-cli-"))
+    const program = join(home, "partial.air")
+    writeFileSync(program, `
+      let written = file.write({ path: "partial.txt", content: "first" })
+      let staged = http.stage({ endpoint: "https://example.invalid/partial", method: "POST", body: "payload", holdMillis: 60000 })
+      assert false, "stop after the partial report is admitted"
+      return { written: written, staged: staged }
+    `)
+
+    const executed = run(["run", program, "--workspace", home], home)
+    expect(executed.status).toBe(1)
+
+    const report = json(executed.stdout) as {
+      readonly result: {
+        readonly state: string
+        readonly result: null
+        readonly failure?: {
+          readonly action: string
+          readonly phase: string
+          readonly causeTag?: string
+        }
+        readonly actions: ReadonlyArray<{
+          readonly result: {
+            readonly value: Record<string, unknown>
+          }
+        }>
+      }
+    }
+
+    expect(report.result.state).toBe("partial")
+    expect(report.result.result).toBeNull()
+    expect(report.result.failure).toMatchObject({
+      action: "program",
+      phase: "language",
+      causeTag: "AssertionFailed"
+    })
+    expect(report.result.actions).toHaveLength(2)
+    expect(report.result.actions[0]!.result.value).toMatchObject({
+      state: "applied",
+      act_id: expect.any(String)
+    })
+    expect(report.result.actions[1]!.result.value).toMatchObject({
+      state: "staged",
+      emission_id: expect.any(String)
+    })
+    expect(readFileSync(join(home, "partial.txt"), "utf8")).toBe("first")
+  })
+
   it("runs a real read → process stdin → write → stage program through admission, Runtime, Hold, and Outbox", () => {
     const home = mkdtempSync(join(tmpdir(), "airlock-cli-"))
     const program = join(home, "workflow.air")

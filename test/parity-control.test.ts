@@ -95,7 +95,19 @@ describe("shell parity — bounded Airlock control", () => {
 
     const refused = run(["run", program, "--workspace", workspace], home)
     expect(refused.status).toBe(1)
-    expect(refused.stderr).toContain("LoopLimitExceeded")
-    expect(refused.stderr).not.toContain("ProgramActionExecutionFailed")
+    const report = JSON.parse(refused.stdout) as {
+      readonly result: {
+        readonly state: string
+        readonly result: null
+        readonly actions: ReadonlyArray<unknown>
+        readonly failure?: {
+          readonly causeTag?: string
+        }
+      }
+    }
+    expect(report.result.state).toBe("failed")
+    expect(report.result.result).toBeNull()
+    expect(report.result.actions).toHaveLength(0)
+    expect(report.result.failure).toMatchObject({ causeTag: "LoopLimitExceeded" })
   })
 })

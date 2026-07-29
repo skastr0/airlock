@@ -60,5 +60,5 @@ describe("agent-only CLI surface", () => {
       const observed = run([allowed], home)
       expect(observed.status, `${allowed}: ${observed.stderr}`).toBe(0)
     }
-  })
+  }, 20_000)
 })

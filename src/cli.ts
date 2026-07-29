@@ -48,6 +48,136 @@ const rendered = <A, E extends { readonly _tag: string }, R>(
     )
   )
 
+const renderedProgram = <A extends {
+  readonly result: {
+    readonly state: string
+  }
+}, E extends { readonly _tag: string }, R>(
+  effect: Effect.Effect<A, E, R>
+) =>
+  effect.pipe(
+    Effect.tap((value) => emit(value)),
+    Effect.tap((value) =>
+      value.result.state === "succeeded"
+        ? Effect.void
+        : Effect.sync(() => {
+            process.exitCode = 1
+          })
+    ),
+    Effect.catchAll((error) =>
+      Console.error(JSON.stringify(error)).pipe(
+        Effect.zipRight(Effect.sync(() => process.exit(1)))
+      )
+      )
+    )
+
+const projectInlineArtifact = (artifact: {
+  readonly id: string
+  readonly bytes: Uint8Array
+  readonly mediaType: string
+  readonly provenance: string
+}) => ({
+  id: artifact.id,
+  mediaType: artifact.mediaType,
+  byteLength: artifact.bytes.byteLength,
+  provenance: artifact.provenance
+})
+
+const projectPlan = (plan: {
+  readonly id: string
+  readonly actionReference: string
+  readonly nodes: ReadonlyArray<{
+    readonly id: string
+    readonly _tag: string
+    readonly dependsOn: ReadonlyArray<string>
+  }>
+}) => ({
+  id: plan.id,
+  actionReference: plan.actionReference,
+  nodes: plan.nodes.map((node) => ({
+    id: node.id,
+    kind: node._tag,
+    dependsOn: [...node.dependsOn]
+  }))
+})
+
+const projectProgramRun = (run: {
+  readonly state: string
+  readonly result: LanguageValue
+  readonly plans: ReadonlyArray<{
+    readonly id: string
+    readonly actionReference: string
+    readonly nodes: ReadonlyArray<{
+      readonly id: string
+      readonly _tag: string
+      readonly dependsOn: ReadonlyArray<string>
+    }>
+  }>
+  readonly actions: ReadonlyArray<{
+    readonly request: {
+      readonly call: {
+        readonly action: string
+        readonly input: unknown
+      }
+      readonly callDigest: string
+      readonly draft: {
+        readonly id: string
+        readonly actionReference: string
+        readonly nodes: ReadonlyArray<{
+          readonly id: string
+          readonly _tag: string
+          readonly dependsOn: ReadonlyArray<string>
+        }>
+      }
+      readonly inlineArtifacts: ReadonlyArray<{
+        readonly id: string
+        readonly bytes: Uint8Array
+        readonly mediaType: string
+        readonly provenance: string
+      }>
+    }
+    readonly result: {
+      readonly value: unknown
+      readonly artifacts: ReadonlyArray<{
+        readonly id: string
+        readonly bytes: Uint8Array
+        readonly mediaType: string
+        readonly provenance: string
+      }>
+    }
+  }>
+  readonly artifacts: ReadonlyArray<{
+    readonly id: string
+    readonly bytes: Uint8Array
+    readonly mediaType: string
+    readonly provenance: string
+  }>
+  readonly failure?: {
+    readonly action: string
+    readonly phase: string
+    readonly causeTag?: string
+    readonly reason: string
+  }
+}) => ({
+  state: run.state,
+  result: run.result,
+  plans: run.plans.map(projectPlan),
+  actions: run.actions.map((record) => ({
+    request: {
+      call: record.request.call,
+      callDigest: record.request.callDigest,
+      draft: projectPlan(record.request.draft),
+      inlineArtifacts: record.request.inlineArtifacts.map(projectInlineArtifact)
+    },
+    result: {
+      value: record.result.value,
+      artifacts: record.result.artifacts.map(projectInlineArtifact)
+    }
+  })),
+  artifacts: run.artifacts.map(projectInlineArtifact),
+  ...(run.failure === undefined ? {} : { failure: run.failure })
+})
+
 const failInput = (field: string, reason: string) =>
   Effect.fail(new CliInputError({ field, reason }))
 
@@ -400,24 +530,7 @@ const executeProgram = (
       schemaVersion: "airlock/program-run/v1",
       profile,
       workspace,
-      result: {
-        result: result.result,
-        plans: result.plans.map((plan) => ({
-          id: plan.id,
-          actionReference: plan.actionReference,
-          nodes: plan.nodes.map((node) => ({
-            id: node.id,
-            kind: node._tag,
-            dependsOn: [...node.dependsOn]
-          }))
-        })),
-        artifacts: result.artifacts.map((artifact) => ({
-          id: artifact.id,
-          mediaType: artifact.mediaType,
-          byteLength: artifact.bytes.byteLength,
-          provenance: artifact.provenance
-        }))
-      }
+      result: projectProgramRun(result)
     }
   })
 
@@ -430,7 +543,7 @@ const run = Command.make(
     workspace: Options.text("workspace").pipe(Options.withDefault(process.cwd()))
   },
   ({ program, bindings, profile, workspace: requestedWorkspace }) =>
-    rendered(
+    renderedProgram(
       Effect.gen(function* () {
         const fs = yield* FileSystem.FileSystem
         const source = yield* fs.readFileString(program).pipe(
@@ -450,7 +563,7 @@ const evalProgram = Command.make(
     workspace: Options.text("workspace").pipe(Options.withDefault(process.cwd()))
   },
   ({ source, bindings, profile, workspace }) =>
-    rendered(executeProgram(source, bindings, profile, workspace))
+    renderedProgram(executeProgram(source, bindings, profile, workspace))
 ).pipe(Command.withDescription("Run Airlock source supplied as one structured argument by an agent harness"))
 
 // ── ledger ──────────────────────────────────────────────────────────────────
