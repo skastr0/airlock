@@ -1,5 +1,5 @@
 import { Effect, Schema } from "effect"
-import { ArtifactId, HandleKind, Right } from "../plan/index.ts"
+import { ArtifactId, CellProfile, HandleKind, Right } from "../plan/index.ts"
 
 /**
  * Native action vocabulary is a pure lowering seam. It describes requested
@@ -112,6 +112,18 @@ export const FileMkdirAction = Schema.Struct({
 })
 export type FileMkdirAction = typeof FileMkdirAction.Type
 
+/**
+ * Process input is structurally disjoint. A bare branded string was ambiguous
+ * with the "discard" and "inherit" literals at the wire boundary, while text
+ * and artifact input have different provenance and lowering requirements.
+ */
+export const ProcessStdin = Schema.Union(
+  Schema.Literal("discard", "inherit"),
+  Schema.Struct({ kind: Schema.Literal("text"), value: Schema.String }),
+  Schema.Struct({ kind: Schema.Literal("artifact"), id: ArtifactId })
+)
+export type ProcessStdin = typeof ProcessStdin.Type
+
 export const ProcessRunAction = Schema.Struct({
   action: Schema.Literal("process.run"),
   /** Absolute executable identity; argument atoms live separately in `args`. */
@@ -122,10 +134,10 @@ export const ProcessRunAction = Schema.Struct({
     Schema.Record({ key: Schema.String, value: Schema.String }),
     { default: () => ({}) }
   ),
-  cellProfile: Schema.optionalWith(Schema.String, { default: () => "compatibility" }),
+  cellProfile: Schema.optionalWith(CellProfile, { default: () => "compatibility" as const }),
   timeoutMs: Schema.optional(Schema.Number),
-  /** An artifact is resolved by runtime; the other choices require no input. */
-  stdin: Schema.optionalWith(Schema.Union(Schema.Literal("discard", "inherit"), ArtifactId), {
+  /** Text is frozen as an artifact before Plan lowering; artifact ids stay explicit. */
+  stdin: Schema.optionalWith(ProcessStdin, {
     default: () => "discard" as const
   }),
   stdout: Schema.optionalWith(Schema.Literal("capture", "discard", "inherit"), {
@@ -194,9 +206,9 @@ export class InvokeLowering extends Schema.TaggedClass<InvokeLowering>()("Invoke
   args: Schema.Array(Schema.String),
   cwd: Schema.String,
   env: Schema.Record({ key: Schema.String, value: Schema.String }),
-  cellProfile: Schema.String,
+  cellProfile: CellProfile,
   timeoutMs: Schema.optional(Schema.Number),
-  stdin: Schema.Union(ArtifactId, Schema.Literal("discard", "inherit")),
+  stdin: ProcessStdin,
   stdout: Schema.Literal("capture", "discard", "inherit"),
   stderr: Schema.Literal("capture", "discard", "inherit"),
   outputLimitBytes: Schema.Number,

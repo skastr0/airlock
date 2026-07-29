@@ -142,6 +142,13 @@ export class RequestExternalNode extends Schema.TaggedClass<RequestExternalNode>
   ...NodeBase,
   method: Schema.Literal("GET", "POST", "PUT", "PATCH", "DELETE"),
   endpoint: Schema.String,
+  headers: Schema.optionalWith(
+    Schema.Record({ key: Schema.String, value: Schema.String }),
+    { default: () => ({}) }
+  ),
+  /** Inline request bytes and artifact-backed bytes are mutually exclusive. */
+  body: Schema.optional(Schema.String),
+  bodyArtifact: Schema.optional(ArtifactId),
   holdMillis: Schema.Number
 }) {}
 
@@ -278,6 +285,10 @@ export class InvalidApplyContract extends Schema.TaggedError<InvalidApplyContrac
   "InvalidApplyContract",
   { nodeId: Schema.String, field: Schema.String, reason: Schema.String }
 ) {}
+export class InvalidRequestExternalContract extends Schema.TaggedError<InvalidRequestExternalContract>()(
+  "InvalidRequestExternalContract",
+  { nodeId: Schema.String, field: Schema.String, reason: Schema.String }
+) {}
 export class RequirementUnresolved extends Schema.TaggedError<RequirementUnresolved>()(
   "RequirementUnresolved",
   { requirement: Schema.String }
@@ -303,6 +314,7 @@ export type PlanValidationError =
   | DuplicateRequirementId
   | InvalidInvokeContract
   | InvalidApplyContract
+  | InvalidRequestExternalContract
 
 const duplicates = (values: ReadonlyArray<string>) =>
   [...new Set(values.filter((value, index) => values.indexOf(value) !== index))].sort()
@@ -312,6 +324,9 @@ const invalidInvoke = (node: InvokeNode, field: string, reason: string) =>
 
 const invalidApply = (node: ApplyNode, field: string, reason: string) =>
   new InvalidApplyContract({ nodeId: node.id, field, reason })
+
+const invalidRequestExternal = (node: RequestExternalNode, field: string, reason: string) =>
+  new InvalidRequestExternalContract({ nodeId: node.id, field, reason })
 
 /**
  * Checks the facts Schema cannot cheaply express and keeps the process
@@ -427,6 +442,51 @@ const validateApply = (
   return undefined
 }
 
+/**
+ * RequestExternal is an inert intent, but its bytes are still explicit Plan
+ * dataflow. Artifact-backed bodies must come from one declared producer in
+ * the request's dependency closure; runtime staging must never discover body
+ * bytes through ambient state.
+ */
+const validateRequestExternal = (
+  node: RequestExternalNode,
+  nodes: ReadonlyArray<PlanNode>
+): InvalidRequestExternalContract | undefined => {
+  const bodySources = Number(node.body !== undefined) + Number(node.bodyArtifact !== undefined)
+  if (bodySources > 1) {
+    return invalidRequestExternal(
+      node,
+      "body/bodyArtifact",
+      "provide at most one request body source"
+    )
+  }
+  if (node.bodyArtifact === undefined) return undefined
+
+  const producers = nodes.flatMap((candidate) =>
+    candidate.produces
+      .filter((artifact) => artifact === node.bodyArtifact)
+      .map(() => candidate)
+  )
+  if (producers.length !== 1) {
+    return invalidRequestExternal(
+      node,
+      "bodyArtifact",
+      producers.length === 0
+        ? "must name exactly one artifact produced by the Plan"
+        : "is ambiguous across multiple artifact declarations"
+    )
+  }
+  const producer = producers[0]!
+  if (producer.id === node.id || !dependencyClosure(nodes, node).has(producer.id)) {
+    return invalidRequestExternal(
+      node,
+      "dependsOn",
+      "must depend on the node that produced bodyArtifact"
+    )
+  }
+  return undefined
+}
+
 /** Validates the inert draft and returns stable topological order. */
 export const orderPlan = (
   draft: PlanDraft
@@ -451,6 +511,10 @@ export const orderPlan = (
       }
       if (node._tag === "Apply") {
         const invalid = validateApply(node, draft.nodes)
+        if (invalid !== undefined) return yield* invalid
+      }
+      if (node._tag === "RequestExternal") {
+        const invalid = validateRequestExternal(node, draft.nodes)
         if (invalid !== undefined) return yield* invalid
       }
       for (const dependency of node.dependsOn) {

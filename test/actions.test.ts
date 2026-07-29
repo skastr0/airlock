@@ -53,13 +53,29 @@ describe("native action catalog", () => {
 
       const stage = yield* lower({
         action: "http.stage", endpoint: "https://api.example.test/jobs", method: "POST",
+        headers: { "content-type": "application/json", "x-trace": "action-test" },
         body: "{\"job\":\"check\"}"
       })
       expect(stage.nodes[0]).toMatchObject({
         _tag: "RequestExternal",
         endpoint: "https://api.example.test/jobs",
         method: "POST",
+        headers: { "content-type": "application/json", "x-trace": "action-test" },
+        body: "{\"job\":\"check\"}",
         requirements: [{ kind: "endpoint", rights: ["connect", "emit"] }]
+      })
+
+      const stagedArtifact = yield* lower({
+        action: "http.stage",
+        endpoint: "https://api.example.test/jobs",
+        method: "PUT",
+        bodyArtifact: "artifact/request-body"
+      })
+      expect(stagedArtifact.nodes[0]).toMatchObject({
+        _tag: "RequestExternal",
+        method: "PUT",
+        headers: {},
+        bodyArtifact: "artifact/request-body"
       })
     })
   )
@@ -76,7 +92,8 @@ describe("native action catalog", () => {
         stdout: "capture",
         stderr: "capture",
         timeoutMs: 30_000,
-        outputLimitBytes: 16_384
+        outputLimitBytes: 16_384,
+        cellProfile: "native-contained"
       })
       const invoke = lowered.nodes[0]!
       expect(invoke).toMatchObject({
@@ -88,9 +105,34 @@ describe("native action catalog", () => {
         stdout: "capture",
         stderr: "capture",
         timeoutMs: 30_000,
-        outputLimitBytes: 16_384
+        outputLimitBytes: 16_384,
+        cellProfile: "native-contained"
       })
       expect("argv" in invoke).toBe(false)
+
+      const textInput = yield* lower({
+        action: "process.run",
+        executable: "/usr/bin/cat",
+        args: [],
+        cwd: "/srv/releases",
+        stdin: { kind: "text", value: "hello from Airlock" }
+      })
+      expect(textInput.nodes[0]).toMatchObject({
+        _tag: "Invoke",
+        stdin: { kind: "text", value: "hello from Airlock" }
+      })
+
+      const artifactInput = yield* lower({
+        action: "process.run",
+        executable: "/usr/bin/cat",
+        args: [],
+        cwd: "/srv/releases",
+        stdin: { kind: "artifact", id: "artifact/stdin" }
+      })
+      expect(artifactInput.nodes[0]).toMatchObject({
+        _tag: "Invoke",
+        stdin: { kind: "artifact", id: "artifact/stdin" }
+      })
     })
   )
 
@@ -107,6 +149,34 @@ describe("native action catalog", () => {
       }).pipe(Effect.flip)
       expect(relativeExecutable).toBeInstanceOf(InvalidActionInput)
       expect(relativeExecutable).toMatchObject({ field: "executable" })
+
+      const invalidProfile = yield* lower({
+        action: "process.run",
+        executable: "/usr/bin/tar",
+        args: [],
+        cwd: "/srv/app",
+        cellProfile: "almost-contained"
+      }).pipe(Effect.flip)
+      expect(invalidProfile).toBeInstanceOf(ActionCallDecodeFailed)
+
+      const ambiguousBareStdin = yield* lower({
+        action: "process.run",
+        executable: "/usr/bin/cat",
+        args: [],
+        cwd: "/srv/app",
+        stdin: "artifact/stdin"
+      }).pipe(Effect.flip)
+      expect(ambiguousBareStdin).toBeInstanceOf(ActionCallDecodeFailed)
+
+      const ambiguousBody = yield* lower({
+        action: "http.stage",
+        endpoint: "https://api.example.test/jobs",
+        method: "POST",
+        body: "inline",
+        bodyArtifact: "artifact/request-body"
+      }).pipe(Effect.flip)
+      expect(ambiguousBody).toBeInstanceOf(InvalidActionInput)
+      expect(ambiguousBody).toMatchObject({ field: "body/bodyArtifact" })
 
       const malformed = yield* lower({ action: "unknown.action" }).pipe(Effect.flip)
       expect(malformed).toBeInstanceOf(ActionCallDecodeFailed)

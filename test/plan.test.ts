@@ -15,17 +15,21 @@ import {
   HandleResolution,
   InvalidApplyContract,
   InvalidInvokeContract,
+  InvalidRequestExternalContract,
   InvokeNode,
   NodeId,
   type PlanNode,
   PlanDraft,
   PlanId,
   PlanRuntime,
+  RequestExternalNode,
   RequirementId,
   ResourceRequirement,
   UnknownDependency,
   closeExecution,
+  decodePlanDraftJson,
   decodePlanJson,
+  encodePlanDraftJson,
   encodePlanJson,
   orderPlan,
   transitionNode,
@@ -162,6 +166,85 @@ describe("Plan v1 kernel", () => {
       const unrelated = new ApplyNode({ ...merge, id: id("merge-unrelated"), dependsOn: [capture.id] })
       const dependencyFailure = yield* orderPlan(draft([capture, invoke, unrelated])).pipe(Effect.flip)
       expect(dependencyFailure).toMatchObject({ _tag: "InvalidApplyContract", field: "dependsOn" })
+    })
+  )
+
+  it.effect("keeps external request bytes explicit and dependency-bound while staging only intent", () =>
+    Effect.gen(function* () {
+      const inline = new RequestExternalNode({
+        id: id("external-inline"),
+        dependsOn: [],
+        requires: [],
+        produces: [],
+        method: "POST",
+        endpoint: "https://api.example.test/jobs",
+        headers: { "content-type": "application/json", "x-trace": "plan-test" },
+        body: "{\"job\":\"check\"}",
+        holdMillis: 30_000
+      })
+      const decoded = yield* encodePlanDraftJson(draft([inline])).pipe(
+        Effect.flatMap(decodePlanDraftJson)
+      )
+      expect(decoded.nodes[0]).toMatchObject({
+        _tag: "RequestExternal",
+        headers: { "content-type": "application/json", "x-trace": "plan-test" },
+        body: "{\"job\":\"check\"}"
+      })
+
+      const artifactBacked = new RequestExternalNode({
+        ...inline,
+        id: id("external-artifact"),
+        dependsOn: [capture.id],
+        body: undefined,
+        bodyArtifact: capture.produces[0]
+      })
+      expect((yield* orderPlan(draft([capture, artifactBacked]))).map((node) => node.id))
+        .toEqual([capture.id, artifactBacked.id])
+
+      const ambiguous = new RequestExternalNode({
+        ...inline,
+        id: id("external-ambiguous"),
+        bodyArtifact: capture.produces[0]
+      })
+      const ambiguousFailure = yield* orderPlan(draft([capture, ambiguous])).pipe(Effect.flip)
+      expect(ambiguousFailure).toBeInstanceOf(InvalidRequestExternalContract)
+      expect(ambiguousFailure).toMatchObject({
+        field: "body/bodyArtifact"
+      })
+
+      const missingArtifact = new RequestExternalNode({
+        ...artifactBacked,
+        id: id("external-missing-artifact"),
+        bodyArtifact: ArtifactId.make("artifact/not-produced")
+      })
+      const missingFailure = yield* orderPlan(draft([capture, missingArtifact])).pipe(Effect.flip)
+      expect(missingFailure).toMatchObject({
+        _tag: "InvalidRequestExternalContract",
+        field: "bodyArtifact"
+      })
+
+      const unrelated = new RequestExternalNode({
+        ...artifactBacked,
+        id: id("external-unrelated"),
+        dependsOn: []
+      })
+      const dependencyFailure = yield* orderPlan(draft([capture, unrelated])).pipe(Effect.flip)
+      expect(dependencyFailure).toMatchObject({
+        _tag: "InvalidRequestExternalContract",
+        field: "dependsOn"
+      })
+
+      const duplicateProducer = new CaptureNode({
+        ...capture,
+        id: id("duplicate-body-producer")
+      })
+      const duplicateFailure = yield* orderPlan(
+        draft([capture, duplicateProducer, artifactBacked])
+      ).pipe(Effect.flip)
+      expect(duplicateFailure).toMatchObject({
+        _tag: "InvalidRequestExternalContract",
+        field: "bodyArtifact"
+      })
     })
   )
 
