@@ -129,6 +129,13 @@ export const ProcessRunAction = Schema.Struct({
   /** Absolute executable identity; argument atoms live separately in `args`. */
   executable: Schema.String,
   args: Schema.Array(Schema.String),
+  /**
+   * Exact executable identities this root may spawn as descendants. The
+   * root executable remains separate and is always the Invoke authority.
+   */
+  descendantExecutables: Schema.optionalWith(Schema.Array(Schema.String), {
+    default: () => []
+  }),
   cwd: Schema.String,
   env: Schema.optionalWith(
     Schema.Record({ key: Schema.String, value: Schema.String }),
@@ -204,6 +211,7 @@ export class InvokeLowering extends Schema.TaggedClass<InvokeLowering>()("Invoke
   action: Schema.Literal("process.run"),
   executable: Schema.String,
   args: Schema.Array(Schema.String),
+  descendantExecutables: Schema.Array(Schema.String),
   cwd: Schema.String,
   env: Schema.Record({ key: Schema.String, value: Schema.String }),
   cellProfile: CellProfile,
@@ -284,6 +292,9 @@ const pathNeed = (selector: string, realm: string, rights: ReadonlyArray<typeof 
   new ResourceNeed({ kind: "path", selector, realm, rights: [...rights] })
 
 const executableNeed = (selector: string, realm: string) =>
+  new ResourceNeed({ kind: "executable", selector, realm, rights: ["invoke"] })
+
+const descendantExecutableNeed = (selector: string, realm: string) =>
   new ResourceNeed({ kind: "executable", selector, realm, rights: ["execute"] })
 
 const endpointNeed = (selector: string, realm: string) =>
@@ -319,6 +330,13 @@ export const lowerNativeAction = (
       case "file.list":
       case "file.stat": {
         yield* requireNonBlank(call.action, "path", call.path)
+        if (call.action === "file.stat" && call.followSymlinks) {
+          return yield* new InvalidActionInput({
+            action: call.action,
+            field: "followSymlinks",
+            reason: "must be false; following symlinks is not part of the native contract"
+          })
+        }
         const locator =
           call.action === "file.inspect"
             ? `inspect:${call.path}`
@@ -446,6 +464,37 @@ export const lowerNativeAction = (
             reason: "must be an absolute path; PATH lookup is not part of the action contract"
           })
         }
+        const descendantExecutables = [...new Set(call.descendantExecutables)]
+        if (descendantExecutables.length !== call.descendantExecutables.length) {
+          return yield* new InvalidActionInput({
+            action: call.action,
+            field: "descendantExecutables",
+            reason: "must not contain duplicate executable identities"
+          })
+        }
+        for (const [index, descendant] of descendantExecutables.entries()) {
+          if (!descendant.startsWith("/")) {
+            return yield* new InvalidActionInput({
+              action: call.action,
+              field: `descendantExecutables[${index}]`,
+              reason: "must be an absolute path"
+            })
+          }
+          if (descendant.includes("\0")) {
+            return yield* new InvalidActionInput({
+              action: call.action,
+              field: `descendantExecutables[${index}]`,
+              reason: "must not contain NUL"
+            })
+          }
+          if (descendant === call.executable) {
+            return yield* new InvalidActionInput({
+              action: call.action,
+              field: `descendantExecutables[${index}]`,
+              reason: "must not repeat the root executable identity"
+            })
+          }
+        }
         if (!call.cwd.startsWith("/")) {
           return yield* new InvalidActionInput({
             action: call.action,
@@ -487,6 +536,9 @@ export const lowerNativeAction = (
         }
         const requirements = uniqueNeeds([
           executableNeed(call.executable, call.realm),
+          ...descendantExecutables.map((selector) =>
+            descendantExecutableNeed(selector, call.realm)
+          ),
           pathNeed(call.cwd, call.realm, ["read"]),
           ...call.readable,
           ...call.writable
@@ -498,6 +550,7 @@ export const lowerNativeAction = (
               action: call.action,
               executable: call.executable,
               args: call.args,
+              descendantExecutables,
               cwd: call.cwd,
               env: call.env,
               cellProfile: call.cellProfile,
@@ -548,7 +601,7 @@ export const lowerNativeAction = (
   })
 
 export const decodeAndLowerNativeAction = (source: string, input: unknown) =>
-  Schema.decodeUnknown(NativeActionCall)(input).pipe(
+  Schema.decodeUnknown(NativeActionCall, { onExcessProperty: "error" })(input).pipe(
     Effect.mapError(
       (error) => new ActionCallDecodeFailed({ source, message: error.message })
     ),

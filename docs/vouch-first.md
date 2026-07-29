@@ -129,17 +129,23 @@ mean it cannot be cited as external replacement evidence.
 ## Program corpus
 
 `examples/vouch/host-workflow.air` is executed. `snapshot.air`, `restore.air`,
-and `replace.air` remain parser-backed full-workflow examples. Their companion
+and `replace.air` now use the canonical Airlock verbs and are exercised
+through a stub executor in `test/vouch-contract.test.ts`. Their companion
 contract test verifies:
 
 - no shell escape or Vouch-specific runtime action;
-- structured `run` calls with executable, args, streams, timeout, and profile;
-- staged external requests; and
+- structured `process.run` calls with executable, args, streams, timeoutMs,
+  and profile;
+- compatibility-profile controller calls where OpenShell needs an unbrokered
+  host endpoint; remote Python argv atoms do not become local descendant
+  grants;
+- canonical `file.inspect`, `file.read`, `file.copy`, and `http.stage`
+  requests; and
 - lowering to the four generic Plan nodes.
 
 Some example calls describe the intended full controller workflow and exceed
-today's integrated native capability. Parser-backed is not the same as
-executed end to end.
+today's integrated native capability. Stub-executed is not the same as
+native end to end.
 
 ## Next evidence steps
 

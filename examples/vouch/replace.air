@@ -1,21 +1,21 @@
 # State-preserving replacement composes Capture, Invoke, Apply, and a generic
 # brokered remote-plan request. It has no Vouch or sandbox primitive.
 
-let existing = capture({ source: "file", locator: sandbox_inventory })
+let existing = file.inspect({ path: sandbox_inventory })
 
-if existing.present {
-  let snapshot = run({ executable: airlock_program, args: ["run", snapshot_program, "--sandbox", sandbox_name, "--archive", local_archive], stdin: null, stdout: "capture", stderr: "capture", timeout: 300s, cellProfile: "native-contained" })
+if existing.bytes > 0 {
+  let snapshot = process.run({ executable: airlock_program, args: ["run", snapshot_program, "--sandbox", sandbox_name, "--archive", local_archive], cwd: workspace, stdin: "discard", stdout: "capture", stderr: "capture", timeoutMs: 300000, cellProfile: "compatibility" })
   assert snapshot.exit_code == 0, "replacement refused because snapshot failed"
 
-  let saved = apply({ operation: "write", target: durable_backup, source: local_archive })
-  assert saved.recoverable == true, "backup must enter managed state through Hold"
+  let saved = file.copy({ source: local_archive, destination: durable_backup })
+  assert saved.state == "applied", "backup must enter managed state through Hold"
 
-  let replacement = request_external({ method: "POST", endpoint: realm_endpoint, hold: 30s, body: { action: "replace-machine", name: sandbox_name, image: image } })
+  let replacement = http.stage({ method: "POST", endpoint: realm_endpoint, holdMillis: 30000, body: "{\"action\":\"replace-machine\",\"name\":\"" + sandbox_name + "\",\"image\":\"" + image + "\"}" })
   assert replacement.state == "staged", "remote replacement must be staged before dispatch"
 
-  let restore = run({ executable: airlock_program, args: ["run", restore_program, "--sandbox", sandbox_name, "--archive", durable_backup], stdin: null, stdout: "capture", stderr: "capture", timeout: 300s, cellProfile: "native-contained" })
+  let restore = process.run({ executable: airlock_program, args: ["run", restore_program, "--sandbox", sandbox_name, "--archive", durable_backup], cwd: workspace, stdin: "discard", stdout: "capture", stderr: "capture", timeoutMs: 300000, cellProfile: "compatibility" })
   assert restore.exit_code == 0, "replacement restore failed"
 } else {
-  let created = request_external({ method: "POST", endpoint: realm_endpoint, hold: 30s, body: { action: "create-machine", name: sandbox_name, image: image } })
+  let created = http.stage({ method: "POST", endpoint: realm_endpoint, holdMillis: 30000, body: "{\"action\":\"create-machine\",\"name\":\"" + sandbox_name + "\",\"image\":\"" + image + "\"}" })
   assert created.state == "staged", "initial create must be staged before dispatch"
 }

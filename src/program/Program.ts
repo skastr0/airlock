@@ -53,6 +53,7 @@ import {
   Runtime,
   RuntimeInitialArtifact,
   type RuntimeArtifact,
+  RuntimeRecoveryEvidence,
   RuntimeRun
 } from "../runtime/index.ts"
 import {
@@ -224,13 +225,30 @@ const causeReason = (cause: unknown): string =>
 
 const executionFailure = (
   action: string,
-  phase: ProgramActionExecutionFailed["phase"]
+  phase: ProgramActionExecutionFailed["phase"],
+  runtime?: RuntimeRun
 ) => (cause: unknown) =>
   new ProgramActionExecutionFailed({
     action,
     phase,
+    ...(runtime === undefined ? {} : { runtime }),
     ...(causeTag(cause) === undefined ? {} : { causeTag: causeTag(cause) }),
     reason: causeReason(cause)
+  })
+
+const runtimeExecutionFailure = (
+  action: string,
+  runtime: RuntimeRun,
+  phase: ProgramActionExecutionFailed["phase"],
+  reason: string,
+  causeTag?: string
+) =>
+  new ProgramActionExecutionFailed({
+    action,
+    phase,
+    ...(causeTag === undefined ? {} : { causeTag }),
+    reason,
+    runtime
   })
 
 /**
@@ -301,7 +319,7 @@ const asStringList = (value: LanguageValue | undefined, field: string, action: s
 const object = (value: LanguageRecord): Record<string, unknown> => ({ ...value })
 
 const isDurationValue = (
-  value: LanguageValue | undefined
+  value: unknown
 ): value is { readonly kind: "Duration"; readonly value: number; readonly unit: "ms" | "s" | "m" | "h" | "d" } =>
   typeof value === "object" && value !== null &&
   !Array.isArray(value) &&
@@ -330,6 +348,62 @@ const strictNativeAction = (
     Effect.mapError((error) => new ProgramActionDecodeFailed({ action, reason: error.message }))
   )
 
+const normalizeProcessRunInput = (
+  action: string,
+  input: LanguageRecord
+): Effect.Effect<Record<string, unknown>, ProgramActionDecodeFailed> =>
+  Effect.gen(function* () {
+    const { timeout, timeoutMs, stdin, ...rest } = object(input)
+    if (timeout !== undefined && timeoutMs !== undefined) {
+      return yield* new ProgramActionDecodeFailed({
+        action,
+        reason: "timeout and timeoutMs are mutually exclusive"
+      })
+    }
+    const normalized: Record<string, unknown> = { ...rest }
+    if (stdin !== undefined) normalized.stdin = stdin === null ? "discard" : stdin
+    if (timeout !== undefined) {
+      if (!isDurationValue(timeout)) {
+        return yield* new ProgramActionDecodeFailed({
+          action,
+          reason: "timeout must be a Duration"
+        })
+      }
+      normalized.timeoutMs = durationMillis(timeout)
+    } else if (timeoutMs !== undefined) {
+      normalized.timeoutMs = timeoutMs
+    }
+    return normalized
+  })
+
+const normalizeRequestExternalInput = (
+  action: string,
+  input: LanguageRecord
+): Effect.Effect<Record<string, unknown>, ProgramActionDecodeFailed> =>
+  Effect.gen(function* () {
+    const { hold, holdMillis, body, ...rest } = object(input)
+    if (hold !== undefined && holdMillis !== undefined) {
+      return yield* new ProgramActionDecodeFailed({
+        action,
+        reason: "hold and holdMillis are mutually exclusive"
+      })
+    }
+    const normalized: Record<string, unknown> = { ...rest }
+    if (hold !== undefined) {
+      if (!isDurationValue(hold)) {
+        return yield* new ProgramActionDecodeFailed({
+          action,
+          reason: "hold must be a Duration"
+        })
+      }
+      normalized.holdMillis = durationMillis(hold)
+    } else if (holdMillis !== undefined) {
+      normalized.holdMillis = holdMillis
+    }
+    if (body !== undefined) normalized.body = canonical(body)
+    return normalized
+  })
+
 /** Decode compact language aliases into the canonical native action vocabulary. */
 export const decodeProgramAction = (
   action: string,
@@ -339,41 +413,78 @@ export const decodeProgramAction = (
     if (nativeNames.has(action as NativeActionName)) {
       if (args.length !== 1) return yield* new ProgramActionDecodeFailed({ action, reason: "expects exactly one record argument" })
       const input = yield* record(args[0], action)
-      return { action, ...object(input) } as unknown as NativeActionCallValue
+      return yield* strictNativeAction(action, { ...object(input), action })
     }
     switch (action) {
       case "run": {
         if (args.length === 1) {
+          if (typeof args[0] === "string") {
+            return yield* strictNativeAction(action, {
+              action: "process.run",
+              executable: args[0],
+              args: []
+            })
+          }
           const input = yield* record(args[0], action)
-          return { action: "process.run", ...object(input) } as unknown as NativeActionCallValue
+          const normalized = yield* normalizeProcessRunInput(action, input)
+          return yield* strictNativeAction(action, { ...normalized, action: "process.run" })
         }
         if (args.length < 1 || args.length > 3) {
           return yield* new ProgramActionDecodeFailed({ action, reason: "expects run(executable, args?, options?)" })
         }
         const executable = yield* string(args[0], "executable", action)
-        const runArgs = yield* asStringList(args[1], "args", action)
-        const options = args[2] === undefined ? {} : object(yield* record(args[2], action))
-        return { action: "process.run", executable, args: runArgs, ...options } as unknown as NativeActionCallValue
+        let runArgs: string[] = []
+        let options: LanguageRecord | undefined
+        if (args[1] !== undefined) {
+          if (Array.isArray(args[1])) {
+            runArgs = yield* asStringList(args[1], "args", action)
+            if (args[2] !== undefined) {
+              options = yield* record(args[2], action)
+            }
+          } else {
+            if (args[2] !== undefined) {
+              return yield* new ProgramActionDecodeFailed({ action, reason: "expects run(executable, args?, options?)" })
+            }
+            options = yield* record(args[1], action)
+          }
+        }
+        const normalized = options === undefined
+          ? {}
+          : yield* normalizeProcessRunInput(action, options)
+        return yield* strictNativeAction(action, {
+          ...normalized,
+          action: "process.run",
+          executable,
+          args: runArgs
+        })
       }
       case "capture": {
         if (args.length !== 1) return yield* new ProgramActionDecodeFailed({ action, reason: "expects capture(path | { path, format? })" })
-        if (typeof args[0] === "string") return { action: "file.read", path: args[0] } as unknown as NativeActionCallValue
-        return { action: "file.read", ...object(yield* record(args[0], action)) } as unknown as NativeActionCallValue
+        if (typeof args[0] === "string") {
+          return yield* strictNativeAction(action, { action: "file.read", path: args[0] })
+        }
+        const input = yield* record(args[0], action)
+        return yield* strictNativeAction(action, { ...object(input), action: "file.read" })
       }
       case "apply": {
         if (args.length === 1) {
           const input = yield* record(args[0], action)
           const operation = yield* string(input.operation, "operation", action)
           const { operation: _, ...rest } = object(input)
-          return { action: `file.${operation}`, ...rest } as unknown as NativeActionCallValue
+          return yield* strictNativeAction(action, { ...rest, action: `file.${operation}` })
         }
         if (args.length !== 2) return yield* new ProgramActionDecodeFailed({ action, reason: "expects apply(operation, record)" })
         const operation = yield* string(args[0], "operation", action)
-        return { action: `file.${operation}`, ...object(yield* record(args[1], action)) } as unknown as NativeActionCallValue
+        return yield* strictNativeAction(action, {
+          ...object(yield* record(args[1], action)),
+          action: `file.${operation}`
+        })
       }
       case "request_external": {
         if (args.length !== 1) return yield* new ProgramActionDecodeFailed({ action, reason: "expects one record argument" })
-        return { action: "http.stage", ...object(yield* record(args[0], action)) } as unknown as NativeActionCallValue
+        const input = yield* record(args[0], action)
+        const normalized = yield* normalizeRequestExternalInput(action, input)
+        return yield* strictNativeAction(action, { ...normalized, action: "http.stage" })
       }
       default:
         return yield* unknown(action)
@@ -385,9 +496,7 @@ export const canonicalizeProgramAction = (
   action: string,
   value: unknown
 ): Effect.Effect<NativeActionCallValue, ProgramActionDecodeFailed> =>
-  Schema.decodeUnknown(NativeActionCall)(value).pipe(
-    Effect.mapError((error) => new ProgramActionDecodeFailed({ action, reason: error.message }))
-  )
+  strictNativeAction(action, value)
 
 const requirement = (planId: PlanId, index: number, need: ResourceNeed) =>
   new ResourceRequirement({
@@ -616,6 +725,7 @@ export const draftForAction = (
           produces,
           executable: call.executable,
           args: call.args,
+          descendantExecutables: call.descendantExecutables,
           cwd: call.cwd,
           env: call.env,
           ...(stdinArtifact === undefined ? {} : { stdin: stdinArtifact }),
@@ -720,7 +830,13 @@ export const draftForAction = (
 const oneDeclaredExecutable = (
   exported: ExportedToolAction
 ): Effect.Effect<string, ProgramActionDecodeFailed> => {
-  const selectors = [...new Set(exported.loaded.definition.executables.map((entry) => entry.selector))]
+  const selectors = [
+    ...new Set(
+      exported.loaded.definition.executables
+        .filter((entry) => entry.role === "root")
+        .map((entry) => entry.selector)
+    )
+  ]
   return selectors.length === 1 && selectors[0]!.startsWith("/")
     ? Effect.succeed(selectors[0]!)
     : Effect.fail(new ProgramActionDecodeFailed({
@@ -834,6 +950,9 @@ const runtimeRunValue = (
   const stdout = invoke?.stdoutArtifact === undefined ? undefined : byId.get(invoke.stdoutArtifact)
   const stderr = invoke?.stderrArtifact === undefined ? undefined : byId.get(invoke.stderrArtifact)
   const delta = invoke?.deltaArtifact === undefined ? undefined : byId.get(invoke.deltaArtifact)
+  const recovery = Schema.decodeUnknownSync(LanguageValueSchema)(
+    Schema.encodeSync(Schema.Array(RuntimeRecoveryEvidence))(run.recovery)
+  )
   return {
     state: run.state,
     plan_id: run.planId,
@@ -845,6 +964,7 @@ const runtimeRunValue = (
     stdout_artifact: runtimeArtifactValue(stdout),
     stderr_artifact: runtimeArtifactValue(stderr),
     delta_artifact: runtimeArtifactValue(delta),
+    recovery,
     receipts: run.receipts.map((receipt) => ({
       node_id: receipt.nodeId,
       sequence: receipt.sequence,
@@ -861,39 +981,42 @@ const runtimeArtifact = (
   action: string
 ): Effect.Effect<RuntimeArtifact, ProgramActionExecutionFailed> => {
   if (node.produces.length !== 1) {
-    return Effect.fail(new ProgramActionExecutionFailed({
+    return Effect.fail(runtimeExecutionFailure(
       action,
-      phase: "contract",
-      causeTag: "ProgramPlanShapeMismatch",
-      reason: `${node._tag} ${node.id} must declare exactly one result artifact`
-    }))
+      run,
+      "contract",
+      `${node._tag} ${node.id} must declare exactly one result artifact`,
+      "ProgramPlanShapeMismatch"
+    ))
   }
   const id = node.produces[0]!
   const matches = run.artifacts.filter((candidate) => candidate.artifact.id === id)
   return matches.length === 1
     ? Effect.succeed(matches[0]!)
-    : Effect.fail(new ProgramActionExecutionFailed({
+    : Effect.fail(runtimeExecutionFailure(
         action,
-        phase: "runtime",
-        causeTag: "ProgramRuntimeArtifactUnavailable",
-        reason: matches.length === 0
+        run,
+        "runtime",
+        matches.length === 0
           ? `runtime did not materialize ${id}`
-          : `runtime materialized ${id} more than once`
-      }))
+          : `runtime materialized ${id} more than once`,
+        "ProgramRuntimeArtifactUnavailable"
+      ))
 }
 
 const decodeRuntimeJson = <A, I>(
+  run: RuntimeRun,
   item: RuntimeArtifact,
   schema: Schema.Schema<A, I, never>,
   action: string
 ): Effect.Effect<A, ProgramActionExecutionFailed> =>
   Effect.try({
     try: () => strictDecodedText.decode(item.bytes),
-    catch: (cause) => executionFailure(action, "contract")(cause)
+    catch: (cause) => executionFailure(action, "contract", run)(cause)
   }).pipe(
     Effect.flatMap((json) =>
       Schema.decode(Schema.parseJson(schema))(json).pipe(
-        Effect.mapError(executionFailure(action, "contract"))
+        Effect.mapError(executionFailure(action, "contract", run))
       )
     )
   )
@@ -907,14 +1030,15 @@ const requireSuccessfulRuntime = (
 ): Effect.Effect<void, ProgramActionExecutionFailed> => {
   if (run.state === "succeeded") return Effect.void
   const failed = failedRuntimeReceipt(run)
-  return Effect.fail(new ProgramActionExecutionFailed({
+  return Effect.fail(runtimeExecutionFailure(
     action,
-    phase: "runtime",
-    causeTag: failed?.errorTag ?? "ProgramRuntimeFailed",
-    reason: failed === undefined
+    run,
+    "runtime",
+    failed === undefined
       ? `runtime finished ${run.state} without a failed node receipt`
-      : `runtime node ${failed.nodeId} finished ${failed.state}`
-  }))
+      : `runtime node ${failed.nodeId} finished ${failed.state}`,
+    failed?.errorTag ?? "ProgramRuntimeFailed"
+  ))
 }
 
 const processEvidence = (
@@ -926,24 +1050,26 @@ const processEvidence = (
     (node): node is InvokeNode => node._tag === "Invoke"
   )
   if (invokes.length !== 1) {
-    return Effect.fail(new ProgramActionExecutionFailed({
+    return Effect.fail(runtimeExecutionFailure(
       action,
-      phase: "contract",
-      causeTag: "ProgramPlanShapeMismatch",
-      reason: `expected exactly one Invoke node; found ${invokes.length}`
-    }))
+      run,
+      "contract",
+      `expected exactly one Invoke node; found ${invokes.length}`,
+      "ProgramPlanShapeMismatch"
+    ))
   }
   const matches = run.processes.filter(
     (candidate) => candidate.nodeId === invokes[0]!.id
   )
   return matches.length === 1
     ? Effect.succeed({ invoke: invokes[0]!, evidence: matches[0]! })
-    : Effect.fail(new ProgramActionExecutionFailed({
+    : Effect.fail(runtimeExecutionFailure(
         action,
-        phase: "runtime",
-        causeTag: "ProgramProcessEvidenceUnavailable",
-        reason: `expected exactly one process receipt for ${invokes[0]!.id}; found ${matches.length}`
-      }))
+        run,
+        "runtime",
+        `expected exactly one process receipt for ${invokes[0]!.id}; found ${matches.length}`,
+        "ProgramProcessEvidenceUnavailable"
+      ))
 }
 
 const toolRuntimeIsDecodable = (
@@ -1007,6 +1133,7 @@ const validateRuntimeRequest = (
   })
 
 const captureFor = (
+  run: RuntimeRun,
   plan: Plan,
   action: string,
   operation: CaptureNode["operation"]
@@ -1016,15 +1143,17 @@ const captureFor = (
   )
   return matches.length === 1
     ? Effect.succeed(matches[0]!)
-    : Effect.fail(new ProgramActionExecutionFailed({
+    : Effect.fail(runtimeExecutionFailure(
         action,
-        phase: "contract",
-        causeTag: "ProgramPlanShapeMismatch",
-        reason: `expected exactly one Capture.${operation} node; found ${matches.length}`
-      }))
+        run,
+        "contract",
+        `expected exactly one Capture.${operation} node; found ${matches.length}`,
+        "ProgramPlanShapeMismatch"
+      ))
 }
 
 const applyFor = (
+  run: RuntimeRun,
   plan: Plan,
   action: string,
   operation: ApplyNode["operation"]
@@ -1034,15 +1163,17 @@ const applyFor = (
   )
   return matches.length === 1
     ? Effect.succeed(matches[0]!)
-    : Effect.fail(new ProgramActionExecutionFailed({
+    : Effect.fail(runtimeExecutionFailure(
         action,
-        phase: "contract",
-        causeTag: "ProgramPlanShapeMismatch",
-        reason: `expected exactly one Apply.${operation} node; found ${matches.length}`
-      }))
+        run,
+        "contract",
+        `expected exactly one Apply.${operation} node; found ${matches.length}`,
+        "ProgramPlanShapeMismatch"
+      ))
 }
 
 const externalFor = (
+  run: RuntimeRun,
   plan: Plan,
   action: string
 ): Effect.Effect<RequestExternalNode, ProgramActionExecutionFailed> => {
@@ -1051,12 +1182,13 @@ const externalFor = (
   )
   return matches.length === 1
     ? Effect.succeed(matches[0]!)
-    : Effect.fail(new ProgramActionExecutionFailed({
+    : Effect.fail(runtimeExecutionFailure(
         action,
-        phase: "contract",
-        causeTag: "ProgramPlanShapeMismatch",
-        reason: `expected exactly one RequestExternal node; found ${matches.length}`
-      }))
+        run,
+        "contract",
+        `expected exactly one RequestExternal node; found ${matches.length}`,
+        "ProgramPlanShapeMismatch"
+      ))
 }
 
 /**
@@ -1092,34 +1224,36 @@ export const ProgramPlanRuntimeLive = Layer.effect(
             case "file.stat": {
               yield* requireSuccessfulRuntime(run, call.action)
               const capture = yield* captureFor(
+                run,
                 plan,
                 call.action,
                 call.action === "file.inspect" ? "inspect" : "stat"
               )
               const result = yield* runtimeArtifact(run, capture, call.action)
-              const stat = yield* decodeRuntimeJson(result, NativeStat, call.action)
+              const stat = yield* decodeRuntimeJson(run, result, NativeStat, call.action)
               return actionResult(statValue(stat))
             }
             case "file.read": {
               yield* requireSuccessfulRuntime(run, call.action)
-              const capture = yield* captureFor(plan, call.action, "read")
+              const capture = yield* captureFor(run, plan, call.action, "read")
               const result = yield* runtimeArtifact(run, capture, call.action)
               switch (capture.format) {
                 case "text": return actionResult(yield* Effect.try({
                   try: () => strictDecodedText.decode(result.bytes),
-                  catch: executionFailure(call.action, "contract")
+                  catch: executionFailure(call.action, "contract", run)
                 }))
                 case "bytes": return actionResult([...result.bytes])
                 case "json": return actionResult(
-                  yield* decodeRuntimeJson(result, LanguageValueSchema, call.action)
+                  yield* decodeRuntimeJson(run, result, LanguageValueSchema, call.action)
                 )
               }
             }
             case "file.list": {
               yield* requireSuccessfulRuntime(run, call.action)
-              const capture = yield* captureFor(plan, call.action, "list")
+              const capture = yield* captureFor(run, plan, call.action, "list")
               const result = yield* runtimeArtifact(run, capture, call.action)
               const entries = yield* decodeRuntimeJson(
+                run,
                 result,
                 Schema.Array(NativeListEntry),
                 call.action
@@ -1128,17 +1262,19 @@ export const ProgramPlanRuntimeLive = Layer.effect(
             }
             case "file.glob": {
               yield* requireSuccessfulRuntime(run, call.action)
-              const capture = yield* captureFor(plan, call.action, "glob")
+              const capture = yield* captureFor(run, plan, call.action, "glob")
               if (capture.pattern === undefined) {
-                return yield* new ProgramActionExecutionFailed({
-                  action: call.action,
-                  phase: "contract",
-                  causeTag: "ProgramPlanShapeMismatch",
-                  reason: "Capture.glob has no pattern"
-                })
+                return yield* runtimeExecutionFailure(
+                  call.action,
+                  run,
+                  "contract",
+                  "Capture.glob has no pattern",
+                  "ProgramPlanShapeMismatch"
+                )
               }
               const result = yield* runtimeArtifact(run, capture, call.action)
               const matches = yield* decodeRuntimeJson(
+                run,
                 result,
                 Schema.Array(Schema.String),
                 call.action
@@ -1147,9 +1283,10 @@ export const ProgramPlanRuntimeLive = Layer.effect(
             }
             case "file.write": {
               yield* requireSuccessfulRuntime(run, call.action)
-              const apply = yield* applyFor(plan, call.action, "write")
+              const apply = yield* applyFor(run, plan, call.action, "write")
               const result = yield* runtimeArtifact(run, apply, call.action)
               const applied = yield* decodeRuntimeJson(
+                run,
                 result,
                 NativeWriteReceipt,
                 call.action
@@ -1165,9 +1302,10 @@ export const ProgramPlanRuntimeLive = Layer.effect(
             }
             case "file.remove": {
               yield* requireSuccessfulRuntime(run, call.action)
-              const apply = yield* applyFor(plan, call.action, "remove")
+              const apply = yield* applyFor(run, plan, call.action, "remove")
               const result = yield* runtimeArtifact(run, apply, call.action)
               const removed = yield* decodeRuntimeJson(
+                run,
                 result,
                 RemoveReceipt,
                 call.action
@@ -1182,17 +1320,19 @@ export const ProgramPlanRuntimeLive = Layer.effect(
             }
             case "file.copy": {
               yield* requireSuccessfulRuntime(run, call.action)
-              const apply = yield* applyFor(plan, call.action, "copy")
+              const apply = yield* applyFor(run, plan, call.action, "copy")
               if (apply.source === undefined) {
-                return yield* new ProgramActionExecutionFailed({
-                  action: call.action,
-                  phase: "contract",
-                  causeTag: "ProgramPlanShapeMismatch",
-                  reason: "Apply.copy has no source"
-                })
+                return yield* runtimeExecutionFailure(
+                  call.action,
+                  run,
+                  "contract",
+                  "Apply.copy has no source",
+                  "ProgramPlanShapeMismatch"
+                )
               }
               const result = yield* runtimeArtifact(run, apply, call.action)
               const copied = yield* decodeRuntimeJson(
+                run,
                 result,
                 NativeWriteReceipt,
                 call.action
@@ -1209,17 +1349,19 @@ export const ProgramPlanRuntimeLive = Layer.effect(
             }
             case "file.move": {
               yield* requireSuccessfulRuntime(run, call.action)
-              const apply = yield* applyFor(plan, call.action, "move")
+              const apply = yield* applyFor(run, plan, call.action, "move")
               if (apply.source === undefined) {
-                return yield* new ProgramActionExecutionFailed({
-                  action: call.action,
-                  phase: "contract",
-                  causeTag: "ProgramPlanShapeMismatch",
-                  reason: "Apply.move has no source"
-                })
+                return yield* runtimeExecutionFailure(
+                  call.action,
+                  run,
+                  "contract",
+                  "Apply.move has no source",
+                  "ProgramPlanShapeMismatch"
+                )
               }
               const result = yield* runtimeArtifact(run, apply, call.action)
               const moved = yield* decodeRuntimeJson(
+                run,
                 result,
                 NativeMoveReceipt,
                 call.action
@@ -1235,9 +1377,10 @@ export const ProgramPlanRuntimeLive = Layer.effect(
             }
             case "file.mkdir": {
               yield* requireSuccessfulRuntime(run, call.action)
-              const apply = yield* applyFor(plan, call.action, "mkdir")
+              const apply = yield* applyFor(run, plan, call.action, "mkdir")
               const result = yield* runtimeArtifact(run, apply, call.action)
               const made = yield* decodeRuntimeJson(
+                run,
                 result,
                 NativeMkdirReceipt,
                 call.action
@@ -1258,24 +1401,26 @@ export const ProgramPlanRuntimeLive = Layer.effect(
                 )
                 if (!toolRuntimeIsDecodable(run, invoke)) {
                   const failed = failedRuntimeReceipt(run)
-                  return yield* new ProgramActionExecutionFailed({
-                    action: request.tool.name,
-                    phase: "runtime",
-                    causeTag: failed?.errorTag ?? "ProgramToolRuntimeFailed",
-                    reason: `tool runtime finished ${run.state} outside its process result`
-                  })
+                  return yield* runtimeExecutionFailure(
+                    request.tool.name,
+                    run,
+                    "runtime",
+                    `tool runtime finished ${run.state} outside its process result`,
+                    failed?.errorTag ?? "ProgramToolRuntimeFailed"
+                  )
                 }
                 if (evidence.receipt.exitCode === null) {
-                  return yield* new ProgramActionExecutionFailed({
-                    action: request.tool.name,
-                    phase: "runtime",
-                    causeTag: "ProgramToolProcessIncomplete",
-                    reason: `tool process ended ${evidence.outcome}${
+                  return yield* runtimeExecutionFailure(
+                    request.tool.name,
+                    run,
+                    "runtime",
+                    `tool process ended ${evidence.outcome}${
                       evidence.receipt.signal === null
                         ? ""
                         : ` with ${evidence.receipt.signal}`
-                    } without an exit code`
-                  })
+                    } without an exit code`,
+                    "ProgramToolProcessIncomplete"
+                  )
                 }
                 const value = yield* decodeToolResult({
                   definitionId: request.tool.definitionId,
@@ -1287,9 +1432,9 @@ export const ProgramPlanRuntimeLive = Layer.effect(
                   stdout: decodedText.decode(evidence.receipt.stdout),
                   stderr: decodedText.decode(evidence.receipt.stderr)
                 }).pipe(
-                  Effect.mapError(executionFailure(request.tool.name, "contract")),
+                  Effect.mapError(executionFailure(request.tool.name, "contract", run)),
                   Effect.flatMap((decoded) => Schema.decodeUnknown(LanguageValueSchema)(decoded).pipe(
-                    Effect.mapError(executionFailure(request.tool!.name, "contract"))
+                    Effect.mapError(executionFailure(request.tool!.name, "contract", run))
                   ))
                 )
                 return actionResult(value, outputs)
@@ -1298,17 +1443,19 @@ export const ProgramPlanRuntimeLive = Layer.effect(
             }
             case "http.stage": {
               yield* requireSuccessfulRuntime(run, call.action)
-              const external = yield* externalFor(plan, call.action)
+              const external = yield* externalFor(run, plan, call.action)
               if (external.bodyArtifact !== undefined) {
-                return yield* new ProgramActionExecutionFailed({
-                  action: call.action,
-                  phase: "contract",
-                  causeTag: "ProgramPlanShapeMismatch",
-                  reason: "program lowering must freeze the artifact-backed body into RequestExternal.body"
-                })
+                return yield* runtimeExecutionFailure(
+                  call.action,
+                  run,
+                  "contract",
+                  "program lowering must freeze the artifact-backed body into RequestExternal.body",
+                  "ProgramPlanShapeMismatch"
+                )
               }
               const result = yield* runtimeArtifact(run, external, call.action)
               const staged = yield* decodeRuntimeJson(
+                run,
                 result,
                 OutboxEmission,
                 call.action
@@ -1386,7 +1533,23 @@ const normalizeStatement = (statement: Statement, actionNames: ReadonlySet<strin
     case "ReturnStatement": return { ...statement, ...(statement.value === undefined ? {} : { value: normalizeExpression(statement.value, actionNames) }) }
     case "AssertStatement": return { ...statement, test: normalizeExpression(statement.test, actionNames), ...(statement.message === undefined ? {} : { message: normalizeExpression(statement.message, actionNames) }) }
     case "IfStatement": return { ...statement, test: normalizeExpression(statement.test, actionNames), consequent: statement.consequent.map((item) => normalizeStatement(item, actionNames)), ...(statement.alternate === undefined ? {} : { alternate: statement.alternate.map((item) => normalizeStatement(item, actionNames)) }) }
-    case "ForStatement": return { ...statement, from: normalizeExpression(statement.from, actionNames), to: normalizeExpression(statement.to, actionNames), body: statement.body.map((item) => normalizeStatement(item, actionNames)) }
+    case "ForStatement": {
+      const body = statement.body.map((item) =>
+        normalizeStatement(item, actionNames)
+      )
+      return statement.iteration === "list"
+        ? {
+            ...statement,
+            source: normalizeExpression(statement.source, actionNames),
+            body
+          }
+        : {
+            ...statement,
+            from: normalizeExpression(statement.from, actionNames),
+            to: normalizeExpression(statement.to, actionNames),
+            body
+          }
+    }
   }
 }
 
@@ -1419,7 +1582,8 @@ const runProgram = (executor: {
             action: cause.action,
             phase: cause.phase,
             ...(cause.causeTag === undefined ? {} : { causeTag: cause.causeTag }),
-            reason: cause.reason
+            reason: cause.reason,
+            ...(cause.runtime === undefined ? {} : { runtime: cause.runtime })
           })
         }
         if (cause instanceof ProgramActionDecodeFailed) {

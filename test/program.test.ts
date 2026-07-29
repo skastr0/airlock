@@ -56,12 +56,17 @@ describe("ProgramRunner", () => {
       Effect.gen(function* () {
         const runner = yield* ProgramRunner
         return yield* runner.run(new ProgramRequest({
-          source: `return process.run({ executable: "/usr/bin/printf", args: ["ok"], cwd: "/tmp" })`
+          source: `return process.run({ executable: "/usr/bin/printf", args: ["ok"], descendantExecutables: ["/bin/sh"], cwd: "/tmp" })`
         }))
       }).pipe(Effect.provide(TestLayer))
     )
     expect(calls).toHaveLength(1)
-    expect(calls[0]!.draft.nodes[0]).toMatchObject({ _tag: "Invoke", executable: "/usr/bin/printf", args: ["ok"] })
+    expect(calls[0]!.draft.nodes[0]).toMatchObject({
+      _tag: "Invoke",
+      executable: "/usr/bin/printf",
+      args: ["ok"],
+      descendantExecutables: ["/bin/sh"]
+    })
   })
 
   it("returns a partial run report with completed action records when a later language failure aborts evaluation", async () => {
@@ -102,10 +107,69 @@ describe("ProgramRunner", () => {
     expect(calls).toHaveLength(2)
   })
 
-  it("decodes aliases through the native Schema boundary", async () => {
-    const raw = await Effect.runPromise(decodeProgramAction("run", ["/usr/bin/true", [], { cwd: "/tmp" }]))
-    const call = await Effect.runPromise(canonicalizeProgramAction("run", raw))
-    expect(call).toMatchObject({ action: "process.run", executable: "/usr/bin/true", cwd: "/tmp", realm: "local" })
+  it("decodes alias inputs into canonical process and HTTP actions", async () => {
+    const processCall = await Effect.runPromise(decodeProgramAction("run", [{
+      executable: "/usr/bin/true",
+      args: [],
+      descendantExecutables: ["/bin/sh"],
+      cwd: "/tmp",
+      stdin: null,
+      timeout: { kind: "Duration", value: 2, unit: "m" },
+      cellProfile: "native-contained"
+    }]))
+    const call = await Effect.runPromise(canonicalizeProgramAction("run", processCall))
+    expect(call).toMatchObject({
+      action: "process.run",
+      executable: "/usr/bin/true",
+      cwd: "/tmp",
+      descendantExecutables: ["/bin/sh"],
+      stdin: "discard",
+      timeoutMs: 120_000,
+      realm: "local"
+    })
+
+    const staged = await Effect.runPromise(decodeProgramAction("request_external", [{
+      method: "POST",
+      endpoint: "https://example.test/collect",
+      hold: { kind: "Duration", value: 30, unit: "s" },
+      body: { b: 2, a: 1 }
+    }]))
+    expect(staged).toMatchObject({
+      action: "http.stage",
+      holdMillis: 30_000,
+      body: "{\"a\":1,\"b\":2}"
+    })
+  })
+
+  it("rejects mutually exclusive alias timing fields", async () => {
+    const runConflict = await Effect.runPromise(Effect.either(decodeProgramAction("run", [{
+      executable: "/usr/bin/true",
+      args: [],
+      cwd: "/tmp",
+      timeout: { kind: "Duration", value: 1, unit: "s" },
+      timeoutMs: 1_000
+    }])))
+    expect(runConflict._tag).toBe("Left")
+    if (runConflict._tag === "Left") {
+      expect(runConflict.left).toMatchObject({
+        action: "run",
+        reason: "timeout and timeoutMs are mutually exclusive"
+      })
+    }
+
+    const stagedConflict = await Effect.runPromise(Effect.either(decodeProgramAction("request_external", [{
+      method: "POST",
+      endpoint: "https://example.test/collect",
+      hold: { kind: "Duration", value: 1, unit: "s" },
+      holdMillis: 1_000
+    }])))
+    expect(stagedConflict._tag).toBe("Left")
+    if (stagedConflict._tag === "Left") {
+      expect(stagedConflict.left).toMatchObject({
+        action: "request_external",
+        reason: "hold and holdMillis are mutually exclusive"
+      })
+    }
   })
 
   it("fails unknown action names in the typed error channel", async () => {

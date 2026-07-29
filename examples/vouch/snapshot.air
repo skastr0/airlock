@@ -1,15 +1,17 @@
-# Vouch-derived state snapshot, expressed only as Airlock's generic actions.
+# Vouch-derived state snapshot, expressed only as canonical Airlock actions.
 # The helper remains ordinary existing code; Airlock owns its structured
 # invocation, authority, receipt, cancellation, and later local application.
+# OpenShell needs host endpoint authority that the macOS native Cell does not
+# yet broker, so these controller calls explicitly use compatibility.
 
-let snapshot = run({ executable: openshell, args: ["sandbox", "exec", "--name", sandbox_name, "--no-tty", "--timeout", "120", "--", "/usr/bin/python3", "-I", "-S", "/opt/airlock-programs/sqlite-safe-snapshot.py", "--state-root", hermes_home, "--output", remote_archive], stdin: null, stdout: "capture", stderr: "capture", timeout: 150s, cellProfile: "native-contained" })
+let snapshot = process.run({ executable: openshell, args: ["sandbox", "exec", "--name", sandbox_name, "--no-tty", "--timeout", "120", "--", "/usr/bin/python3", "-I", "-S", "/opt/airlock-programs/sqlite-safe-snapshot.py", "--state-root", hermes_home, "--output", remote_archive], cwd: workspace, stdin: "discard", stdout: "capture", stderr: "capture", timeoutMs: 150000, cellProfile: "compatibility" })
 assert snapshot.exit_code == 0, "snapshot command failed"
 
-let staged = run({ executable: openshell, args: ["sandbox", "exec", "--name", sandbox_name, "--no-tty", "--timeout", "30", "--", "/usr/bin/python3", "-I", "-S", "/opt/airlock-programs/stage-artifact.py", remote_archive, sandbox_archive], stdin: null, stdout: "capture", stderr: "capture", timeout: 45s, cellProfile: "native-contained" })
+let staged = process.run({ executable: openshell, args: ["sandbox", "exec", "--name", sandbox_name, "--no-tty", "--timeout", "30", "--", "/usr/bin/python3", "-I", "-S", "/opt/airlock-programs/stage-artifact.py", remote_archive, sandbox_archive], cwd: workspace, stdin: "discard", stdout: "capture", stderr: "capture", timeoutMs: 45000, cellProfile: "compatibility" })
 assert staged.exit_code == 0, "snapshot staging failed"
 
-let downloaded = run({ executable: openshell, args: ["sandbox", "download", sandbox_name, sandbox_archive, local_archive], stdin: null, stdout: "capture", stderr: "capture", timeout: 180s, cellProfile: "native-contained" })
+let downloaded = process.run({ executable: openshell, args: ["sandbox", "download", sandbox_name, sandbox_archive, local_archive], cwd: workspace, stdin: "discard", stdout: "capture", stderr: "capture", timeoutMs: 180000, cellProfile: "compatibility" })
 assert downloaded.exit_code == 0, "snapshot download failed"
 
-let archive = capture({ source: "file", locator: local_archive })
+let archive = file.inspect({ path: local_archive })
 assert archive.bytes > 0, "snapshot archive is empty"

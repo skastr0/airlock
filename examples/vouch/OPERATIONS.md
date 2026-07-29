@@ -14,17 +14,17 @@ the network.
 
 | Vouch machine operation | Structured Airlock expression | Existing implementation remains owned by |
 |---|---|---|
-| inspect `hermes-state.tgz` | `Capture(file)` with an explicit path requirement | filesystem |
-| invoke `openshell sandbox upload ...` | `Invoke { executable: openshell, args: [...] }` | OpenShell |
-| invoke remote Python restore | structured `Invoke` of OpenShell, whose argv names `/usr/bin/python3` and the helper | OpenShell and Python |
+| inspect `hermes-state.tgz` | `file.inspect({ path: local_archive })` | filesystem |
+| invoke `openshell sandbox upload ...` | `process.run({ executable: openshell, args: [...], cwd: workspace, stdin: "discard" })` | OpenShell |
+| invoke remote Python restore | structured `process.run` of OpenShell, whose argv names `/usr/bin/python3` and the helper; the remote command is not a local descendant grant | OpenShell and Python |
 | inspect command exit, stdout, stderr | named `Invoke` stream artifacts plus its receipt | Airlock process seam |
-| parse and validate the last JSON line | pure program computation over the stdout artifact | Airlock language/program |
+| parse and validate the last JSON line | pure program computation over the JSON receipt file | Airlock language/program |
 | extract tar members | structured `Invoke` of `/usr/bin/tar`, or of the existing Python helper when collision-skipping semantics are required | tar or Python |
 | create an online SQLite snapshot | structured `Invoke` of the existing helper or `sqlite3` executable | SQLite/Python |
 | download a sandbox artifact | structured `Invoke` of OpenShell | OpenShell |
-| replace a live local backup | `Invoke` against a private Cell, then `Apply.merge` | Cell proposes; Hold installs |
-| remove or replace managed local state | `Apply`; displaced bytes enter Hold | Hold |
-| delete/recreate a remote machine | `RequestExternal`, then a privileged Outbox commit | remote realm adapter |
+| replace a live local backup | `process.run` against a private Cell, then `file.copy` / `Apply.merge` | Cell proposes; Hold installs |
+| remove or replace managed local state | `file.copy` / `file.move` / `file.write`; displaced bytes enter Hold | Hold |
+| delete/recreate a remote machine | `http.stage`, then a privileged Outbox commit | remote realm adapter |
 | poll health with a deadline | bounded program control over repeated structured invocations | Airlock program/runtime |
 | retain a durable receipt | Plan node receipts plus Hold/Outbox Ledger entries | Airlock runtime |
 
@@ -62,6 +62,9 @@ Airlock physics:
 - A real OpenShell invocation needs its executable identity, config/helpers,
   Unix sockets or endpoints, descendants, and credentials represented by an
   enforceable execution closure.
+- The checked-in controller programs therefore mark OpenShell calls as
+  `compatibility`; the native-contained claim remains limited to local,
+  no-network work until an endpoint broker exists.
 - Native-contained macOS currently denies all network for this path; it does
   not yet broker an allowlisted endpoint to a Cell.
 - Outbox dispatch supports HTTP. A staged external command/remote-realm Plan

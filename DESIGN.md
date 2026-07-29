@@ -155,9 +155,11 @@ through `Outbox.commit`;
 irreversible discard path.
 
 `Invoke` accepts the structured
-`{ executable, args, stdin, stdout, stderr, timeout }` contract.
+`{ executable, args, stdin, stdout, stderr, timeoutMs }` contract.
 `executable` is separate from `args`; the argument array never embeds the
 executable as element zero. There is no command-string execution form.
+Language aliases may normalize `timeout` or `hold` at the program boundary,
+but the admitted plan sees the canonical field names above.
 
 The runtime uses Effect: data and wire boundaries are Schema-first, expected
 failures are tagged in the typed error channel, capability requirements are

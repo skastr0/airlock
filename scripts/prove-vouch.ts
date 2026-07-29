@@ -175,7 +175,7 @@ const makeDraft = (
       kind: "executable",
       realm: "host",
       selector: "/usr/bin/tar",
-      rights: ["execute"]
+      rights: ["invoke"]
     }),
     new ResourceRequirement({
       id: invokeWorkspace,

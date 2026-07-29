@@ -86,6 +86,7 @@ describe("native action catalog", () => {
         action: "process.run",
         executable: "/usr/bin/tar",
         args: ["-xf", "release.tar"],
+        descendantExecutables: ["/bin/sh"],
         cwd: "/srv/releases",
         env: { LANG: "C" },
         stdin: "discard",
@@ -100,6 +101,7 @@ describe("native action catalog", () => {
         _tag: "Invoke",
         executable: "/usr/bin/tar",
         args: ["-xf", "release.tar"],
+        descendantExecutables: ["/bin/sh"],
         cwd: "/srv/releases",
         stdin: "discard",
         stdout: "capture",
@@ -109,6 +111,18 @@ describe("native action catalog", () => {
         cellProfile: "native-contained"
       })
       expect("argv" in invoke).toBe(false)
+      expect(invoke.requirements).toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          kind: "executable",
+          selector: "/usr/bin/tar",
+          rights: ["invoke"]
+        }),
+        expect.objectContaining({
+          kind: "executable",
+          selector: "/bin/sh",
+          rights: ["execute"]
+        })
+      ]))
 
       const textInput = yield* lower({
         action: "process.run",
@@ -138,6 +152,14 @@ describe("native action catalog", () => {
 
   it.effect("rejects malformed or authority-ambiguous action calls", () =>
     Effect.gen(function* () {
+      const followingSymlinks = yield* lower({
+        action: "file.stat",
+        path: "/srv/app",
+        followSymlinks: true
+      }).pipe(Effect.flip)
+      expect(followingSymlinks).toBeInstanceOf(InvalidActionInput)
+      expect(followingSymlinks).toMatchObject({ field: "followSymlinks" })
+
       const ambiguousWrite = yield* lower({
         action: "file.write", path: "/srv/app/config", content: "a", sourceArtifact: "artifact/config"
       }).pipe(Effect.flip)
@@ -167,6 +189,26 @@ describe("native action catalog", () => {
         stdin: "artifact/stdin"
       }).pipe(Effect.flip)
       expect(ambiguousBareStdin).toBeInstanceOf(ActionCallDecodeFailed)
+
+      const descendantRootRepeat = yield* lower({
+        action: "process.run",
+        executable: "/usr/bin/tar",
+        descendantExecutables: ["/usr/bin/tar"],
+        args: [],
+        cwd: "/srv/app"
+      }).pipe(Effect.flip)
+      expect(descendantRootRepeat).toBeInstanceOf(InvalidActionInput)
+      expect(descendantRootRepeat).toMatchObject({ field: "descendantExecutables[0]" })
+
+      const descendantNul = yield* lower({
+        action: "process.run",
+        executable: "/usr/bin/tar",
+        descendantExecutables: ["/usr/bin/tar\u0000child"],
+        args: [],
+        cwd: "/srv/app"
+      }).pipe(Effect.flip)
+      expect(descendantNul).toBeInstanceOf(InvalidActionInput)
+      expect(descendantNul).toMatchObject({ field: "descendantExecutables[0]" })
 
       const ambiguousBody = yield* lower({
         action: "http.stage",

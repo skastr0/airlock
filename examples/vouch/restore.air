@@ -1,16 +1,18 @@
 # Restore is an ordinary artifact transfer followed by an ordinary structured
 # invocation. Archive parsing and SQLite semantics stay in existing tools.
+# `/usr/bin/python3` below is a remote argv atom, not a local descendant edge.
+# OpenShell controller calls use compatibility until native endpoint brokerage.
 
-let archive = capture({ source: "file", locator: local_archive })
+let archive = file.inspect({ path: local_archive })
 assert archive.bytes > 0, "restore archive is missing or empty"
 
-let uploaded = run({ executable: openshell, args: ["sandbox", "upload", sandbox_name, local_archive, remote_archive, "--no-git-ignore"], stdin: null, stdout: "capture", stderr: "capture", timeout: 120s, cellProfile: "native-contained" })
+let uploaded = process.run({ executable: openshell, args: ["sandbox", "upload", sandbox_name, local_archive, remote_archive, "--no-git-ignore"], cwd: workspace, stdin: "discard", stdout: "capture", stderr: "capture", timeoutMs: 120000, cellProfile: "compatibility" })
 assert uploaded.exit_code == 0, "restore upload failed"
 
-let restored = run({ executable: openshell, args: ["sandbox", "exec", "--name", sandbox_name, "--no-tty", "--timeout", "180", "--", "/usr/bin/python3", "-I", "-S", "/opt/airlock-programs/safe-restore.py", "--archive", remote_archive, "--destination", state_home], stdin: null, stdout: "capture", stderr: "capture", timeout: 210s, cellProfile: "native-contained" })
+let restored = process.run({ executable: openshell, args: ["sandbox", "exec", "--name", sandbox_name, "--no-tty", "--timeout", "180", "--", "/usr/bin/python3", "-I", "-S", "/opt/airlock-programs/safe-restore.py", "--archive", remote_archive, "--destination", state_home], cwd: workspace, stdin: "discard", stdout: "capture", stderr: "capture", timeoutMs: 210000, cellProfile: "compatibility" })
 assert restored.exit_code == 0, "restore command failed"
 
-let receipt = capture({ source: "process-output", locator: restored.stdout })
+let receipt = file.read({ path: restore_receipt, format: "json" })
 assert receipt.phase == "state_restored", "restore receipt has the wrong phase"
 assert receipt.ok == true, "restore did not report success"
 assert receipt.extracted > 0, "restore extracted no state"
