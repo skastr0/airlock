@@ -85,3 +85,29 @@ The next Vouch gate is therefore concrete: run the same admitted contracts
 against a disposable OpenShell sandbox, with a fixture containing a live
 SQLite database and an unwritable image-owned collision, while keeping the
 remote machine disposable and the external replacement request staged.
+
+## Expanded host-operation acceptance
+
+[`host-workflow.air`](host-workflow.air) and
+[`../../scripts/prove-vouch-operations.ts`](../../scripts/prove-vouch-operations.ts)
+exercise the high-frequency Unix shapes found in the current 6k+ line Vouch
+runtime without copying its application vocabulary into Airlock:
+
+| Vouch source evidence | Generic operation proved |
+|---|---|
+| `box-runtime-v1.py:2888-2947` | bounded process-group execution, captured output, timeout, cancellation, and output budget |
+| `box-runtime-v1.py:2989-3024` | absolute executable plus distinct argv atoms for an OpenShell-shaped invocation |
+| `box-runtime-v1.py:5853-5953` | inspect a state tree, invoke existing `tar`, inspect its result, and stage a backup with file copy/move |
+| `box-runtime-v1.py:5956-6027` | explicit stdin/stdout artifact flow and structured receipts around existing restore machinery |
+| `box-runtime-v1.py:6041-6129` | recoverable local transition plus an inert external replacement/event intent |
+
+The proof runs a native-contained `tar` overwrite against a private workspace,
+applies its delta through Hold, stages an HTTP intent without dispatching it,
+and restores the exact prior archive bytes by act id. It also passes `tar`
+member output into `wc` as an artifact rather than a textual pipe, and
+round-trips a realistic OpenShell-shaped argv vector through `/usr/bin/printf`
+without invoking a shell.
+
+This extends, rather than replaces, `prove-vouch.ts`: the original proof covers
+restore of a directory topology; the operation proof covers the surrounding
+host orchestration and process-lifecycle contracts.

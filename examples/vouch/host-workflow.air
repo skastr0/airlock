@@ -1,0 +1,19 @@
+let tree = file.list({ path: state_dir })
+let state_entries = file.glob({ root: state_dir, pattern: "**/*" })
+let backup_directory = file.mkdir({ path: backup_dir, parents: true })
+
+let packed = process.run({ executable: "/usr/bin/tar", args: ["-czf", "snapshot.tgz", "state"], cwd: workspace, env: { COPYFILE_DISABLE: "1", LANG: "C" }, stdin: "discard", stdout: "capture", stderr: "capture", timeoutMs: 30000, cellProfile: "native-contained" })
+assert packed.state == "succeeded", "snapshot command failed"
+let archive = file.inspect({ path: snapshot })
+
+let members = process.run({ executable: "/usr/bin/tar", args: ["-tzf", "snapshot.tgz"], cwd: workspace, env: { COPYFILE_DISABLE: "1", LANG: "C" }, stdin: "discard", stdout: "capture", stderr: "capture", timeoutMs: 30000, cellProfile: "native-contained" })
+let member_count = process.run({ executable: "/usr/bin/wc", args: ["-l"], cwd: workspace, env: { LANG: "C" }, stdin: { kind: "artifact", id: members.stdout_artifact.id }, stdout: "capture", stderr: "capture", timeoutMs: 30000, cellProfile: "native-contained" })
+
+let argv = process.run({ executable: "/usr/bin/printf", args: ["%s\n", "--gateway", "local", "--gateway-endpoint", "unix:///tmp/gateway.sock", "sandbox", "exec", "--name", "alice", "--no-tty", "--timeout", "180", "--", "/usr/bin/python3", "-I", "-S"], cwd: workspace, env: { LANG: "C" }, stdin: "discard", stdout: "capture", stderr: "capture", timeoutMs: 30000, cellProfile: "native-contained" })
+
+let copied = file.copy({ source: snapshot, destination: staged_backup })
+let moved = file.move({ source: staged_backup, destination: final_backup })
+let removed = file.remove({ path: stale_file })
+let staged = http.stage({ endpoint: endpoint, method: "POST", headers: { "content-type": "application/json", "x-airlock-corpus": "vouch" }, body: "{\"operation\":\"snapshot-ready\"}", holdMillis: 300000 })
+
+return { tree: tree, state_entries: state_entries, backup_directory: backup_directory, packed: packed, archive: archive, members: members.stdout, member_count: member_count.stdout, argv: argv.stdout, copied: copied, moved: moved, removed: removed, staged: staged }
