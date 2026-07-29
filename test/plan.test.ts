@@ -13,7 +13,10 @@ import {
   Handle,
   HandleId,
   HandleResolution,
+  InvalidInvokeContract,
+  InvokeNode,
   NodeId,
+  type PlanNode,
   PlanDraft,
   PlanId,
   PlanRuntime,
@@ -44,8 +47,14 @@ const apply = new ApplyNode({
   id: id("apply"), dependsOn: [id("capture")], requires: [req("workspace")], produces: [],
   operation: "write", target: "README.md", sourceArtifact: ArtifactId.make("artifact/input")
 })
+const invoke = new InvokeNode({
+  id: id("format"), dependsOn: [capture.id], requires: [], produces: [],
+  executable: "/usr/bin/true", args: ["--version"], cwd: "/workspace",
+  env: { LANG: "C" }, stdout: "capture", stderr: "discard",
+  outputLimitBytes: 4096, timeoutMs: 2_000, cellProfile: "native-contained"
+})
 
-const draft = (nodes = [capture, apply]) => new PlanDraft({
+const draft = (nodes: ReadonlyArray<PlanNode> = [capture, apply]) => new PlanDraft({
   schemaVersion: "airlock/plan-draft/v1", id: PlanId.make("plan/test"), actionReference: "test.action",
   nodes, requirements: [requirement], definitionDigests: [digest("sha256/definition")]
 })
@@ -55,6 +64,36 @@ describe("Plan v1 kernel", () => {
     Effect.gen(function* () {
       const ordered = yield* orderPlan(draft())
       expect(ordered.map((node) => node.id)).toEqual([id("capture"), id("apply")])
+    })
+  )
+
+  it.effect("keeps structured invocation separate from executable identity and validates atoms before admission", () =>
+    Effect.gen(function* () {
+      const invokeDraft = draft([capture, invoke])
+      const ordered = yield* orderPlan(invokeDraft)
+      const admittedInvoke = ordered[1]
+      expect(admittedInvoke).toMatchObject({
+        _tag: "Invoke",
+        executable: "/usr/bin/true",
+        args: ["--version"],
+        cwd: "/workspace",
+        env: { LANG: "C" },
+        stdout: "capture",
+        stderr: "discard",
+        outputLimitBytes: 4096,
+        timeoutMs: 2_000,
+        cellProfile: "native-contained"
+      })
+      expect(admittedInvoke).not.toHaveProperty("argv")
+
+      const invalidExecutable = new InvokeNode({ ...invoke, id: id("invalid-executable"), executable: "python3" })
+      const executableFailure = yield* orderPlan(draft([invalidExecutable])).pipe(Effect.flip)
+      expect(executableFailure).toBeInstanceOf(InvalidInvokeContract)
+      expect(executableFailure).toMatchObject({ _tag: "InvalidInvokeContract", field: "executable" })
+
+      const invalidTimeout = new InvokeNode({ ...invoke, id: id("invalid-timeout"), timeoutMs: 0 })
+      const timeoutFailure = yield* orderPlan(draft([invalidTimeout])).pipe(Effect.flip)
+      expect(timeoutFailure).toMatchObject({ _tag: "InvalidInvokeContract", field: "timeoutMs" })
     })
   )
 

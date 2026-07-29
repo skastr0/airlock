@@ -33,6 +33,21 @@ export const HandleKind = Schema.Literal(
 )
 export type HandleKind = typeof HandleKind.Type
 
+/**
+ * The Cell selected for an invocation. Compatibility preserves the ratchet;
+ * the contained profiles are explicit authority reductions.
+ */
+export const CellProfile = Schema.Literal(
+  "compatibility",
+  "native-contained",
+  "vm-enclosed"
+)
+export type CellProfile = typeof CellProfile.Type
+
+/** Stream disposition is part of the admitted process contract, never shell syntax. */
+export const StreamDisposition = Schema.Literal("capture", "inherit", "discard")
+export type StreamDisposition = typeof StreamDisposition.Type
+
 export class Grant extends Schema.Class<Grant>("Grant")({
   id: GrantId,
   principal: Schema.String,
@@ -78,9 +93,23 @@ export class CaptureNode extends Schema.TaggedClass<CaptureNode>("CaptureNode")(
 
 export class InvokeNode extends Schema.TaggedClass<InvokeNode>("InvokeNode")("Invoke", {
   ...NodeBase,
-  argv: Schema.Array(Schema.String),
-  cellProfile: Schema.String,
-  stdin: Schema.optional(ArtifactId)
+  /** Always an absolute executable identity in Plan v1; executable handles bind via requirements. */
+  executable: Schema.String,
+  /** Individual argument atoms. The executable is never embedded here. */
+  args: Schema.Array(Schema.String),
+  /** Omitted means the Cell's admitted working directory. */
+  cwd: Schema.optional(Schema.String),
+  /** An explicit environment overlay; no inherited ambient environment is implied. */
+  env: Schema.optionalWith(Schema.Record({ key: Schema.String, value: Schema.String }), {
+    default: () => ({})
+  }),
+  /** Stdin can only be a previously captured/staged artifact in Plan v1. */
+  stdin: Schema.optional(ArtifactId),
+  stdout: Schema.optionalWith(StreamDisposition, { default: () => "capture" as const }),
+  stderr: Schema.optionalWith(StreamDisposition, { default: () => "capture" as const }),
+  outputLimitBytes: Schema.optionalWith(Schema.Number, { default: () => 1_048_576 }),
+  timeoutMs: Schema.optional(Schema.Number),
+  cellProfile: CellProfile
 }) {}
 
 export class ApplyNode extends Schema.TaggedClass<ApplyNode>("ApplyNode")("Apply", {
@@ -226,6 +255,10 @@ export class DuplicateRequirementId extends Schema.TaggedError<DuplicateRequirem
   "DuplicateRequirementId",
   { id: Schema.String }
 ) {}
+export class InvalidInvokeContract extends Schema.TaggedError<InvalidInvokeContract>()(
+  "InvalidInvokeContract",
+  { nodeId: Schema.String, field: Schema.String, reason: Schema.String }
+) {}
 export class RequirementUnresolved extends Schema.TaggedError<RequirementUnresolved>()(
   "RequirementUnresolved",
   { requirement: Schema.String }
@@ -249,9 +282,46 @@ export type PlanValidationError =
   | CyclicPlan
   | UnknownRequirement
   | DuplicateRequirementId
+  | InvalidInvokeContract
 
 const duplicates = (values: ReadonlyArray<string>) =>
   [...new Set(values.filter((value, index) => values.indexOf(value) !== index))].sort()
+
+const invalidInvoke = (node: InvokeNode, field: string, reason: string) =>
+  new InvalidInvokeContract({ nodeId: node.id, field, reason })
+
+/**
+ * Checks the facts Schema cannot cheaply express and keeps the process
+ * boundary honest before authority admission. This intentionally validates
+ * atoms only: Airlock composes existing programs, it does not parse their
+ * command-line grammars.
+ */
+const validateInvoke = (node: InvokeNode): InvalidInvokeContract | undefined => {
+  if (!node.executable.startsWith("/")) {
+    return invalidInvoke(node, "executable", "must be an absolute executable identity")
+  }
+  if (node.executable.includes("\0")) {
+    return invalidInvoke(node, "executable", "must not contain NUL")
+  }
+  if (node.cwd !== undefined && (!node.cwd.startsWith("/") || node.cwd.includes("\0"))) {
+    return invalidInvoke(node, "cwd", "must be an absolute path without NUL when provided")
+  }
+  for (const [index, argument] of node.args.entries()) {
+    if (argument.includes("\0")) return invalidInvoke(node, `args[${index}]`, "must not contain NUL")
+  }
+  for (const [key, value] of Object.entries(node.env)) {
+    if (key.length === 0 || key.includes("=") || key.includes("\0") || value.includes("\0")) {
+      return invalidInvoke(node, "env", "keys must be non-empty without = or NUL; values must not contain NUL")
+    }
+  }
+  if (!Number.isSafeInteger(node.outputLimitBytes) || node.outputLimitBytes < 0) {
+    return invalidInvoke(node, "outputLimitBytes", "must be a non-negative safe integer")
+  }
+  if (node.timeoutMs !== undefined && (!Number.isSafeInteger(node.timeoutMs) || node.timeoutMs <= 0)) {
+    return invalidInvoke(node, "timeoutMs", "must be a positive safe integer when provided")
+  }
+  return undefined
+}
 
 /** Validates the inert draft and returns stable topological order. */
 export const orderPlan = (
@@ -271,6 +341,10 @@ export const orderPlan = (
     const knownNodes = new Set(nodeIds)
     const knownRequirements = new Set(requirementIds)
     for (const node of draft.nodes) {
+      if (node._tag === "Invoke") {
+        const invalid = validateInvoke(node)
+        if (invalid !== undefined) return yield* invalid
+      }
       for (const dependency of node.dependsOn) {
         if (!knownNodes.has(dependency)) {
           return yield* new UnknownDependency({ nodeId: node.id, dependency })
