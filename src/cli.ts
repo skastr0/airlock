@@ -592,7 +592,14 @@ const schema = Command.make(
         language: {
           syntax: "airlock",
           effects: "identifier ActionResolver calls only",
-          control: ["let", "if", "for literal range", "return", "assert"]
+          control: [
+            "let",
+            "if",
+            "for finite range",
+            "for captured list",
+            "return",
+            "assert"
+          ]
         }
       } : {})
     })

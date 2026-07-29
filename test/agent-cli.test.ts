@@ -76,6 +76,28 @@ describe("agent-only CLI surface", () => {
     }
   })
 
+  it("advertises the implemented finite control surface", { timeout: 30_000 }, () => {
+    const home = mkdtempSync(join(tmpdir(), "airlock-agent-schema-"))
+    const discovered = run(["schema", "language"], home)
+
+    expect(discovered.status, discovered.stderr).toBe(0)
+    expect(json(discovered.stdout)).toMatchObject({
+      schemaVersion: "airlock/discovery/v1",
+      language: {
+        syntax: "airlock",
+        effects: "identifier ActionResolver calls only",
+        control: [
+          "let",
+          "if",
+          "for finite range",
+          "for captured list",
+          "return",
+          "assert"
+        ]
+      }
+    })
+  })
+
   it("exposes redacted durable Runtime receipts by Plan id", { timeout: 30_000 }, () => {
     const home = mkdtempSync(join(tmpdir(), "airlock-agent-runs-"))
     const executed = run([
