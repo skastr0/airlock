@@ -4,6 +4,11 @@
 > Airlock is a reference-monitor design for agent-originated effects, not an
 > intent oracle. The current native backend is a write/network fence around a
 > private workspace; it is not a confidentiality sandbox.
+>
+> Only the reaper and ratchet laws in [`DESIGN.md`](../DESIGN.md) are frozen.
+> The execution-closure, information-flow, two-phase, endpoint, and persistent-
+> authority material below is implemented only where explicitly stated; the
+> rest is candidate design or acceptance work.
 
 ## Trust boundary
 
@@ -13,7 +18,8 @@ Untrusted inputs include:
 - project files and instructions;
 - paths, arguments, URLs, downloaded artifacts, and process output;
 - tool-definition documents before decoding and admission; and
-- existing executables beyond the authority deliberately granted to them.
+- existing executables and every loader/helper/configuration path not bound by
+  the current contract.
 
 Trusted for a particular result:
 
@@ -28,6 +34,11 @@ The harness is outside this repository. If it exposes a shell, filesystem,
 network, Docker, SSH, or equivalent bypass beside Airlock, a shell-free
 reference-monitor claim is invalid.
 
+Airlock is agent-only in this threat model. It is not trying to make a human
+terminal safe. A valid harness removes direct shell and peer effect tools,
+exposes the reduced `airlock-agent` surface, and retains supervisor control of
+profile, policy, commit, undo, and reap authority.
+
 ## Current enforceable properties
 
 ### Structured process input
@@ -41,11 +52,64 @@ This does not make an invoked interpreter harmless. A deliberately admitted
 shell, Python program, build system, package script, Git hook, or plugin may
 interpret its own arguments and configuration.
 
+### Agent requests versus trusted transitions
+
+The agent can author only the four Plan nodes:
+
+```text
+Capture | Invoke | Apply | RequestExternal
+```
+
+Admission, grant/handle binding, live Hold transitions, Outbox dispatch,
+reconciliation, undo, and reap are trusted runtime or supervisor transitions.
+`RequestExternal` creates inert durable state; only `Outbox.commit` can
+dispatch it. `Apply` describes a managed mutation; it is not raw filesystem
+authority. Keeping these algebras distinct prevents “commit” or “reap” from
+becoming an accidental fifth agent primitive.
+
+### Modeled execution authority
+
+The integrated program path carries a Schema-validated `ExecutionAuthority`
+rather than erasing admission to a bare Plan. It retains the closed Plan,
+Grants, handles, exact requirement resolutions, per-node bindings,
+policy/profile identity, and a closure digest.
+
+For the fields present in Plan v1, Admission requires:
+
+- file Capture locator `read`;
+- Invoke executable `execute` and explicit cwd `read`;
+- Apply target `write`, copy source `read`, and move source `read + write`; and
+- external endpoint `connect + emit`.
+
+Unused requirements, duplicate authority identities/rights, unbound modeled
+operands, mutated closure data, and expired Grants are rejected with typed
+errors. Runtime accepts only `ExecutionAuthority`, verifies one retained
+per-node binding against the admitted handle closure, and refreshes the closure,
+Grant lifetime, and handles immediately before each dependency-ready node.
+Tampering or expiry becomes a failed `RuntimeAuthorityInvalid` node receipt and
+no effect adapter is called. Definitions may request requirements but cannot
+issue a Grant.
+
+This is operand-complete only relative to the current Plan schema. It does not
+mean argv paths, environment-selected loaders, inherited configuration,
+plugins, hooks, descendants, descriptors, or credentials are fully modeled.
+
 ### Recoverable managed changes
 
 Supported local mutation passes through Hold. The live binding is displaced
 by rename, undo checks the current binding before restoration, and
 `Hold.reap` owns the only irreversible removal site.
+
+On macOS, installing or restoring live managed bytes uses an Effect capability
+over `renamex_np(RENAME_EXCL)`. A target that appears after preflight is
+preserved and reported as a typed conflict; there is no fallback to an
+overwriting rename. Replacing rename remains limited to publishing journal
+replicas, where old and new names represent the same state record.
+
+Native adapters reserve a journaled runtime-private Hold act before populating
+candidate bytes for write/copy/move/mkdir. If population fails or is
+interrupted, the stage remains enumerable and Reaper-owned rather than becoming
+untracked adapter state.
 
 Hold and Outbox serialize their recovery transitions through a bounded,
 cancellable Airlock-home exclusive-file lease. The owner record is durably
@@ -65,6 +129,9 @@ schedule.
 `RequestExternal` and `http.stage` create durable local Outbox intent. The
 single wire-capable call is inside `Outbox.commit`. Startup recovery converts
 a stranded `committing` entry to `uncertain` rather than inventing an outcome.
+Cancel is meaningful only before dispatch claims the intent. Completed,
+failed, and uncertain are dispatch outcomes; enqueue/stage is not itself the
+external effect.
 
 Current dispatch is direct HTTP with manual redirects. It is not a contained
 EndpointBroker and does not prove DNS, proxy, loopback, Unix-socket,
@@ -74,11 +141,25 @@ descriptor-passing, credential, or protocol-idempotency policy.
 
 The native Cell:
 
+- receives a workspace canonicalized before admission by the trusted CLI;
 - runs against a fresh private workspace;
 - denies writes outside that workspace and declared temporary locations;
 - denies network;
 - fingerprints source/private state and reports a delta; and
-- requires a separate, revalidated Hold-backed Apply.
+- requires a separate, revalidated Hold-backed Apply; and
+- transfers the exact private workspace into runtime-private Hold lifecycle on
+  normal completion, typed failure, or cancellation.
+
+For native program execution, existing absolute policy scopes are
+canonicalized and the conventional `workspace` binding is replaced with the
+supervisor-selected canonical directory. A symlink-ancestor alias cannot make
+a lexically allowed directory grant a different physical workspace. Runtime
+also checks the registered private workspace and Cell-reported directory refer
+to the same device/inode before retention.
+
+These checks close the demonstrated top-level workspace alias/substitution
+paths. They do not establish general identity-safe resolution for every
+resource under symlink, rename, hardlink, or mount races.
 
 The Seatbelt profile also permits:
 
@@ -95,6 +176,13 @@ descendants before reporting completion; timeout and cancellation terminate
 the owned group, and output limits retain a bounded partial process receipt.
 PTY, double-fork/session escape, and every daemonization technique remain
 outside the proof.
+
+Runtime-private Hold acts are excluded from ordinary undo and can be discarded
+only by Reaper. The normal finalizer never prefix-sweeps neighboring paths.
+Retention failure is surfaced in the run result. A process crash before
+registration/finalization can still leave a private tree outside this lifecycle
+and requires future startup reconciliation. Held trees also consume storage
+until the supervisor reaps them.
 
 ### Fail-closed profile selection
 
@@ -116,31 +204,49 @@ withheld every alternate machine-effect tool.
 Tool definitions are decoded from JSON into a finite Schema:
 
 - no code executes while loading;
-- argument/environment/resource templates are declarative;
-- artifact and secret templates cannot be resolved by pure lowering;
-- executable constraints must match explicit absolute identities;
+- v1 accepts exactly one absolute executable and only `invoke` lowering;
+- argument/environment/resource templates and result decoders are
+  declarative;
+- unsupported artifact/secret template forms are rejected rather than
+  partially interpreted;
+- executable constraints match explicit absolute identities;
 - definitions request requirements but do not grant them; and
-- lowering produces existing native actions and Plan constructors.
+- every accepted action lowers totally to the existing structured Invoke
+  action and Plan constructors or returns a typed error.
 
-Definition signing, provenance strength, distribution, locking, and
-end-to-end program invocation remain open.
+Accepted definitions execute end to end through the same program, Admission,
+ExecutionAuthority, Runtime, and output Schema validation as native actions.
+Their digests are bound into the request and Plan. They cannot add an effect
+class, dispatch, or mint authority.
+
+Definition signing, provenance strength, distribution locking, richer
+execution-closure contracts, and whether future versions need compositions of
+the existing Plan nodes remain open.
 
 ## Candidate execution-closure contract
 
 The stronger design admits a transitive closure rather than one executable:
 
 ```text
-executable + loader/shebang chain
+root/image identity
++ executable + loader/shebang chain
 + dynamic libraries + environment + configuration
 + descendants + helpers + hooks + plugins
 + pagers/editors/credential helpers/lifecycle scripts
-+ filesystem/endpoint/secret grants + limits + lifetime
++ filesystem/endpoint/stream/artifact/credential grants
++ limits + lifetime + cancellation + receipt obligations
 ```
 
 That is an acceptance condition, not a current native guarantee. The present
 Seatbelt profile allows process execution and ambient reads, while admission
 binds the requested executable rather than mediating every later `exec` or
 config lookup.
+
+Airlock intentionally does not replace or semantically verify the program:
+`tar`, `git`, compilers, package managers, and interpreters retain their
+algorithms. A complete execution closure constrains what the opaque program can
+observe and affect; it does not prove that its application-level result matches
+the agent's intent.
 
 A future VM backend may contain unknown guest execution behind stronger host
 seams. No VM backend exists today.
@@ -169,6 +275,18 @@ revoke, persist, or authenticate capabilities, and the current Plan/Runtime/
 Outbox path does not propagate or enforce labels end to end. It therefore
 cannot yet prevent secret exfiltration or cross-plan integrity laundering.
 
+The two combinations the stronger admission model must make explicit are:
+
+```text
+confidential read + external write
+untrusted write    + later trusted execution/config/policy use
+```
+
+A conservative node/artifact label is a plausible first implementation; the
+design does not presume complete per-byte taint tracking. Declassification
+(lowering confidentiality) and endorsement (raising integrity) remain separate
+supervisor acts.
+
 Giving raw secret bytes to an executable would be disclosure, not
 declassification. Non-extractable credential capabilities are design
 direction, not current behavior.
@@ -186,6 +304,13 @@ low-authority work writes hook/config/executable
 Relevant resources include executable/search paths, definitions, policies,
 hooks, plugins, build/package scripts, SCM/tool configuration, credential
 helpers, launch agents, trust stores, and grant sources.
+
+Admission of one Plan cannot discover this time-separated flow merely by
+checking that Plan's requirements. Candidate controls include execution-
+adjacent resource classes, config-neutralizing tool contracts, persistent
+provenance/integrity, explicit endorsement before later trusted use, and
+immutable execution roots. These are design directions to test against hostile
+workloads, not frozen invariants.
 
 The current repository has label types and admission provenance, but it does
 not yet classify and enforce all of these resources across runs. Prevention
@@ -209,10 +334,16 @@ expiry and revocation
 The broker would receipt actual destinations and reject authority import such
 as unmodeled file descriptors over Unix sockets.
 
+For high-value credentials, the preferred companion is a non-extractable
+credential capability: authorize a specific signature, request, destination,
+or single-use exchange without projecting the underlying secret bytes into the
+Cell. Raw projection cannot provide a non-leakage guarantee after an opaque
+executable receives the bytes.
+
 No such broker is installed. Native Cells deny network; compatibility
 processes retain ambient host network; Outbox itself can dispatch HTTP. A
-future VM may route guest egress through a broker, but that is design
-direction only.
+future VM may route guest egress through a broker, but endpoint and credential
+brokerage are design direction only.
 
 ## Two-phase local and external work
 
@@ -241,6 +372,10 @@ Airlock does not currently protect against:
 - confidential host reads by native-contained code;
 - malicious semantics inside an admitted executable;
 - every descendant, loader, config, hook, plugin, or helper path;
+- general resource identity races beyond the canonical native workspace
+  binding;
+- native Cell trees stranded by an uncatchable crash before lifecycle
+  finalization;
 - resource exhaustion beyond the published limits;
 - unsupported filesystems, metadata, devices, or live state;
 - external consequences after dispatch;
@@ -265,6 +400,14 @@ Before claiming more than the current narrow envelope, the project needs:
 - end-to-end labels and persistent-authority fixtures;
 - endpoint-broker tests if network is advertised;
 - repeated results on each published macOS/architecture combination; and
-- a representative corpus rather than the current local Vouch/parity fixtures.
+- a representative model/harness corpus rather than the current local
+  Vouch/parity fixtures.
+
+The checked-in 72-case Unix contract corpus is useful schema/lowering/
+admission coverage, not security evidence: it executes no task and measures no
+model or harness. The ten executed parity workloads and Vouch-derived proofs
+exercise real paths, but they are still short of the frozen 50-task corpus,
+direct-shell baseline, and hostile campaigns required by the acceptance
+contract.
 
 These are defined in the [acceptance contract](acceptance.md).
