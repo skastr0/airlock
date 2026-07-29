@@ -217,6 +217,10 @@ const nodeReceipt = (
     ? [artifacts.get(node.stdin)?.artifact.digest].filter((value): value is Digest => value !== undefined)
     : node._tag === "Apply" && node.sourceArtifact !== undefined
       ? [artifacts.get(node.sourceArtifact)?.artifact.digest].filter((value): value is Digest => value !== undefined)
+      : node._tag === "RequestExternal" && node.bodyArtifact !== undefined
+        ? [artifacts.get(node.bodyArtifact)?.artifact.digest].filter(
+            (value): value is Digest => value !== undefined
+          )
       : [],
   outputArtifacts, resourceIdentities,
   ...(errorTag === undefined ? {} : { errorTag })
@@ -505,9 +509,41 @@ const make = Effect.gen(function* () {
           yield* hold.overwrite(target, content).pipe(Effect.mapError((error) => new RuntimeNodeFailure({ nodeId: node.id, operation: "Hold.overwrite", reason: `${error._tag}: ${errorReason(error)}` })))
           return node.produces
         }
-        case "RequestExternal":
-          yield* outbox.stage(new EmissionRequest({ url: node.endpoint, method: node.method }), node.holdMillis).pipe(Effect.mapError((error) => new RuntimeNodeFailure({ nodeId: node.id, operation: "stage external", reason: `${error._tag}: ${errorReason(error)}` })))
+        case "RequestExternal": {
+          const bodyArtifact = node.bodyArtifact === undefined
+            ? undefined
+            : artifacts.get(node.bodyArtifact)
+          if (node.bodyArtifact !== undefined && bodyArtifact === undefined) {
+            return yield* new RuntimeNodeFailure({
+              nodeId: node.id,
+              operation: "stage external",
+              reason: `missing body artifact ${node.bodyArtifact}`
+            })
+          }
+          let body = node.body
+          if (bodyArtifact !== undefined) {
+            try {
+              body = textDecoder.decode(bodyArtifact.bytes)
+            } catch {
+              return yield* new RuntimeUnsupported({
+                nodeId: node.id,
+                feature: "binary RequestExternal body",
+                reason: "HTTP Outbox v1 accepts text bodies; artifact bytes are not valid UTF-8"
+              })
+            }
+          }
+          yield* outbox.stage(new EmissionRequest({
+            url: node.endpoint,
+            method: node.method,
+            headers: node.headers,
+            ...(body === undefined ? {} : { body })
+          }), node.holdMillis).pipe(Effect.mapError((error) => new RuntimeNodeFailure({
+            nodeId: node.id,
+            operation: "stage external",
+            reason: `${error._tag}: ${errorReason(error)}`
+          })))
           return node.produces
+        }
       }
     })
 

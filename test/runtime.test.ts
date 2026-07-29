@@ -156,10 +156,35 @@ describe("runtime Plan interpreter", () => {
       Effect.flatMap((workspace) => Effect.gen(function* () {
         const home = join(workspace, ".airlock-home")
         const result = yield* execute(plan([
-          new RequestExternalNode({ id: node("stage"), dependsOn: [], requires: [], produces: [], endpoint: "https://example.invalid/never-dispatched", method: "POST", holdMillis: 60_000 })
+          new RequestExternalNode({
+            id: node("stage"),
+            dependsOn: [],
+            requires: [],
+            produces: [],
+            endpoint: "https://example.invalid/never-dispatched",
+            method: "POST",
+            headers: {
+              "content-type": "application/json",
+              authorization: "Bearer never-expose"
+            },
+            body: "{\"phase\":\"stage-only\"}",
+            holdMillis: 60_000
+          })
         ]), compatibilityLayer(workspace, home))
         expect(result.state).toBe("succeeded")
         expect(existsSync(join(home, "outbox"))).toBe(true)
+        const [stateDirectory] = readdirSync(join(home, "outbox"))
+        expect(stateDirectory).toMatch(/^emi_.+\.staged$/)
+        const manifest = JSON.parse(
+          readFileSync(join(home, "outbox", stateDirectory!, "manifest.json"), "utf8")
+        ) as {
+          readonly intent: { readonly headerNames: ReadonlyArray<string>; readonly bodyBytes: number }
+          readonly request: { readonly headers: Record<string, string>; readonly body?: string }
+        }
+        expect(manifest.intent.headerNames).toEqual(["authorization", "content-type"])
+        expect(manifest.intent.bodyBytes).toBe(new TextEncoder().encode("{\"phase\":\"stage-only\"}").byteLength)
+        expect(manifest.request.headers.authorization).toBe("[redacted]")
+        expect(manifest.request.body).not.toContain("stage-only")
       }))
     )
   )
