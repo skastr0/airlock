@@ -2,6 +2,7 @@ import { FileSystem, Path } from "@effect/platform"
 import { Effect } from "effect"
 import { AirlockHome } from "../AirlockHome.ts"
 import { EmissionId } from "../domain.ts"
+import { makeExclusiveFileLock } from "../platform/ExclusiveFileLock.ts"
 import {
   OutboxState,
   OutboxStateCorrupt,
@@ -31,6 +32,13 @@ export interface StoredEmission {
 }
 
 export interface FileOutboxStore {
+  /**
+   * Serializes dispatch/recovery across Airlock processes. The lock is global
+   * to one Airlock home because startup recovery must not race any live commit.
+   */
+  readonly withExclusive: <A, E, R>(
+    effect: Effect.Effect<A, E, R>
+  ) => Effect.Effect<A, E | OutboxStorageFailed, R>
   readonly create: (
     id: EmissionId,
     manifestJson: string,
@@ -93,6 +101,10 @@ export const makeFileOutboxStore = Effect.gen(function* () {
 
   const statePath = (id: EmissionId, state: OutboxState) =>
     path.join(home.outboxDir, `${id}.${state}`)
+  const lockRoot = path.join(home.home, "outbox-locks")
+  const activeLock = path.join(lockRoot, "active")
+  const releasedLock = path.join(lockRoot, "released")
+  const abandonedLock = path.join(lockRoot, "abandoned")
 
   const validateId = (id: EmissionId) =>
     safeIdPattern.test(id)
@@ -149,6 +161,24 @@ export const makeFileOutboxStore = Effect.gen(function* () {
   yield* fs
     .chmod(home.outboxDir, 0o700)
     .pipe(Effect.mapError((cause) => fail("secure-root", cause)))
+  yield* fs
+    .makeDirectory(lockRoot, { recursive: true, mode: 0o700 })
+    .pipe(Effect.mapError((cause) => fail("initialize-lock", cause)))
+  yield* fs
+    .chmod(lockRoot, 0o700)
+    .pipe(Effect.mapError((cause) => fail("secure-lock-root", cause)))
+
+  const lock = makeExclusiveFileLock({
+    root: lockRoot,
+    active: activeLock,
+    released: releasedLock,
+    abandoned: abandonedLock,
+    onError: (operation, _target, cause) =>
+      fail(`lock-${operation}`, cause)
+  })
+
+  const withExclusive = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
+    lock.withLock(effect)
 
   const entries = fs
     .readDirectory(home.outboxDir)
@@ -359,6 +389,7 @@ export const makeFileOutboxStore = Effect.gen(function* () {
   // expiry must be implemented by the single authorized reaper, not by adding
   // an Outbox-local unlink path.
   return {
+    withExclusive,
     create,
     findState,
     read,

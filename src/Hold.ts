@@ -18,6 +18,7 @@ import {
   UnknownAct
 } from "./domain.ts"
 import { Ledger, type LedgerError } from "./Ledger.ts"
+import { makeExclusiveFileLock } from "./platform/ExclusiveFileLock.ts"
 
 // The recovery floor, by construction: the destructive part of every mutation
 // is a rename. The single unlink site in this component is `reap` — the runner's
@@ -220,6 +221,8 @@ const make = Effect.gen(function* () {
   const stageFile = (id: string) => path.join(actDir(id), "stage")
   const lockRoot = path.join(home.home, "hold-locks")
   const activeLock = path.join(lockRoot, "active")
+  const releasedLock = path.join(lockRoot, "released")
+  const abandonedLock = path.join(lockRoot, "abandoned")
 
   const fsError = (operation: string, target: string) => (cause: unknown) =>
     new HoldFilesystemError({ operation, target, reason: reasonOf(cause) })
@@ -237,116 +240,92 @@ const make = Effect.gen(function* () {
     .makeDirectory(lockRoot, { recursive: true })
     .pipe(Effect.mapError(fsError("create Hold lock directory", lockRoot)))
 
+  const syncDirectory = (directory: string, operation: string) =>
+    Effect.tryPromise({
+      try: async () => {
+        const handle = await open(directory, "r")
+        try {
+          await handle.sync()
+        } finally {
+          await handle.close()
+        }
+      },
+      catch: fsError(operation, directory)
+    })
+
+  const renameDurable = (
+    source: string,
+    target: string,
+    operation: string
+  ) =>
+    fs.rename(source, target).pipe(
+      Effect.mapError(fsError(operation, target)),
+      Effect.zipRight(
+        Effect.forEach(
+          [...new Set([path.dirname(source), path.dirname(target)])],
+          (directory) =>
+            syncDirectory(directory, `${operation} directory sync`),
+          { concurrency: 1, discard: true }
+        )
+      )
+    )
+
+  const writeNewDurable = (
+    target: string,
+    content: string,
+    operation: string
+  ) =>
+    Effect.tryPromise({
+      try: async () => {
+        const handle = await open(target, "wx", 0o600)
+        try {
+          await handle.writeFile(content, "utf8")
+          await handle.sync()
+        } finally {
+          await handle.close()
+        }
+      },
+      catch: fsError(operation, target)
+    }).pipe(
+      Effect.zipRight(
+        syncDirectory(path.dirname(target), `${operation} directory sync`)
+      )
+    )
+
   const writeJournal = (journal: HoldJournal) =>
     encodeJournal(journal).pipe(
       Effect.mapError(fsError("encode hold journal", manifestFile(journal.manifest.id))),
       Effect.flatMap((json) => {
         const target = manifestFile(journal.manifest.id)
         const staged = `${target}.next-${crypto.randomUUID()}`
-        return Effect.tryPromise({
-          try: async () => {
-            const handle = await open(staged, "wx", 0o600)
-            try {
-              await handle.writeFile(json, "utf8")
-              await handle.sync()
-            } finally {
-              await handle.close()
-            }
-          },
-          catch: fsError("write staged hold journal", staged)
-        }).pipe(
+        return writeNewDurable(
+          staged,
+          json,
+          "write staged hold journal"
+        ).pipe(
           Effect.zipRight(
-            fs.rename(staged, target).pipe(
-              Effect.mapError(fsError("install hold journal", target))
-            )
+            renameDurable(staged, target, "install hold journal")
           )
         )
       })
     )
 
-  const ownerFile = (directory: string) => path.join(directory, "owner.json")
-  const processExists = (pid: number) => {
-    try {
-      process.kill(pid, 0)
-      return true
-    } catch (cause) {
-      return (cause as NodeJS.ErrnoException).code !== "ESRCH"
-    }
-  }
-  const realDelay = (milliseconds: number) =>
-    Effect.async<void>((resume) => {
-      const timer = setTimeout(() => resume(Effect.void), milliseconds)
-      return Effect.sync(() => clearTimeout(timer))
-    })
-
   /**
-   * Cross-process serialization uses only create/write/rename. Releasing or
-   * recovering a lease renames it to a unique tombstone; Reaper remains the
-   * only component that can physically unlink state.
+   * Cross-process serialization uses a bounded three-file protocol. Releasing
+   * or recovering a lease is an atomic rename over one reusable tombstone;
+   * Reaper remains the only component that can physically unlink state.
    */
-  const acquireLock = Effect.fnUntraced(function* () {
-    const started = Date.now()
-    while (Date.now() - started < 30_000) {
-      const token = crypto.randomUUID()
-      const candidate = path.join(lockRoot, `candidate-${token}`)
-      yield* fs
-        .makeDirectory(candidate)
-        .pipe(Effect.mapError(fsError("create Hold lock candidate", candidate)))
-      yield* fs
-        .writeFileString(
-          ownerFile(candidate),
-          JSON.stringify({ token, pid: process.pid, createdAt: new Date().toISOString() })
-        )
-        .pipe(Effect.mapError(fsError("write Hold lock owner", ownerFile(candidate))))
-
-      const claimed = yield* fs.rename(candidate, activeLock).pipe(Effect.either)
-      if (claimed._tag === "Right") return token
-
-      yield* fs
-        .rename(candidate, path.join(lockRoot, `released-${token}`))
-        .pipe(Effect.mapError(fsError("retire Hold lock candidate", candidate)))
-
-      const owner = yield* fs.readFileString(ownerFile(activeLock)).pipe(Effect.either)
-      if (owner._tag === "Right") {
-        const decoded = yield* Effect.sync(() => {
-          try {
-            return JSON.parse(owner.right) as { readonly pid?: unknown }
-          } catch {
-            return undefined
-          }
-        })
-        if (
-          decoded !== undefined &&
-          typeof decoded.pid === "number" &&
-          Number.isSafeInteger(decoded.pid) &&
-          decoded.pid > 0 &&
-          !processExists(decoded.pid)
-        ) {
-          const abandoned = path.join(lockRoot, `abandoned-${crypto.randomUUID()}`)
-          yield* fs.rename(activeLock, abandoned).pipe(Effect.either)
-          continue
-        }
-      }
-      yield* realDelay(10)
-    }
-    return yield* new HoldFilesystemError({
-      operation: "acquire Hold lock",
-      target: activeLock,
-      reason: "timed out after 30000ms"
-    })
+  const lock = makeExclusiveFileLock({
+    root: lockRoot,
+    active: activeLock,
+    released: releasedLock,
+    abandoned: abandonedLock,
+    onError: (operation, target, cause) =>
+      fsError(`Hold lock ${operation}`, target)(cause)
   })
 
-  const releaseLock = (token: string) =>
-    fs.rename(activeLock, path.join(lockRoot, `released-${token}`)).pipe(
-      Effect.mapError(fsError("release Hold lock", activeLock))
-    )
-
   const withLock = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
-    Effect.acquireUseRelease(
-      acquireLock(),
-      () => effect,
-      (token) => releaseLock(token).pipe(Effect.orDie)
-    )
+    lock.withLock(effect)
 
   const decodeStoredJournal = (raw: string, id: ActId) =>
     decodeJournal(raw).pipe(
@@ -364,14 +343,113 @@ const make = Effect.gen(function* () {
       Effect.mapError(fsError("decode hold journal", manifestFile(id)))
     )
 
+  type JournalCandidate = Readonly<{
+    readonly file: string
+    readonly modifiedAt: number
+    readonly journal: HoldJournal
+  }>
+
+  const journalRank = (state: HoldJournal["state"]) =>
+    state === "prepared" ? 0 : state === "held" ? 1 : 2
+
+  /**
+   * Journal publication is file-sync + rename + directory-sync. If the
+   * process stopped between the first two steps, the durable `.next-*` file is
+   * still authoritative recovery material. Select the furthest valid state
+   * (then the newest file), and atomically promote it before reconciliation.
+   */
+  const loadRecoverableJournal = Effect.fnUntraced(function* (id: ActId) {
+    const directory = actDir(id)
+    const entries = yield* fs
+      .readDirectory(directory)
+      .pipe(Effect.mapError(fsError("list hold journal candidates", directory)))
+    const names = entries.filter(
+      (entry) =>
+        entry === "manifest.json" ||
+        entry.startsWith("manifest.json.next-")
+    )
+    if (names.length === 0) {
+      return yield* new HoldFilesystemError({
+        operation: "read hold journal",
+        target: manifestFile(id),
+        reason: "no durable journal candidate"
+      })
+    }
+
+    const decoded = yield* Effect.forEach(
+      names,
+      (name) => {
+        const candidate = path.join(directory, name)
+        return Effect.all({
+          raw: fs
+            .readFileString(candidate)
+            .pipe(Effect.mapError(fsError("read hold journal candidate", candidate))),
+          info: Effect.tryPromise({
+            try: () => lstat(candidate),
+            catch: fsError("stat hold journal candidate", candidate)
+          })
+        }).pipe(
+          Effect.flatMap(({ raw, info }) =>
+            decodeStoredJournal(raw, id).pipe(
+              Effect.flatMap((journal) =>
+                journal.manifest.id === id
+                  ? Effect.succeed({
+                      file: candidate,
+                      modifiedAt: info.mtimeMs,
+                      journal
+                    } satisfies JournalCandidate)
+                  : Effect.fail(
+                      new HoldFilesystemError({
+                        operation: "decode hold journal",
+                        target: candidate,
+                        reason: `journal id ${journal.manifest.id} does not match ${id}`
+                      })
+                    )
+              )
+            )
+          ),
+          Effect.either
+        )
+      },
+      { concurrency: 1 }
+    )
+    const valid = decoded.flatMap((result) =>
+      result._tag === "Right" ? [result.right] : []
+    )
+    if (valid.length === 0) {
+      const failure = decoded.find((result) => result._tag === "Left")
+      return yield* failure?._tag === "Left"
+        ? failure.left
+        : new HoldFilesystemError({
+            operation: "decode hold journal",
+            target: manifestFile(id),
+            reason: "no valid journal candidate"
+          })
+    }
+
+    valid.sort((left, right) => {
+      const state = journalRank(right.journal.state) - journalRank(left.journal.state)
+      return state === 0 ? right.modifiedAt - left.modifiedAt : state
+    })
+    const selected = valid[0]!
+    if (selected.file !== manifestFile(id)) {
+      yield* renameDurable(
+        selected.file,
+        manifestFile(id),
+        "promote staged hold journal"
+      )
+    }
+    return selected.journal
+  })
+
   const readJournal = (id: ActId) =>
-    fs.readFileString(manifestFile(id)).pipe(
+    fs.stat(actDir(id)).pipe(
       Effect.mapError((error) =>
         error._tag === "SystemError" && error.reason === "NotFound"
           ? new UnknownAct({ id })
-          : fsError("read hold journal", manifestFile(id))(error)
+          : fsError("stat hold act", actDir(id))(error)
       ),
-      Effect.flatMap((raw) => decodeStoredJournal(raw, id))
+      Effect.zipRight(loadRecoverableJournal(id))
     )
 
   const pathExists = (target: string) =>
@@ -522,6 +600,7 @@ const make = Effect.gen(function* () {
     yield* fs
       .makeDirectory(actDir(manifest.id), { recursive: true })
       .pipe(Effect.mapError(fsError("create hold act", actDir(manifest.id))))
+    yield* syncDirectory(home.holdDir, "create hold act directory sync")
     yield* writeJournal(
       new HoldJournal({ state: "prepared", manifest, ...(retained === undefined ? {} : { retained }) })
     )
@@ -548,9 +627,7 @@ const make = Effect.gen(function* () {
       at
     })
     yield* reserveAct(manifest, entry.retained)
-    yield* fs
-      .rename(target, payloadFile(id))
-      .pipe(Effect.mapError(fsError("retain target", target)))
+    yield* renameDurable(target, payloadFile(id), "retain target")
     yield* writeJournal(
       new HoldJournal({ state: "held", manifest, retained: entry.retained })
     )
@@ -583,14 +660,18 @@ const make = Effect.gen(function* () {
     manifest: HeldManifest,
     content: string
   ) {
-    yield* fs
-      .writeFileString(stageFile(manifest.id), content)
-      .pipe(Effect.mapError(fsError("write staged replacement", stageFile(manifest.id))))
+    yield* writeNewDurable(
+      stageFile(manifest.id),
+      content,
+      "write staged replacement"
+    )
     const occupied = yield* pathExists(manifest.target)
     if (occupied) return yield* new TargetOccupied({ target: manifest.target })
-    yield* fs
-      .rename(stageFile(manifest.id), manifest.target)
-      .pipe(Effect.mapError(fsError("install staged replacement", manifest.target)))
+    yield* renameDurable(
+      stageFile(manifest.id),
+      manifest.target,
+      "install staged replacement"
+    )
     if (!manifest.hasPayload) {
       yield* writeJournal(new HoldJournal({ state: "held", manifest }))
     }
@@ -605,11 +686,12 @@ const make = Effect.gen(function* () {
   ) {
     const occupied = yield* pathExists(manifest.target)
     if (occupied) return yield* new TargetOccupied({ target: manifest.target })
-    yield* fs.rename(source, manifest.target).pipe(
+    yield* renameDurable(source, manifest.target, "install replacement source").pipe(
       Effect.mapError((error) =>
-        error._tag === "SystemError" && error.reason === "NotFound"
+        error._tag === "HoldFilesystemError" &&
+        error.reason.includes("NotFound")
           ? new SourceNotFound({ source })
-          : fsError("install replacement source", source)(error)
+          : error
       )
     )
     if (!manifest.hasPayload) {
@@ -631,9 +713,11 @@ const make = Effect.gen(function* () {
           target: manifest.target
         })
       }
-      yield* fs
-        .rename(payloadFile(manifest.id), manifest.target)
-        .pipe(Effect.mapError(fsError("restore target after failed install", manifest.target)))
+      yield* renameDurable(
+        payloadFile(manifest.id),
+        manifest.target,
+        "restore target after failed install"
+      )
     }
     yield* writeJournal(
       new HoldJournal({
@@ -745,10 +829,7 @@ const make = Effect.gen(function* () {
           Effect.mapError(fsError("stat hold act", actDir(id))),
           Effect.flatMap((info) =>
             info.type === "Directory"
-              ? fs.readFileString(manifestFile(id)).pipe(
-                  Effect.mapError(fsError("read hold journal", manifestFile(id))),
-                  Effect.flatMap((raw) => decodeStoredJournal(raw, id))
-                )
+              ? loadRecoverableJournal(id)
               : Effect.succeed(undefined)
           )
         )
@@ -905,9 +986,11 @@ const make = Effect.gen(function* () {
       yield* fs
         .makeDirectory(path.dirname(manifest.target), { recursive: true })
         .pipe(Effect.mapError(fsError("create undo parent", path.dirname(manifest.target))))
-      yield* fs
-        .rename(payloadFile(id), manifest.target)
-        .pipe(Effect.mapError(fsError("restore held payload", manifest.target)))
+      yield* renameDurable(
+        payloadFile(id),
+        manifest.target,
+        "restore held payload"
+      )
     }
     yield* writeJournal(
       new HoldJournal({
@@ -956,6 +1039,7 @@ const make = Effect.gen(function* () {
       yield* fs
         .remove(actDir(journal.manifest.id), { recursive: true })
         .pipe(Effect.mapError(fsError("reap hold act", actDir(journal.manifest.id))))
+      yield* syncDirectory(home.holdDir, "reap hold act directory sync")
       yield* ledger.record(
         new LedgerEntry({
           at: now,

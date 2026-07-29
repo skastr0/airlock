@@ -1,7 +1,7 @@
 import { FileSystem, Path } from "@effect/platform"
 import { BunContext } from "@effect/platform-bun"
 import { describe, expect, it } from "@effect/vitest"
-import { Context, Effect, Layer } from "effect"
+import { Context, Effect, Fiber, Layer } from "effect"
 import * as http from "node:http"
 import type { AddressInfo } from "node:net"
 import * as AirlockHome from "../src/AirlockHome.ts"
@@ -19,6 +19,7 @@ const layersFor = (home: string) =>
 interface World {
   readonly outbox: Context.Tag.Service<typeof Outbox>
   readonly received: () => number
+  readonly home: string
   readonly url: string
 }
 
@@ -28,17 +29,22 @@ const world = <A, E>(body: (ctx: World) => Effect.Effect<A, E>) =>
       const fs = yield* FileSystem.FileSystem
       const path = yield* Path.Path
       const tmp = yield* fs.makeTempDirectoryScoped()
+      const home = path.join(tmp, "airlock-home")
       const outbox = yield* Effect.provide(
         Outbox,
-        layersFor(path.join(tmp, "airlock-home"))
+        layersFor(home)
       )
       let hits = 0
       const server = yield* Effect.acquireRelease(
         Effect.async<http.Server>((resume) => {
-          const s = http.createServer((_req, res) => {
+          const s = http.createServer((req, res) => {
             hits += 1
-            res.writeHead(200)
-            res.end("ok")
+            const respond = () => {
+              res.writeHead(200)
+              res.end("ok")
+            }
+            if (req.url === "/slow") setTimeout(respond, 150)
+            else respond()
           })
           s.listen(0, "127.0.0.1", () => resume(Effect.succeed(s)))
         }),
@@ -51,6 +57,7 @@ const world = <A, E>(body: (ctx: World) => Effect.Effect<A, E>) =>
       return yield* body({
         outbox,
         received: () => hits,
+        home,
         url: `http://127.0.0.1:${address.port}/hook`
       })
     })
@@ -113,6 +120,29 @@ describe("Outbox — cancellable emissions", () => {
         const report = yield* outbox.flush
         expect(report.committed.map((e) => e.id)).toEqual([due.id])
         expect(report.waiting).toBe(1)
+        expect(received()).toBe(1)
+      })
+    )
+  )
+
+  it.effect("does not recover a live commit from another Airlock process as uncertain", () =>
+    world(({ home, outbox, received, url }) =>
+      Effect.gen(function* () {
+        const staged = yield* outbox.stage(post(url.replace("/hook", "/slow")), 0)
+        const committing = yield* Effect.fork(outbox.commit(staged.id))
+        yield* Effect.async<void>((resume) => {
+          const timer = setTimeout(() => resume(Effect.void), 25)
+          return Effect.sync(() => clearTimeout(timer))
+        })
+
+        // Constructing another Outbox used to recover every `.committing`
+        // directory immediately. It must now wait for the live claimant.
+        const observer = yield* Effect.provide(Outbox, layersFor(home))
+        const observed = yield* observer.inspect(staged.id)
+        const committed = yield* Fiber.join(committing)
+
+        expect(committed.status).toBe("committed")
+        expect(observed.status).toBe("committed")
         expect(received()).toBe(1)
       })
     )

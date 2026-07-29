@@ -3,6 +3,7 @@ import type { PlatformError } from "@effect/platform/Error"
 import { BunContext } from "@effect/platform-bun"
 import { describe, expect, it } from "@effect/vitest"
 import { Context, Effect, Layer } from "effect"
+import { utimes } from "node:fs/promises"
 import { fileURLToPath } from "node:url"
 import * as AirlockHome from "../src/AirlockHome.ts"
 import { Hold, HoldLive } from "../src/Hold.ts"
@@ -189,6 +190,33 @@ describe("Hold — undoable mutations", () => {
     )
   )
 
+  it.effect("promotes a durable staged-only journal after a publication crash", () =>
+    world(({ fs, hold, path, tmp }) =>
+      Effect.gen(function* () {
+        const file = path.join(tmp, "staged-journal.txt")
+        yield* fs.writeFileString(file, "recover me")
+        const receipt = yield* hold.remove(file)
+        const home = path.join(tmp, "airlock-home")
+        const canonical = path.join(
+          home,
+          "hold",
+          receipt.id,
+          "manifest.json"
+        )
+        const staged = `${canonical}.next-crash-fixture`
+        yield* fs.rename(canonical, staged)
+
+        const reconstructed = yield* Effect.provide(Hold, layersFor(home))
+        expect((yield* reconstructed.held).map((entry) => entry.id)).toContain(
+          receipt.id
+        )
+        expect(yield* fs.exists(canonical)).toBe(true)
+        yield* reconstructed.undo(receipt.id)
+        expect(yield* fs.readFileString(file)).toBe("recover me")
+      })
+    )
+  )
+
   it.effect("replaceFrom renames a Cell file into place and undo restores the prior target", () =>
     world(({ fs, hold, path, tmp }) =>
       Effect.gen(function* () {
@@ -355,6 +383,37 @@ describe("Hold — undoable mutations", () => {
         expect(["initial", "from-first", "from-second"]).toContain(
           yield* fs.readFileString(target)
         )
+      })
+    )
+  )
+
+  it.effect("reclaims an old malformed lock and keeps lock storage bounded", () =>
+    world(({ fs, hold, path, tmp }) =>
+      Effect.gen(function* () {
+        const home = path.join(tmp, "airlock-home")
+        const lockRoot = path.join(home, "hold-locks")
+        const active = path.join(lockRoot, "active")
+        yield* fs.writeFileString(active, "{}")
+        yield* Effect.tryPromise(() =>
+          utimes(active, new Date(0), new Date(0))
+        )
+
+        const reconstructed = yield* Effect.provide(Hold, layersFor(home))
+        const target = path.join(tmp, "bounded.txt")
+        for (let index = 0; index < 20; index += 1) {
+          yield* reconstructed.overwrite(target, String(index))
+        }
+
+        const lockEntries = yield* fs.readDirectory(lockRoot)
+        expect(lockEntries.every((entry) =>
+          entry === "active" ||
+          entry === "released" ||
+          entry === "abandoned"
+        )).toBe(true)
+        expect(lockEntries.length).toBeLessThanOrEqual(3)
+        expect(yield* fs.readFileString(target)).toBe("19")
+        // Ensure the original service can still acquire the shared protocol.
+        expect((yield* hold.overwrite(target, "final")).previousHeld).toBe(true)
       })
     )
   )
