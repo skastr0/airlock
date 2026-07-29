@@ -36,7 +36,8 @@
     "uninstall:macos": "sh scripts/uninstall-macos.sh",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "verify": "bun run typecheck && bun run test"
+    "test:bun": "bun run scripts/verify-bun-integrations.ts",
+    "verify": "bun run typecheck && bun run test && bun run test:bun"
   },
   "dependencies": {
     "@effect/cli": "^0.75.0",
