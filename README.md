@@ -28,11 +28,15 @@ bun run build:macos
 sh scripts/install-macos.sh
 export PATH="$HOME/.local/bin:$PATH"
 airlock doctor
+airlock-agent actions
 ```
 
 `build:macos` creates a standalone binary plus a SHA-256 manifest in a fresh
-`dist/` directory. The installer verifies the checksum and refuses to replace
-an existing binary unless `--replace` is supplied. The builder accepts
+`dist/` directory. The installer verifies, probes, and installs the paired
+`airlock` and `airlock-agent` binaries before displacing either existing
+binary; `--replace` preserves prior binaries in a unique Trash transaction.
+The builder applies and verifies local ad-hoc code signatures before hashing;
+Developer ID signing and notarization remain release-owner work. It accepts
 `--target bun-darwin-x64`, but the published evidence must say which
 architecture actually ran.
 

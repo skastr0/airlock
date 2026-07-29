@@ -5,8 +5,8 @@
   "packageManager": "bun@1.3.11",
   "description": "The chamber between agents and the world: every mutation recoverable, every emission cancellable, everything ledgered.",
   "bin": {
-    "airlock": "./src/cli.ts",
-    "airlock-agent": "./src/agent-cli.ts"
+    "airlock": "src/cli.ts",
+    "airlock-agent": "src/agent-cli.ts"
   },
   "files": [
     "src",
@@ -21,8 +21,11 @@
     "LICENSE"
   ],
   "engines": {
-    "bun": ">=1.3.0"
+    "bun": ">=1.3.11"
   },
+  "os": [
+    "darwin"
+  ],
   "publishConfig": {
     "access": "public"
   },

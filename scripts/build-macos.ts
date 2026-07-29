@@ -89,6 +89,26 @@ for (const executable of executables) {
   if (build.exitCode !== 0) {
     throw new Error(`Bun compile failed for ${executable.name} with exit ${build.exitCode}`)
   }
+
+  // Local ad-hoc signing makes a freshly compiled executable runnable under
+  // normal macOS code-signing checks. Public Developer ID signing and
+  // notarization intentionally remain a human release gate.
+  const sign = Bun.spawnSync({
+    cmd: ["codesign", "--force", "--sign", "-", executable.path],
+    stdout: "inherit",
+    stderr: "inherit"
+  })
+  if (sign.exitCode !== 0) {
+    throw new Error(`codesign failed for ${executable.name} with exit ${sign.exitCode}`)
+  }
+  const verify = Bun.spawnSync({
+    cmd: ["codesign", "--verify", "--deep", "--strict", executable.path],
+    stdout: "inherit",
+    stderr: "inherit"
+  })
+  if (verify.exitCode !== 0) {
+    throw new Error(`codesign verification failed for ${executable.name} with exit ${verify.exitCode}`)
+  }
 }
 
 const built = executables.map((executable) => {

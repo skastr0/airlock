@@ -25,14 +25,23 @@ const sha256 = (path: string) =>
 
 const fixture = (temporary: string) => {
   const source = join(temporary, "airlock")
+  const agentSource = join(temporary, "airlock-agent")
   const checksum = join(temporary, "airlock.sha256")
   writeFileSync(
     source,
     "#!/bin/sh\nif [ \"${1:-}\" = \"--version\" ]; then echo airlock-test; exit 0; fi\nif [ \"${1:-}\" = \"doctor\" ]; then echo healthy; exit 0; fi\nexit 64\n"
   )
   chmodSync(source, 0o755)
-  writeFileSync(checksum, `${sha256(source)}  airlock\n`)
-  return { source, checksum }
+  writeFileSync(
+    agentSource,
+    "#!/bin/sh\nif [ \"${1:-}\" = \"--version\" ]; then echo airlock-agent-test; exit 0; fi\nexit 64\n"
+  )
+  chmodSync(agentSource, 0o755)
+  writeFileSync(
+    checksum,
+    `${sha256(source)}  airlock\n${sha256(agentSource)}  airlock-agent\n`
+  )
+  return { source, agentSource, checksum }
 }
 
 const run = (script: string, args: Array<string>, temporary: string) =>
@@ -59,6 +68,7 @@ describe("macOS distribution scripts", () => {
 
     expect(result.status).toBe(0)
     expect(existsSync(join(prefix, "bin", "airlock"))).toBe(true)
+    expect(existsSync(join(prefix, "bin", "airlock-agent"))).toBe(true)
     expect(result.stdout).toContain("healthy")
   })
 
@@ -85,13 +95,16 @@ describe("macOS distribution scripts", () => {
     )
     expect(replaced.status).toBe(0)
     expect(readFileSync(target, "utf8")).toContain("airlock-test")
+    expect(readFileSync(join(prefix, "bin", "airlock-agent"), "utf8")).toContain(
+      "airlock-agent-test"
+    )
     const trash = join(temporary, "trash")
     expect(existsSync(trash)).toBe(true)
   })
 
   it("rejects a corrupt artifact and moves an installed binary to temporary Trash on uninstall", () => {
     const temporary = root()
-    const { checksum, source } = fixture(temporary)
+    const { agentSource, checksum, source } = fixture(temporary)
     const prefix = join(temporary, "prefix")
     writeFileSync(checksum, "0".repeat(64) + "  airlock\n")
     const rejected = run(
@@ -102,7 +115,10 @@ describe("macOS distribution scripts", () => {
     expect(rejected.status).toBe(65)
     expect(existsSync(join(prefix, "bin", "airlock"))).toBe(false)
 
-    writeFileSync(checksum, `${sha256(source)}  airlock\n`)
+    writeFileSync(
+      checksum,
+      `${sha256(source)}  airlock\n${sha256(agentSource)}  airlock-agent\n`
+    )
     expect(
       run(install, ["--source", source, "--checksum", checksum, "--prefix", prefix], temporary)
         .status
@@ -110,6 +126,39 @@ describe("macOS distribution scripts", () => {
     const removed = run(uninstall, ["--prefix", prefix], temporary)
     expect(removed.status).toBe(0)
     expect(existsSync(join(prefix, "bin", "airlock"))).toBe(false)
+    expect(existsSync(join(prefix, "bin", "airlock-agent"))).toBe(false)
     expect(existsSync(join(temporary, "trash"))).toBe(true)
+  })
+
+  it("rejects root-equivalent prefixes and does not replace either binary before both candidates probe", () => {
+    const temporary = root()
+    const { agentSource, checksum, source } = fixture(temporary)
+    const rootPrefix = run(
+      install,
+      ["--source", source, "--checksum", checksum, "--prefix", "/tmp/../"],
+      temporary
+    )
+    expect(rootPrefix.status).not.toBe(0)
+
+    writeFileSync(agentSource, "#!/bin/sh\nexit 73\n")
+    chmodSync(agentSource, 0o755)
+    writeFileSync(
+      checksum,
+      `${sha256(source)}  airlock\n${sha256(agentSource)}  airlock-agent\n`
+    )
+    const prefix = join(temporary, "prefix")
+    const target = join(prefix, "bin", "airlock")
+    const agentTarget = join(prefix, "bin", "airlock-agent")
+    mkdirSync(join(prefix, "bin"), { recursive: true })
+    writeFileSync(target, "prior-supervisor")
+    writeFileSync(agentTarget, "prior-agent")
+    const failed = run(
+      install,
+      ["--source", source, "--checksum", checksum, "--prefix", prefix, "--replace"],
+      temporary
+    )
+    expect(failed.status).not.toBe(0)
+    expect(readFileSync(target, "utf8")).toBe("prior-supervisor")
+    expect(readFileSync(agentTarget, "utf8")).toBe("prior-agent")
   })
 })
