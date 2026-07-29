@@ -446,8 +446,6 @@ export const lowerToolAction = (
       })
     }
 
-    yield* validateToolValue(definition, action, action.inputSchema, request.input)
-
     const executableConstraint = yield* selectExecutableConstraint(
       definition.id,
       action.name,
@@ -487,8 +485,13 @@ export const lowerToolAction = (
             "stdin",
             "Artifact",
             action.stdin.path,
-            "runtime-binding-required"
-          )
+          "runtime-binding-required"
+        )
+
+    // Template failures are more actionable than a schema summary. Once every
+    // requested argv/cwd/resource atom is safely resolved, validate the full
+    // finite input shape before any native lowering can occur.
+    yield* validateToolValue(definition, action, action.inputSchema, request.input)
 
     const call: typeof ProcessRunAction.Type = {
       action: "process.run",

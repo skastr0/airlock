@@ -241,17 +241,6 @@ const nonBlank = (definition: ToolDefinition, field: string, value: string) =>
     ? Effect.fail(new InvalidToolDefinition({ id: definition.id, field, reason: "must not be blank" }))
     : Effect.void
 
-const languageIdentifier = /^[A-Za-z_][A-Za-z0-9_]*$/
-
-const namespaceAtom = (definition: ToolDefinition, field: string, value: string) =>
-  languageIdentifier.test(value)
-    ? Effect.void
-    : Effect.fail(new InvalidToolDefinition({
-      id: definition.id,
-      field,
-      reason: "must be an Airlock identifier so <definition id>.<action> is callable"
-    }))
-
 /**
  * The definition format accepts a deliberately small JSON-Schema-shaped
  * vocabulary. It is a validation format, never a hook for executable code or
@@ -305,9 +294,6 @@ const parseToolSchema = (
       const required = record.required
       if (required !== undefined && (!Array.isArray(required) || !required.every((item) => typeof item === "string"))) {
         return yield* schemaFailure(definition, action, which, `${path}.required`, "must be an array of property names")
-      }
-      if ((required ?? []).some((key) => !(key in properties))) {
-        return yield* schemaFailure(definition, action, which, `${path}.required`, "may name only declared properties")
       }
       if (record.additionalProperties !== undefined && typeof record.additionalProperties !== "boolean") {
         return yield* schemaFailure(definition, action, which, `${path}.additionalProperties`, "must be a boolean")
@@ -394,7 +380,6 @@ export const validateToolDefinition = (
 ): Effect.Effect<ToolDefinition, InvalidToolDefinition | DuplicateToolAction> =>
   Effect.gen(function* () {
     yield* nonBlank(definition, "id", definition.id)
-    yield* namespaceAtom(definition, "id", definition.id)
     yield* nonBlank(definition, "version", definition.version)
     if (definition.executables.length === 0) {
       return yield* new InvalidToolDefinition({
@@ -416,7 +401,6 @@ export const validateToolDefinition = (
     }
     for (const action of definition.actions) {
       yield* nonBlank(definition, "actions[].name", action.name)
-      yield* namespaceAtom(definition, `actions.${action.name}.name`, action.name)
       yield* parseToolSchema(definition, action, "input", action.inputSchema).pipe(
         Effect.asVoid,
         Effect.mapError((error) => new InvalidToolDefinition({ id: definition.id, field: `actions.${action.name}.inputSchema${error.path.slice(1)}`, reason: error.reason }))
@@ -516,7 +500,11 @@ export const loadKnownToolDefinitions = (
     const keys = loaded.map(({ definition }) => definition.id)
     const duplicate = duplicates(keys)[0]
     if (duplicate !== undefined) {
-      return yield* new DuplicateToolDefinition({ id: duplicate, version: "" })
+      const versions = loaded
+        .filter(({ definition }) => definition.id === duplicate)
+        .map(({ definition }) => definition.version)
+        .sort((left, right) => left.localeCompare(right, "en"))
+      return yield* new DuplicateToolDefinition({ id: duplicate, version: versions[0] ?? "" })
     }
     return new ToolDefinitionRegistry({ definitions: loaded })
   })

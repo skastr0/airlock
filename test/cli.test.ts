@@ -9,10 +9,11 @@ const repository = resolve(import.meta.dirname, "..")
 const run = (
   args: ReadonlyArray<string>,
   home: string,
-  environment: Readonly<Record<string, string>> = {}
+  environment: Readonly<Record<string, string>> = {},
+  cwd: string = repository
 ) =>
-  spawnSync("bun", ["src/cli.ts", ...args], {
-    cwd: repository,
+  spawnSync("bun", [join(repository, "src/cli.ts"), ...args], {
+    cwd,
     env: { ...process.env, AIRLOCK_HOME: home, ...environment },
     encoding: "utf8"
   })
@@ -138,9 +139,61 @@ describe("agent-facing CLI", () => {
     expect(json(executed.stdout)).toMatchObject({
       result: { result: { ok: true }, plans: [{ actionReference: expect.stringMatching(/^printf_json\.decode@sha256:/) }] }
     })
-    const listed = run(["actions"], home)
+    const listed = run(["actions"], home, {}, home)
     expect(listed.status).toBe(0)
     expect(json(listed.stdout)).toMatchObject({ definitions: [expect.objectContaining({ name: "printf_json.decode" })] })
+  })
+
+  it("fails a tool-backed action when the runtime reports a failed plan", () => {
+    const home = mkdtempSync(join(tmpdir(), "airlock-cli-tools-failure-"))
+    const tools = join(home, ".airlock", "tools")
+    mkdirSync(join(home, ".airlock"))
+    mkdirSync(tools)
+    writeFileSync(join(tools, "exit-check.airlock-tool.json"), JSON.stringify({
+      schemaVersion: "airlock/tool-definition/v1",
+      id: "exit_check",
+      version: "1.0.0",
+      executables: [{ realm: "local", selector: "/usr/bin/false" }],
+      actions: [{
+        name: "check",
+        inputSchema: {
+          type: "object",
+          properties: { cwd: { type: "string" } },
+          required: ["cwd"],
+          additionalProperties: false
+        },
+        args: [],
+        cwd: { _tag: "Input", path: ["cwd"] },
+        lowering: "invoke",
+        effectFootprint: ["invoke"],
+        resultDecoder: "exit-status"
+      }]
+    }))
+
+    const program = join(home, "exit-check.air")
+    writeFileSync(program, `return exit_check.check({ cwd: ${JSON.stringify(home)} })`)
+
+    const executed = run(["run", program, "--workspace", home], home)
+    expect(executed.status).toBe(1)
+
+    const report = json(executed.stdout) as {
+      readonly result: {
+        readonly state: string
+        readonly failure?: {
+          readonly action: string
+          readonly phase: string
+          readonly causeTag?: string
+          readonly reason: string
+        }
+      }
+    }
+
+    expect(report.result.state).toBe("failed")
+    expect(report.result.failure).toMatchObject({
+      action: "exit_check.check",
+      phase: "runtime",
+      causeTag: "ProgramToolRuntimeFailed"
+    })
   })
 
   it("returns a typed partial report when a later program failure aborts after completed actions", () => {

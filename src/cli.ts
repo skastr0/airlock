@@ -449,7 +449,9 @@ const doctor = Command.make("doctor", {}, () => rendered(capabilityPayload))
 const capabilities = Command.make("capabilities", {}, () => rendered(capabilityPayload))
   .pipe(Command.withDescription("Machine-readable alias for doctor"))
 
-const actions = Command.make("actions", {}, () => rendered(discoveredTools(process.cwd()).pipe(
+const actions = Command.make("actions", {
+  workspace: Options.text("workspace").pipe(Options.withDefault(process.cwd()))
+}, ({ workspace }) => rendered(discoveredTools(nodePath.resolve(workspace)).pipe(
   Effect.map((tools) => ({
     schemaVersion: "airlock/actions/v1",
     actions: NativeActionCatalog,
