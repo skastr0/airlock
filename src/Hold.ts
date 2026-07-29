@@ -12,6 +12,8 @@ import {
   ProtectedPath,
   ReapReport,
   RemoveReceipt,
+  RuntimePrivateNotUndoable,
+  RuntimePrivateRetentionReceipt,
   TargetNotFound,
   UndoConflict,
   UndoReceipt,
@@ -136,6 +138,12 @@ export class Hold extends Context.Tag("airlock/Hold")<
       OverwriteReceipt,
       TargetNotFound | ProtectedPath | UnsupportedReplacementSymlink | HoldMutationError | TargetOccupied
     >
+    readonly retireRuntimePrivate: (
+      target: string
+    ) => Effect.Effect<
+      RuntimePrivateRetentionReceipt,
+      TargetNotFound | ProtectedPath | UnsupportedReplacementSymlink | HoldMutationError
+    >
     readonly replaceFrom: (
       target: string,
       source: string
@@ -155,11 +163,24 @@ export class Hold extends Context.Tag("airlock/Hold")<
       id: ActId
     ) => Effect.Effect<
       UndoReceipt,
-      TargetNotFound | UnknownAct | NotHeld | UndoConflict | UnsupportedReplacementSymlink | HoldMutationError
+      | TargetNotFound
+      | UnknownAct
+      | NotHeld
+      | RuntimePrivateNotUndoable
+      | UndoConflict
+      | UnsupportedReplacementSymlink
+      | HoldMutationError
     >
     readonly undoLast: Effect.Effect<
       UndoReceipt,
-      TargetNotFound | NothingToUndo | UnknownAct | NotHeld | UndoConflict | UnsupportedReplacementSymlink | HoldMutationError
+      | TargetNotFound
+      | NothingToUndo
+      | UnknownAct
+      | NotHeld
+      | RuntimePrivateNotUndoable
+      | UndoConflict
+      | UnsupportedReplacementSymlink
+      | HoldMutationError
     >
     readonly held: Effect.Effect<ReadonlyArray<HeldManifest>, HoldFilesystemError>
     readonly reap: (
@@ -612,7 +633,8 @@ const make = Effect.gen(function* () {
   const holdTarget = Effect.fnUntraced(function* (
     target: string,
     act: "remove" | "overwrite" | "displaced",
-    entry: Entry
+    entry: Entry,
+    purpose?: "runtime-private"
   ) {
     yield* admitSameVolume(target)
     const id = newActId()
@@ -623,6 +645,7 @@ const make = Effect.gen(function* () {
       target,
       kind: entry.kind,
       hasPayload: true,
+      ...(purpose === undefined ? {} : { purpose }),
       status: "held",
       at
     })
@@ -924,6 +947,35 @@ const make = Effect.gen(function* () {
     })
   })
 
+  const retireRuntimePrivate = Effect.fn("Hold.retireRuntimePrivate")(function* (
+    rawTarget: string
+  ) {
+    const target = path.resolve(rawTarget)
+    yield* guard(target)
+    const entry = yield* inspect(target)
+    const manifest = yield* holdTarget(
+      target,
+      "remove",
+      entry,
+      "runtime-private"
+    )
+    yield* ledger.record(
+      new LedgerEntry({
+        at: manifest.at,
+        effect: "mutation",
+        act: "retire-runtime-private",
+        ref: manifest.id,
+        detail: target
+      })
+    ).pipe(Effect.mapError((cause) => recoveryRequired(manifest, "ledger", cause)))
+    return new RuntimePrivateRetentionReceipt({
+      id: manifest.id,
+      target,
+      kind: entry.kind,
+      at: manifest.at
+    })
+  })
+
   const replaceFrom = Effect.fn("Hold.replaceFrom")(function* (
     rawTarget: string,
     rawSource: string
@@ -992,6 +1044,12 @@ const make = Effect.gen(function* () {
       return yield* new NotHeld({ id, status: journal.state })
     }
     const { manifest } = journal
+    if (manifest.purpose === "runtime-private") {
+      return yield* new RuntimePrivateNotUndoable({
+        id,
+        target: manifest.target
+      })
+    }
     const at = yield* DateTime.now
     const targetExists = yield* pathExists(manifest.target)
     let displaced: ActId | undefined
@@ -1044,7 +1102,9 @@ const make = Effect.gen(function* () {
 
   const undoLast = Effect.gen(function* () {
     const current = yield* held
-    const last = current.at(-1)
+    const last = current
+      .filter((manifest) => manifest.purpose !== "runtime-private")
+      .at(-1)
     if (last === undefined) return yield* new NothingToUndo({})
     return yield* undo(last.id)
   })
@@ -1078,6 +1138,7 @@ const make = Effect.gen(function* () {
   return Hold.of({
     remove: (target) => withLock(remove(target)),
     overwrite: (target, content) => withLock(overwrite(target, content)),
+    retireRuntimePrivate: (target) => withLock(retireRuntimePrivate(target)),
     replaceFrom: (target, source) => withLock(replaceFrom(target, source)),
     undo: (id) => withLock(undo(id)),
     undoLast: withLock(undoLast),

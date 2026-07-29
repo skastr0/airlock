@@ -20,6 +20,9 @@ export type EffectClass = typeof EffectClass.Type
 
 // ── held mutations ──────────────────────────────────────────────────────────
 
+export const HoldPurpose = Schema.Literal("runtime-private")
+export type HoldPurpose = typeof HoldPurpose.Type
+
 export class HeldManifest extends Schema.Class<HeldManifest>("HeldManifest")({
   id: ActId,
   // remove: target renamed into the hold
@@ -31,11 +34,24 @@ export class HeldManifest extends Schema.Class<HeldManifest>("HeldManifest")({
   // a manifest with no payload marks a creation: undoing it displaces the
   // created file rather than renaming a payload back
   hasPayload: Schema.Boolean,
+  // Missing means managed state. Persisting only the exceptional purpose keeps
+  // every pre-purpose journal backward compatible while making runtime-private
+  // retention explicit and non-undoable.
+  purpose: Schema.optional(HoldPurpose),
   status: Schema.Literal("held", "restored"),
   at: Schema.DateTimeUtc
 }) {}
 
 export class RemoveReceipt extends Schema.Class<RemoveReceipt>("RemoveReceipt")({
+  id: ActId,
+  target: Schema.String,
+  kind: Schema.Literal("file", "directory"),
+  at: Schema.DateTimeUtc
+}) {}
+
+export class RuntimePrivateRetentionReceipt extends Schema.Class<RuntimePrivateRetentionReceipt>(
+  "RuntimePrivateRetentionReceipt"
+)({
   id: ActId,
   target: Schema.String,
   kind: Schema.Literal("file", "directory"),
@@ -94,6 +110,7 @@ export class LedgerEntry extends Schema.Class<LedgerEntry>("LedgerEntry")({
     "overwrite",
     "undo",
     "reap",
+    "retire-runtime-private",
     "stage",
     "commit",
     "cancel"
@@ -136,6 +153,14 @@ export class UndoConflict extends Schema.TaggedError<UndoConflict>()(
 export class NothingToUndo extends Schema.TaggedError<NothingToUndo>()(
   "NothingToUndo",
   {}
+) {}
+
+export class RuntimePrivateNotUndoable extends Schema.TaggedError<RuntimePrivateNotUndoable>()(
+  "RuntimePrivateNotUndoable",
+  {
+    id: ActId,
+    target: Schema.String
+  }
 ) {}
 
 export class UnknownEmission extends Schema.TaggedError<UnknownEmission>()(

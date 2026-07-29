@@ -7,7 +7,7 @@ import { utimes } from "node:fs/promises"
 import { fileURLToPath } from "node:url"
 import * as AirlockHome from "../src/AirlockHome.ts"
 import { Hold, HoldLive } from "../src/Hold.ts"
-import { LedgerLive } from "../src/Ledger.ts"
+import { Ledger, LedgerLive } from "../src/Ledger.ts"
 
 const layersFor = (home: string) =>
   HoldLive.pipe(
@@ -143,6 +143,174 @@ describe("Hold — undoable mutations", () => {
 
         const error = yield* hold.undo(receipt.id).pipe(Effect.flip)
         expect(error._tag).toBe("UnknownAct")
+      })
+    )
+  )
+
+  it.effect("retires runtime-private workspaces without making them undo candidates", () =>
+    world(({ fs, hold, path, tmp }) =>
+      Effect.gen(function* () {
+        const managed = path.join(tmp, "managed.txt")
+        const privateWorkspace = path.join(tmp, ".airlock-cell-private")
+        yield* fs.writeFileString(managed, "managed bytes")
+        yield* fs.makeDirectory(path.join(privateWorkspace, "nested"), {
+          recursive: true
+        })
+        yield* fs.writeFileString(
+          path.join(privateWorkspace, "nested", "output.txt"),
+          "runtime-private bytes"
+        )
+
+        const managedReceipt = yield* hold.remove(managed)
+        const retired = yield* hold.retireRuntimePrivate(privateWorkspace)
+
+        expect(yield* fs.exists(privateWorkspace)).toBe(false)
+        const privateManifest = (yield* hold.held).find(
+          (manifest) => manifest.id === retired.id
+        )
+        expect(privateManifest).toMatchObject({
+          id: retired.id,
+          act: "remove",
+          target: privateWorkspace,
+          kind: "directory",
+          hasPayload: true,
+          purpose: "runtime-private",
+          status: "held"
+        })
+
+        const directUndo = yield* hold.undo(retired.id).pipe(Effect.flip)
+        expect(directUndo._tag).toBe("RuntimePrivateNotUndoable")
+        expect(yield* fs.exists(privateWorkspace)).toBe(false)
+
+        const undone = yield* hold.undoLast
+        expect(undone.id).toBe(managedReceipt.id)
+        expect(yield* fs.readFileString(managed)).toBe("managed bytes")
+        const nothingManaged = yield* hold.undoLast.pipe(Effect.flip)
+        expect(nothingManaged._tag).toBe("NothingToUndo")
+        expect((yield* hold.held).map((manifest) => manifest.id)).toContain(
+          retired.id
+        )
+
+        const home = path.join(tmp, "airlock-home")
+        const ledger = yield* Effect.provide(Ledger, layersFor(home))
+        expect(yield* ledger.entries).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({
+              effect: "mutation",
+              act: "retire-runtime-private",
+              ref: retired.id,
+              detail: privateWorkspace
+            })
+          ])
+        )
+      })
+    )
+  )
+
+  it.effect("recovers a prepared runtime-private retirement as held, never restored", () =>
+    world(({ fs, hold, path, tmp }) =>
+      Effect.gen(function* () {
+        const privateWorkspace = path.join(tmp, ".airlock-cell-recover")
+        yield* fs.makeDirectory(privateWorkspace, { recursive: true })
+        yield* fs.writeFileString(
+          path.join(privateWorkspace, "output.txt"),
+          "retain until reap"
+        )
+        const retired = yield* hold.retireRuntimePrivate(privateWorkspace)
+        const home = path.join(tmp, "airlock-home")
+        const journalPath = path.join(
+          home,
+          "hold",
+          retired.id,
+          "manifest.json"
+        )
+        const journal = JSON.parse(
+          yield* fs.readFileString(journalPath)
+        ) as Record<string, unknown>
+        yield* fs.writeFileString(
+          journalPath,
+          JSON.stringify({ ...journal, state: "prepared" })
+        )
+
+        const reconstructed = yield* Effect.provide(Hold, layersFor(home))
+        expect(yield* fs.exists(privateWorkspace)).toBe(false)
+        expect((yield* reconstructed.held).find(
+          (manifest) => manifest.id === retired.id
+        )).toMatchObject({
+          purpose: "runtime-private",
+          status: "held",
+          hasPayload: true
+        })
+        expect(
+          (JSON.parse(yield* fs.readFileString(journalPath)) as {
+            readonly state: string
+          }).state
+        ).toBe("held")
+        expect((yield* reconstructed.undo(retired.id).pipe(Effect.flip))._tag).toBe(
+          "RuntimePrivateNotUndoable"
+        )
+      })
+    )
+  )
+
+  it.effect("decodes purpose-less managed journals and keeps them undoable", () =>
+    world(({ fs, hold, path, tmp }) =>
+      Effect.gen(function* () {
+        const managed = path.join(tmp, "legacy-managed.txt")
+        yield* fs.writeFileString(managed, "legacy bytes")
+        const receipt = yield* hold.remove(managed)
+        const home = path.join(tmp, "airlock-home")
+        const journalPath = path.join(
+          home,
+          "hold",
+          receipt.id,
+          "manifest.json"
+        )
+        const encoded = JSON.parse(
+          yield* fs.readFileString(journalPath)
+        ) as {
+          readonly manifest: Record<string, unknown>
+        }
+        expect(encoded.manifest).not.toHaveProperty("purpose")
+
+        const reconstructed = yield* Effect.provide(Hold, layersFor(home))
+        const manifest = (yield* reconstructed.held).find(
+          (candidate) => candidate.id === receipt.id
+        )
+        expect(manifest?.purpose).toBeUndefined()
+        expect((yield* reconstructed.undoLast).id).toBe(receipt.id)
+        expect(yield* fs.readFileString(managed)).toBe("legacy bytes")
+      })
+    )
+  )
+
+  it.effect("reaper is the sole terminal authority for runtime-private payloads", () =>
+    world(({ fs, hold, path, tmp }) =>
+      Effect.gen(function* () {
+        const privateWorkspace = path.join(tmp, ".airlock-cell-reap")
+        yield* fs.makeDirectory(privateWorkspace, { recursive: true })
+        yield* fs.writeFileString(
+          path.join(privateWorkspace, "large-output.bin"),
+          "private"
+        )
+        const retired = yield* hold.retireRuntimePrivate(privateWorkspace)
+        const actDirectory = path.join(
+          tmp,
+          "airlock-home",
+          "hold",
+          retired.id
+        )
+        expect(yield* fs.exists(actDirectory)).toBe(true)
+
+        const report = yield* hold.reap(0)
+        expect(report.reaped).toContain(retired.id)
+        expect(yield* fs.exists(actDirectory)).toBe(false)
+        expect((yield* hold.held).map((manifest) => manifest.id)).not.toContain(
+          retired.id
+        )
+        expect((yield* hold.undo(retired.id).pipe(Effect.flip))._tag).toBe(
+          "UnknownAct"
+        )
       })
     )
   )
