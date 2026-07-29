@@ -1081,6 +1081,14 @@ export const ProgramPlanRuntimeLive = Layer.effect(
               const run = yield* runtime.execute(plan, inputs).pipe(
                 Effect.mapError(executionFailure(call.action, "runtime"))
               )
+              if (request.tool !== undefined && run.state !== "succeeded") {
+                return yield* new ProgramActionExecutionFailed({
+                  action: request.tool.name,
+                  phase: "runtime",
+                  causeTag: "ProgramToolRuntimeFailed",
+                  reason: `tool runtime finished ${run.state}`
+                })
+              }
               const outputs = runtimeInlineArtifacts(run)
               if (request.tool !== undefined) {
                 const invoke = plan.nodes.find((node): node is InvokeNode => node._tag === "Invoke")

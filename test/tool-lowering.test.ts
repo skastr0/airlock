@@ -7,9 +7,11 @@ import {
   UnknownToolAction,
   UnsupportedToolActionLowering,
   decodeToolDefinition,
+  decodeToolResult,
   lowerToolAction,
   ToolDefinitionDocument,
-  ToolDefinitionLocation
+  ToolDefinitionLocation,
+  ToolResultDecodeFailed
 } from "../src/tools/index.ts"
 
 const location = new ToolDefinitionLocation({
@@ -335,6 +337,43 @@ describe("inert tool action lowering", () => {
       ).pipe(Effect.flip)
       expect(accessor).toBeInstanceOf(ToolTemplateRejected)
       expect(accessor).toMatchObject({ reason: "accessor-not-data" })
+    })
+  )
+
+  it.effect("decodes tool results against the declared output schema", () =>
+    Effect.gen(function* () {
+      const loaded = yield* load(archiveDefinition())
+      const lowered = {
+        definitionId: loaded.definition.id,
+        actionName: loaded.definition.actions[0]!.name,
+        resultDecoder: "json-stdout" as const,
+        outputSchema: {
+          type: "object",
+          properties: {
+            ok: { type: "boolean" },
+            count: { type: "integer" }
+          },
+          required: ["ok", "count"],
+          additionalProperties: false
+        }
+      }
+
+      const value = yield* decodeToolResult(lowered, {
+        exitCode: 0,
+        stdout: JSON.stringify({ ok: true, count: 2 }),
+        stderr: ""
+      })
+      expect(value).toEqual({ ok: true, count: 2 })
+
+      const failure = yield* decodeToolResult(lowered, {
+        exitCode: 0,
+        stdout: JSON.stringify({ ok: true, count: "nope" }),
+        stderr: ""
+      }).pipe(Effect.flip)
+      expect(failure).toBeInstanceOf(ToolResultDecodeFailed)
+      expect(failure).toMatchObject({
+        reason: expect.stringContaining("$.count: expected integer")
+      })
     })
   )
 })

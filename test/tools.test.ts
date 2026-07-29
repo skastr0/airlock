@@ -3,14 +3,19 @@ import { Effect } from "effect"
 import {
   DuplicateToolDefinition,
   InvalidToolDefinition,
+  ToolActionNameCollision,
   ToolDefinitionDecodeFailed,
   ToolDefinitionDirectories,
   ToolDefinitionDocument,
+  ToolDefinitionRegistry,
   ToolDefinitionLocation,
+  ToolInputRejected,
   type ToolDefinitionReader,
+  exportToolActions,
   decodeToolDefinition,
   knownToolDefinitionLocations,
-  loadKnownToolDefinitions
+  loadKnownToolDefinitions,
+  validateToolValue
 } from "../src/tools/index.ts"
 
 const directories = new ToolDefinitionDirectories({
@@ -124,6 +129,45 @@ describe("inert tool definitions", () => {
       const duplicate = yield* loadKnownToolDefinitions(duplicateReader, directories).pipe(Effect.flip)
       expect(duplicate).toBeInstanceOf(DuplicateToolDefinition)
       expect(duplicate).toMatchObject({ id: "archive", version: "1.0.0" })
+    })
+  )
+
+  it.effect("validates every declared schema field and refuses native shadowing", () =>
+    Effect.gen(function* () {
+      const loaded = yield* decodeToolDefinition(document(definition()))
+      const action = loaded.definition.actions[0]!
+      const schema = {
+        type: "object",
+        properties: {
+          first: { type: "string" },
+          second: { type: "integer" }
+        },
+        required: ["first", "second"],
+        additionalProperties: false
+      }
+
+      const validationError = yield* validateToolValue(
+        loaded.definition,
+        action,
+        schema,
+        { first: "ok", second: "not-an-integer" }
+      ).pipe(Effect.flip)
+      expect(validationError).toBeInstanceOf(ToolInputRejected)
+      expect(validationError).toMatchObject({
+        path: "$.second",
+        reason: "expected integer"
+      })
+
+      const registry = new ToolDefinitionRegistry({ definitions: [loaded] })
+      const collision = yield* exportToolActions(
+        registry,
+        new Set(["archive.extract"])
+      ).pipe(Effect.flip)
+      expect(collision).toBeInstanceOf(ToolActionNameCollision)
+      expect(collision).toMatchObject({
+        name: "archive.extract",
+        reason: "native-shadow"
+      })
     })
   )
 })
