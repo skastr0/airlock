@@ -146,6 +146,18 @@ describe("Plan v1 kernel", () => {
       const compatibilityDelta = new InvokeNode({ ...invoke, id: id("compatibility-delta"), cellProfile: "compatibility" })
       const deltaFailure = yield* orderPlan(draft([compatibilityDelta])).pipe(Effect.flip)
       expect(deltaFailure).toMatchObject({ _tag: "InvalidInvokeContract", field: "deltaArtifact" })
+
+      const conflictingStdin = new InvokeNode({
+        ...invoke,
+        id: id("conflicting-stdin"),
+        stdin: ArtifactId.make("artifact/input"),
+        stdinDisposition: "inherit"
+      })
+      const stdinFailure = yield* orderPlan(draft([conflictingStdin])).pipe(Effect.flip)
+      expect(stdinFailure).toMatchObject({
+        _tag: "InvalidInvokeContract",
+        field: "stdin/stdinDisposition"
+      })
     })
   )
 

@@ -118,6 +118,14 @@ export class InvokeNode extends Schema.TaggedClass<InvokeNode>("InvokeNode")("In
   /** Stdin can only be a previously captured/staged artifact in Plan v1. */
   stdin: Schema.optional(ArtifactId),
   /**
+   * Ambient stdin is explicit rather than encoded as absence. An artifact and
+   * inherited stdin are mutually exclusive; omitted/discard is the default.
+   */
+  stdinDisposition: Schema.optionalWith(
+    Schema.Literal("discard", "inherit"),
+    { default: () => "discard" as const }
+  ),
+  /**
    * Captured process streams are named artifacts when later Plan nodes need
    * them. They are deliberately not inferred from their position in
    * `produces`: a Cell receipt can always describe the streams it observed,
@@ -252,6 +260,10 @@ export class Artifact extends Schema.Class<Artifact>("Artifact")({
 }) {}
 
 export class Receipt extends Schema.Class<Receipt>("Receipt")({
+  schemaVersion: Schema.optionalWith(
+    Schema.Literal("airlock/receipt/v1"),
+    { default: () => "airlock/receipt/v1" as const }
+  ),
   id: ReceiptId,
   planId: PlanId,
   nodeId: NodeId,
@@ -434,6 +446,13 @@ const validateInvoke = (node: InvokeNode): InvalidInvokeContract | undefined => 
   }
   if (node.stderrArtifact !== undefined && node.stderr !== "capture") {
     return invalidInvoke(node, "stderrArtifact", "requires stderr disposition capture")
+  }
+  if (node.stdin !== undefined && node.stdinDisposition !== "discard") {
+    return invalidInvoke(
+      node,
+      "stdin/stdinDisposition",
+      "artifact stdin and inherited stdin are mutually exclusive"
+    )
   }
   if (node.deltaArtifact !== undefined && node.cellProfile === "compatibility") {
     return invalidInvoke(node, "deltaArtifact", "requires a contained Cell profile")

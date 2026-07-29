@@ -1,12 +1,20 @@
-import { FileSystem, Path } from "@effect/platform"
+import { Path } from "@effect/platform"
 import { Cause, Context, DateTime, Effect, Exit, Layer, Schema } from "effect"
 import { createHash } from "node:crypto"
 import { lstat, readFile, readdir } from "node:fs/promises"
 import * as nodePath from "node:path"
 import { Cell, CellReceipt, CellRequest, WorkspaceDeltaCandidate } from "../cell/index.ts"
 import { Hold } from "../Hold.ts"
-import { ActId, EmissionRequest } from "../domain.ts"
-import { Outbox } from "../Outbox.ts"
+import { ActId, EmissionRequest, RemoveReceipt } from "../domain.ts"
+import {
+  NativeFileSystem,
+  NativeListEntry,
+  NativeMkdirReceipt,
+  NativeMoveReceipt,
+  NativeStat,
+  NativeWriteReceipt
+} from "../native/index.ts"
+import { Outbox, OutboxEmission } from "../Outbox.ts"
 import {
   ArtifactId,
   Artifact,
@@ -21,9 +29,12 @@ import {
 } from "../plan/index.ts"
 import {
   ProcessInputBytes,
+  ProcessCancelled,
+  ProcessOutputLimitExceeded,
   ProcessReceipt,
   ProcessRequest,
-  ProcessRunner
+  ProcessRunner,
+  ProcessTimedOut
 } from "../process/Process.ts"
 
 /**
@@ -105,13 +116,48 @@ export const RuntimeLifecycleReceipt = Schema.Union(
 )
 export type RuntimeLifecycleReceipt = typeof RuntimeLifecycleReceipt.Type
 
+export const RuntimeProcessOutcome = Schema.Literal(
+  "exited",
+  "timed-out",
+  "output-limit",
+  "cancelled"
+)
+export type RuntimeProcessOutcome = typeof RuntimeProcessOutcome.Type
+
+/**
+ * Process execution evidence is independent of node success. A nonzero exit,
+ * timeout, output overflow, or cancellation may still carry decisive stdout,
+ * stderr, timing, pid, and termination evidence.
+ */
+export class RuntimeProcessEvidence extends Schema.Class<RuntimeProcessEvidence>(
+  "RuntimeProcessEvidence"
+)({
+  nodeId: Schema.String,
+  outcome: RuntimeProcessOutcome,
+  receipt: ProcessReceipt
+}) {}
+
+export class RuntimeMergeEvidence extends Schema.Class<RuntimeMergeEvidence>(
+  "RuntimeMergeEvidence"
+)({
+  target: Schema.String,
+  paths: Schema.Array(Schema.String)
+}) {}
+
 export class RuntimeRun extends Schema.Class<RuntimeRun>("RuntimeRun")({
+  schemaVersion: Schema.optionalWith(
+    Schema.Literal("airlock/runtime-run/v1"),
+    { default: () => "airlock/runtime-run/v1" as const }
+  ),
   planId: Schema.String,
   state: Schema.Literal("succeeded", "failed", "partial"),
   startedAt: Schema.DateTimeUtc,
   finishedAt: Schema.DateTimeUtc,
   receipts: Schema.Array(Receipt),
   artifacts: Schema.Array(RuntimeArtifact),
+  processes: Schema.optionalWith(Schema.Array(RuntimeProcessEvidence), {
+    default: () => []
+  }),
   lifecycle: Schema.optionalWith(Schema.Array(RuntimeLifecycleReceipt), {
     default: () => []
   })
@@ -156,6 +202,31 @@ export class RuntimeLifecycleFailure extends Schema.TaggedError<RuntimeLifecycle
   }
 ) {}
 
+export class RuntimeProcessFailure extends Schema.TaggedError<RuntimeProcessFailure>()(
+  "RuntimeProcessFailure",
+  {
+    nodeId: Schema.String,
+    outcome: Schema.Literal(
+      "nonzero-exit",
+      "signal",
+      "timed-out",
+      "output-limit",
+      "cancelled"
+    ),
+    receipt: ProcessReceipt,
+    outputArtifacts: Schema.Array(ArtifactId)
+  }
+) {}
+
+export class RuntimeArtifactClaimMismatch extends Schema.TaggedError<RuntimeArtifactClaimMismatch>()(
+  "RuntimeArtifactClaimMismatch",
+  {
+    nodeId: Schema.String,
+    claimed: Schema.Array(ArtifactId),
+    materialized: Schema.Array(ArtifactId)
+  }
+) {}
+
 export type RuntimeError =
   | RuntimePlanInvalid
   | RuntimeNodeFailure
@@ -163,6 +234,8 @@ export type RuntimeError =
   | RuntimeCapabilityDenied
   | RuntimeMergeDrift
   | RuntimeDeltaUnsupported
+  | RuntimeProcessFailure
+  | RuntimeArtifactClaimMismatch
 
 export class Runtime extends Context.Tag("airlock/Runtime")<
   Runtime,
@@ -184,17 +257,28 @@ const textDecoder = new TextDecoder("utf-8", { fatal: true })
 const digest = (bytes: Uint8Array): Digest =>
   `sha256:${createHash("sha256").update(bytes).digest("hex")}` as Digest
 
-const artifact = (id: ArtifactId, bytes: Uint8Array, provenance: string, cellReceipt?: CellReceipt) =>
+const artifact = (
+  id: ArtifactId,
+  bytes: Uint8Array,
+  provenance: string,
+  options: {
+    readonly cellReceipt?: CellReceipt
+    readonly mediaType?: string
+  } = {}
+) =>
   new RuntimeArtifact({
     artifact: new Artifact({
       id,
       digest: digest(bytes),
-      mediaType: cellReceipt === undefined ? "application/octet-stream" : "application/vnd.airlock.cell-delta+json",
+      mediaType: options.mediaType ??
+        (options.cellReceipt === undefined
+          ? "application/octet-stream"
+          : "application/vnd.airlock.cell-delta+json"),
       byteLength: bytes.byteLength,
       provenance
     }),
     bytes,
-    ...(cellReceipt === undefined ? {} : { cellReceipt })
+    ...(options.cellReceipt === undefined ? {} : { cellReceipt: options.cellReceipt })
   })
 
 export const materializeInitialArtifact = (
@@ -211,6 +295,21 @@ export const materializeInitialArtifact = (
     bytes: input.bytes
   })
 
+const encodeStructured = <A, I>(
+  schema: Schema.Schema<A, I, never>,
+  value: A,
+  nodeId: NodeId,
+  operation: string
+) =>
+  Schema.encode(Schema.parseJson(schema))(value).pipe(
+    Effect.map((json) => text.encode(json)),
+    Effect.mapError((cause) => new RuntimeNodeFailure({
+      nodeId,
+      operation,
+      reason: String(cause)
+    }))
+  )
+
 const receiptId = (): ReceiptId => `receipt_${crypto.randomUUID()}` as ReceiptId
 const errorReason = (error: unknown) =>
   error instanceof Error ? error.message : typeof error === "string" ? error : JSON.stringify(error)
@@ -225,38 +324,307 @@ const handlesFor = (plan: Plan, node: PlanNode): ReadonlyArray<Handle> => {
   })
 }
 
-const validatePlan = (plan: Plan): Effect.Effect<ReadonlyArray<PlanNode>, RuntimePlanInvalid> =>
-  Effect.try({
-    try: () => {
-      const ids = new Set<string>()
-      for (const node of plan.nodes) {
-        if (ids.has(node.id)) throw new RuntimePlanInvalid({ planId: plan.id, reason: `duplicate node id: ${node.id}` })
-        ids.add(node.id)
+const planInvalid = (plan: Plan, reason: string) =>
+  new RuntimePlanInvalid({ planId: plan.id, reason })
+
+const duplicate = (values: ReadonlyArray<string>) =>
+  values.find((value, index) => values.indexOf(value) !== index)
+
+const runtimeNodeContractFailure = (
+  plan: Plan,
+  node: PlanNode,
+  profile: RuntimeProfile,
+  workspace: string
+): RuntimePlanInvalid | undefined => {
+  const repeatedOutput = duplicate(node.produces)
+  if (repeatedOutput !== undefined) {
+    return planInvalid(
+      plan,
+      `node ${node.id} declares output artifact ${repeatedOutput} more than once`
+    )
+  }
+
+  switch (node._tag) {
+    case "Capture": {
+      if (node.produces.length !== 1) {
+        return planInvalid(plan, `Capture ${node.id} must produce exactly one materialized artifact`)
       }
-      const remaining = new Map(plan.nodes.map((node) => [node.id, node.dependsOn.length]))
-      const children = new Map(plan.nodes.map((node) => [node.id, [] as NodeId[]]))
-      for (const node of plan.nodes) for (const dependency of node.dependsOn) {
-        if (!ids.has(dependency)) throw new RuntimePlanInvalid({ planId: plan.id, reason: `node ${node.id} depends on unknown node ${dependency}` })
-        children.get(dependency)!.push(node.id)
+      if (node.locator.length === 0 || node.locator.includes("\0")) {
+        return planInvalid(
+          plan,
+          `Capture ${node.id} locator must be non-empty and contain no NUL`
+        )
       }
-      const byId = new Map(plan.nodes.map((node) => [node.id, node]))
-      const ready = plan.nodes.filter((node) => remaining.get(node.id) === 0)
-      const ordered: PlanNode[] = []
-      while (ready.length > 0) {
-        const next = ready.shift()!
-        ordered.push(next)
-        for (const child of children.get(next.id) ?? []) {
-          const count = (remaining.get(child) ?? 0) - 1
-          remaining.set(child, count)
-          if (count === 0) ready.push(byId.get(child)!)
+      if (node.source === "process-output") {
+        return planInvalid(
+          plan,
+          `Capture ${node.id} process-output is not a runtime operation; bind an Invoke stream artifact`
+        )
+      }
+      if (node.source !== "file" && node.operation !== "read") {
+        return planInvalid(
+          plan,
+          `Capture ${node.id} operation ${node.operation} requires source file`
+        )
+      }
+      if (
+        node.operation === "glob" &&
+        (node.pattern === undefined || node.pattern.length === 0)
+      ) {
+        return planInvalid(plan, `Capture ${node.id} file.glob requires pattern`)
+      }
+      if (node.operation !== "glob" && node.pattern !== undefined) {
+        return planInvalid(plan, `Capture ${node.id} pattern is valid only for file.glob`)
+      }
+      if (node.operation !== "read" && node.format !== "bytes") {
+        return planInvalid(plan, `Capture ${node.id} format is valid only for file.read`)
+      }
+      return undefined
+    }
+    case "Invoke": {
+      if (!node.executable.startsWith("/") || node.executable.includes("\0")) {
+        return planInvalid(plan, `Invoke ${node.id} executable must be an absolute path without NUL`)
+      }
+      if (
+        node.cwd !== undefined &&
+        (!node.cwd.startsWith("/") || node.cwd.includes("\0"))
+      ) {
+        return planInvalid(plan, `Invoke ${node.id} cwd must be an absolute path without NUL`)
+      }
+      if (node.args.some((argument) => argument.includes("\0"))) {
+        return planInvalid(plan, `Invoke ${node.id} arguments must not contain NUL`)
+      }
+      if (
+        Object.entries(node.env).some(
+          ([key, value]) =>
+            key.length === 0 ||
+            key.includes("=") ||
+            key.includes("\0") ||
+            value.includes("\0")
+        )
+      ) {
+        return planInvalid(
+          plan,
+          `Invoke ${node.id} environment keys and values must be explicit valid atoms`
+        )
+      }
+      if (!Number.isSafeInteger(node.outputLimitBytes) || node.outputLimitBytes < 0) {
+        return planInvalid(plan, `Invoke ${node.id} outputLimitBytes must be a non-negative safe integer`)
+      }
+      if (
+        node.timeoutMs !== undefined &&
+        (!Number.isSafeInteger(node.timeoutMs) || node.timeoutMs <= 0)
+      ) {
+        return planInvalid(plan, `Invoke ${node.id} timeoutMs must be a positive safe integer`)
+      }
+      if (node.cellProfile === "vm-enclosed") {
+        return planInvalid(plan, `Invoke ${node.id} requests unavailable vm-enclosed execution`)
+      }
+      if (profile === "vm-enclosed") {
+        return planInvalid(plan, "runtime profile vm-enclosed is unavailable")
+      }
+      if (profile === "native-contained" && node.cellProfile !== "native-contained") {
+        return planInvalid(
+          plan,
+          `Invoke ${node.id} cannot widen native-contained runtime authority`
+        )
+      }
+      if (
+        node.cellProfile === "native-contained" &&
+        (
+          node.stdinDisposition === "inherit" ||
+          node.stdout === "inherit" ||
+          node.stderr === "inherit"
+        )
+      ) {
+        return planInvalid(
+          plan,
+          `Invoke ${node.id} native-contained execution forbids inherited stdin, stdout, and stderr descriptors`
+        )
+      }
+      if (node.stdin !== undefined && node.stdinDisposition === "inherit") {
+        return planInvalid(
+          plan,
+          `Invoke ${node.id} cannot combine artifact stdin with inherited stdin`
+        )
+      }
+      const named = [
+        node.stdoutArtifact,
+        node.stderrArtifact,
+        node.deltaArtifact
+      ].filter((id): id is ArtifactId => id !== undefined)
+      const repeatedBinding = duplicate(named)
+      if (repeatedBinding !== undefined) {
+        return planInvalid(plan, `Invoke ${node.id} binds artifact ${repeatedBinding} more than once`)
+      }
+      if (
+        node.produces.length !== named.length ||
+        node.produces.some((id) => !named.includes(id))
+      ) {
+        return planInvalid(
+          plan,
+          `Invoke ${node.id} produces must exactly match its named stream and delta artifacts`
+        )
+      }
+      if (node.stdoutArtifact !== undefined && node.stdout !== "capture") {
+        return planInvalid(plan, `Invoke ${node.id} stdoutArtifact requires captured stdout`)
+      }
+      if (node.stderrArtifact !== undefined && node.stderr !== "capture") {
+        return planInvalid(plan, `Invoke ${node.id} stderrArtifact requires captured stderr`)
+      }
+      if (node.cellProfile === "native-contained" && node.deltaArtifact === undefined) {
+        return planInvalid(
+          plan,
+          `Invoke ${node.id} native-contained execution requires a delta artifact`
+        )
+      }
+      if (node.cellProfile === "compatibility" && node.deltaArtifact !== undefined) {
+        return planInvalid(
+          plan,
+          `Invoke ${node.id} compatibility execution cannot produce a Cell delta`
+        )
+      }
+      return undefined
+    }
+    case "Apply": {
+      if (node.produces.length > 1) {
+        return planInvalid(plan, `Apply ${node.id} may produce at most one receipt artifact`)
+      }
+      if (node.target.length === 0 || node.target.includes("\0")) {
+        return planInvalid(
+          plan,
+          `Apply ${node.id} target must be non-empty and contain no NUL`
+        )
+      }
+      if (node.operation !== "mkdir" && node.parents) {
+        return planInvalid(
+          plan,
+          `Apply ${node.id} parents is valid only for mkdir`
+        )
+      }
+      if (node.operation === "write") {
+        return node.sourceArtifact === undefined || node.source !== undefined
+          ? planInvalid(plan, `Apply ${node.id} write requires only sourceArtifact`)
+          : undefined
+      }
+      if (node.operation === "copy" || node.operation === "move") {
+        return node.source === undefined ||
+            node.source.length === 0 ||
+            node.source.includes("\0") ||
+            node.sourceArtifact !== undefined
+          ? planInvalid(
+              plan,
+              `Apply ${node.id} ${node.operation} requires only a non-empty source path without NUL`
+            )
+          : undefined
+      }
+      if (node.operation === "remove" || node.operation === "mkdir") {
+        return node.source !== undefined || node.sourceArtifact !== undefined
+          ? planInvalid(plan, `Apply ${node.id} ${node.operation} accepts no source`)
+          : undefined
+      }
+      if (node.sourceArtifact === undefined || node.source !== undefined) {
+        return planInvalid(plan, `Apply ${node.id} merge requires only a Cell delta artifact`)
+      }
+      if (![workspace, "."].includes(node.target)) {
+        return planInvalid(plan, `Apply ${node.id} merge must target the admitted workspace root`)
+      }
+      return undefined
+    }
+    case "RequestExternal": {
+      if (node.produces.length > 1) {
+        return planInvalid(
+          plan,
+          `RequestExternal ${node.id} may produce at most one staged-intent artifact`
+        )
+      }
+      if (node.endpoint.length === 0 || node.endpoint.includes("\0")) {
+        return planInvalid(
+          plan,
+          `RequestExternal ${node.id} endpoint must be non-empty and contain no NUL`
+        )
+      }
+      if (
+        !Number.isSafeInteger(node.holdMillis) ||
+        node.holdMillis < 0
+      ) {
+        return planInvalid(
+          plan,
+          `RequestExternal ${node.id} holdMillis must be a non-negative safe integer`
+        )
+      }
+      if (node.body !== undefined && node.bodyArtifact !== undefined) {
+        return planInvalid(plan, `RequestExternal ${node.id} has two body sources`)
+      }
+      return undefined
+    }
+  }
+}
+
+const validatePlan = (
+  plan: Plan,
+  profile: RuntimeProfile,
+  workspace: string
+): Effect.Effect<ReadonlyArray<PlanNode>, RuntimePlanInvalid> =>
+  Effect.gen(function* () {
+    const ids = plan.nodes.map((node) => node.id)
+    const repeatedNode = duplicate(ids)
+    if (repeatedNode !== undefined) {
+      return yield* planInvalid(plan, `duplicate node id: ${repeatedNode}`)
+    }
+    const declaredArtifacts = plan.nodes.flatMap((node) => node.produces)
+    const repeatedArtifact = duplicate(declaredArtifacts)
+    if (repeatedArtifact !== undefined) {
+      return yield* planInvalid(
+        plan,
+        `artifact ${repeatedArtifact} has more than one Plan producer`
+      )
+    }
+    const known = new Set(ids)
+    for (const node of plan.nodes) {
+      const contractFailure = runtimeNodeContractFailure(
+        plan,
+        node,
+        profile,
+        workspace
+      )
+      if (contractFailure !== undefined) return yield* contractFailure
+      for (const dependency of node.dependsOn) {
+        if (!known.has(dependency)) {
+          return yield* planInvalid(
+            plan,
+            `node ${node.id} depends on unknown node ${dependency}`
+          )
         }
       }
-      if (ordered.length !== plan.nodes.length) throw new RuntimePlanInvalid({ planId: plan.id, reason: "plan dependency graph is cyclic" })
-      return ordered
-    },
-    catch: (cause) => cause instanceof RuntimePlanInvalid
-      ? cause
-      : new RuntimePlanInvalid({ planId: plan.id, reason: errorReason(cause) })
+    }
+
+    const remaining = new Map(
+      plan.nodes.map((node) => [node.id, node.dependsOn.length])
+    )
+    const children = new Map(
+      plan.nodes.map((node) => [node.id, [] as NodeId[]])
+    )
+    for (const node of plan.nodes) {
+      for (const dependency of node.dependsOn) {
+        children.get(dependency)!.push(node.id)
+      }
+    }
+    const byId = new Map(plan.nodes.map((node) => [node.id, node]))
+    const ready = plan.nodes.filter((node) => remaining.get(node.id) === 0)
+    const ordered: PlanNode[] = []
+    while (ready.length > 0) {
+      const next = ready.shift()!
+      ordered.push(next)
+      for (const child of children.get(next.id) ?? []) {
+        const count = (remaining.get(child) ?? 0) - 1
+        remaining.set(child, count)
+        if (count === 0) ready.push(byId.get(child)!)
+      }
+    }
+    return ordered.length === plan.nodes.length
+      ? ordered
+      : yield* planInvalid(plan, "plan dependency graph is cyclic")
   })
 
 const nodeReceipt = (
@@ -338,6 +706,19 @@ const deltaBytes = (receipt: CellReceipt) => text.encode(JSON.stringify({
   delta: receipt.delta.map((candidate) => ({ path: candidate.path, kind: candidate.kind }))
 }))
 
+const materializeNodeArtifact = (
+  node: PlanNode,
+  artifacts: Map<ArtifactId, RuntimeArtifact>,
+  bytes: Uint8Array,
+  provenance: string,
+  mediaType: string
+): ReadonlyArray<ArtifactId> => {
+  const id = node.produces[0]
+  if (id === undefined) return []
+  artifacts.set(id, artifact(id, bytes, provenance, { mediaType }))
+  return [id]
+}
+
 type RuntimeCellWorkspace = {
   readonly nodeId: NodeId
   readonly requestedWorkspace: string
@@ -345,12 +726,12 @@ type RuntimeCellWorkspace = {
 }
 
 const make = Effect.gen(function* () {
-  const fs = yield* FileSystem.FileSystem
   const path = yield* Path.Path
   const config = yield* RuntimeConfigTag
   const process = yield* ProcessRunner
   const cell = yield* Cell
   const hold = yield* Hold
+  const native = yield* NativeFileSystem
   const outbox = yield* Outbox
   const workspace = path.resolve(config.workspace)
 
@@ -474,11 +855,74 @@ const make = Effect.gen(function* () {
       })
     })
 
+  const materializeInvokeOutputs = (
+    node: PlanNode & { readonly _tag: "Invoke" },
+    receipt: ProcessReceipt,
+    cellReceipt: CellReceipt | undefined,
+    artifacts: Map<ArtifactId, RuntimeArtifact>
+  ): ReadonlyArray<ArtifactId> => {
+    const produced: ArtifactId[] = []
+    if (node.stdoutArtifact !== undefined) {
+      artifacts.set(node.stdoutArtifact, artifact(
+        node.stdoutArtifact,
+        receipt.stdout,
+        `invoke:stdout:${node.executable}`
+      ))
+      produced.push(node.stdoutArtifact)
+    }
+    if (node.stderrArtifact !== undefined) {
+      artifacts.set(node.stderrArtifact, artifact(
+        node.stderrArtifact,
+        receipt.stderr,
+        `invoke:stderr:${node.executable}`
+      ))
+      produced.push(node.stderrArtifact)
+    }
+    if (cellReceipt !== undefined && node.deltaArtifact !== undefined) {
+      artifacts.set(node.deltaArtifact, artifact(
+        node.deltaArtifact,
+        deltaBytes(cellReceipt),
+        `cell-delta:${node.executable}`,
+        { cellReceipt }
+      ))
+      produced.push(node.deltaArtifact)
+    }
+    return produced
+  }
+
+  const evidencedProcessFailure = (
+    error: unknown
+  ): {
+    readonly evidence: RuntimeProcessOutcome
+    readonly failure: RuntimeProcessFailure["outcome"]
+    readonly receipt: ProcessReceipt
+  } | undefined =>
+    error instanceof ProcessTimedOut
+      ? {
+          evidence: "timed-out",
+          failure: "timed-out",
+          receipt: error.receipt
+        }
+      : error instanceof ProcessOutputLimitExceeded
+        ? {
+            evidence: "output-limit",
+            failure: "output-limit",
+            receipt: error.receipt
+          }
+        : error instanceof ProcessCancelled
+          ? {
+              evidence: "cancelled",
+              failure: "cancelled",
+              receipt: error.receipt
+            }
+          : undefined
+
   const runInvoke = (
     node: PlanNode & { readonly _tag: "Invoke" },
     artifacts: Map<ArtifactId, RuntimeArtifact>,
-    cellWorkspaces: Map<NodeId, RuntimeCellWorkspace>
-  ) =>
+    cellWorkspaces: Map<NodeId, RuntimeCellWorkspace>,
+    processes: Map<NodeId, RuntimeProcessEvidence>
+  ): Effect.Effect<ReadonlyArray<ArtifactId>, RuntimeError> =>
     Effect.gen(function* () {
       const stdin = node.stdin === undefined ? undefined : artifacts.get(node.stdin)
       if (node.stdin !== undefined && stdin === undefined) {
@@ -490,7 +934,9 @@ const make = Effect.gen(function* () {
         args: node.args,
         cwd,
         env: { ...config.environment, ...node.env },
-        ...(stdin === undefined ? {} : { stdin: new ProcessInputBytes({ _tag: "bytes", bytes: stdin.bytes }) }),
+        stdin: stdin === undefined
+          ? node.stdinDisposition
+          : new ProcessInputBytes({ _tag: "bytes", bytes: stdin.bytes }),
         stdout: node.stdout,
         stderr: node.stderr,
         outputLimitBytes: node.outputLimitBytes,
@@ -500,10 +946,10 @@ const make = Effect.gen(function* () {
       if (contained && path.resolve(cwd) !== workspace) {
         return yield* new RuntimeCapabilityDenied({ nodeId: node.id, right: "Cell working directory", reason: "native-contained Invoke cwd must be the admitted workspace" })
       }
-      let outcome: {
+      let execution: Effect.Effect<{
         readonly process: ProcessReceipt
         readonly cell: CellReceipt | undefined
-      }
+      }, unknown>
       if (contained) {
         const privateWorkspace = path.resolve(
           path.join(path.dirname(workspace), `.airlock-cell-${crypto.randomUUID()}`)
@@ -516,120 +962,345 @@ const make = Effect.gen(function* () {
         // Register before invoking the Cell: preparation or process failure may
         // occur after the private workspace has already been created.
         cellWorkspaces.set(node.id, registration)
-        const receipt = yield* cell.run(new CellRequest({
+        execution = cell.run(new CellRequest({
           sourceWorkspace: workspace,
           privateWorkspace,
           process: request,
           network: "deny"
-        }))
-        yield* bindCellWorkspaceIdentity(node.id, registration, receipt)
-        outcome = { process: receipt.processReceipt, cell: receipt }
+        })).pipe(
+          Effect.map((receipt) => ({
+            process: receipt.processReceipt,
+            cell: receipt
+          }))
+        )
       } else {
-        outcome = {
-          process: yield* process.run(request),
-          cell: undefined
-        }
+        execution = process.run(request).pipe(
+          Effect.map((receipt) => ({
+            process: receipt,
+            cell: undefined
+          }))
+        )
       }
-      if (outcome.process.exitCode !== 0 || outcome.process.signal !== null) {
+
+      const executed = yield* execution.pipe(Effect.either)
+      if (executed._tag === "Left") {
+        const evidenced = evidencedProcessFailure(executed.left)
+        if (evidenced !== undefined) {
+          processes.set(node.id, new RuntimeProcessEvidence({
+            nodeId: node.id,
+            outcome: evidenced.evidence,
+            receipt: evidenced.receipt
+          }))
+          const outputArtifacts = materializeInvokeOutputs(
+            node,
+            evidenced.receipt,
+            undefined,
+            artifacts
+          )
+          return yield* new RuntimeProcessFailure({
+            nodeId: node.id,
+            outcome: evidenced.failure,
+            receipt: evidenced.receipt,
+            outputArtifacts
+          })
+        }
+        const tag = typeof executed.left === "object" &&
+            executed.left !== null &&
+            "_tag" in executed.left
+          ? String(executed.left._tag)
+          : "ProcessExecutionFailed"
         return yield* new RuntimeNodeFailure({
-          nodeId: node.id, operation: "invoke", reason: `process exited ${outcome.process.exitCode === null ? outcome.process.signal : outcome.process.exitCode}`
+          nodeId: node.id,
+          operation: "invoke",
+          reason: `${tag}: ${errorReason(executed.left)}`
         })
       }
-      const outputs = new Map<ArtifactId, { readonly bytes: Uint8Array; readonly provenance: string; readonly cellReceipt?: CellReceipt }>()
-      // Named outputs are explicit bindings, not positional guesses. The Plan
-      // decides which stream or delta is exported, and the runtime only fills
-      // the ids the Plan declared.
-      if (node.stdoutArtifact !== undefined) {
-        outputs.set(node.stdoutArtifact, {
-          bytes: outcome.process.stdout,
-          provenance: `invoke:stdout:${node.executable}`
-        })
-      }
-      if (node.stderrArtifact !== undefined) {
-        outputs.set(node.stderrArtifact, {
-          bytes: outcome.process.stderr,
-          provenance: `invoke:stderr:${node.executable}`
-        })
-      }
+
+      const outcome = executed.right
+      processes.set(node.id, new RuntimeProcessEvidence({
+        nodeId: node.id,
+        outcome: "exited",
+        receipt: outcome.process
+      }))
       if (outcome.cell !== undefined) {
-        if (node.deltaArtifact === undefined) {
-          return yield* new RuntimeNodeFailure({
-            nodeId: node.id,
-            operation: "record Cell delta",
-            reason: "native-contained Invoke requires a declared delta artifact id"
-          })
-        }
-        outputs.set(node.deltaArtifact, {
-          bytes: deltaBytes(outcome.cell),
-          provenance: `cell-delta:${node.executable}`,
-          cellReceipt: outcome.cell
+        yield* bindCellWorkspaceIdentity(
+          node.id,
+          cellWorkspaces.get(node.id)!,
+          outcome.cell
+        )
+      }
+      const outputArtifacts = materializeInvokeOutputs(
+        node,
+        outcome.process,
+        outcome.cell,
+        artifacts
+      )
+      if (outcome.process.signal !== null) {
+        return yield* new RuntimeProcessFailure({
+          nodeId: node.id,
+          outcome: "signal",
+          receipt: outcome.process,
+          outputArtifacts
         })
       }
-      const produced: ArtifactId[] = []
-      for (const id of node.produces) {
-        const output = outputs.get(id)
-        if (output === undefined) {
-          return yield* new RuntimeNodeFailure({
-            nodeId: node.id,
-            operation: "record Invoke outputs",
-            reason: `missing bound output for artifact ${id}`
-          })
-        }
-        artifacts.set(id, artifact(id, output.bytes, output.provenance, output.cellReceipt))
-        produced.push(id)
+      if (outcome.process.exitCode !== 0) {
+        return yield* new RuntimeProcessFailure({
+          nodeId: node.id,
+          outcome: "nonzero-exit",
+          receipt: outcome.process,
+          outputArtifacts
+        })
       }
-      return produced
-    }).pipe(Effect.mapError((error) => error instanceof RuntimeNodeFailure || error instanceof RuntimeCapabilityDenied ? error : new RuntimeNodeFailure({
-      nodeId: node.id, operation: "invoke", reason: `${error._tag}: ${errorReason(error)}`
-    })))
+      return outputArtifacts
+    })
+
+  const materializeStructuredResult = <A, I>(
+    node: PlanNode,
+    artifacts: Map<ArtifactId, RuntimeArtifact>,
+    schema: Schema.Schema<A, I, never>,
+    value: A,
+    provenance: string
+  ) =>
+    node.produces.length === 0
+      ? Effect.succeed([])
+      : encodeStructured(
+          schema,
+          value,
+          node.id,
+          `encode ${provenance} artifact`
+        ).pipe(
+          Effect.map((bytes) => materializeNodeArtifact(
+            node,
+            artifacts,
+            bytes,
+            provenance,
+            "application/json"
+          ))
+        )
+
+  const nativeNodeFailure = (node: PlanNode, operation: string) =>
+    (error: { readonly _tag: string }) => new RuntimeNodeFailure({
+      nodeId: node.id,
+      operation,
+      reason: `${error._tag}: ${errorReason(error)}`
+    })
 
   const runNode = (
     plan: Plan,
     node: PlanNode,
     artifacts: Map<ArtifactId, RuntimeArtifact>,
-    cellWorkspaces: Map<NodeId, RuntimeCellWorkspace>
+    cellWorkspaces: Map<NodeId, RuntimeCellWorkspace>,
+    processes: Map<NodeId, RuntimeProcessEvidence>
   ): Effect.Effect<ReadonlyArray<ArtifactId>, RuntimeError> =>
     Effect.gen(function* () {
       yield* enforce(node)
       switch (node._tag) {
         case "Capture": {
-          let bytes: Uint8Array
           switch (node.source) {
-            case "file": bytes = yield* fs.readFile(localPath(node.locator)).pipe(Effect.mapError((error) => new RuntimeNodeFailure({ nodeId: node.id, operation: "read file", reason: errorReason(error) }))); break
+            case "file":
+              switch (node.operation) {
+                case "read": {
+                  const bytes = yield* native.readBytes(node.locator).pipe(
+                    Effect.mapError(nativeNodeFailure(node, "Capture.file.read"))
+                  )
+                  const mediaType = node.format === "text"
+                    ? "text/plain; charset=utf-8"
+                    : node.format === "json"
+                      ? "application/json"
+                      : "application/octet-stream"
+                  return materializeNodeArtifact(
+                    node,
+                    artifacts,
+                    bytes,
+                    `capture:file.read:${node.locator}`,
+                    mediaType
+                  )
+                }
+                case "inspect": {
+                  const result = yield* native.inspect(node.locator).pipe(
+                    Effect.mapError(nativeNodeFailure(node, "Capture.file.inspect"))
+                  )
+                  return yield* materializeStructuredResult(
+                    node,
+                    artifacts,
+                    NativeStat,
+                    result,
+                    `capture:file.inspect:${node.locator}`
+                  )
+                }
+                case "stat": {
+                  const result = yield* native.stat(node.locator).pipe(
+                    Effect.mapError(nativeNodeFailure(node, "Capture.file.stat"))
+                  )
+                  return yield* materializeStructuredResult(
+                    node,
+                    artifacts,
+                    NativeStat,
+                    result,
+                    `capture:file.stat:${node.locator}`
+                  )
+                }
+                case "list": {
+                  const result = yield* native.list(node.locator).pipe(
+                    Effect.mapError(nativeNodeFailure(node, "Capture.file.list"))
+                  )
+                  return yield* materializeStructuredResult(
+                    node,
+                    artifacts,
+                    Schema.Array(NativeListEntry),
+                    result,
+                    `capture:file.list:${node.locator}`
+                  )
+                }
+                case "glob": {
+                  const result = yield* native.glob(
+                    node.locator,
+                    node.pattern!
+                  ).pipe(
+                    Effect.mapError(nativeNodeFailure(node, "Capture.file.glob"))
+                  )
+                  return yield* materializeStructuredResult(
+                    node,
+                    artifacts,
+                    Schema.Array(Schema.String),
+                    result,
+                    `capture:file.glob:${node.locator}`
+                  )
+                }
+              }
             case "environment": {
               const value = config.environment[node.locator]
               if (value === undefined) return yield* new RuntimeNodeFailure({ nodeId: node.id, operation: "read environment", reason: `not present: ${node.locator}` })
-              bytes = text.encode(value); break
+              return materializeNodeArtifact(
+                node,
+                artifacts,
+                text.encode(value),
+                `capture:environment:${node.locator}`,
+                "text/plain; charset=utf-8"
+              )
             }
-            case "clock": bytes = text.encode((yield* DateTime.now).toString()); break
+            case "clock":
+              return materializeNodeArtifact(
+                node,
+                artifacts,
+                text.encode((yield* DateTime.now).toString()),
+                `capture:clock:${node.locator}`,
+                "text/plain; charset=utf-8"
+              )
             case "process-output": return yield* new RuntimeUnsupported({ nodeId: node.id, feature: "process-output Capture", reason: "use Invoke produces to bind an explicit stream artifact" })
           }
-          for (const id of node.produces) artifacts.set(id, artifact(id, bytes, `${node.source}:${node.locator}`))
-          return node.produces
         }
-        case "Invoke": return yield* runInvoke(node, artifacts, cellWorkspaces)
+        case "Invoke":
+          return yield* runInvoke(node, artifacts, cellWorkspaces, processes)
         case "Apply": {
-          const target = localPath(node.target)
-          if (node.operation === "remove") {
-            yield* hold.remove(target).pipe(Effect.mapError((error) => new RuntimeNodeFailure({ nodeId: node.id, operation: "Hold.remove", reason: `${error._tag}: ${errorReason(error)}` })))
-            return node.produces
+          switch (node.operation) {
+            case "write": {
+              const source = artifacts.get(node.sourceArtifact!)
+              if (source === undefined) {
+                return yield* new RuntimeNodeFailure({
+                  nodeId: node.id,
+                  operation: "Apply.write",
+                  reason: `missing artifact ${node.sourceArtifact}`
+                })
+              }
+              if (source.cellReceipt !== undefined) {
+                return yield* new RuntimeUnsupported({
+                  nodeId: node.id,
+                  feature: "Apply.write",
+                  reason: "a Cell delta is consumable only by Apply.merge"
+                })
+              }
+              const result = yield* native.writeBytes(
+                node.target,
+                source.bytes
+              ).pipe(Effect.mapError(nativeNodeFailure(node, "Apply.write")))
+              return yield* materializeStructuredResult(
+                node,
+                artifacts,
+                NativeWriteReceipt,
+                result,
+                `apply:write:${node.target}`
+              )
+            }
+            case "remove": {
+              const result = yield* native.remove(node.target).pipe(
+                Effect.mapError(nativeNodeFailure(node, "Apply.remove"))
+              )
+              return yield* materializeStructuredResult(
+                node,
+                artifacts,
+                RemoveReceipt,
+                result,
+                `apply:remove:${node.target}`
+              )
+            }
+            case "copy": {
+              const result = yield* native.copy(
+                node.source!,
+                node.target
+              ).pipe(Effect.mapError(nativeNodeFailure(node, "Apply.copy")))
+              return yield* materializeStructuredResult(
+                node,
+                artifacts,
+                NativeWriteReceipt,
+                result,
+                `apply:copy:${node.target}`
+              )
+            }
+            case "move": {
+              const result = yield* native.move(
+                node.source!,
+                node.target
+              ).pipe(Effect.mapError(nativeNodeFailure(node, "Apply.move")))
+              return yield* materializeStructuredResult(
+                node,
+                artifacts,
+                NativeMoveReceipt,
+                result,
+                `apply:move:${node.target}`
+              )
+            }
+            case "mkdir": {
+              const result = yield* native.mkdir(node.target, {
+                parents: node.parents
+              }).pipe(Effect.mapError(nativeNodeFailure(node, "Apply.mkdir")))
+              return yield* materializeStructuredResult(
+                node,
+                artifacts,
+                NativeMkdirReceipt,
+                result,
+                `apply:mkdir:${node.target}`
+              )
+            }
+            case "merge": {
+              const source = artifacts.get(node.sourceArtifact!)
+              if (source === undefined) {
+                return yield* new RuntimeNodeFailure({
+                  nodeId: node.id,
+                  operation: "Apply.merge",
+                  reason: `missing artifact ${node.sourceArtifact}`
+                })
+              }
+              if (source.cellReceipt === undefined) {
+                return yield* new RuntimeNodeFailure({
+                  nodeId: node.id,
+                  operation: "Apply.merge",
+                  reason: "source artifact is not a Cell delta"
+                })
+              }
+              yield* mergeCellDelta(node, source)
+              return yield* materializeStructuredResult(
+                node,
+                artifacts,
+                RuntimeMergeEvidence,
+                new RuntimeMergeEvidence({
+                  target: node.target,
+                  paths: source.cellReceipt.delta.map((entry) => entry.path)
+                }),
+                `apply:merge:${node.target}`
+              )
+            }
           }
-          if (node.operation === "move") return yield* new RuntimeUnsupported({ nodeId: node.id, feature: "Apply.move", reason: "Plan v1 has no held move contract" })
-          if (node.sourceArtifact === undefined) return yield* new RuntimeNodeFailure({ nodeId: node.id, operation: `Apply.${node.operation}`, reason: "sourceArtifact is required" })
-          const source = artifacts.get(node.sourceArtifact)
-          if (source === undefined) return yield* new RuntimeNodeFailure({ nodeId: node.id, operation: `Apply.${node.operation}`, reason: `missing artifact ${node.sourceArtifact}` })
-          if (node.operation === "merge") {
-            if (source.cellReceipt === undefined) return yield* new RuntimeNodeFailure({ nodeId: node.id, operation: "Apply.merge", reason: "source artifact is not a Cell delta" })
-            yield* mergeCellDelta(node, source)
-            return node.produces
-          }
-          if (source.cellReceipt !== undefined) return yield* new RuntimeUnsupported({ nodeId: node.id, feature: `Apply.${node.operation}`, reason: "a Cell delta is consumable only by Apply.merge" })
-          let content: string
-          try { content = textDecoder.decode(source.bytes) } catch {
-            return yield* new RuntimeUnsupported({ nodeId: node.id, feature: "binary Apply.write", reason: "Hold text write refuses lossy byte conversion" })
-          }
-          yield* hold.overwrite(target, content).pipe(Effect.mapError((error) => new RuntimeNodeFailure({ nodeId: node.id, operation: "Hold.overwrite", reason: `${error._tag}: ${errorReason(error)}` })))
-          return node.produces
         }
         case "RequestExternal": {
           const bodyArtifact = node.bodyArtifact === undefined
@@ -644,17 +1315,16 @@ const make = Effect.gen(function* () {
           }
           let body = node.body
           if (bodyArtifact !== undefined) {
-            try {
-              body = textDecoder.decode(bodyArtifact.bytes)
-            } catch {
-              return yield* new RuntimeUnsupported({
+            body = yield* Effect.try({
+              try: () => textDecoder.decode(bodyArtifact.bytes),
+              catch: () => new RuntimeUnsupported({
                 nodeId: node.id,
                 feature: "binary RequestExternal body",
                 reason: "HTTP Outbox v1 accepts text bodies; artifact bytes are not valid UTF-8"
               })
-            }
+            })
           }
-          yield* outbox.stage(new EmissionRequest({
+          const staged = yield* outbox.stage(new EmissionRequest({
             url: node.endpoint,
             method: node.method,
             headers: node.headers,
@@ -664,7 +1334,13 @@ const make = Effect.gen(function* () {
             operation: "stage external",
             reason: `${error._tag}: ${errorReason(error)}`
           })))
-          return node.produces
+          return yield* materializeStructuredResult(
+            node,
+            artifacts,
+            OutboxEmission,
+            staged,
+            `request-external:${node.endpoint}`
+          )
         }
       }
     })
@@ -717,7 +1393,7 @@ const make = Effect.gen(function* () {
   ): Effect.Effect<RuntimeRun, RuntimePlanInvalid | RuntimeLifecycleFailure> => {
     const cellWorkspaces = new Map<NodeId, RuntimeCellWorkspace>()
     const runPlan = Effect.gen(function* () {
-      const ordered = yield* validatePlan(plan)
+      const ordered = yield* validatePlan(plan, config.profile, workspace)
       const startedAt = yield* DateTime.now
       const producedIds = new Set(ordered.flatMap((node) => node.produces))
       const inputIds = initialArtifacts.map((input) => input.id)
@@ -740,6 +1416,7 @@ const make = Effect.gen(function* () {
       )
       const receipts: Receipt[] = []
       const stateByNode = new Map<NodeId, NodeState>()
+      const processes = new Map<NodeId, RuntimeProcessEvidence>()
       let failed = false
       for (const node of ordered) {
         const handles = handlesFor(plan, node)
@@ -761,20 +1438,51 @@ const make = Effect.gen(function* () {
           failed = true
           continue
         }
+        const artifactsBefore = new Set(artifacts.keys())
         const result = yield* runNode(
           plan,
           node,
           artifacts,
-          cellWorkspaces
+          cellWorkspaces,
+          processes
         ).pipe(Effect.either)
-        if (result._tag === "Left") {
+        const materialized = [...artifacts.keys()].filter(
+          (id) => !artifactsBefore.has(id)
+        )
+        const claimed = result._tag === "Right"
+          ? result.right
+          : result.left instanceof RuntimeProcessFailure
+            ? result.left.outputArtifacts
+            : []
+        const claimMatches =
+          claimed.length === materialized.length &&
+          claimed.every((id) => materialized.includes(id))
+        if (!claimMatches) {
+          const mismatch = new RuntimeArtifactClaimMismatch({
+            nodeId: node.id,
+            claimed,
+            materialized
+          })
           receipts.push(yield* nodeReceipt(
             plan,
             node,
             receipts.length + 1,
             "failed",
             artifacts,
-            [],
+            materialized,
+            handles.map((handle) => handle.resourceIdentity),
+            mismatch._tag
+          ))
+          stateByNode.set(node.id, "failed")
+          failed = true
+        } else if (result._tag === "Left") {
+          receipts.push(yield* nodeReceipt(
+            plan,
+            node,
+            receipts.length + 1,
+            "failed",
+            artifacts,
+            claimed,
             handles.map((handle) => handle.resourceIdentity),
             result.left._tag
           ))
@@ -807,7 +1515,8 @@ const make = Effect.gen(function* () {
         startedAt,
         finishedAt,
         receipts,
-        artifacts: [...artifacts.values()]
+        artifacts: [...artifacts.values()],
+        processes: [...processes.values()]
       })
     })
 

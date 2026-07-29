@@ -19,6 +19,10 @@ import {
 } from "../src/cell/index.ts"
 import { Hold, HoldFilesystemError, HoldLayer } from "../src/Hold.ts"
 import { LedgerLive } from "../src/Ledger.ts"
+import {
+  NativeFileSystemLive,
+  NativeFilesystemConfig
+} from "../src/native/index.ts"
 import { OutboxLive } from "../src/Outbox.ts"
 import {
   ArtifactId, AuthorityAdmission, CaptureNode, Digest, NodeId, Plan, PlanId, RequestExternalNode, ApplyNode, InvokeNode
@@ -65,6 +69,7 @@ const compatibilityLayer = (workspace: string, home: string) => RuntimeLive.pipe
     }))
   }))),
   Layer.provideMerge(impossibleCell),
+  Layer.provideMerge(NativeFileSystemLive(new NativeFilesystemConfig({ workspace }))),
   Layer.provideMerge(HoldTestLive), Layer.provideMerge(OutboxLive), Layer.provideMerge(LedgerLive),
   Layer.provideMerge(AirlockHome.layer(home)),
   Layer.provideMerge(RuntimeConfigLive(new RuntimeConfig({ workspace }))),
@@ -78,6 +83,7 @@ const nativeLayer = (
   hold: Layer.Layer<Hold, any, any> = HoldTestLive
 ) => RuntimeLive.pipe(
   Layer.provideMerge(cell), Layer.provideMerge(ProcessRunnerLive), Layer.provideMerge(MacosPlatformLive),
+  Layer.provideMerge(NativeFileSystemLive(new NativeFilesystemConfig({ workspace }))),
   Layer.provideMerge(hold), Layer.provideMerge(OutboxLive), Layer.provideMerge(LedgerLive),
   Layer.provideMerge(AirlockHome.layer(home)),
   Layer.provideMerge(RuntimeConfigLive(new RuntimeConfig({ workspace, profile: "native-contained" }))),
@@ -463,7 +469,7 @@ describe("native-contained runtime", () => {
           const lifecycle = run.lifecycle[0]
 
           expect(run.state).toBe("failed")
-          expect(run.receipts[0]?.errorTag).toBe("RuntimeNodeFailure")
+          expect(run.receipts[0]?.errorTag).toBe("RuntimeProcessFailure")
           expect(lifecycle).toMatchObject({
             _tag: "RuntimeCellWorkspaceHeld",
             state: "held",
