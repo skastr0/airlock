@@ -60,6 +60,7 @@ import {
   ProcessRunner,
   ProcessTimedOut
 } from "../process/Process.ts"
+import { makeExclusiveFileLock } from "../platform/ExclusiveFileLock.ts"
 
 /**
  * Candidate Plan interpreter. Plan, receipt, and Cell contracts are the
@@ -336,6 +337,21 @@ export class RuntimeLifecycleFailure extends Schema.TaggedError<RuntimeLifecycle
   }
 ) {}
 
+export class RuntimeExecutionClaimRejected extends Schema.TaggedError<RuntimeExecutionClaimRejected>()(
+  "RuntimeExecutionClaimRejected",
+  {
+    planId: Schema.String,
+    operation: Schema.Literal(
+      "persistent-journal-required",
+      "acquire",
+      "replay"
+    ),
+    priorState: Schema.optional(RuntimeRunSnapshot.fields.state),
+    priorSequence: Schema.optional(Schema.Number),
+    reason: Schema.String
+  }
+) {}
+
 export class RuntimeProcessFailure extends Schema.TaggedError<RuntimeProcessFailure>()(
   "RuntimeProcessFailure",
   {
@@ -398,7 +414,10 @@ export class Runtime extends Context.Tag("airlock/Runtime")<
     readonly execute: (
       authority: ExecutionAuthority,
       initialArtifacts?: ReadonlyArray<RuntimeInitialArtifact>
-    ) => Effect.Effect<RuntimeRun, RuntimePlanInvalid | RuntimeLifecycleFailure>
+    ) => Effect.Effect<
+      RuntimeRun,
+      RuntimePlanInvalid | RuntimeLifecycleFailure | RuntimeExecutionClaimRejected
+    >
     readonly inspect: (
       planId: string
     ) => Effect.Effect<RuntimeRunSnapshot, RuntimeRunJournalError | RuntimeRunNotFound>
@@ -1254,6 +1273,52 @@ const make = Effect.gen(function* () {
     : makeFileRuntimeRunJournal(config.runJournalDirectory)
   const workspace = path.resolve(config.workspace)
 
+  const withExecutionClaim = <A, E, R>(
+    planId: string,
+    effect: Effect.Effect<A, E, R>
+  ): Effect.Effect<A, E | RuntimeExecutionClaimRejected, R> => {
+    const journalRoot = config.runJournalDirectory
+    if (journalRoot === undefined) {
+      return Effect.fail(
+        new RuntimeExecutionClaimRejected({
+          planId,
+          operation: "persistent-journal-required",
+          reason:
+            "execution requires a persistent run journal so Plan identity can be claimed before world work"
+        })
+      )
+    }
+
+    const claimRoot = nodePath.join(journalRoot, ".claims")
+    const identity = createHash("sha256").update(planId).digest("hex")
+    const active = nodePath.join(claimRoot, `${identity}.lock`)
+    const claimFailure = (
+      operation: string,
+      target: string,
+      cause: unknown
+    ) =>
+      new RuntimeExecutionClaimRejected({
+        planId,
+        operation: "acquire",
+        reason: `${operation} ${target}: ${errorReason(cause)}`
+      })
+    const lock = makeExclusiveFileLock({
+      root: claimRoot,
+      active,
+      released: `${active}.released`,
+      abandoned: `${active}.abandoned`,
+      onError: claimFailure
+    })
+
+    return Effect.tryPromise({
+      try: () => mkdir(claimRoot, { recursive: true, mode: 0o700 }),
+      catch: (cause) => claimFailure("create-claim-root", claimRoot, cause)
+    }).pipe(
+      Effect.asVoid,
+      Effect.flatMap(() => lock.withLock(effect))
+    )
+  }
+
   const localPath = (locator: string) => nodePath.isAbsolute(locator) ? locator : path.join(workspace, locator)
 
   const enforce = (node: PlanNode): Effect.Effect<void, RuntimeError> => {
@@ -1997,7 +2062,10 @@ const make = Effect.gen(function* () {
   const execute = (
     authority: ExecutionAuthority,
     initialArtifacts: ReadonlyArray<RuntimeInitialArtifact> = []
-  ): Effect.Effect<RuntimeRun, RuntimePlanInvalid | RuntimeLifecycleFailure> => {
+  ): Effect.Effect<
+    RuntimeRun,
+    RuntimePlanInvalid | RuntimeLifecycleFailure | RuntimeExecutionClaimRejected
+  > => {
     const plan = authority.admission.plan
     const cellWorkspaces = new Map<NodeId, RuntimeCellWorkspace>()
     let ordered: ReadonlyArray<PlanNode> = []
@@ -2065,12 +2133,15 @@ const make = Effect.gen(function* () {
           reason: `initial artifact is also produced by a node: ${collidingInput}`
         })
       }
-      for (const input of initialArtifacts) {
-        artifacts.set(input.id, materializeInitialArtifact(input))
-      }
-      snapshotSequence = yield* runJournal.inspect(plan.id).pipe(
-        Effect.map((snapshot) => snapshot.sequence),
-        Effect.catchTag("RuntimeRunNotFound", () => Effect.succeed(0)),
+      const prior = yield* runJournal.inspect(plan.id).pipe(
+        Effect.map((snapshot) => ({
+          _tag: "Found" as const,
+          snapshot
+        })),
+        Effect.catchTag(
+          "RuntimeRunNotFound",
+          () => Effect.succeed({ _tag: "Absent" as const })
+        ),
         Effect.mapError(
           (error) =>
             new RuntimeLifecycleFailure({
@@ -2080,6 +2151,19 @@ const make = Effect.gen(function* () {
             })
         )
       )
+      if (prior._tag === "Found") {
+        return yield* new RuntimeExecutionClaimRejected({
+          planId: plan.id,
+          operation: "replay",
+          priorState: prior.snapshot.state,
+          priorSequence: prior.snapshot.sequence,
+          reason:
+            `Plan execution already started and is durably recorded as ${prior.snapshot.state} at sequence ${prior.snapshot.sequence}`
+        })
+      }
+      for (const input of initialArtifacts) {
+        artifacts.set(input.id, materializeInitialArtifact(input))
+      }
       const beganAt = yield* DateTime.now
       startedAt = beganAt
       yield* persistSnapshot("running")
@@ -2241,7 +2325,7 @@ const make = Effect.gen(function* () {
      * uninterruptible so a second cancellation cannot strand a known Cell
      * workspace before Hold either accepts it or records why it could not.
      */
-    return Effect.uninterruptibleMask((restore) =>
+    const claimedExecution = Effect.uninterruptibleMask((restore) =>
       Effect.gen(function* () {
         const runExit = yield* restore(runPlan).pipe(Effect.exit)
         const lifecycle = yield* retainCellWorkspaces(cellWorkspaces)
@@ -2334,6 +2418,7 @@ const make = Effect.gen(function* () {
         return finalized
       })
     )
+    return withExecutionClaim(plan.id, claimedExecution)
   }
 
   return Runtime.of({

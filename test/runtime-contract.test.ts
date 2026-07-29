@@ -1,6 +1,8 @@
 import { BunContext } from "@effect/platform-bun"
 import { describe, expect, it } from "@effect/vitest"
 import { Context, DateTime, Effect, Layer } from "effect"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
 import { ExecutionAuthority } from "../src/admission/index.ts"
 import { Cell } from "../src/cell/index.ts"
 import {
@@ -263,6 +265,10 @@ const runtimeLayer = (
     Layer.provideMerge(RuntimeConfigLive(new RuntimeConfig({
       workspace: "/work",
       profile: options.profile ?? "compatibility",
+      runJournalDirectory: join(
+        tmpdir(),
+        `airlock-runtime-contract-${crypto.randomUUID()}`
+      ),
       environment: { AIRLOCK_TEST: "present" }
     }))),
     Layer.provideMerge(BunContext.layer)
