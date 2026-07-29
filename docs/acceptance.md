@@ -9,8 +9,11 @@
 Two claims are evaluated separately:
 
 1. **Compatibility:** Airlock provides a structured, Unix-shaped alternative
-   to direct shell orchestration while preserving broad host capability. This
-   claim includes no containment.
+   to direct shell orchestration while preserving broad Bash-like host
+   capability. Compatibility children retain ambient host authority; their
+   internal writes and network sends are not Hold/Outbox-mediated. This claim
+   includes no containment, recovery, cancellation, or external-uncertainty
+   guarantee for those child effects.
 2. **Native-contained:** Airlock can replace direct shell access for the
    published native-contained task and resource envelope on macOS, with
    managed local changes applied through Hold and unsupported capabilities
@@ -33,6 +36,11 @@ usable developer preview — broad claim not yet earned
 
 Evidence present today:
 
+- the final integrated `bun run verify` gate passes 52 test files plus one
+  skipped file and 254 tests plus 16 skipped tests;
+- the four explicit Bun/macOS boundary gates pass: 11 ProcessRunner cases,
+  eight native Cell cases, seven executable-edge cases, and nine in-process
+  boundary cases;
 - construction tests count one irreversible removal site and one Outbox wire
   site;
 - compatibility CLI/program execution is tested;
@@ -51,24 +59,43 @@ Evidence present today:
   delta, and stages a replacement request without dispatch;
 - a second Vouch-derived program executes 12 generic host operations / 16 Plan
   nodes and separately proves process timeout, cancellation, and bounded-output
-  receipts;
+  receipts; the two local proofs passed 20/20 and 10/10 consecutive
+  repetitions respectively on the final integrated revision, without becoming
+  real remote Vouch/OpenShell evidence;
 - four checked-in parity fixtures exercise common file/process/control/native
   rewrite shapes;
 - five further agent-only workloads exercise repository observation/search and
   artifact piping, native `sed`, tar, local Git, and `make` descendants;
 - a destructive native workload proves recursive removal is Hold-backed and
   exactly undoable through the supervisor;
+- a [separate repeatability campaign](evidence/parity-50.md) launches the real
+  `airlock-agent` subprocess 50 times: exactly ten deterministic scripted cases
+  repeated five times, with 40 compatibility and 10 native-contained successes
+  in 110.52 seconds cold; these are not 50 unique or model-generated tasks, a
+  direct-shell A/B, or a held-out corpus;
 - Hold and Outbox have bounded cross-process lease, stale-owner recovery, and
   journal/recovery tests, including cancellation of contended waiters without
   stealing the live owner;
+- Reaper cancellation is characterized at its terminal boundary: waiting is
+  cancellable without changing the held act, terminal removal plus directory
+  sync is uninterruptible, and interrupted Ledger publication returns typed
+  `HoldReapRecoveryRequired` evidence with the confirmed removal set;
 - the shared `O_EXLOCK` mechanism has a direct macOS proof with 16 independent
   Bun processes, 16 distinct PIDs, every contender completing, no independent
   `O_EXCL` overlap violation, and maximum decoded event occupancy of one; and
+- Runtime uses a persistent run journal and a SHA-256-derived, kernel-backed
+  `O_EXLOCK` claim before adapter work, retains the claim through
+  `running`/`finalizing`/terminal publication, and rejects concurrent or later
+  replay as typed `RuntimeExecutionClaimRejected`; and
 - the paired supervisor/agent macOS artifacts are locally ad-hoc signed,
-  hashed, verified, installed, and probed as one release pair; and
+  hashed, verified, installed, and probed as one release pair;
 - a later program failure returns a nonzero, versioned partial report that
   retains completed action records, Plan drafts, artifacts, and typed failure
-  context; and
+  context;
+- native action discovery is generated from the same Effect Schemas that
+  perform decoding, `run`/`eval --compact` returns a compact, deduplicated
+  evidence projection while process output and program values retain their
+  configured limits, and `runs --limit` is bounded to 1–100 snapshots; and
 - inert tool definitions execute end to end through existing generic actions,
   Admission, Plans, Runtime, and Schema-decoded results.
 
@@ -91,10 +118,11 @@ Direct unit/integration evidence establishes bounded properties:
 construction-site counts, structured argv, explicit native refusal/fences,
 staged-only Hold journal promotion, cross-process lease
 serialization/reclamation, process-group waiting, and paired local artifact
-verification. This does not meet this contract's definition of strong
-confidence. Product-level shell-replacement and security claims remain
-candidate because the corpus, platform, fault, and hostile gates are
-incomplete.
+verification. The 50/50 scripted campaign establishes repeatability of ten
+known cases, not representative agent task completion. This does not meet this
+contract's definition of strong confidence. Product-level shell-replacement
+and security claims remain candidate because the corpus, direct-shell
+baseline, platform, fault, and hostile gates are incomplete.
 
 ## Evaluation harness
 
@@ -191,11 +219,13 @@ All applicable gates must pass:
 9. Every attempted Plan node has a typed outcome and correlated receipt.
 10. Ordinary label derivation cannot lower confidentiality or raise
     integrity.
+11. Persistent Runtime storage and a single-use Plan claim precede adapter or
+    world work; a prior snapshot rejects replay.
 
-Gates 1–8 have meaningful repository coverage now. Gate 9 is implemented for
-completed current runtime nodes and versioned CLI results, but a failing node
-does not yet have a proven durable crash-safe receipt path. Gate 10 exists in
-the pure label component but is not enforced end to end.
+Gates 1–8 and 11 have meaningful repository coverage now. Gate 9 is
+implemented for completed current runtime nodes and versioned CLI results, but
+a failing node does not yet have a proven durable crash-safe receipt path.
+Gate 10 exists in the pure label component but is not enforced end to end.
 
 ## Native containment gates
 
@@ -248,9 +278,12 @@ Required outcomes:
 Current evidence covers bounded cross-process Hold/Outbox serialization,
 including a direct 16-process proof of the shared kernel lease; stale/dead
 lease-owner reclamation; lock-directory bounds; recovered `committing`
-uncertainty; and promotion of a valid staged-only Hold journal. The independent
+uncertainty; promotion of a valid staged-only Hold journal; and Reaper
+cancellation before terminal authority plus exact recovery evidence when
+Ledger publication is interrupted after confirmed removal. The independent
 sentinel and event trace prove one-holder mutual exclusion for that campaign.
-They do not cover every Hold/Outbox transition point and overlap listed above.
+They do not cover every Hold/Outbox/Reaper transition point and overlap listed
+above.
 
 ## Security and red-team gates
 

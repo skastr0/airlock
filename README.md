@@ -13,11 +13,13 @@ ambient host reads. A VM backend is a future, stronger enclosure and is not a
 macOS v1 release prerequisite.
 
 The repository has two runnable Vouch-derived local proofs, ten checked-in
-shell-parity workloads, a direct 16-process macOS proof of the shared
-`O_EXLOCK` lease, bounded Hold/Outbox recovery tests, and construction checks
-for the mutation and wire gateways. It does not yet have the representative
-corpus, exhaustive crash/overlap matrix, or red-team evidence needed for a
-strong shell-replacement claim.
+shell-parity workloads, a 50-execution agent-surface repeatability campaign, a
+direct 16-process macOS proof of the shared `O_EXLOCK` lease, bounded
+Hold/Outbox recovery tests, and construction checks for the mutation and wire
+gateways. The final integrated gate passes 52 test files plus one skipped file,
+254 tests plus 16 skipped tests, and all four Bun/macOS boundary suites. It
+does not yet have the representative corpus, exhaustive crash/overlap matrix,
+or red-team evidence needed for a strong shell-replacement claim.
 
 ## Install from npm
 
@@ -119,7 +121,12 @@ airlock exec \
   --cwd /tmp
 ```
 
-It preserves broad host capability and makes no containment claim.
+It preserves broad Bash-like host capability and makes no containment claim.
+The child process retains the invoking user's ambient filesystem, network,
+configuration, descendant, and descriptor authority. Writes and sends it
+performs internally are not converted into `Apply` or `RequestExternal` and
+receive no Hold, Outbox, recovery, cancellation, or dispatch-uncertainty
+guarantee.
 
 ## Inspect the surface
 
@@ -141,6 +148,15 @@ supervisor may pin it with `AIRLOCK_AGENT_PROFILE` (otherwise compatibility
 remains the ratchet default). A program can still request structured Invoke or
 Apply work, but a node that attempts to weaken the selected profile returns a
 failed `RuntimeCapabilityDenied` receipt and does not perform the effect.
+
+Action discovery is generated from the same Effect Schemas used to decode
+native actions, so `airlock-agent schema process.run` reports the executable
+contract rather than a parallel handwritten approximation. `run` and `eval`
+accept `--compact` for a compact, deduplicated projection of action, Plan,
+node, artifact, and failure evidence. Process output and the returned program
+value remain subject to their configured limits; compact mode is not a
+separate byte ceiling. `airlock-agent runs` returns ten recent run snapshots by
+default; `--limit` accepts values from 1 through 100.
 
 The current program action vocabulary is generic:
 
@@ -170,16 +186,23 @@ airlock undo
 airlock reap --older-than 7d
 ```
 
-Every managed replacement displaces the prior binding by rename. `Hold.reap`
-contains the repository's only irreversible removal site. Hold and Outbox
-serialize recovery transitions across processes with a bounded recoverable
-exclusive-file lease. Hold journal publication stages and syncs a candidate
-before promotion; startup can promote a valid staged-only journal. Those are
-tested properties. The lock proof launches 16 independent Bun processes,
-requires every contender to complete, and uses a separate kernel `O_EXCL`
-sentinel plus Schema-decoded enter/exit evidence to establish maximum
+Every Airlock-owned managed replacement displaces the prior binding by rename.
+`Hold.reap` contains the repository's only irreversible removal site. Hold and
+Outbox serialize recovery transitions across processes with a bounded
+recoverable exclusive-file lease. Hold journal publication stages and syncs a
+candidate before promotion; startup can promote a valid staged-only journal.
+Those are tested properties. The lock proof launches 16 independent Bun
+processes, requires every contender to complete, and uses a separate kernel
+`O_EXCL` sentinel plus Schema-decoded enter/exit evidence to establish maximum
 simultaneous holders of exactly one. This does not claim that every Hold or
 Outbox crash point and overlapping operation schedule has been exhausted.
+
+Reap waiting remains cancellable before terminal removal authority is taken,
+leaving the held act intact. Once removal begins, removal and directory sync
+run as one uninterruptible terminal section. If cancellation interrupts later
+Ledger publication, Hold returns typed `HoldReapRecoveryRequired` evidence
+with the confirmed removal set instead of reporting a false ordinary failure.
+This is bounded cancellation evidence, not proof of every Reaper crash point.
 
 ```sh
 airlock send https://api.example.com/hook \
@@ -191,9 +214,11 @@ airlock cancel emi_...
 airlock commit emi_...
 ```
 
-`send` and `http.stage` create durable local intent. The only wire-capable
-call is inside `Outbox.commit`. The current Outbox dispatch is bounded HTTP
-with manual redirects; it is not the proposed general endpoint broker.
+`send` and `http.stage` create durable local intent. For Airlock-owned
+`RequestExternal` work, the only runtime wire-capable call is inside
+`Outbox.commit`. Compatibility children retain ambient network and their sends
+are not Outbox dispatches. The current Outbox dispatch is bounded HTTP with
+manual redirects; it is not the proposed general endpoint broker.
 
 ## What is proved today
 
@@ -217,12 +242,29 @@ bounded-output partial process receipt.
 These are local host-operation fixtures, not a real Vouch/OpenShell replacement
 run. They do not prove endpoint brokerage, confidentiality, complete execution
 closure, exhaustive crash recovery, concurrent multi-entry atomicity, metadata
-fidelity, or broad task coverage.
+fidelity, or broad task coverage. On the final integrated revision, the first
+proof passed 20/20 consecutive repetitions and the second passed 10/10. That
+supports repeatability of these two local fixtures, not real remote Vouch or
+OpenShell replacement.
 
 Five additional agent-only workloads exercise repository observation/search
 and an artifact pipeline, native `sed` editing, tar round-trip, local Git,
 and `make` with descendant processes. A destructive native fixture also proves
 recursive removal remains Hold-backed and exactly undoable by the supervisor.
+
+The repeatability proof launches the real `airlock-agent` entrypoint in 50
+fresh Bun subprocesses: exactly ten deterministic scripted cases, repeated
+five times each. It records 40 compatibility and 10 native-contained
+successes; the measured cold campaign took 110.52 seconds. This is not 50
+unique or model-generated tasks, a direct-shell A/B, or a held-out corpus.
+See [the exact parity evidence and claim boundary](docs/evidence/parity-50.md).
+
+Every Plan Runtime execution also requires persistent run-journal storage and
+claims a SHA-256-derived Plan identity with a kernel-backed `O_EXLOCK` lease
+before adapter or world work. The claim remains held through the full
+`running` → `finalizing` → terminal lifecycle. Concurrent acquisition,
+sequential replay, or an existing recovered snapshot returns typed
+`RuntimeExecutionClaimRejected`; it does not execute the Plan again.
 
 ## Documentation
 
@@ -233,12 +275,14 @@ recursive removal remains Hold-backed and exactly undoable by the supervisor.
 - [Security model](docs/security-model.md)
 - [v1 acceptance contract](docs/acceptance.md)
 - [Vouch-first evidence](docs/vouch-first.md)
+- [50-execution agent proof](docs/evidence/parity-50.md)
 - [Feedback disposition](docs/feedback-disposition.md)
 
 ## Known gaps
 
-Strong confidence remains unearned. The project has not yet published a
-50-task shell-free corpus, repeated runs across supported macOS builds,
+Strong confidence remains unearned. Fifty repeated executions of ten scripted
+cases are not the required 50 unique real tasks. The project has not yet
+published that shell-free corpus, repeated runs across supported macOS builds,
 fault-injection at every durable transition, an exhaustive overlapping
 Apply/undo/reap/commit campaign, hostile execution-closure tests, or cross-plan
 information-flow and authority-laundering tests. Endpoint-broker tests become

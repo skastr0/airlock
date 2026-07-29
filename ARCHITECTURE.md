@@ -97,15 +97,17 @@ Hold/Outbox finality, and receipt semantics should not.
 | native workspace identity | **Implemented at the trusted CLI boundary**; native execution canonicalizes the workspace and existing absolute policy scopes before admission, while general path-race-safe resource identity remains incomplete |
 | private Cell lifecycle | **Implemented normal path**; exact Cell workspace identity is transferred to a non-undoable runtime-private Hold act on completion, failure, or cancellation, then only Reaper may discard it |
 | VM-enclosed profile | **Future design direction**; the CLI and runtime refuse it because no backend is installed |
-| Hold | **Implemented domain nucleus**; files/directories, same-volume rename admission, bounded cross-process locking, staged journal promotion, and undo conflict handling |
+| Hold | **Implemented domain nucleus**; files/directories, same-volume rename admission, bounded cross-process locking, staged journal promotion, undo conflict handling, and typed Reaper cancellation recovery after confirmed removal |
 | Outbox | **Implemented domain nucleus**; durable HTTP stage/cancel/commit, bounded cross-process locking, and honest `uncertain` recovery |
 | Ledger | **Implemented durable append seam**; cross-process locking, file/directory sync, and typed torn-tail repair/quarantine are established, but a complete compaction/tamper-evident multi-component Journal is not |
 | labels | **Implemented pure candidate**; lattice, sink checks, scoped declassification/endorsement, and tests exist, but the runtime does not yet enforce them end to end |
 | endpoint broker | **Candidate, not implemented**; current native Cells deny network and Outbox dispatches HTTP itself |
 | complete execution closure | **Acceptance condition, not established** |
 | inert tool definitions | **Implemented v1 integration**; accepted JSON definitions lower invoke-only actions totally through the same Plan/admission/runtime path and cannot mint authority |
+| agent discovery and compact output | **Implemented agent UX seam**; native action JSON Schemas derive from the decoding Schemas, `run`/`eval --compact` projects evidence, and recent-run listing is bounded to 1–100 entries |
 | Vouch evidence | **Implemented local proofs**; one restore/apply/stage/undo fixture plus a 12-action host-operation workflow, not a real OpenShell or remote replacement |
 | Unix contract corpus | **Implemented contract-shape evidence**; 72 accepted shapes across 10 families parse, decode, lower, validate, and compatibility-admit, with 8 explicit unsupported classes; they are not executed tasks or model-success evidence |
+| 50-execution agent proof | **Implemented repeatability evidence**; 10 deterministic scripted cases run five times each through real agent CLI subprocesses (40 compatibility, 10 native-contained), not 50 unique/model-generated tasks, a shell A/B, or a holdout corpus |
 | macOS distribution | **Implemented local release path**; paired supervisor/agent binaries are hashed, ad-hoc signed, verified, transactionally installed, and probed; Developer ID signing and notarization remain release gates |
 | shell-replacement confidence | **Not earned**; the checked-in fixtures are useful but not a representative corpus, complete crash matrix, or red-team result |
 
@@ -327,9 +329,63 @@ to end through the same program, Plan, Admission, Runtime, and Schema-decoder
 path. This is an extension mechanism for vocabulary and contracts, not for
 physics.
 
+Native action discovery is generated from the same Effect Schemas that decode
+those actions, rather than a parallel handwritten schema catalog. The agent
+surface can request one action schema directly. `run` and `eval` also provide a
+compact, deduplicated projection of action, Plan, node, artifact, and failure
+evidence; process output and the returned program value remain subject to their
+own configured limits rather than a separate compact-output byte ceiling.
+Recent-run listing defaults to ten snapshots and accepts an explicit bound from
+1 through 100.
+
 Unknown programs remain available through structured `process.run` in
 compatibility. Curated definitions improve model affordance and precision;
 they are not a completeness gate.
+
+### Design direction: bounded machine discovery
+
+A machine-wide tool-search failure exposed two safety axes that should not be
+collapsed. **Scope invention** is an agent silently widening a search root,
+following a new mount or symlink domain, or substituting a machine-wide
+enumeration for the supervisor's requested scope. It can happen through
+read-only operations. **Destructiveness** concerns mutation, finality, and
+recovery. A narrowly authorized removal may be destructive while a read-only
+`find /` invents scope. Hold physics addresses the former; it does not by
+itself make the latter legitimate.
+
+The candidate discovery path should prefer supervisor-known facts before
+machine traversal:
+
+1. resolve from a supervisor-known executable inventory;
+2. resolve installed inert tool definitions;
+3. resolve supervisor/harness-known skill manifests; then
+4. if still necessary, request a bounded `Capture` traversal.
+
+A bounded traversal contract should make its search authority legible:
+
+```text
+root
+maximum depth
+maximum entries inspected
+maximum results returned
+maximum bytes observed or returned
+maximum elapsed time
+symlink-following posture
+mount-crossing posture
+```
+
+Budget exhaustion should return a typed result that lets the agent request
+explicit supervisor escalation. It must not silently widen the root, follow
+additional mounts, or switch to an ambient search path.
+
+This is a **design direction**, not an implemented feature or a new law.
+Current `file.glob` does not expose this complete multi-budget traversal
+contract. The current native Cell also permits ambient host reads, so a strict
+discovery profile must not grant generic `find` or an interpreter merely to
+perform discovery: either can traverse outside the modeled `Capture` scope
+from inside the admitted process. Compatibility may retain those broad ambient
+tools under the ratchet, but then Airlock makes no containment or bounded-
+discovery claim for their reads.
 
 ### Finality: Hold and Outbox
 
@@ -561,6 +617,15 @@ It asks Hold to reserve a runtime-private act first, then populates the supplied
 stage and installs through the ordinary replacement transition. A failed,
 interrupted, or abandoned population remains enumerable recovery material for
 Reaper rather than orphan adapter state.
+
+Reaper cancellation has an explicit terminal boundary. Waiting for the Hold
+lease remains interruptible and leaves the act held. After Reaper takes
+terminal removal authority, removal and directory sync are uninterruptible.
+If cancellation interrupts the subsequent Ledger publication, the operation
+returns `HoldReapRecoveryRequired` with `phase: "ledger"`, confirmed current
+removal, and the exact reaped/current evidence rather than reporting a normal
+failure that could invite an unsafe retry. This characterizes the tested
+cancellation windows; it does not establish every crash point.
 
 The current evidence still does not establish crash safety at every filesystem
 and kernel point, every overlapping Apply/undo/reap schedule, metadata
@@ -883,7 +948,7 @@ macOS v1 is judged on what this release implements:
 - the agent-only acceptance corpus must measure real task completion without
   direct shell or alternate effect authority.
 
-The repository now contains three different kinds of evidence that must not be
+The repository now contains five different kinds of evidence that must not be
 collapsed:
 
 1. 72 Unix-informed **contract shapes** across 10 families parse, decode, lower
@@ -895,9 +960,24 @@ collapsed:
    build-descendant work.
 3. Two **Vouch-derived local proofs** exercise the generic restore and host
    workflow decomposition without running real Vouch/OpenShell remote work.
+   On the final integrated revision they passed 20/20 and 10/10 consecutive
+   repetitions respectively.
 4. Bun/macOS boundary proofs exercise the private write/network/temp fence,
    exact executable descendants and shebang chains, and the admitted
    interpreter/in-process-code boundary.
+5. One [**50-execution repeatability
+   campaign**](docs/evidence/parity-50.md) launches the real agent CLI as a
+   fresh Bun subprocess for exactly ten deterministic scripted cases, five
+   repetitions each: 40 compatibility and 10 native-contained successes in
+   110.52 seconds cold. It is not 50 unique/model-generated tasks, a
+   direct-shell A/B, or a held-out corpus.
+
+The final integrated `bun run verify` gate passes 52 test files plus one
+skipped file and 254 tests plus 16 skipped tests. Its explicit Bun/macOS
+boundary suites pass 11 ProcessRunner, eight native Cell, seven
+executable-edge, and nine in-process-boundary cases. These counts establish the
+revision's tested baseline; they do not transform fixtures into representative
+agent-task evidence.
 
 The published native exclusions include unstructured command strings, symlink
 Apply, special files/devices, mount mutation, interactive PTY/job control,
