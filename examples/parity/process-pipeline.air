@@ -1,0 +1,7 @@
+let selected = process.run({ executable: "/usr/bin/grep", args: ["-n", "needle", "input.txt"], cwd: workspace, stdin: "discard", stdout: "capture", stderr: "capture", cellProfile: "compatibility" })
+
+let upper = process.run({ executable: "/usr/bin/tr", args: ["a-z", "A-Z"], cwd: workspace, stdin: { kind: "artifact", id: selected.stdout_artifact.id }, stdout: "capture", stderr: "capture", cellProfile: "compatibility" })
+
+let literal = process.run({ executable: "/usr/bin/printf", args: ["%s", "literal; touch should-not-exist"], cwd: workspace, stdin: "discard", stdout: "capture", stderr: "capture", cellProfile: "compatibility" })
+
+return { selected: selected.stdout, transformed: upper.stdout, literal: literal.stdout, states: [selected.state, upper.state, literal.state] }

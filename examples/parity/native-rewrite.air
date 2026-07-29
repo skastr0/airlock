@@ -1,0 +1,1 @@
+return process.run({ executable: "/bin/cp", args: ["replacement.txt", "live.txt"], cwd: workspace, stdin: "discard", stdout: "capture", stderr: "capture", cellProfile: "native-contained" })

@@ -1,0 +1,13 @@
+assert enabled, "the supervisor must enable this workload"
+
+for index in 0..3 {
+  let written = file.write({ path: "bounded.txt", content: "bounded iteration\n" })
+  assert written.state == "applied"
+}
+
+if expected == 3 {
+  let observed = file.read({ path: "bounded.txt", format: "text" })
+  return { state: "complete", iterations: expected, observed: observed }
+} else {
+  return { state: "unexpected-input", iterations: expected }
+}
