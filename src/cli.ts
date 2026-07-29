@@ -50,7 +50,9 @@ const rendered = <A, E, R>(
     Effect.flatMap(emit),
     Effect.catchAll((error) =>
       Console.error(JSON.stringify(error)).pipe(
-        Effect.zipRight(Effect.sync(() => process.exit(1)))
+        Effect.zipRight(Effect.sync(() => {
+          process.exitCode = 1
+        }))
       )
     )
   )
@@ -73,7 +75,9 @@ const renderedProgram = <A extends {
     ),
     Effect.catchAll((error) =>
       Console.error(JSON.stringify(error)).pipe(
-        Effect.zipRight(Effect.sync(() => process.exit(1)))
+        Effect.zipRight(Effect.sync(() => {
+          process.exitCode = 1
+        }))
       )
       )
     )
