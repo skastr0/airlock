@@ -36,6 +36,7 @@ import {
 } from "../src/plan/index.ts"
 import { MacosPlatformLive } from "../src/platform/macos/index.ts"
 import { ProcessRunnerLive } from "../src/process/Process.ts"
+import { NativeFileSystemLive, NativeFilesystemConfig } from "../src/native/index.ts"
 import {
   Runtime,
   RuntimeConfig,
@@ -152,6 +153,7 @@ const makeDraft = (
 ) => {
   const captureArchive = requirement("capture-archive-path")
   const invokeTar = requirement("invoke-tar")
+  const invokeWorkspace = requirement("invoke-workspace")
   const observeSoul = requirement("observe-live-soul")
   const mergeWorkspace = requirement("merge-workspace")
   const stageReplacement = requirement("stage-replacement")
@@ -176,6 +178,13 @@ const makeDraft = (
       rights: ["execute"]
     }),
     new ResourceRequirement({
+      id: invokeWorkspace,
+      kind: "path",
+      realm: "host",
+      selector: workspace,
+      rights: ["read"]
+    }),
+    new ResourceRequirement({
       id: observeSoul,
       kind: "path",
       realm: "host",
@@ -194,7 +203,7 @@ const makeDraft = (
       kind: "endpoint",
       realm: "replacement-controller",
       selector: endpoint,
-      rights: ["emit"]
+      rights: ["connect", "emit"]
     })
   ]
 
@@ -209,7 +218,7 @@ const makeDraft = (
   const invoke = new InvokeNode({
     id: node("extract-private"),
     dependsOn: [capture.id],
-    requires: [invokeTar],
+    requires: [invokeTar, invokeWorkspace],
     produces: [tarStderr, cellDelta],
     executable: "/usr/bin/tar",
     args: ["-xzf", "-", "-C", "hermes"],
@@ -300,23 +309,32 @@ export const runVouchProof = async (): Promise<VouchProofReport> => {
     endpointAllowlist: [endpoint]
   })
 
-  const runtimeLayer = RuntimeLive.pipe(
-    Layer.provideMerge(CellLive),
-    Layer.provideMerge(ProcessRunnerLive),
-    Layer.provideMerge(MacosPlatformLive),
-    Layer.provideMerge(HoldLive),
-    Layer.provideMerge(OutboxLive),
-    Layer.provideMerge(LedgerLive),
-    Layer.provideMerge(AirlockHome.layer(fixture.home)),
-    Layer.provideMerge(
-      RuntimeConfigLive(
-        new RuntimeConfig({
-          workspace: fixture.workspace,
-          profile: "native-contained"
-        })
-      )
-    ),
+  const homeLayer = AirlockHome.layer(fixture.home).pipe(
     Layer.provideMerge(BunContext.layer)
+  )
+  const ledgerLayer = LedgerLive.pipe(Layer.provideMerge(homeLayer))
+  const stateLayer = Layer.mergeAll(
+    ledgerLayer,
+    HoldLive.pipe(Layer.provideMerge(ledgerLayer)),
+    OutboxLive.pipe(Layer.provideMerge(ledgerLayer))
+  )
+  const nativeLayer = NativeFileSystemLive(new NativeFilesystemConfig({
+    workspace: fixture.workspace
+  })).pipe(Layer.provideMerge(stateLayer))
+  const executionDependencies = Layer.mergeAll(
+    nativeLayer,
+    ProcessRunnerLive,
+    MacosPlatformLive
+  )
+  const cellLayer = CellLive.pipe(
+    Layer.provideMerge(executionDependencies)
+  )
+  const runtimeLayer = RuntimeLive.pipe(
+    Layer.provideMerge(cellLayer),
+    Layer.provideMerge(RuntimeConfigLive(new RuntimeConfig({
+      workspace: fixture.workspace,
+      profile: "native-contained"
+    })))
   )
 
   let dispatchCalls = 0
@@ -340,9 +358,17 @@ export const runVouchProof = async (): Promise<VouchProofReport> => {
         )
         assert(
           run.receipts.every(
-            (receipt) => receipt.resourceIdentities.length === 1
+            (receipt) => {
+              const planned = admitted.plan.nodes.find(
+                (node) => node.id === receipt.nodeId
+              )
+              return planned !== undefined &&
+                receipt.resourceIdentities.length === planned.requires.length &&
+                new Set(receipt.resourceIdentities).size ===
+                  receipt.resourceIdentities.length
+            }
           ),
-          "every node must carry its admitted resource identity"
+          "every node must carry each distinct admitted resource identity"
         )
 
         const beforeApply = run.artifacts.find(

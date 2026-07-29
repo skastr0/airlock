@@ -33,8 +33,8 @@ describe.skipIf(!supported)("Vouch-derived macOS end-to-end proof", () => {
     )
 
     expect(report.profile).toBe("native-contained")
-    expect(report.grantCount).toBe(5)
-    expect(report.handleCount).toBe(5)
+    expect(report.grantCount).toBe(6)
+    expect(report.handleCount).toBe(6)
     expect(report.receipts.map((receipt) => receipt.state)).toEqual([
       "succeeded",
       "succeeded",
@@ -46,10 +46,8 @@ describe.skipIf(!supported)("Vouch-derived macOS end-to-end proof", () => {
       1, 2, 3, 4, 5
     ])
     expect(
-      report.receipts.every(
-        (receipt) => receipt.resourceIdentities.length === 1
-      )
-    ).toBe(true)
+      report.receipts.map((receipt) => receipt.resourceIdentities.length)
+    ).toEqual([1, 2, 1, 1, 1])
     expect(report.receipts[1]?.inputDigests).toHaveLength(1)
 
     expect(report.cell).toMatchObject({

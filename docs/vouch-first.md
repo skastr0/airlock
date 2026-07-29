@@ -59,9 +59,11 @@ The proof then invokes Hold undo as an administrative transition.
 
 The proof asserts:
 
-- five admitted grants and five handles;
+- six admitted grants and six handles, including separate executable and
+  working-directory authority for the `tar` invocation;
 - five succeeded Plan-node receipts in sequence;
-- one admitted resource identity per node;
+- one admitted resource identity per node except the invocation, which carries
+  its distinct executable and working-directory identities;
 - the archive digest is attached to the Invoke input;
 - the actual executable and args are recorded;
 - network is denied;
