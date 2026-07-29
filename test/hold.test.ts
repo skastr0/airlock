@@ -1,4 +1,5 @@
 import { FileSystem, Path } from "@effect/platform"
+import type { PlatformError } from "@effect/platform/Error"
 import { BunContext } from "@effect/platform-bun"
 import { describe, expect, it } from "@effect/vitest"
 import { Context, Effect, Layer } from "effect"
@@ -144,6 +145,49 @@ describe("Hold — undoable mutations", () => {
       })
     )
   )
+
+  it.effect("retains filesystem metadata alongside the held payload", () =>
+    world(({ fs, hold, path, tmp }) =>
+      Effect.gen(function* () {
+        const file = path.join(tmp, "metadata.txt")
+        yield* fs.writeFileString(file, "retain me")
+        const receipt = yield* hold.remove(file)
+        const raw = yield* fs.readFileString(
+          path.join(tmp, "airlock-home", "hold", receipt.id, "manifest.json")
+        )
+        const journal = JSON.parse(raw) as {
+          readonly state: string
+          readonly retained: { readonly device: number; readonly mode: number; readonly bytes: number }
+        }
+
+        expect(journal.state).toBe("held")
+        expect(journal.retained.device).toBeTypeOf("number")
+        expect(journal.retained.mode).toBeTypeOf("number")
+        expect(journal.retained.bytes).toBe("retain me".length)
+      })
+    )
+  )
+
+  it.effect("reconciles a crash-left prepared rename to held on next construction", () =>
+    world(({ fs, hold, path, tmp }) =>
+      Effect.gen(function* () {
+        const file = path.join(tmp, "prepared.txt")
+        yield* fs.writeFileString(file, "still recoverable")
+        const receipt = yield* hold.remove(file)
+        const home = path.join(tmp, "airlock-home")
+        const journalPath = path.join(home, "hold", receipt.id, "manifest.json")
+        const journal = JSON.parse(yield* fs.readFileString(journalPath)) as Record<string, unknown>
+        yield* fs.writeFileString(journalPath, JSON.stringify({ ...journal, state: "prepared" }))
+
+        const recovered = yield* Effect.provide(Hold, layersFor(home))
+        const held = yield* recovered.held
+        expect(held.some((manifest) => manifest.id === receipt.id)).toBe(true)
+        expect(
+          (JSON.parse(yield* fs.readFileString(journalPath)) as { readonly state: string }).state
+        ).toBe("held")
+      })
+    )
+  )
 })
 
 describe("construction invariant", () => {
@@ -152,10 +196,27 @@ describe("construction invariant", () => {
       const fs = yield* FileSystem.FileSystem
       const path = yield* Path.Path
       const srcDir = fileURLToPath(new URL("../src", import.meta.url))
-      const files = yield* fs.readDirectory(srcDir)
+      const sourceFiles: (
+        directory: string
+      ) => Effect.Effect<ReadonlyArray<string>, PlatformError> = (directory) =>
+        Effect.gen(function* () {
+          const entries = yield* fs.readDirectory(directory)
+          const files: Array<string> = []
+          for (const entry of entries) {
+            const candidate = path.join(directory, entry)
+            const info = yield* fs.stat(candidate)
+            if (info.type === "Directory") {
+              files.push(...(yield* sourceFiles(candidate)))
+            } else if (candidate.endsWith(".ts")) {
+              files.push(candidate)
+            }
+          }
+          return files
+        })
+      const files = yield* sourceFiles(srcDir)
       let unlinkSites = 0
       for (const file of files) {
-        const source = yield* fs.readFileString(path.join(srcDir, file))
+        const source = yield* fs.readFileString(file)
         unlinkSites += (source.match(/\bfs\s*\.remove\(/g) ?? []).length
       }
       expect(unlinkSites).toBe(1)

@@ -10,13 +10,6 @@ import {
   EmissionRequest,
   ScopeEscape
 } from "./domain.ts"
-import type {
-  NotHeld,
-  NothingToUndo,
-  UndoConflict,
-  UndoReceipt,
-  UnknownAct
-} from "./domain.ts"
 import { Hold, HoldLive } from "./Hold.ts"
 import { Ledger, LedgerLive } from "./Ledger.ts"
 import { Outbox, OutboxLive } from "./Outbox.ts"
@@ -104,12 +97,7 @@ const undo = Command.make(
     rendered(
       Effect.flatMap(
         Hold,
-        (
-          hold
-        ): Effect.Effect<
-          UndoReceipt,
-          UnknownAct | NotHeld | UndoConflict | NothingToUndo
-        > =>
+        (hold) =>
           Option.isSome(id)
             ? hold.undo(ActId.make(id.value))
             : hold.undoLast
