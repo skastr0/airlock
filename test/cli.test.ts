@@ -103,6 +103,46 @@ describe("agent-facing CLI", () => {
     })
   })
 
+  it("loads an immediate project tool definition as an inert namespaced action", () => {
+    const home = mkdtempSync(join(tmpdir(), "airlock-cli-tools-"))
+    const tools = join(home, ".airlock", "tools")
+    mkdirSync(join(home, ".airlock"))
+    mkdirSync(tools)
+    writeFileSync(join(tools, "printf.airlock-tool.json"), JSON.stringify({
+      schemaVersion: "airlock/tool-definition/v1",
+      id: "printf_json",
+      version: "1.0.0",
+      executables: [{ realm: "local", selector: "/usr/bin/printf" }],
+      actions: [{
+        name: "decode",
+        inputSchema: {
+          type: "object",
+          properties: { cwd: { type: "string" }, json: { type: "string" } },
+          required: ["cwd", "json"], additionalProperties: false
+        },
+        outputSchema: {
+          type: "object", properties: { ok: { type: "boolean" } },
+          required: ["ok"], additionalProperties: false
+        },
+        args: [{ _tag: "Input", path: ["json"] }],
+        cwd: { _tag: "Input", path: ["cwd"] },
+        resources: [{ kind: "path", realm: "local", selector: { _tag: "Input", path: ["cwd"] }, rights: ["read"] }],
+        lowering: "invoke", effectFootprint: ["invoke"], resultDecoder: "json-stdout"
+      }]
+    }))
+    const program = join(home, "tool.air")
+    writeFileSync(program, `return printf_json.decode({ cwd: ${JSON.stringify(home)}, json: "{\\\"ok\\\":true}" })`)
+
+    const executed = run(["run", program, "--workspace", home], home)
+    expect(executed.status).toBe(0)
+    expect(json(executed.stdout)).toMatchObject({
+      result: { result: { ok: true }, plans: [{ actionReference: expect.stringMatching(/^printf_json\.decode@sha256:/) }] }
+    })
+    const listed = run(["actions"], home)
+    expect(listed.status).toBe(0)
+    expect(json(listed.stdout)).toMatchObject({ definitions: [expect.objectContaining({ name: "printf_json.decode" })] })
+  })
+
   it("returns a typed partial report when a later program failure aborts after completed actions", () => {
     const home = mkdtempSync(join(tmpdir(), "airlock-cli-"))
     const program = join(home, "partial.air")

@@ -24,15 +24,25 @@ export const DEFAULT_TOOL_DEFINITION_MAX_BYTES = 256 * 1024
 const readFailure = (location: ToolDefinitionLocation, reason: string) =>
   new ToolDefinitionReadFailed({ location, reason })
 
-const isRegularDirectory = (location: ToolDefinitionLocation) =>
+const optionalDirectory = (location: ToolDefinitionLocation) =>
   Effect.tryPromise({
-    try: () => lstat(location.directory),
+    try: async () => {
+      try {
+        return await lstat(location.directory)
+      } catch (cause) {
+        if (typeof cause === "object" && cause !== null && "code" in cause &&
+          (cause as { readonly code?: unknown }).code === "ENOENT") return undefined
+        throw cause
+      }
+    },
     catch: () => readFailure(location, "cannot inspect exact definition location")
   }).pipe(
     Effect.flatMap((entry) =>
-      entry.isDirectory() && !entry.isSymbolicLink()
-        ? Effect.void
-        : Effect.fail(readFailure(location, "exact definition location is not a regular directory"))
+      entry === undefined
+        ? Effect.succeed(false)
+        : entry.isDirectory() && !entry.isSymbolicLink()
+          ? Effect.succeed(true)
+          : Effect.fail(readFailure(location, "exact definition location is not a regular directory"))
     )
   )
 
@@ -100,14 +110,15 @@ export const makeFileToolDefinitionReader = (
 
   return {
     read: (location) =>
-      Effect.gen(function* () {
-        yield* isRegularDirectory(location)
-        const names = yield* listCandidateNames(location)
-        return yield* Effect.forEach(
-          names,
-          (name) => readRegularDocument(location, join(location.directory, name), maxBytes),
-          { concurrency: 1 }
-        )
-      })
+      optionalDirectory(location).pipe(
+        Effect.flatMap((exists) => exists ? Effect.gen(function* () {
+          const names = yield* listCandidateNames(location)
+          return yield* Effect.forEach(
+            names,
+            (name) => readRegularDocument(location, join(location.directory, name), maxBytes),
+            { concurrency: 1 }
+          )
+        }) : Effect.succeed([]))
+      )
   }
 }

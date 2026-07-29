@@ -47,6 +47,13 @@ import {
   type RuntimeArtifact,
   type RuntimeRun
 } from "../runtime/index.ts"
+import {
+  ExportedToolAction,
+  ToolActionLoweringRequest,
+  decodeToolResult,
+  exportedToolActionName,
+  lowerToolAction
+} from "../tools/index.ts"
 
 /**
  * Program is the candidate bridge from the pure Airlock language to plans.
@@ -58,6 +65,15 @@ import {
 export class ProgramActionCall extends Schema.Class<ProgramActionCall>("ProgramActionCall")({
   action: Schema.String,
   input: Schema.Unknown
+}) {}
+
+/** Immutable definition facts bound into the request digest and Plan draft. */
+export class ProgramToolBinding extends Schema.Class<ProgramToolBinding>("ProgramToolBinding")({
+  name: Schema.String,
+  definitionId: Schema.String,
+  definitionDigest: Digest,
+  resultDecoder: Schema.Literal("exit-status", "json-stdout", "json-stderr", "none"),
+  outputSchema: Schema.optional(Schema.Unknown)
 }) {}
 
 export class InlineArtifact extends Schema.Class<InlineArtifact>("InlineArtifact")({
@@ -81,7 +97,8 @@ export class ProgramActionRequest extends Schema.Class<ProgramActionRequest>("Pr
   /** Bound into draft.actionReference so admission covers call and input bytes. */
   callDigest: Schema.String.pipe(Schema.brand("Digest")),
   draft: PlanDraft,
-  inlineArtifacts: Schema.Array(InlineArtifact)
+  inlineArtifacts: Schema.Array(InlineArtifact),
+  tool: Schema.optional(ProgramToolBinding)
 }) {}
 
 export class ProgramActionResult extends Schema.Class<ProgramActionResult>("ProgramActionResult")({
@@ -350,10 +367,18 @@ const bytesDigest = (bytes: Uint8Array) =>
 
 const digestAction = (
   call: NativeActionCallValue,
-  artifacts: ReadonlyArray<InlineArtifact>
+  artifacts: ReadonlyArray<InlineArtifact>,
+  tool?: ProgramToolBinding
 ): Digest =>
   Digest.make(`sha256:${createHash("sha256").update(canonical({
     call,
+    ...(tool === undefined ? {} : { tool: {
+      name: tool.name,
+      definitionId: tool.definitionId,
+      definitionDigest: tool.definitionDigest,
+      resultDecoder: tool.resultDecoder,
+      ...(tool.outputSchema === undefined ? {} : { outputSchema: tool.outputSchema })
+    } }),
     artifacts: artifacts
       .map((artifact) => ({
         id: artifact.id,
@@ -643,6 +668,63 @@ export const draftForAction = (
     })
   })
 
+const oneDeclaredExecutable = (
+  exported: ExportedToolAction
+): Effect.Effect<string, ProgramActionDecodeFailed> => {
+  const selectors = [...new Set(exported.loaded.definition.executables.map((entry) => entry.selector))]
+  return selectors.length === 1 && selectors[0]!.startsWith("/")
+    ? Effect.succeed(selectors[0]!)
+    : Effect.fail(new ProgramActionDecodeFailed({
+      action: exportedToolActionName(exported.loaded.definition, exported.action),
+      reason: "definition action requires exactly one declared absolute executable"
+    }))
+}
+
+const draftForToolAction = (
+  exported: ExportedToolAction,
+  cellProfile: CellProfile,
+  args: readonly LanguageValue[],
+  sequence: number,
+  nowId: string,
+  availableArtifacts: ReadonlyArray<InlineArtifact>
+): Effect.Effect<ProgramActionRequest, ProgramActionDecodeFailed> =>
+  Effect.gen(function* () {
+    const name = exportedToolActionName(exported.loaded.definition, exported.action)
+    if (args.length !== 1) {
+      return yield* new ProgramActionDecodeFailed({ action: name, reason: "expects exactly one record argument" })
+    }
+    const input = yield* record(args[0], name)
+    const executable = yield* oneDeclaredExecutable(exported)
+    const lowered = yield* lowerToolAction(new ToolActionLoweringRequest({
+      loaded: exported.loaded,
+      action: exported.action.name,
+      input: object(input),
+      executable,
+      cellProfile
+    })).pipe(Effect.mapError((error) => new ProgramActionDecodeFailed({ action: name, reason: error.message ?? error._tag })))
+    const base = yield* draftForAction(lowered.call, sequence, nowId, availableArtifacts)
+    const tool = new ProgramToolBinding({
+      name,
+      definitionId: lowered.definitionId,
+      definitionDigest: lowered.definitionDigest,
+      resultDecoder: lowered.resultDecoder,
+      ...(exported.action.outputSchema === undefined ? {} : { outputSchema: exported.action.outputSchema })
+    })
+    const callDigest = digestAction(lowered.call, base.inlineArtifacts, tool)
+    const draft = new PlanDraft({
+      ...base.draft,
+      actionReference: `${name}@${callDigest}`,
+      definitionDigests: [lowered.definitionDigest]
+    })
+    return new ProgramActionRequest({
+      call: new ProgramActionCall({ action: name, input: lowered.call }),
+      callDigest,
+      draft,
+      inlineArtifacts: base.inlineArtifacts,
+      tool
+    })
+  })
+
 const statValue = (stat: NativeStat): LanguageRecord => ({
   path: stat.path,
   kind: stat.kind,
@@ -743,7 +825,7 @@ const validateRuntimeRequest = (
     const call = yield* Schema.decodeUnknown(NativeActionCall)(request.call.input).pipe(
       Effect.mapError(executionFailure(request.call.action, "contract"))
     )
-    if (request.call.action !== call.action) {
+    if (request.tool === undefined && request.call.action !== call.action) {
       return yield* new ProgramActionExecutionFailed({
         action: request.call.action,
         phase: "contract",
@@ -751,13 +833,22 @@ const validateRuntimeRequest = (
         reason: `call tag ${request.call.action} does not match input tag ${call.action}`
       })
     }
-    const actualDigest = digestAction(call, request.inlineArtifacts)
-    const expectedReference = actionReference(call, actualDigest)
+    if (request.tool !== undefined && request.call.action !== request.tool.name) {
+      return yield* new ProgramActionExecutionFailed({
+        action: request.call.action,
+        phase: "contract",
+        causeTag: "ProgramToolBindingMismatch",
+        reason: "the tool action name does not match its bound definition facts"
+      })
+    }
+    const actualDigest = digestAction(call, request.inlineArtifacts, request.tool)
+    const expectedReference = `${request.tool?.name ?? call.action}@${actualDigest}`
     if (
       request.callDigest !== actualDigest ||
       request.draft.id !== plan.id ||
       request.draft.actionReference !== expectedReference ||
-      plan.actionReference !== expectedReference
+      plan.actionReference !== expectedReference ||
+      (request.tool !== undefined && !plan.definitionDigests.includes(request.tool.definitionDigest))
     ) {
       return yield* new ProgramActionExecutionFailed({
         action: call.action,
@@ -991,6 +1082,24 @@ export const ProgramPlanRuntimeLive = Layer.effect(
                 Effect.mapError(executionFailure(call.action, "runtime"))
               )
               const outputs = runtimeInlineArtifacts(run)
+              if (request.tool !== undefined) {
+                const invoke = plan.nodes.find((node): node is InvokeNode => node._tag === "Invoke")
+                const byId = new Map(run.artifacts.map((item) => [item.artifact.id, item]))
+                const stdout = invoke?.stdoutArtifact === undefined ? "" : decodedText.decode(byId.get(invoke.stdoutArtifact)?.bytes ?? new Uint8Array())
+                const stderr = invoke?.stderrArtifact === undefined ? "" : decodedText.decode(byId.get(invoke.stderrArtifact)?.bytes ?? new Uint8Array())
+                const value = yield* decodeToolResult({
+                  definitionId: request.tool.definitionId,
+                  actionName: request.tool.name,
+                  resultDecoder: request.tool.resultDecoder,
+                  ...(request.tool.outputSchema === undefined ? {} : { outputSchema: request.tool.outputSchema })
+                }, { exitCode: 0, stdout, stderr }).pipe(
+                  Effect.mapError(executionFailure(request.tool.name, "contract")),
+                  Effect.flatMap((decoded) => Schema.decodeUnknown(LanguageValueSchema)(decoded).pipe(
+                    Effect.mapError(executionFailure(request.tool!.name, "contract"))
+                  ))
+                )
+                return actionResult(value, outputs)
+              }
               return actionResult(runtimeRunValue(run, plan), outputs)
             }
             case "http.stage": {
@@ -1039,6 +1148,18 @@ export const ProgramExecutionLive = (policy: AdmissionPolicy) => {
   return ProgramRunnerLive.pipe(Layer.provide(executor))
 }
 
+export const ProgramExecutionWithToolsLive = (
+  policy: AdmissionPolicy,
+  actions: ReadonlyMap<string, ExportedToolAction>,
+  cellProfile: CellProfile
+) => {
+  const executor = ProgramPlanExecutorLive.pipe(
+    Layer.provideMerge(ProgramAdmissionLive(policy)),
+    Layer.provideMerge(ProgramPlanRuntimeLive)
+  )
+  return ProgramRunnerWithToolsLive(actions, cellProfile).pipe(Layer.provide(executor))
+}
+
 const dottedName = (expression: Expression): string | undefined => {
   if (expression.kind === "IdentifierExpression") return expression.name
   if (expression.kind !== "FieldExpression") return undefined
@@ -1046,42 +1167,43 @@ const dottedName = (expression: Expression): string | undefined => {
   return prefix === undefined ? undefined : `${prefix}.${expression.field}`
 }
 
-const normalizeExpression = (expression: Expression): Expression => {
+const normalizeExpression = (expression: Expression, actionNames: ReadonlySet<string>): Expression => {
   switch (expression.kind) {
     case "CallExpression": {
       const dotted = dottedName(expression.callee)
-      const callee = dotted !== undefined && nativeNames.has(dotted as NativeActionName)
+      const callee = dotted !== undefined && actionNames.has(dotted)
         ? { kind: "IdentifierExpression" as const, name: dotted, span: expression.callee.span }
-        : normalizeExpression(expression.callee)
-      return { ...expression, callee, arguments: expression.arguments.map(normalizeExpression) }
+        : normalizeExpression(expression.callee, actionNames)
+      return { ...expression, callee, arguments: expression.arguments.map((item) => normalizeExpression(item, actionNames)) }
     }
-    case "ListExpression": return { ...expression, items: expression.items.map(normalizeExpression) }
-    case "RecordExpression": return { ...expression, entries: expression.entries.map((entry) => ({ ...entry, value: normalizeExpression(entry.value) })) }
-    case "UnaryExpression": return { ...expression, operand: normalizeExpression(expression.operand) }
-    case "BinaryExpression": return { ...expression, left: normalizeExpression(expression.left), right: normalizeExpression(expression.right) }
-    case "FieldExpression": return { ...expression, object: normalizeExpression(expression.object) }
-    case "IndexExpression": return { ...expression, object: normalizeExpression(expression.object), index: normalizeExpression(expression.index) }
+    case "ListExpression": return { ...expression, items: expression.items.map((item) => normalizeExpression(item, actionNames)) }
+    case "RecordExpression": return { ...expression, entries: expression.entries.map((entry) => ({ ...entry, value: normalizeExpression(entry.value, actionNames) })) }
+    case "UnaryExpression": return { ...expression, operand: normalizeExpression(expression.operand, actionNames) }
+    case "BinaryExpression": return { ...expression, left: normalizeExpression(expression.left, actionNames), right: normalizeExpression(expression.right, actionNames) }
+    case "FieldExpression": return { ...expression, object: normalizeExpression(expression.object, actionNames) }
+    case "IndexExpression": return { ...expression, object: normalizeExpression(expression.object, actionNames), index: normalizeExpression(expression.index, actionNames) }
     default: return expression
   }
 }
 
-const normalizeStatement = (statement: Statement): Statement => {
+const normalizeStatement = (statement: Statement, actionNames: ReadonlySet<string>): Statement => {
   switch (statement.kind) {
-    case "LetStatement": return { ...statement, value: normalizeExpression(statement.value) }
-    case "ExpressionStatement": return { ...statement, expression: normalizeExpression(statement.expression) }
-    case "ReturnStatement": return { ...statement, ...(statement.value === undefined ? {} : { value: normalizeExpression(statement.value) }) }
-    case "AssertStatement": return { ...statement, test: normalizeExpression(statement.test), ...(statement.message === undefined ? {} : { message: normalizeExpression(statement.message) }) }
-    case "IfStatement": return { ...statement, test: normalizeExpression(statement.test), consequent: statement.consequent.map(normalizeStatement), ...(statement.alternate === undefined ? {} : { alternate: statement.alternate.map(normalizeStatement) }) }
-    case "ForStatement": return { ...statement, from: normalizeExpression(statement.from), to: normalizeExpression(statement.to), body: statement.body.map(normalizeStatement) }
+    case "LetStatement": return { ...statement, value: normalizeExpression(statement.value, actionNames) }
+    case "ExpressionStatement": return { ...statement, expression: normalizeExpression(statement.expression, actionNames) }
+    case "ReturnStatement": return { ...statement, ...(statement.value === undefined ? {} : { value: normalizeExpression(statement.value, actionNames) }) }
+    case "AssertStatement": return { ...statement, test: normalizeExpression(statement.test, actionNames), ...(statement.message === undefined ? {} : { message: normalizeExpression(statement.message, actionNames) }) }
+    case "IfStatement": return { ...statement, test: normalizeExpression(statement.test, actionNames), consequent: statement.consequent.map((item) => normalizeStatement(item, actionNames)), ...(statement.alternate === undefined ? {} : { alternate: statement.alternate.map((item) => normalizeStatement(item, actionNames)) }) }
+    case "ForStatement": return { ...statement, from: normalizeExpression(statement.from, actionNames), to: normalizeExpression(statement.to, actionNames), body: statement.body.map((item) => normalizeStatement(item, actionNames)) }
   }
 }
 
 /** Supports dotted native verbs without giving the language a reflective call surface. */
-export const normalizeProgramActions = (program: Program): Program => ({ ...program, body: program.body.map(normalizeStatement) })
+export const normalizeProgramActions = (program: Program, extraActions: ReadonlySet<string> = new Set()): Program =>
+  ({ ...program, body: program.body.map((statement) => normalizeStatement(statement, new Set([...nativeNames, ...extraActions]))) })
 
 const runProgram = (executor: {
   readonly execute: (request: ProgramActionRequest) => Effect.Effect<ProgramActionResult, ProgramActionExecutionFailed>
-}) =>
+}, tools: { readonly actions: ReadonlyMap<string, ExportedToolAction>; readonly cellProfile: CellProfile }) =>
   (request: ProgramRequest): Effect.Effect<ProgramRunResult, ProgramError> =>
     Effect.gen(function* () {
       const parsed = yield* parse(request.source)
@@ -1141,6 +1263,23 @@ const runProgram = (executor: {
       }
       const resolver: ActionResolver<never, UnknownProgramAction | ProgramActionDecodeFailed | ProgramActionExecutionFailed> = {
         resolve: (action, args) => Effect.gen(function* () {
+          const tool = tools.actions.get(action)
+          if (tool !== undefined) {
+            const next = yield* draftForToolAction(
+              tool,
+              tools.cellProfile,
+              args,
+              sequence++,
+              crypto.randomUUID(),
+              [...artifacts.values()]
+            )
+            plans.push(next.draft)
+            for (const input of next.inlineArtifacts) artifacts.set(input.id, input)
+            const executed = yield* executor.execute(next)
+            for (const output of executed.artifacts) artifacts.set(output.id, output)
+            actions.push(actionRecord(next, executed))
+            return executed.value
+          }
           const decoded = yield* decodeProgramAction(action, args)
           const call = yield* canonicalizeProgramAction(action, decoded)
           const next = yield* draftForAction(
@@ -1157,7 +1296,7 @@ const runProgram = (executor: {
           return executed.value
         })
       }
-      const evaluation = yield* evaluate(normalizeProgramActions(parsed), resolver, {
+      const evaluation = yield* evaluate(normalizeProgramActions(parsed, new Set(tools.actions.keys())), resolver, {
         ...(request.maxLoopIterations === undefined ? {} : { maxLoopIterations: request.maxLoopIterations }),
         bindings: request.bindings
       }).pipe(Effect.either)
@@ -1181,12 +1320,21 @@ const runProgram = (executor: {
       })
     })
 
-export const ProgramRunnerLive = Layer.effect(
+const programRunnerLive = (tools: { readonly actions: ReadonlyMap<string, ExportedToolAction>; readonly cellProfile: CellProfile }) => Layer.effect(
   ProgramRunner,
   Effect.gen(function* () {
     const executor = yield* ProgramActionExecutor
     return ProgramRunner.of({
-      run: runProgram(executor)
+      run: runProgram(executor, tools)
     })
   })
 )
+
+/** The default language surface contains only native actions. */
+export const ProgramRunnerLive = programRunnerLive({ actions: new Map(), cellProfile: "compatibility" })
+
+/** A caller that loaded definitions may explicitly extend one runner surface. */
+export const ProgramRunnerWithToolsLive = (
+  actions: ReadonlyMap<string, ExportedToolAction>,
+  cellProfile: CellProfile
+) => programRunnerLive({ actions, cellProfile })

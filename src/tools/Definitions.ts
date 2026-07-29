@@ -170,6 +170,18 @@ export class ToolDefinitionRegistry extends Schema.Class<ToolDefinitionRegistry>
   definitions: Schema.Array(LoadedToolDefinition)
 }) {}
 
+/** A resolved name is still data: it carries no executor, Layer, or authority. */
+export class ExportedToolAction extends Schema.Class<ExportedToolAction>("ExportedToolAction")({
+  name: Schema.String,
+  loaded: LoadedToolDefinition,
+  action: ToolActionDefinition
+}) {}
+
+export class ToolActionNameCollision extends Schema.TaggedError<ToolActionNameCollision>()(
+  "ToolActionNameCollision",
+  { name: Schema.String, reason: Schema.Literal("duplicate-export", "native-shadow") }
+) {}
+
 export class ToolDefinitionReadFailed extends Schema.TaggedError<ToolDefinitionReadFailed>()(
   "ToolDefinitionReadFailed",
   { location: ToolDefinitionLocation, reason: Schema.String }
@@ -195,12 +207,24 @@ export class DuplicateToolDefinition extends Schema.TaggedError<DuplicateToolDef
   { id: Schema.String, version: Schema.String }
 ) {}
 
+export class ToolSchemaRejected extends Schema.TaggedError<ToolSchemaRejected>()(
+  "ToolSchemaRejected",
+  { id: Schema.String, action: Schema.String, schema: Schema.Literal("input", "output"), path: Schema.String, reason: Schema.String }
+) {}
+
+export class ToolInputRejected extends Schema.TaggedError<ToolInputRejected>()(
+  "ToolInputRejected",
+  { id: Schema.String, action: Schema.String, path: Schema.String, reason: Schema.String }
+) {}
+
 export type ToolDefinitionError =
   | ToolDefinitionReadFailed
   | ToolDefinitionDecodeFailed
   | InvalidToolDefinition
   | DuplicateToolAction
   | DuplicateToolDefinition
+  | ToolSchemaRejected
+  | ToolActionNameCollision
 
 /** A reader is an integration seam. Implementations may use any storage. */
 export interface ToolDefinitionReader {
@@ -217,6 +241,150 @@ const nonBlank = (definition: ToolDefinition, field: string, value: string) =>
     ? Effect.fail(new InvalidToolDefinition({ id: definition.id, field, reason: "must not be blank" }))
     : Effect.void
 
+const languageIdentifier = /^[A-Za-z_][A-Za-z0-9_]*$/
+
+const namespaceAtom = (definition: ToolDefinition, field: string, value: string) =>
+  languageIdentifier.test(value)
+    ? Effect.void
+    : Effect.fail(new InvalidToolDefinition({
+      id: definition.id,
+      field,
+      reason: "must be an Airlock identifier so <definition id>.<action> is callable"
+    }))
+
+/**
+ * The definition format accepts a deliberately small JSON-Schema-shaped
+ * vocabulary. It is a validation format, never a hook for executable code or
+ * an invitation to implement JSON Schema piecemeal.
+ */
+type JsonSchema =
+  | { readonly type: "object"; readonly properties?: Readonly<Record<string, JsonSchema>>; readonly required?: ReadonlyArray<string>; readonly additionalProperties?: boolean }
+  | { readonly type: "array"; readonly items: JsonSchema }
+  | { readonly type: "string" | "number" | "integer" | "boolean" | "null"; readonly enum?: ReadonlyArray<string | number | boolean | null>; readonly const?: string | number | boolean | null }
+
+const scalar = (value: unknown): value is string | number | boolean | null =>
+  value === null || typeof value === "string" || typeof value === "number" || typeof value === "boolean"
+
+const schemaFailure = (definition: ToolDefinition, action: ToolActionDefinition, which: "input" | "output", path: string, reason: string) =>
+  new ToolSchemaRejected({ id: definition.id, action: action.name, schema: which, path, reason })
+
+const parseToolSchema = (
+  definition: ToolDefinition,
+  action: ToolActionDefinition,
+  which: "input" | "output",
+  source: unknown,
+  path = "$"
+): Effect.Effect<JsonSchema, ToolSchemaRejected> =>
+  Effect.gen(function* () {
+    if (typeof source !== "object" || source === null || Array.isArray(source)) {
+      return yield* schemaFailure(definition, action, which, path, "must be an object with one supported type")
+    }
+    const record = source as Record<string, unknown>
+    const type = record.type
+    if (typeof type !== "string" || !["object", "array", "string", "number", "integer", "boolean", "null"].includes(type)) {
+      return yield* schemaFailure(definition, action, which, `${path}.type`, "must be one of object, array, string, number, integer, boolean, null")
+    }
+    const parsedType = type as JsonSchema["type"]
+    const permitted = parsedType === "object"
+      ? new Set(["type", "properties", "required", "additionalProperties"])
+      : type === "array"
+        ? new Set(["type", "items"])
+        : new Set(["type", "enum", "const"])
+    for (const key of Object.keys(record)) {
+      if (!permitted.has(key)) return yield* schemaFailure(definition, action, which, `${path}.${key}`, "unsupported JSON Schema feature")
+    }
+    if (parsedType === "object") {
+      const rawProperties = record.properties
+      if (rawProperties !== undefined && (typeof rawProperties !== "object" || rawProperties === null || Array.isArray(rawProperties))) {
+        return yield* schemaFailure(definition, action, which, `${path}.properties`, "must be an object")
+      }
+      const properties: Record<string, JsonSchema> = {}
+      for (const [key, value] of Object.entries(rawProperties ?? {})) {
+        properties[key] = yield* parseToolSchema(definition, action, which, value, `${path}.properties.${key}`)
+      }
+      const required = record.required
+      if (required !== undefined && (!Array.isArray(required) || !required.every((item) => typeof item === "string"))) {
+        return yield* schemaFailure(definition, action, which, `${path}.required`, "must be an array of property names")
+      }
+      if ((required ?? []).some((key) => !(key in properties))) {
+        return yield* schemaFailure(definition, action, which, `${path}.required`, "may name only declared properties")
+      }
+      if (record.additionalProperties !== undefined && typeof record.additionalProperties !== "boolean") {
+        return yield* schemaFailure(definition, action, which, `${path}.additionalProperties`, "must be a boolean")
+      }
+      return { type: parsedType, ...(Object.keys(properties).length === 0 ? {} : { properties }), ...(required === undefined ? {} : { required: [...required] }), ...(record.additionalProperties === undefined ? {} : { additionalProperties: record.additionalProperties }) }
+    }
+    if (parsedType === "array") {
+      if (record.items === undefined) return yield* schemaFailure(definition, action, which, `${path}.items`, "is required")
+      return { type: parsedType, items: yield* parseToolSchema(definition, action, which, record.items, `${path}.items`) }
+    }
+    if (record.enum !== undefined && (!Array.isArray(record.enum) || !record.enum.every(scalar))) {
+      return yield* schemaFailure(definition, action, which, `${path}.enum`, "must contain only JSON scalar values")
+    }
+    if (record.const !== undefined && !scalar(record.const)) {
+      return yield* schemaFailure(definition, action, which, `${path}.const`, "must be a JSON scalar value")
+    }
+    return { type: parsedType as "string" | "number" | "integer" | "boolean" | "null", ...(record.enum === undefined ? {} : { enum: record.enum as ReadonlyArray<string | number | boolean | null> }), ...(record.const === undefined ? {} : { const: record.const as string | number | boolean | null }) }
+  })
+
+const jsonEqual = (left: unknown, right: unknown): boolean => JSON.stringify(left) === JSON.stringify(right)
+
+const typeMatches = (value: unknown, type: JsonSchema["type"]): boolean =>
+  type === "null" ? value === null
+    : type === "array" ? Array.isArray(value)
+      : type === "object" ? typeof value === "object" && value !== null && !Array.isArray(value)
+        : type === "integer" ? typeof value === "number" && Number.isInteger(value)
+          : typeof value === type
+
+export const validateToolSchemaValue = (
+  id: string,
+  actionName: string,
+  schema: unknown,
+  value: unknown
+): Effect.Effect<void, ToolInputRejected> =>
+  // Runtime inputs are already accepted only from a definition that passed
+  // validation. Rechecking protects the execution boundary against a forged
+  // request without turning schemas into executable behavior.
+  parseToolSchema(
+    new ToolDefinition({ schemaVersion: "airlock/tool-definition/v1", id: ToolDefinitionId.make(id), version: "runtime", executables: [], actions: [] }),
+    new ToolActionDefinition({ name: actionName, inputSchema: schema, args: [], cwd: new LiteralTemplate({ value: "/" }), lowering: "invoke", effectFootprint: ["invoke"], resultDecoder: "none" }),
+    "input", schema
+  ).pipe(
+    Effect.mapError((error) => new ToolInputRejected({ id, action: actionName, path: error.path, reason: error.reason })),
+    Effect.flatMap(function validate(parsed): Effect.Effect<void, ToolInputRejected> {
+      const reject = (path: string, reason: string) => Effect.fail(new ToolInputRejected({ id, action: actionName, path, reason }))
+      const loop = (current: JsonSchema, candidate: unknown, path: string): Effect.Effect<void, ToolInputRejected> => {
+        if (!typeMatches(candidate, current.type)) return reject(path, `expected ${current.type}`)
+        if ("const" in current && current.const !== undefined && !jsonEqual(candidate, current.const)) return reject(path, "must equal const")
+        if ("enum" in current && current.enum !== undefined && !current.enum.some((item) => jsonEqual(item, candidate))) return reject(path, "must be one of enum")
+        if (current.type === "array") return Effect.forEach(candidate as ReadonlyArray<unknown>, (item, index) => loop(current.items, item, `${path}[${index}]`), { discard: true })
+        if (current.type === "object") {
+          const object = candidate as Record<string, unknown>
+          for (const required of current.required ?? []) if (!(required in object)) return reject(`${path}.${required}`, "is required")
+          const properties = current.properties ?? {}
+          return Effect.forEach(Object.entries(object), ([key, item]) => {
+            const child = properties[key]
+            if (child === undefined) {
+              return current.additionalProperties === false
+                ? reject(`${path}.${key}`, "additional property is not allowed")
+                : Effect.void
+            }
+            return loop(child, item, `${path}.${key}`)
+          }, { discard: true })
+        }
+        return Effect.void
+      }
+      return loop(parsed, value, "$")
+    })
+  )
+
+export const validateToolValue = (
+  definition: ToolDefinition,
+  action: ToolActionDefinition,
+  schema: unknown,
+  value: unknown
+) => validateToolSchemaValue(definition.id, action.name, schema, value)
+
 /**
  * Validates the small amount of semantics that definitions are allowed to own.
  * It intentionally cannot validate an executable's behavior or grant power.
@@ -226,6 +394,7 @@ export const validateToolDefinition = (
 ): Effect.Effect<ToolDefinition, InvalidToolDefinition | DuplicateToolAction> =>
   Effect.gen(function* () {
     yield* nonBlank(definition, "id", definition.id)
+    yield* namespaceAtom(definition, "id", definition.id)
     yield* nonBlank(definition, "version", definition.version)
     if (definition.executables.length === 0) {
       return yield* new InvalidToolDefinition({
@@ -247,6 +416,17 @@ export const validateToolDefinition = (
     }
     for (const action of definition.actions) {
       yield* nonBlank(definition, "actions[].name", action.name)
+      yield* namespaceAtom(definition, `actions.${action.name}.name`, action.name)
+      yield* parseToolSchema(definition, action, "input", action.inputSchema).pipe(
+        Effect.asVoid,
+        Effect.mapError((error) => new InvalidToolDefinition({ id: definition.id, field: `actions.${action.name}.inputSchema${error.path.slice(1)}`, reason: error.reason }))
+      )
+      if (action.outputSchema !== undefined) {
+        yield* parseToolSchema(definition, action, "output", action.outputSchema).pipe(
+          Effect.asVoid,
+          Effect.mapError((error) => new InvalidToolDefinition({ id: definition.id, field: `actions.${action.name}.outputSchema${error.path.slice(1)}`, reason: error.reason }))
+        )
+      }
       if (action.lowering === "invoke") {
         if (!action.effectFootprint.includes("invoke")) {
           return yield* new InvalidToolDefinition({
@@ -333,11 +513,40 @@ export const loadKnownToolDefinitions = (
     const loaded = yield* Effect.forEach(documents.flat(), decodeToolDefinition, {
       concurrency: 1
     })
-    const keys = loaded.map(({ definition }) => `${definition.id}@${definition.version}`)
+    const keys = loaded.map(({ definition }) => definition.id)
     const duplicate = duplicates(keys)[0]
     if (duplicate !== undefined) {
-      const [id, version] = duplicate.split("@")
-      return yield* new DuplicateToolDefinition({ id: id ?? duplicate, version: version ?? "" })
+      return yield* new DuplicateToolDefinition({ id: duplicate, version: "" })
     }
     return new ToolDefinitionRegistry({ definitions: loaded })
+  })
+
+export const exportedToolActionName = (definition: ToolDefinition, action: ToolActionDefinition) =>
+  `${definition.id}.${action.name}`
+
+/**
+ * Computes the only names a definition can export. Callers pass built-in names
+ * so an installed document cannot turn `file.read` into something else.
+ */
+export const exportToolActions = (
+  registry: ToolDefinitionRegistry,
+  nativeActionNames: ReadonlySet<string>
+): Effect.Effect<ReadonlyArray<ExportedToolAction>, ToolActionNameCollision> =>
+  Effect.gen(function* () {
+    const exports: ExportedToolAction[] = []
+    const names = new Set<string>()
+    for (const loaded of registry.definitions) {
+      for (const action of loaded.definition.actions) {
+        const name = exportedToolActionName(loaded.definition, action)
+        if (nativeActionNames.has(name)) {
+          return yield* new ToolActionNameCollision({ name, reason: "native-shadow" })
+        }
+        if (names.has(name)) {
+          return yield* new ToolActionNameCollision({ name, reason: "duplicate-export" })
+        }
+        names.add(name)
+        exports.push(new ExportedToolAction({ name, loaded, action }))
+      }
+    }
+    return exports
   })

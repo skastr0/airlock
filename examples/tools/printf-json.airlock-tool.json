@@ -1,0 +1,41 @@
+{
+  "schemaVersion": "airlock/tool-definition/v1",
+  "id": "printf_json",
+  "version": "1.0.0",
+  "executables": [
+    { "realm": "local", "selector": "/usr/bin/printf" }
+  ],
+  "actions": [
+    {
+      "name": "decode",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "cwd": { "type": "string" },
+          "json": { "type": "string" }
+        },
+        "required": ["cwd", "json"],
+        "additionalProperties": false
+      },
+      "outputSchema": {
+        "type": "object",
+        "properties": { "ok": { "type": "boolean" } },
+        "required": ["ok"],
+        "additionalProperties": false
+      },
+      "args": [{ "_tag": "Input", "path": ["json"] }],
+      "cwd": { "_tag": "Input", "path": ["cwd"] },
+      "resources": [
+        {
+          "kind": "path",
+          "realm": "local",
+          "selector": { "_tag": "Input", "path": ["cwd"] },
+          "rights": ["read"]
+        }
+      ],
+      "lowering": "invoke",
+      "effectFootprint": ["invoke"],
+      "resultDecoder": "json-stdout"
+    }
+  ]
+}

@@ -4,6 +4,7 @@ import { BunContext, BunRuntime } from "@effect/platform-bun"
 import { FileSystem } from "@effect/platform"
 import { Console, Effect, Layer, Option, Schema } from "effect"
 import * as nodePath from "node:path"
+import * as nodeOs from "node:os"
 import { AdmissionPolicy } from "./admission/index.ts"
 import { NativeActionCatalog } from "./actions/index.ts"
 import { layerFromEnv } from "./AirlockHome.ts"
@@ -19,7 +20,13 @@ import { MacosPlatform, MacosPlatformLive } from "./platform/macos/index.ts"
 import { NativeFileSystemLive, NativeFilesystemConfig } from "./native/index.ts"
 import { ProcessRequest, ProcessRunner, ProcessRunnerLive } from "./process/Process.ts"
 import { Outbox, OutboxLive } from "./Outbox.ts"
-import { ProgramExecutionLive, ProgramRequest, ProgramRunner } from "./program/index.ts"
+import { ProgramExecutionWithToolsLive, ProgramRequest, ProgramRunner } from "./program/index.ts"
+import {
+  ToolDefinitionDirectories,
+  exportToolActions,
+  loadKnownToolDefinitions,
+  makeFileToolDefinitionReader
+} from "./tools/index.ts"
 import { RuntimeConfig, RuntimeConfigLive, RuntimeLive } from "./runtime/index.ts"
 import { AIRLOCK_VERSION } from "./version.ts"
 
@@ -282,6 +289,20 @@ const compatibilityPolicy = (workspace: string) => new AdmissionPolicy({
   endpointAllowlist: []
 })
 
+/** Fixed, immediate, optional locations; definitions never recursively load code. */
+const definitionDirectories = (workspace: string) => new ToolDefinitionDirectories({
+  builtin: nodePath.join(import.meta.dir, "..", "tool-definitions"),
+  installed: nodePath.join(process.env["AIRLOCK_HOME"] ?? nodePath.join(nodeOs.homedir(), ".airlock"), "tools"),
+  user: nodePath.join(nodeOs.homedir(), ".config", "airlock", "tools"),
+  project: nodePath.join(workspace, ".airlock", "tools")
+})
+
+const discoveredTools = (workspace: string) =>
+  loadKnownToolDefinitions(makeFileToolDefinitionReader(), definitionDirectories(workspace)).pipe(
+    Effect.flatMap((registry) => exportToolActions(registry, new Set(NativeActionCatalog.map((action) => action.name)))),
+    Effect.mapError((error) => new CliInputError({ field: "tool-definitions", reason: error.message ?? error._tag }))
+  )
+
 /**
  * Policies are supervisor input, never inferred from an action request. The
  * compatibility policy is deliberately broad under the ratchet; contained
@@ -428,10 +449,19 @@ const doctor = Command.make("doctor", {}, () => rendered(capabilityPayload))
 const capabilities = Command.make("capabilities", {}, () => rendered(capabilityPayload))
   .pipe(Command.withDescription("Machine-readable alias for doctor"))
 
-const actions = Command.make("actions", {}, () => rendered(Effect.succeed({
-  schemaVersion: "airlock/actions/v1",
-  actions: NativeActionCatalog
-}))).pipe(Command.withDescription("List the built-in, Unix-shaped action vocabulary"))
+const actions = Command.make("actions", {}, () => rendered(discoveredTools(process.cwd()).pipe(
+  Effect.map((tools) => ({
+    schemaVersion: "airlock/actions/v1",
+    actions: NativeActionCatalog,
+    definitions: tools.map((tool) => ({
+      name: tool.name,
+      definitionId: tool.loaded.definition.id,
+      version: tool.loaded.definition.version,
+      executable: tool.loaded.definition.executables.map((item) => item.selector),
+      resultDecoder: tool.action.resultDecoder
+    }))
+  }))
+))).pipe(Command.withDescription("List built-in actions plus inert discovered tool definitions"))
 
 const schema = Command.make(
   "schema",
@@ -534,6 +564,7 @@ const executeProgram = (
   Effect.gen(function* () {
     const workspace = nodePath.resolve(requestedWorkspace)
     const policy = yield* supervisorPolicy(profile, workspace)
+    const tools = yield* discoveredTools(workspace)
     const bindingsValue = yield* parseBindings(rawBindings)
     const runtimeLayer = RuntimeLive.pipe(
       Layer.provideMerge(RuntimeConfigLive(new RuntimeConfig({
@@ -542,7 +573,11 @@ const executeProgram = (
         environment: profile === "compatibility" ? compatibilityEnvironment() : {}
       })))
     )
-    const programLayer = ProgramExecutionLive(policy).pipe(
+    const programLayer = ProgramExecutionWithToolsLive(
+      policy,
+      new Map(tools.map((tool) => [tool.name, tool])),
+      profile
+    ).pipe(
       Layer.provideMerge(NativeFileSystemLive(new NativeFilesystemConfig({ workspace }))),
       Layer.provideMerge(runtimeLayer)
     )

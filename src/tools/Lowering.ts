@@ -13,6 +13,9 @@ import {
   ToolDefinitionId,
   ToolLoweringKind,
   ToolResultDecoder,
+  ToolInputRejected,
+  validateToolValue,
+  validateToolSchemaValue,
   type TemplateValue,
   type ToolActionDefinition,
   type ToolExecutableConstraint,
@@ -127,6 +130,16 @@ export class ToolNativeLoweringRejected extends Schema.TaggedError<ToolNativeLow
   }
 ) {}
 
+export class ToolResultDecodeFailed extends Schema.TaggedError<ToolResultDecodeFailed>()(
+  "ToolResultDecodeFailed",
+  {
+    definitionId: Schema.String,
+    action: Schema.String,
+    decoder: ToolResultDecoder,
+    reason: Schema.String
+  }
+) {}
+
 export type ToolActionLoweringError =
   | UnknownToolAction
   | UnsupportedToolActionLowering
@@ -134,6 +147,7 @@ export type ToolActionLoweringError =
   | ToolTemplateRejected
   | ToolDefinitionDigestFailed
   | ToolNativeLoweringRejected
+  | ToolInputRejected
 
 type JsonScalar = string | number | boolean
 
@@ -432,6 +446,8 @@ export const lowerToolAction = (
       })
     }
 
+    yield* validateToolValue(definition, action, action.inputSchema, request.input)
+
     const executableConstraint = yield* selectExecutableConstraint(
       definition.id,
       action.name,
@@ -512,3 +528,38 @@ export const lowerToolAction = (
       lowering
     })
   })
+
+/** Decode the finite result forms a definition is allowed to request. */
+export const decodeToolResult = (
+  lowered: { readonly definitionId: string; readonly actionName: string; readonly resultDecoder: ToolResultDecoder } & {
+    readonly outputSchema?: unknown
+  },
+  result: { readonly exitCode: number; readonly stdout: string; readonly stderr: string }
+): Effect.Effect<unknown, ToolResultDecodeFailed> => {
+  const fail = (reason: string) => Effect.fail(new ToolResultDecodeFailed({
+    definitionId: lowered.definitionId,
+    action: lowered.actionName,
+    decoder: lowered.resultDecoder,
+    reason
+  }))
+  const decoded = (() => {
+    switch (lowered.resultDecoder) {
+      case "exit-status": return Effect.succeed(result.exitCode)
+      case "none": return Effect.succeed(null)
+      case "json-stdout":
+        return Effect.try({ try: () => JSON.parse(result.stdout), catch: () => new Error("stdout is not valid JSON") }).pipe(Effect.mapError(() => new ToolResultDecodeFailed({ definitionId: lowered.definitionId, action: lowered.actionName, decoder: lowered.resultDecoder, reason: "stdout is not valid JSON" })))
+      case "json-stderr":
+        return Effect.try({ try: () => JSON.parse(result.stderr), catch: () => new Error("stderr is not valid JSON") }).pipe(Effect.mapError(() => new ToolResultDecodeFailed({ definitionId: lowered.definitionId, action: lowered.actionName, decoder: lowered.resultDecoder, reason: "stderr is not valid JSON" })))
+    }
+  })()
+  return decoded.pipe(
+    Effect.flatMap((value) => {
+      if (lowered.outputSchema === undefined) return Effect.succeed(value)
+      // Output shares the same finite schema subset. The error is intentionally
+      // converted here: a tool result failure is not an input rejection.
+      return validateToolSchemaValue(lowered.definitionId, lowered.actionName, lowered.outputSchema, value).pipe(
+        Effect.mapError((error) => new ToolResultDecodeFailed({ definitionId: lowered.definitionId, action: lowered.actionName, decoder: lowered.resultDecoder, reason: `output ${error.path}: ${error.reason}` }))
+      ).pipe(Effect.as(value))
+    })
+  )
+}
