@@ -1,0 +1,17 @@
+let packed = process.run({ executable: "/usr/bin/tar", args: ["-czf", "package.tgz", "package"], cwd: workspace, env: { COPYFILE_DISABLE: "1", LANG: "C", LC_ALL: "C" }, stdin: "discard", stdout: "capture", stderr: "capture", timeoutMs: 30000, cellProfile: "native-contained" })
+assert packed.state == "succeeded", "archive creation failed"
+
+let checksum = process.run({ executable: "/sbin/md5", args: ["-q", "package.tgz"], cwd: workspace, env: { LANG: "C", LC_ALL: "C" }, stdin: "discard", stdout: "capture", stderr: "capture", timeoutMs: 30000, cellProfile: "native-contained" })
+assert checksum.state == "succeeded", "archive checksum failed"
+
+let extracted = workspace + "/extracted"
+let destination = file.mkdir({ path: extracted, parents: true })
+
+let unpacked = process.run({ executable: "/usr/bin/tar", args: ["-xzf", "package.tgz", "-C", "extracted"], cwd: workspace, env: { COPYFILE_DISABLE: "1", LANG: "C", LC_ALL: "C" }, stdin: "discard", stdout: "capture", stderr: "capture", timeoutMs: 30000, cellProfile: "native-contained" })
+assert unpacked.state == "succeeded", "archive extraction failed"
+
+let entries = file.glob({ root: extracted, pattern: "**/*" })
+let config_path = extracted + "/package/config.json"
+let config = file.read({ path: config_path, format: "text" })
+
+return { packed: packed, checksum: checksum, destination: destination, unpacked: unpacked, entries: entries, config: config }

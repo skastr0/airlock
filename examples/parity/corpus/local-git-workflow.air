@@ -1,0 +1,23 @@
+let initialized = process.run({ executable: "/usr/bin/git", args: ["init", "-q"], cwd: workspace, env: { GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null", LANG: "C", LC_ALL: "C" }, stdin: "discard", stdout: "capture", stderr: "capture", timeoutMs: 30000, cellProfile: "native-contained" })
+assert initialized.state == "succeeded", "git init failed"
+
+let source_path = workspace + "/src"
+let readme_path = workspace + "/README.md"
+let feature_path = workspace + "/src/feature.txt"
+let source_directory = file.mkdir({ path: source_path, parents: true })
+let readme = file.write({ path: readme_path, content: "# Agent-owned repository\n" })
+let feature = file.write({ path: feature_path, content: "feature bytes\n" })
+
+let staged = process.run({ executable: "/usr/bin/git", args: ["add", "--", "README.md", "src/feature.txt"], cwd: workspace, env: { GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null", LANG: "C", LC_ALL: "C" }, stdin: "discard", stdout: "capture", stderr: "capture", timeoutMs: 30000, cellProfile: "native-contained" })
+assert staged.state == "succeeded", "git add failed"
+
+let committed = process.run({ executable: "/usr/bin/git", args: ["commit", "--no-gpg-sign", "--no-verify", "-q", "-m", "airlock corpus commit"], cwd: workspace, env: { GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null", GIT_AUTHOR_NAME: "Airlock Agent", GIT_AUTHOR_EMAIL: "agent@airlock.invalid", GIT_COMMITTER_NAME: "Airlock Agent", GIT_COMMITTER_EMAIL: "agent@airlock.invalid", LANG: "C", LC_ALL: "C" }, stdin: "discard", stdout: "capture", stderr: "capture", timeoutMs: 30000, cellProfile: "native-contained" })
+assert committed.state == "succeeded", "git commit failed"
+
+let head = process.run({ executable: "/usr/bin/git", args: ["show", "-s", "--format=%H%n%s", "HEAD"], cwd: workspace, env: { GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null", GIT_PAGER: "cat", LANG: "C", LC_ALL: "C" }, stdin: "discard", stdout: "capture", stderr: "capture", timeoutMs: 30000, cellProfile: "native-contained" })
+assert head.state == "succeeded", "git show failed"
+
+let status = process.run({ executable: "/usr/bin/git", args: ["status", "--porcelain=v1"], cwd: workspace, env: { GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null", GIT_PAGER: "cat", LANG: "C", LC_ALL: "C" }, stdin: "discard", stdout: "capture", stderr: "capture", timeoutMs: 30000, cellProfile: "native-contained" })
+assert status.state == "succeeded", "git status failed"
+
+return { initialized: initialized, source_directory: source_directory, readme: readme, feature: feature, staged: staged, committed: committed, head: head, status: status }

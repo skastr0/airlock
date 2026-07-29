@@ -1,0 +1,16 @@
+let sources = file.glob({ root: ".", pattern: "**/*.ts" })
+let readme = file.read({ path: "README.md", format: "text" })
+
+let status = process.run({ executable: "/usr/bin/git", args: ["status", "--short", "--untracked-files=all"], cwd: workspace, env: { GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null", GIT_PAGER: "cat", LANG: "C", LC_ALL: "C" }, stdin: "discard", stdout: "capture", stderr: "capture", timeoutMs: 30000, cellProfile: "compatibility" })
+assert status.state == "succeeded", "git status failed"
+
+let search = process.run({ executable: "/usr/bin/grep", args: ["-R", "-n", "--include=*.ts", "TODO", "src"], cwd: workspace, env: { LANG: "C", LC_ALL: "C" }, stdin: "discard", stdout: "capture", stderr: "capture", timeoutMs: 30000, cellProfile: "compatibility" })
+assert search.state == "succeeded", "source search failed"
+
+let match_count = process.run({ executable: "/usr/bin/wc", args: ["-l"], cwd: workspace, env: { LANG: "C", LC_ALL: "C" }, stdin: { kind: "artifact", id: search.stdout_artifact.id }, stdout: "capture", stderr: "capture", timeoutMs: 30000, cellProfile: "compatibility" })
+assert match_count.state == "succeeded", "match count failed"
+
+let diff_check = process.run({ executable: "/usr/bin/git", args: ["diff", "--check"], cwd: workspace, env: { GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null", GIT_PAGER: "cat", LANG: "C", LC_ALL: "C" }, stdin: "discard", stdout: "capture", stderr: "capture", timeoutMs: 30000, cellProfile: "compatibility" })
+assert diff_check.state == "succeeded", "git diff --check failed"
+
+return { sources: sources, readme: readme, status: status, search: search, match_count: match_count, diff_check: diff_check }
