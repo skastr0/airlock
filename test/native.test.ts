@@ -126,6 +126,49 @@ describe("NativeFileSystem — scoped native actions", () => {
     )
   )
 
+  it.effect("refuses workspace-root mutation and overlapping tree operations", () =>
+    world(({ fs, native, path, workspace }) =>
+      Effect.gen(function* () {
+        yield* fs.makeDirectory(path.join(workspace, "tree"))
+        yield* fs.writeFileString(path.join(workspace, "tree", "value.txt"), "value")
+
+        const rootRemoval = yield* native.remove(".").pipe(Effect.flip)
+        expect(rootRemoval).toMatchObject({
+          _tag: "ProtectedPath",
+          target: native.workspace
+        })
+
+        const nestedCopy = yield* native.copy("tree", "tree/copy").pipe(Effect.flip)
+        expect(nestedCopy).toMatchObject({
+          _tag: "NativePathOverlap",
+          source: path.join(native.workspace, "tree"),
+          destination: path.join(native.workspace, "tree", "copy")
+        })
+
+        const ancestorMove = yield* native.move("tree/value.txt", "tree").pipe(Effect.flip)
+        expect(ancestorMove).toMatchObject({ _tag: "NativePathOverlap" })
+        expect(yield* fs.readFileString(path.join(workspace, "tree", "value.txt"))).toBe("value")
+      })
+    )
+  )
+
+  it.effect("preserves the typed unsupported-path error while admitting a copy tree", () =>
+    world(({ fs, native, path, workspace }) =>
+      Effect.gen(function* () {
+        yield* fs.makeDirectory(path.join(workspace, "tree"))
+        yield* fs.writeFileString(path.join(workspace, "outside.txt"), "outside")
+        yield* fs.symlink("../outside.txt", path.join(workspace, "tree", "link.txt"))
+
+        const result = yield* native.copy("tree", "tree-copy").pipe(Effect.flip)
+        expect(result).toMatchObject({
+          _tag: "NativePathUnsupported",
+          kind: "symlink"
+        })
+        expect(yield* fs.exists(path.join(workspace, "tree-copy"))).toBe(false)
+      })
+    )
+  )
+
   it.effect("lists and bounds glob expansion with typed useful output", () =>
     world(({ fs, native, path, workspace }) =>
       Effect.gen(function* () {

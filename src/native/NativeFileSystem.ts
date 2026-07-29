@@ -16,7 +16,7 @@ import {
   type UnsupportedReplacementSymlink
 } from "../Hold.ts"
 import {
-  type ProtectedPath,
+  ProtectedPath,
   type RemoveReceipt,
   ScopeEscape,
   type TargetNotFound
@@ -67,6 +67,15 @@ export class NativeGlobInvalid extends Schema.TaggedError<NativeGlobInvalid>()(
 export class NativeGlobLimitExceeded extends Schema.TaggedError<NativeGlobLimitExceeded>()(
   "NativeGlobLimitExceeded",
   { root: Schema.String, pattern: Schema.String, limit: Schema.Number }
+) {}
+
+export class NativePathOverlap extends Schema.TaggedError<NativePathOverlap>()(
+  "NativePathOverlap",
+  {
+    source: Schema.String,
+    destination: Schema.String,
+    reason: Schema.String
+  }
 ) {}
 
 export class NativeJsonInvalid extends Schema.TaggedError<NativeJsonInvalid>()(
@@ -124,13 +133,36 @@ export class NativeMkdirReceipt extends Schema.Class<NativeMkdirReceipt>("Native
   installs: Schema.Array(NativeWriteReceipt)
 }) {}
 
+export class NativeMovePartiallyApplied extends Schema.TaggedError<NativeMovePartiallyApplied>()(
+  "NativeMovePartiallyApplied",
+  {
+    source: Schema.String,
+    destination: Schema.String,
+    install: NativeWriteReceipt,
+    reason: Schema.String
+  }
+) {}
+
+export class NativeMkdirPartiallyApplied extends Schema.TaggedError<NativeMkdirPartiallyApplied>()(
+  "NativeMkdirPartiallyApplied",
+  {
+    path: Schema.String,
+    failedDirectory: Schema.String,
+    installs: Schema.Array(NativeWriteReceipt),
+    reason: Schema.String
+  }
+) {}
+
 export type NativeFilesystemErrorUnion =
   | ScopeEscape
   | NativeFilesystemError
   | NativePathUnsupported
   | NativeGlobInvalid
   | NativeGlobLimitExceeded
+  | NativePathOverlap
   | NativeJsonInvalid
+  | NativeMovePartiallyApplied
+  | NativeMkdirPartiallyApplied
   | ProtectedPath
   | SourceNotFound
   | SourceVolumeMismatch
@@ -289,7 +321,43 @@ const make = (config: NativeFilesystemConfig) =>
       )
 
     const checked = (raw: string) => resolve(raw).pipe(Effect.flatMap(statResolved))
-    const checkedPath = (raw: string) => resolve(raw).pipe(Effect.tap(statResolved))
+    const mutationPath = (raw: string) => resolve(raw).pipe(
+      Effect.flatMap((resolved) =>
+        resolved === workspace
+          ? Effect.fail(new ProtectedPath({
+              target: resolved,
+              reason: "the native filesystem capability does not replace its workspace root"
+            }))
+          : Effect.succeed(resolved)
+      )
+    )
+
+    const pathsOverlap = (left: string, right: string) =>
+      left === right ||
+      left.startsWith(`${right}${nodePath.sep}`) ||
+      right.startsWith(`${left}${nodePath.sep}`)
+
+    const rejectOverlap = (source: string, destination: string) =>
+      pathsOverlap(source, destination)
+        ? Effect.fail(new NativePathOverlap({
+            source,
+            destination,
+            reason: "recursive copy and move paths must not contain one another"
+          }))
+        : Effect.void
+
+    const admitDestinationParent = (destination: string) =>
+      statResolved(nodePath.dirname(destination)).pipe(
+        Effect.flatMap((parent) =>
+          parent.kind === "directory"
+            ? Effect.void
+            : Effect.fail(new NativeFilesystemError({
+                operation: "admit destination",
+                path: destination,
+                reason: "destination parent is not a directory"
+              }))
+        )
+      )
 
     // Staging is private Airlock state. `replaceFrom` then moves the staged
     // object into managed state and holds any displaced live binding.
@@ -352,15 +420,17 @@ const make = (config: NativeFilesystemConfig) =>
       )
 
     /** `fs.copy` has rich semantics; native actions admit only a physical tree. */
-    const verifyTree = (entry: NativeStat): Effect.Effect<void, NativeFilesystemError | NativePathUnsupported> =>
+    const verifyTree = (
+      entry: NativeStat
+    ): Effect.Effect<number, NativeFilesystemError | NativePathUnsupported> =>
       entry.kind !== "directory"
-        ? Effect.void
+        ? Effect.succeed(entry.bytes)
         : fs.readDirectory(entry.path).pipe(
             Effect.mapError(error("inspect copy tree", entry.path)),
             Effect.flatMap((names) => Effect.forEach(names, (name) =>
               statResolved(nodePath.join(entry.path, name)).pipe(Effect.flatMap(verifyTree))
             )),
-            Effect.asVoid
+            Effect.map((sizes) => sizes.reduce((total, size) => total + size, 0))
           )
 
     const validatePattern = (pattern: string): Effect.Effect<ReadonlyArray<string>, NativeGlobInvalid> => {
@@ -427,44 +497,66 @@ const make = (config: NativeFilesystemConfig) =>
       )
 
     const writeBytes = (raw: string, bytes: Uint8Array) =>
-      resolve(raw).pipe(
+      mutationPath(raw).pipe(
         Effect.flatMap((target) => stageBytes(bytes).pipe(Effect.flatMap((stage) => install(target, stage, bytes.byteLength))))
       )
 
     const writeText = (raw: string, content: string) => writeBytes(raw, new TextEncoder().encode(content))
 
-    const remove = (raw: string) => checkedPath(raw).pipe(Effect.flatMap((target) => hold.remove(target)))
+    const remove = (raw: string) =>
+      mutationPath(raw).pipe(
+        Effect.tap(statResolved),
+        Effect.flatMap((target) => hold.remove(target))
+      )
 
     const copy = (rawSource: string, rawDestination: string) =>
-      Effect.all([checked(rawSource), resolve(rawDestination)]).pipe(
+      Effect.all([checked(rawSource), mutationPath(rawDestination)]).pipe(
         Effect.flatMap(([source, destination]) => {
           const stage = stagePath()
-          return verifyTree(source).pipe(Effect.zipRight(fs.copy(source.path, stage, { overwrite: false })),
-            Effect.mapError(error("copy to private stage", stage)),
-            Effect.flatMap(() => install(destination, stage, source.bytes))
+          return rejectOverlap(source.path, destination).pipe(
+            Effect.zipRight(admitDestinationParent(destination)),
+            Effect.zipRight(verifyTree(source)),
+            Effect.flatMap((bytes) =>
+              fs.copy(source.path, stage, { overwrite: false }).pipe(
+                Effect.mapError(error("copy to private stage", stage)),
+                Effect.zipRight(install(destination, stage, bytes))
+              )
+            )
           )
         })
       )
 
     const move = (rawSource: string, rawDestination: string) =>
-      Effect.all([checked(rawSource), resolve(rawDestination)]).pipe(
+      Effect.all([checked(rawSource), mutationPath(rawDestination)]).pipe(
         Effect.flatMap(([source, destination]) => {
-          if (source.path === destination) {
-            return Effect.fail(new NativeFilesystemError({ operation: "move", path: source.path, reason: "source and destination are the same path" }))
-          }
           const stage = stagePath()
-          return verifyTree(source).pipe(Effect.zipRight(fs.copy(source.path, stage, { overwrite: false })),
-            Effect.mapError(error("copy move source to private stage", stage)),
-            Effect.flatMap(() => install(destination, stage, source.bytes)),
+          return rejectOverlap(source.path, destination).pipe(
+            Effect.zipRight(admitDestinationParent(destination)),
+            Effect.zipRight(verifyTree(source)),
+            Effect.flatMap((bytes) =>
+              fs.copy(source.path, stage, { overwrite: false }).pipe(
+                Effect.mapError(error("copy move source to private stage", stage)),
+                Effect.zipRight(install(destination, stage, bytes))
+              )
+            ),
             Effect.flatMap((installReceipt) => hold.remove(source.path).pipe(
-              Effect.map((sourceRemoval) => new NativeMoveReceipt({ install: installReceipt, sourceRemoval }))
+              Effect.map((sourceRemoval) => new NativeMoveReceipt({
+                install: installReceipt,
+                sourceRemoval
+              })),
+              Effect.mapError((cause) => new NativeMovePartiallyApplied({
+                source: source.path,
+                destination,
+                install: installReceipt,
+                reason: `${cause._tag}: ${reasonOf(cause)}`
+              }))
             ))
           )
         })
       )
 
     const mkdir = (raw: string, options?: { readonly parents?: boolean }) =>
-      resolve(raw).pipe(
+      mutationPath(raw).pipe(
         Effect.flatMap((target) => Effect.gen(function* () {
           const exists = yield* fs.exists(target).pipe(Effect.mapError(error("check directory", target)))
           if (exists) {
@@ -489,7 +581,16 @@ const make = (config: NativeFilesystemConfig) =>
           for (const directory of missing) {
             const stage = stagePath()
             yield* fs.makeDirectory(stage).pipe(Effect.mapError(error("make private staged directory", stage)))
-            installs.push(yield* install(directory, stage, 0))
+            const installed = yield* install(directory, stage, 0).pipe(Effect.either)
+            if (Either.isLeft(installed)) {
+              return yield* new NativeMkdirPartiallyApplied({
+                path: target,
+                failedDirectory: directory,
+                installs,
+                reason: `${installed.left._tag}: ${reasonOf(installed.left)}`
+              })
+            }
+            installs.push(installed.right)
           }
           return new NativeMkdirReceipt({ path: target, installs })
         }))
