@@ -229,4 +229,34 @@ describe("macOS distribution scripts", () => {
       expect(readFileSync(agentTarget, "utf8")).toBe(`prior-agent-${failAt}`)
     }
   })
+
+  it("restores the byte-identical live pair when the second uninstall displacement fails", () => {
+    const temporary = root()
+    const { checksum, source } = fixture(temporary)
+    const prefix = join(temporary, "prefix")
+    const target = join(prefix, "bin", "airlock")
+    const agentTarget = join(prefix, "bin", "airlock-agent")
+    expect(
+      run(install, ["--source", source, "--checksum", checksum, "--prefix", prefix], temporary)
+        .status
+    ).toBe(0)
+    const originalAirlock = readFileSync(target)
+    const originalAgent = readFileSync(agentTarget)
+    const shims = join(temporary, "shims")
+    const counter = join(temporary, "mv-count")
+    mkdirSync(shims)
+    const moveShim = join(shims, "mv")
+    writeFileSync(
+      moveShim,
+      "#!/bin/sh\ncount=0\nif [ -f \"$AIRLOCK_MV_COUNTER\" ]; then count=$(cat \"$AIRLOCK_MV_COUNTER\"); fi\ncount=$((count + 1))\nprintf '%s' \"$count\" > \"$AIRLOCK_MV_COUNTER\"\nif [ \"$count\" -eq 2 ]; then exit 91; fi\nexec /bin/mv \"$@\"\n"
+    )
+    chmodSync(moveShim, 0o755)
+    const failed = run(uninstall, ["--prefix", prefix], temporary, {
+      AIRLOCK_MV_COUNTER: counter,
+      PATH: `${shims}:${process.env.PATH ?? "/usr/bin:/bin"}`
+    })
+    expect(failed.status).toBe(75)
+    expect(readFileSync(target)).toEqual(originalAirlock)
+    expect(readFileSync(agentTarget)).toEqual(originalAgent)
+  })
 })

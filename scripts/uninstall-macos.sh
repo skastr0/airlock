@@ -75,6 +75,31 @@ else
 fi
 mkdir -p "$TRASH"
 TRANSACTION="$(mktemp -d "$TRASH/.airlock.uninstalled.XXXXXXXX")"
-if [ -e "$TARGET" ] || [ -L "$TARGET" ]; then mv "$TARGET" "$TRANSACTION/airlock"; fi
-if [ -e "$AGENT_TARGET" ] || [ -L "$AGENT_TARGET" ]; then mv "$AGENT_TARGET" "$TRANSACTION/airlock-agent"; fi
+MOVED_AIRLOCK=0
+MOVED_AGENT=0
+
+rollback() {
+  status="${1:-75}"
+  trap - 0 HUP INT TERM
+  recovery_failed=0
+  if [ "$MOVED_AIRLOCK" -eq 1 ] && ! mv "$TRANSACTION/airlock" "$TARGET"; then
+    echo "airlock uninstall: rollback failed; recover $TRANSACTION/airlock to $TARGET" >&2
+    recovery_failed=1
+  fi
+  if [ "$MOVED_AGENT" -eq 1 ] && ! mv "$TRANSACTION/airlock-agent" "$AGENT_TARGET"; then
+    echo "airlock uninstall: rollback failed; recover $TRANSACTION/airlock-agent to $AGENT_TARGET" >&2
+    recovery_failed=1
+  fi
+  if [ "$recovery_failed" -eq 1 ]; then exit 76; fi
+  exit "$status"
+}
+trap 'status=$?; rollback "$status"' 0 HUP INT TERM
+
+if [ -e "$TARGET" ] || [ -L "$TARGET" ]; then
+  if mv "$TARGET" "$TRANSACTION/airlock"; then MOVED_AIRLOCK=1; else rollback 75; fi
+fi
+if [ -e "$AGENT_TARGET" ] || [ -L "$AGENT_TARGET" ]; then
+  if mv "$AGENT_TARGET" "$TRANSACTION/airlock-agent"; then MOVED_AGENT=1; else rollback 75; fi
+fi
+trap - 0 HUP INT TERM
 echo "moved installed Airlock binaries to $TRANSACTION"
