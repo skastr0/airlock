@@ -435,6 +435,7 @@ export const draftForAction = (
           source: "file",
           locator,
           operation,
+          ...(call.action === "file.read" ? { format: call.format } : {}),
           ...(call.action === "file.glob" ? { pattern: call.pattern } : {})
         }))
         break
@@ -748,10 +749,64 @@ const validateRuntimeRequest = (
     return call
   })
 
+const captureFor = (
+  plan: Plan,
+  action: string,
+  operation: CaptureNode["operation"]
+): Effect.Effect<CaptureNode, ProgramActionExecutionFailed> => {
+  const matches = plan.nodes.filter(
+    (node): node is CaptureNode => node._tag === "Capture" && node.operation === operation
+  )
+  return matches.length === 1
+    ? Effect.succeed(matches[0]!)
+    : Effect.fail(new ProgramActionExecutionFailed({
+        action,
+        phase: "contract",
+        causeTag: "ProgramPlanShapeMismatch",
+        reason: `expected exactly one Capture.${operation} node; found ${matches.length}`
+      }))
+}
+
+const applyFor = (
+  plan: Plan,
+  action: string,
+  operation: ApplyNode["operation"]
+): Effect.Effect<ApplyNode, ProgramActionExecutionFailed> => {
+  const matches = plan.nodes.filter(
+    (node): node is ApplyNode => node._tag === "Apply" && node.operation === operation
+  )
+  return matches.length === 1
+    ? Effect.succeed(matches[0]!)
+    : Effect.fail(new ProgramActionExecutionFailed({
+        action,
+        phase: "contract",
+        causeTag: "ProgramPlanShapeMismatch",
+        reason: `expected exactly one Apply.${operation} node; found ${matches.length}`
+      }))
+}
+
+const externalFor = (
+  plan: Plan,
+  action: string
+): Effect.Effect<RequestExternalNode, ProgramActionExecutionFailed> => {
+  const matches = plan.nodes.filter(
+    (node): node is RequestExternalNode => node._tag === "RequestExternal"
+  )
+  return matches.length === 1
+    ? Effect.succeed(matches[0]!)
+    : Effect.fail(new ProgramActionExecutionFailed({
+        action,
+        phase: "contract",
+        causeTag: "ProgramPlanShapeMismatch",
+        reason: `expected exactly one RequestExternal node; found ${matches.length}`
+      }))
+}
+
 /**
- * Trusted lowering adapter. Native filesystem calls cross only the
- * NativeFileSystem/Hold seam; process calls cross Runtime/Cell; HTTP calls
- * only stage inert Outbox state. This layer has no direct host I/O.
+ * Trusted Plan adapter. Every native operation and operand is taken from the
+ * admitted Plan; the bound ActionCall is used only to select result decoding.
+ * Filesystem effects cross NativeFileSystem/Hold, while Invoke and
+ * RequestExternal cross the core Runtime. This layer has no direct host I/O.
  */
 export const ProgramPlanRuntimeLive = Layer.effect(
   ProgramPlanRuntime,
@@ -769,37 +824,53 @@ export const ProgramPlanRuntimeLive = Layer.effect(
           switch (call.action) {
             case "file.inspect":
             case "file.stat": {
-              const stat = yield* native.stat(call.path).pipe(Effect.mapError(nativeFailure(call.action)))
+              const capture = yield* captureFor(
+                plan,
+                call.action,
+                call.action === "file.inspect" ? "inspect" : "stat"
+              )
+              const stat = yield* native.stat(capture.locator).pipe(Effect.mapError(nativeFailure(call.action)))
               return actionResult(statValue(stat))
             }
-            case "file.read":
-              switch (call.format) {
+            case "file.read": {
+              const capture = yield* captureFor(plan, call.action, "read")
+              switch (capture.format) {
                 case "text":
-                  return actionResult(yield* native.readText(call.path).pipe(Effect.mapError(nativeFailure(call.action))))
+                  return actionResult(yield* native.readText(capture.locator).pipe(Effect.mapError(nativeFailure(call.action))))
                 case "bytes": {
-                  const bytes = yield* native.readBytes(call.path).pipe(Effect.mapError(nativeFailure(call.action)))
+                  const bytes = yield* native.readBytes(capture.locator).pipe(Effect.mapError(nativeFailure(call.action)))
                   return actionResult([...bytes])
                 }
                 case "json": {
-                  const json = yield* native.readJson(call.path).pipe(Effect.mapError(nativeFailure(call.action)))
+                  const json = yield* native.readJson(capture.locator).pipe(Effect.mapError(nativeFailure(call.action)))
                   const value = yield* Schema.decodeUnknown(LanguageValueSchema)(json).pipe(
                     Effect.mapError(executionFailure(call.action, "contract"))
                   )
                   return actionResult(value)
                 }
               }
+            }
             case "file.list": {
-              const entries = yield* native.list(call.path).pipe(Effect.mapError(nativeFailure(call.action)))
+              const capture = yield* captureFor(plan, call.action, "list")
+              const entries = yield* native.list(capture.locator).pipe(Effect.mapError(nativeFailure(call.action)))
               return actionResult(entries.map(listEntryValue))
             }
             case "file.glob": {
-              const matches = yield* native.glob(call.root, call.pattern).pipe(Effect.mapError(nativeFailure(call.action)))
+              const capture = yield* captureFor(plan, call.action, "glob")
+              if (capture.pattern === undefined) {
+                return yield* new ProgramActionExecutionFailed({
+                  action: call.action,
+                  phase: "contract",
+                  causeTag: "ProgramPlanShapeMismatch",
+                  reason: "Capture.glob has no pattern"
+                })
+              }
+              const matches = yield* native.glob(capture.locator, capture.pattern).pipe(Effect.mapError(nativeFailure(call.action)))
               return actionResult([...matches])
             }
             case "file.write": {
-              const sourceId = call.sourceArtifact ?? plan.nodes.find(
-                (node): node is ApplyNode => node._tag === "Apply"
-              )?.sourceArtifact
+              const apply = yield* applyFor(plan, call.action, "write")
+              const sourceId = apply.sourceArtifact
               if (sourceId === undefined) {
                 return yield* new ProgramActionExecutionFailed({
                   action: call.action,
@@ -809,7 +880,7 @@ export const ProgramPlanRuntimeLive = Layer.effect(
                 })
               }
               const source = yield* inlineArtifact(request, sourceId)
-              const applied = yield* native.writeBytes(call.path, source.bytes).pipe(
+              const applied = yield* native.writeBytes(apply.target, source.bytes).pipe(
                 Effect.mapError(nativeFailure(call.action))
               )
               return actionResult({
@@ -822,7 +893,8 @@ export const ProgramPlanRuntimeLive = Layer.effect(
               })
             }
             case "file.remove": {
-              const removed = yield* native.remove(call.path).pipe(Effect.mapError(nativeFailure(call.action)))
+              const apply = yield* applyFor(plan, call.action, "remove")
+              const removed = yield* native.remove(apply.target).pipe(Effect.mapError(nativeFailure(call.action)))
               return actionResult({
                 state: "applied",
                 action: call.action,
@@ -832,21 +904,39 @@ export const ProgramPlanRuntimeLive = Layer.effect(
               })
             }
             case "file.copy": {
-              const copied = yield* native.copy(call.source, call.destination).pipe(
+              const apply = yield* applyFor(plan, call.action, "copy")
+              if (apply.source === undefined) {
+                return yield* new ProgramActionExecutionFailed({
+                  action: call.action,
+                  phase: "contract",
+                  causeTag: "ProgramPlanShapeMismatch",
+                  reason: "Apply.copy has no source"
+                })
+              }
+              const copied = yield* native.copy(apply.source, apply.target).pipe(
                 Effect.mapError(nativeFailure(call.action))
               )
               return actionResult({
                 state: "applied",
                 action: call.action,
                 act_id: copied.receipt.id,
-                source: call.source,
+                source: apply.source,
                 target: copied.receipt.target,
                 previous_held: copied.receipt.previousHeld,
                 bytes: copied.bytes
               })
             }
             case "file.move": {
-              const moved = yield* native.move(call.source, call.destination).pipe(
+              const apply = yield* applyFor(plan, call.action, "move")
+              if (apply.source === undefined) {
+                return yield* new ProgramActionExecutionFailed({
+                  action: call.action,
+                  phase: "contract",
+                  causeTag: "ProgramPlanShapeMismatch",
+                  reason: "Apply.move has no source"
+                })
+              }
+              const moved = yield* native.move(apply.source, apply.target).pipe(
                 Effect.mapError(nativeFailure(call.action))
               )
               return actionResult({
@@ -859,7 +949,8 @@ export const ProgramPlanRuntimeLive = Layer.effect(
               })
             }
             case "file.mkdir": {
-              const made = yield* native.mkdir(call.path, { parents: call.parents }).pipe(
+              const apply = yield* applyFor(plan, call.action, "mkdir")
+              const made = yield* native.mkdir(apply.target, { parents: apply.parents }).pipe(
                 Effect.mapError(nativeFailure(call.action))
               )
               return actionResult({
@@ -883,29 +974,30 @@ export const ProgramPlanRuntimeLive = Layer.effect(
               return actionResult(runtimeRunValue(run, plan), outputs)
             }
             case "http.stage": {
-              let body = call.body
-              if (call.bodyArtifact !== undefined) {
-                const source = yield* inlineArtifact(request, call.bodyArtifact)
-                body = yield* Effect.try({
-                  try: () => new TextDecoder("utf-8", { fatal: true }).decode(source.bytes),
-                  catch: executionFailure(call.action, "contract")
+              const external = yield* externalFor(plan, call.action)
+              if (external.bodyArtifact !== undefined) {
+                return yield* new ProgramActionExecutionFailed({
+                  action: call.action,
+                  phase: "contract",
+                  causeTag: "ProgramPlanShapeMismatch",
+                  reason: "program lowering must freeze the artifact-backed body into RequestExternal.body"
                 })
               }
               const staged = yield* outbox.stage(new HttpExternalIntent({
-                url: call.endpoint,
-                method: call.method,
-                headers: call.headers,
-                ...(body === undefined ? {} : { body })
-              }), call.holdMillis).pipe(
+                url: external.endpoint,
+                method: external.method,
+                headers: external.headers,
+                ...(external.body === undefined ? {} : { body: external.body })
+              }), external.holdMillis).pipe(
                 Effect.mapError(executionFailure(call.action, "outbox"))
               )
               return actionResult({
                 state: staged.status,
                 action: call.action,
                 emission_id: staged.id,
-                method: staged.intent.method,
-                endpoint: staged.intent.endpoint,
-                hold_millis: call.holdMillis
+                method: external.method,
+                endpoint: external.endpoint,
+                hold_millis: external.holdMillis,
               })
             }
           }

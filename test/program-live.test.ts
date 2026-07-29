@@ -299,4 +299,71 @@ describe("ProgramExecutionLive", () => {
       sourceArtifact: request.draft.nodes[0]!.produces[2]
     })
   })
+
+  it("keeps native observation and mutation semantics entirely in the admitted Plan", async () => {
+    const calls = [
+      {
+        input: {
+          action: "file.glob",
+          root: "/work",
+          pattern: "**/*.ts"
+        },
+        node: {
+          _tag: "Capture",
+          operation: "glob",
+          locator: "/work",
+          pattern: "**/*.ts"
+        }
+      },
+      {
+        input: {
+          action: "file.copy",
+          source: "/work/source",
+          destination: "/work/copy"
+        },
+        node: {
+          _tag: "Apply",
+          operation: "copy",
+          source: "/work/source",
+          target: "/work/copy"
+        }
+      },
+      {
+        input: {
+          action: "file.move",
+          source: "/work/copy",
+          destination: "/work/moved"
+        },
+        node: {
+          _tag: "Apply",
+          operation: "move",
+          source: "/work/copy",
+          target: "/work/moved"
+        }
+      },
+      {
+        input: {
+          action: "file.mkdir",
+          path: "/work/nested/path",
+          parents: true
+        },
+        node: {
+          _tag: "Apply",
+          operation: "mkdir",
+          target: "/work/nested/path",
+          parents: true
+        }
+      }
+    ] as const
+
+    for (const [index, fixture] of calls.entries()) {
+      const call = await Effect.runPromise(
+        canonicalizeProgramAction(fixture.input.action, fixture.input)
+      )
+      const request = await Effect.runPromise(draftForAction(call, index, "native-contract"))
+      expect(request.draft.nodes).toHaveLength(1)
+      expect(request.draft.nodes[0]).toMatchObject(fixture.node)
+      expect(request.draft.nodes[0]!.produces).toHaveLength(1)
+    }
+  })
 })

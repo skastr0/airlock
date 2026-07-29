@@ -94,6 +94,11 @@ export class CaptureNode extends Schema.TaggedClass<CaptureNode>("CaptureNode")(
     Schema.Literal("read", "inspect", "stat", "list", "glob"),
     { default: () => "read" as const }
   ),
+  /** File-read decoding requested by the program; runtime still preserves bytes. */
+  format: Schema.optionalWith(
+    Schema.Literal("text", "bytes", "json"),
+    { default: () => "bytes" as const }
+  ),
   /** Required only by file.glob; it remains a bounded native pattern. */
   pattern: Schema.optional(Schema.String)
 }) {}
@@ -360,6 +365,9 @@ const validateCapture = (node: CaptureNode): InvalidCaptureContract | undefined 
     }
   } else if (node.pattern !== undefined) {
     return invalidCapture(node, "pattern", "is valid only for file.glob")
+  }
+  if (node.operation !== "read" && node.format !== "bytes") {
+    return invalidCapture(node, "format", "is valid only for file.read")
   }
   return undefined
 }
