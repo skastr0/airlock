@@ -12,10 +12,11 @@ It is not a confidentiality boundary: the current Seatbelt profile permits
 ambient host reads. A VM backend is a future, stronger enclosure and is not a
 macOS v1 release prerequisite.
 
-The repository has one runnable Vouch-derived proof, unit and integration
-coverage, and construction checks for the two destructive gateways. It does
-not yet have the representative corpus, crash matrix, or red-team evidence
-needed for a strong shell-replacement claim.
+The repository has two runnable Vouch-derived local proofs, a small
+shell-parity suite, bounded Hold/Outbox cross-process recovery tests, and
+construction checks for the mutation and wire gateways. It does not yet have
+the representative corpus, exhaustive crash/overlap matrix, or red-team
+evidence needed for a strong shell-replacement claim.
 
 ## Install from a checkout
 
@@ -31,8 +32,9 @@ airlock doctor
 airlock-agent actions
 ```
 
-`build:macos` creates a standalone binary plus a SHA-256 manifest in a fresh
-`dist/` directory. The installer verifies, probes, and installs the paired
+`build:macos` creates paired standalone binaries plus SHA-256 and JSON
+manifests in a fresh `dist/` directory. The installer verifies, probes, and
+installs the paired
 `airlock` and `airlock-agent` binaries before displacing either existing
 binary; `--replace` preserves prior binaries in a unique Trash transaction.
 The builder applies and verifies local ad-hoc code signatures before hashing;
@@ -87,6 +89,11 @@ native Cell, and merges the resulting delta through Hold. A missing policy,
 profile mismatch, unavailable native mechanism, unsupported delta, or live
 workspace drift is a typed refusal; it does not fall back to compatibility.
 
+A later action or language failure returns a versioned `failed` or `partial`
+program report and a nonzero exit. A partial report retains completed action
+records, Plan drafts, and artifact metadata alongside the typed failure; it
+does not imply rollback of earlier actions.
+
 Compatibility is the zero-configuration profile:
 
 ```sh
@@ -109,6 +116,11 @@ airlock ledger
 
 All CLI output is JSON. `AIRLOCK_HOME` overrides the state directory; the
 default is `~/.airlock`.
+
+`airlock` is the supervisor surface. `airlock-agent` is intentionally
+narrower: it exposes program execution, schemas/capabilities, and read-only
+state inspection, but omits raw exec, direct mutation, dispatch/cancel,
+undo/reap, and flush.
 
 The current program action vocabulary is generic:
 
@@ -135,7 +147,12 @@ airlock reap --older-than 7d
 ```
 
 Every managed replacement displaces the prior binding by rename. `Hold.reap`
-contains the repository's only irreversible removal site.
+contains the repository's only irreversible removal site. Hold and Outbox
+serialize recovery transitions across processes with a bounded recoverable
+exclusive-file lease. Hold journal publication stages and syncs a candidate
+before promotion; startup can promote a valid staged-only journal. Those are
+tested properties, not a claim that every crash point and overlapping
+operation schedule has been exhausted.
 
 ```sh
 airlock send https://api.example.com/hook \
@@ -164,10 +181,16 @@ Vouch-derived restore plan:
 - the dispatch document is owner-only (`0600`); and
 - undo restores the prior directory and removes the newly introduced entry.
 
-This is one local fixture, not a real Vouch/OpenShell replacement run. It does
-not prove endpoint brokerage, confidentiality, complete execution closure,
-crash recovery, concurrent multi-entry atomicity, metadata fidelity, or broad
-task coverage.
+`scripts/prove-vouch-operations.ts` executes a second checked-in program with
+12 actions and 16 Plan nodes. It covers file capture/list/glob, native mkdir,
+tar snapshot/list, an artifact pipe, literal OpenShell-shaped argv, managed
+copy/move/remove, staged HTTP, targeted undo, timeout, cancellation, and a
+bounded-output partial process receipt.
+
+These are local host-operation fixtures, not a real Vouch/OpenShell replacement
+run. They do not prove endpoint brokerage, confidentiality, complete execution
+closure, exhaustive crash recovery, concurrent multi-entry atomicity, metadata
+fidelity, or broad task coverage.
 
 ## Documentation
 
@@ -184,7 +207,10 @@ task coverage.
 
 Strong confidence remains unearned. The project has not yet published a
 50-task shell-free corpus, repeated runs across supported macOS builds,
-fault-injection at every durable transition, concurrent Apply/commit evidence,
-hostile execution-closure tests, endpoint-broker tests, or cross-plan
-information-flow and authority-laundering tests. See the
+fault-injection at every durable transition, an exhaustive overlapping
+Apply/undo/reap/commit campaign, hostile execution-closure tests, or cross-plan
+information-flow and authority-laundering tests. Endpoint-broker tests become
+required if contained networking is advertised. Developer ID signing,
+notarization, and public artifact provenance also remain release-owner gates.
+See the
 [acceptance contract](docs/acceptance.md) for the claim boundary.

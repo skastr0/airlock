@@ -1,70 +1,96 @@
-# Vouch-derived shell replacement corpus
+# Vouch-derived shell-replacement evidence
 
-This is a workload corpus, not an Airlock extension. It is derived from the
-state-preserving replacement path in Vouch's `box-runtime-v1.py`, but no Vouch
-term is a Plan node, native verb, resource kind, or runtime authority.
+> Status: two executed local macOS proofs plus parser-backed full-workflow
+> examples. This is workload evidence, not a representative corpus and not a
+> real Vouch/OpenShell replacement.
 
-The source workload has three stages:
+Vouch's state-preserving replacement path motivates three stages:
 
-1. snapshot state, including a safe SQLite backup, and download a durable
-   archive;
-2. upload and restore that archive into a newly created machine, validating a
-   machine-readable receipt; and
-3. only after a durable local backup exists, request a remote replacement and
-   restore/validate the new machine.
+1. snapshot state, including a safe SQLite backup, and retain an archive;
+2. upload and restore the archive into a new machine, validating a
+   machine-readable result; and
+3. only after a durable local backup exists, request replacement and verify
+   the new machine.
 
-The source's cleanup and service-specific registration are intentionally out
-of this first corpus. They are ordinary later `run` calls or separate managed
-local `Apply` operations; neither creates a new physics category.
+No Vouch term is a Plan node, native verb, resource kind, or runtime authority.
+Tar, SQLite, Python, and OpenShell retain their own application semantics.
 
-## Lowering contract
+## Executed restore proof
 
-| source concern | Airlock operation | executable / authority | timeout | success claim |
-| --- | --- | --- | --- | --- |
-| create a SQLite-consistent archive | `Invoke` through `run` | `/usr/bin/python3 -I -S helper` in a private Cell; state-root read and archive write grants | 150s | exit code is zero; helper emits a captured receipt |
-| move archive into downloadable location | `Invoke` through `run` | existing controller executable plus its structured args | 45s | exit code is zero |
-| download archive | `Invoke` through `run`, then `Capture` | existing controller executable; local artifact destination grant | 180s | exit code is zero and captured artifact has bytes |
-| retain durable backup | `Apply(write)` | Hold-managed local path; no direct overwrite | n/a | Apply receipt says recovery material exists |
-| upload archive | `Invoke` through `run` | existing controller executable plus args | 120s | exit code is zero |
-| restore state | `Invoke` through `run`, then `Capture` | existing controller executable plus an isolated helper | 210s | process receipt says `phase = state_restored`, `ok = true`, and `extracted > 0` |
-| replace or create remote machine | `RequestExternal` | brokered remote-realm endpoint; intent is staged in Outbox | 30s hold before dispatch | only `staged` before commit; after commit result may be succeeded, failed, or uncertain |
+`scripts/prove-vouch.ts` and `test/vouch-e2e.test.ts` execute this admitted
+native-contained path:
 
-`tar`, `sqlite3`, the controller executable, and Python helpers remain existing
-tools. Airlock neither parses archives nor adopts controller/sandbox concepts.
-The scripts therefore use `run({ executable, args, stdin, stdout, stderr,
-timeout, cellProfile })`: no command string, shell interpolation, or project-native
-verb appears.
+```text
+Capture archive
+  → Invoke /usr/bin/tar with artifact stdin
+  → Capture live state before Apply
+  → Apply directory delta through Hold
+  → RequestExternal staged in Outbox
+  → targeted Hold undo
+```
 
-## Required generic contracts
+The fixture establishes that live state is unchanged before Apply, the
+restored directory is installed and recoverable, the HTTP request remains
+staged with no fetch, owner-only private dispatch data retains the request,
+and node/resource receipts correlate the work.
 
-The corpus requires these contracts from the runtime, rather than a bespoke
-implementation:
+## Executed host-operation proof
 
-- `run` accepts an executable handle or absolute executable identity, a list
-  of args atoms, optional working directory and environment overlay, explicit
-  stdin/stdout/stderr policy, timeout, output limit, and Cell
-  profile. It returns exit status and captured streams as artifacts.
-- `capture` admits local/process-output observations with provenance; a later
-  assertion is over captured receipt data, not shell text.
-- `apply(write)` installs an artifact only through Hold and reports whether
-  recovery material was retained.
-- `request_external` stages a generic request in Outbox. Dispatch is separate,
-  cancellable while staged, and `uncertain` if a crash occurs after dispatch
-  might have started.
-- A tool definition may make the controller executable ergonomic, but it may
-  only lower to these existing Plan constructors. It cannot add `upload`,
-  `restore`, `snapshot`, or `replace` physics.
+`examples/vouch/host-workflow.air`,
+`scripts/prove-vouch-operations.ts`, and
+`test/vouch-operations-e2e.test.ts` execute 12 generic actions / 16 Plan
+nodes:
 
-## Current evidence and remaining runtime work
+| Shape | Executed evidence |
+| --- | --- |
+| observe host state | file list, glob, and capture |
+| create private state | native `file.mkdir` |
+| snapshot | `/usr/bin/tar` writes a private archive, followed by Apply |
+| inspect an archive | `/usr/bin/tar` listing captured as an artifact |
+| explicit pipe | listing artifact becomes `wc` stdin |
+| controller-shaped argv | OpenShell-looking atoms round-trip through `printf`; no command string |
+| managed local transitions | copy, move, and remove lower through Hold |
+| external intent | body-bearing HTTP request remains staged; endpoint query is redacted |
+| recovery | targeted undo restores the exact prior archive bytes |
+| process bounds | timeout, `AbortSignal` cancellation, and a 128-byte output-limit partial process receipt |
 
-The corpus is parser-backed now and the companion test constructs a canonical
-Plan DAG using only `Capture`, `Invoke`, `Apply`, and `RequestExternal`. It
-does **not** claim that an external machine has been replaced: execution,
-tool-definition admission, process-output artifact decoding, endpoint
-brokerage, and the remote-realm adapter must be wired before this becomes an
-end-to-end proof.
+The CLI Plan receipt schema is versioned. The proof reports the node-kind
+sequence and keeps Outbox pending with no commit.
 
-Source evidence: `../vouch/assets/box-runtime-v1.py`,
-`snapshot_hermes_state` (around line 5853), `restore_hermes_state` (around
-line 5956), and `replace_sandbox_preserving_state` (around line 6041), read on
-2026-07-29.
+## Parser-backed full workflow
+
+`examples/vouch/snapshot.air`, `restore.air`, and `replace.air` preserve the
+broader workflow as structured examples. Their contract test verifies
+shell-free syntax and lowering to `Capture`, `Invoke`, `Apply`, and
+`RequestExternal`. Some calls exceed the integrated native envelope; parsing
+and lowering are not execution evidence.
+
+## Generic contract
+
+The workload is expected to compose:
+
+- structured `process.run` with separate executable and argv, explicit
+  cwd/environment/streams, timeout, output limit, and profile;
+- captured file and process-output artifacts with provenance;
+- `Apply` through Hold for managed live state;
+- `RequestExternal` into Outbox, with dispatch separately authorized; and
+- ordinary tools or inert definitions, never Vouch-specific physics.
+
+## Exact evidence boundary
+
+The two proofs provide useful candidate-level evidence for local file,
+process, artifact, Hold, Outbox, and receipt paths. They do **not**:
+
+- run the Vouch executable or a real OpenShell Unix-socket/config/credential
+  closure;
+- create or replace a disposable remote realm;
+- execute the live SQLite-safe backup or unwritable-collision cases;
+- provide a native endpoint broker or dispatch the staged request;
+- prove PTY, daemon/session escape, complete loader/helper/config closure, or
+  confidentiality;
+- establish hardlink, ACL, xattr, special-file, live-writer, multi-entry
+  atomicity, or exhaustive crash behavior; or
+- supply a frozen representative corpus or direct-shell baseline.
+
+The source-operation inventory and provenance notes live in
+[`examples/vouch/OPERATIONS.md`](../../examples/vouch/OPERATIONS.md).

@@ -47,10 +47,17 @@ Supported local mutation passes through Hold. The live binding is displaced
 by rename, undo checks the current binding before restoration, and
 `Hold.reap` owns the only irreversible removal site.
 
+Hold and Outbox serialize their recovery transitions through a bounded
+Airlock-home exclusive-file lease. The owner record is durably published,
+stale/dead owners can be reclaimed by rename, and tests exercise competing
+processes and bounded lock-directory growth. Hold also stages and syncs journal
+candidates before promotion and recovers a valid staged-only candidate.
+
 The current envelope covers modeled files/directories and supported
 same-volume transitions. It does not establish safety for symlinks, hardlink
 topology, special files, mounts, devices, ACL/xattr fidelity, foreign writers,
-or live protocol state.
+live protocol state, every crash point, or every overlapping operation
+schedule.
 
 ### External staging
 
@@ -82,12 +89,23 @@ claim only within its advertised delta envelope. It does **not** support a
 confidentiality claim, complete execution-closure claim, or proof against all
 daemonization and descendant-escape techniques.
 
+The process runner owns a process group and now waits for same-group
+descendants before reporting completion; timeout and cancellation terminate
+the owned group, and output limits retain a bounded partial process receipt.
+PTY, double-fork/session escape, and every daemonization technique remain
+outside the proof.
+
 ### Fail-closed profile selection
 
 Native-contained program execution requires a supervisor policy whose profile
 matches the CLI profile. Missing policy or mismatched profile is refused.
 VM-enclosed is refused because no backend is installed. Neither path falls
 back to compatibility.
+
+The installed `airlock-agent` binary narrows the command surface by omitting
+raw exec, direct mutation, dispatch/cancel, undo/reap, and flush. This is a
+useful defense-in-depth boundary. It does not prove the external harness
+withheld every alternate machine-effect tool.
 
 ### Inert tool definitions
 
@@ -238,10 +256,11 @@ Before claiming more than the current narrow envelope, the project needs:
 - complete shell-free harness mediation evidence;
 - hostile interpreter/descendant/config/descriptor tests;
 - path, symlink, hardlink, mount, liveness, and metadata race tests;
-- crash and concurrency tests across Hold, Apply, Outbox, and Journal;
+- exhaustive crash and concurrency tests across Hold, Apply, Outbox, and
+  Journal beyond the bounded lease/journal evidence already present;
 - end-to-end labels and persistent-authority fixtures;
 - endpoint-broker tests if network is advertised;
 - repeated results on each published macOS/architecture combination; and
-- a representative corpus rather than one Vouch-derived fixture.
+- a representative corpus rather than the current local Vouch/parity fixtures.
 
 These are defined in the [acceptance contract](acceptance.md).

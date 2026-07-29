@@ -50,14 +50,15 @@ gate for macOS v1.
 | compatibility profile | **Implemented**; no containment claim |
 | native-contained profile | **Implemented narrow subset**; private view, source-write fence, network denial, delta/Apply path |
 | VM-enclosed profile | **Future design direction**; the CLI and runtime refuse it because no backend is installed |
-| Hold | **Implemented domain nucleus**; files/directories, same-volume rename admission, journaled recovery, undo conflict handling |
-| Outbox | **Implemented domain nucleus**; durable HTTP stage/cancel/commit and honest `uncertain` recovery |
+| Hold | **Implemented domain nucleus**; files/directories, same-volume rename admission, bounded cross-process locking, staged journal promotion, and undo conflict handling |
+| Outbox | **Implemented domain nucleus**; durable HTTP stage/cancel/commit, bounded cross-process locking, and honest `uncertain` recovery |
 | Ledger | **Implemented append-only prototype**; not established as a fully crash-safe Journal |
 | labels | **Implemented pure candidate**; lattice, sink checks, scoped declassification/endorsement, and tests exist, but the runtime does not yet enforce them end to end |
 | endpoint broker | **Candidate, not implemented**; current native Cells deny network and Outbox dispatches HTTP itself |
 | complete execution closure | **Acceptance condition, not established** |
-| Vouch proof | **Implemented one-fixture proof**; native restore/apply/stage/undo, not a real remote replacement |
-| shell-replacement confidence | **Not earned**; no complete corpus, crash matrix, concurrency campaign, or red-team result |
+| Vouch evidence | **Implemented local proofs**; one restore/apply/stage/undo fixture plus a 12-action host-operation workflow, not a real OpenShell or remote replacement |
+| macOS distribution | **Implemented local release path**; paired supervisor/agent binaries are hashed, ad-hoc signed, verified, transactionally installed, and probed; Developer ID signing and notarization remain release gates |
+| shell-replacement confidence | **Not earned**; the checked-in fixtures are useful but not a representative corpus, complete crash matrix, or red-team result |
 
 ## Product direction
 
@@ -232,7 +233,8 @@ Compatibility uses the structured `ProcessRunner` directly:
 - arguments are distinct atoms;
 - cwd, environment overlay, stdin, streams, timeout, and output limit are
   explicit;
-- the runner owns a process group and captures a receipt; and
+- the runner owns a process group, waits for same-group descendants, captures
+  a receipt, and bounds timeout, cancellation, and output; and
 - the process otherwise has the invoking user's ambient host reads, writes,
   network, configuration, descendants, and descriptors.
 
@@ -300,15 +302,26 @@ Implemented properties include:
 - no direct unlink in native filesystem actions; and
 - one construction-counted irreversible removal site in `Hold.reap`.
 
-The current evidence does not establish crash safety across every filesystem
-and kernel point, concurrent multi-process locking, metadata fidelity, live
-protocol-state safety, or atomic multi-entry Apply.
+The Hold root is protected by a bounded cross-process exclusive-file lease.
+Journal publication stages and syncs a candidate before rename, startup picks
+the best valid journal candidate, and recovery can promote a staged-only
+candidate after an injected publication failure. Tests exercise competing
+processes, stale-owner reclamation, and bounded lock-directory growth.
+
+The current evidence still does not establish crash safety at every filesystem
+and kernel point, every overlapping Apply/undo/reap schedule, metadata
+fidelity, live protocol-state safety, or atomic multi-entry Apply.
 
 ## External intent: Outbox
 
 Outbox stores a redacted public manifest and an owner-only private HTTP
 dispatch document. Staging writes durable local state and a Ledger entry.
 Cancellation renames staged state without contacting the network.
+
+Outbox uses the same bounded Airlock-home exclusive-file lease to serialize
+stage, claim, and recovery transitions across processes. A recovered
+`committing` directory remains `uncertain`; the lease does not turn ambiguous
+external delivery into a retryable success/failure result.
 
 `Outbox.commit` performs the only wire-capable call:
 
@@ -347,6 +360,20 @@ Runtime node receipts record sequence, node state, admitted resource
 identities, input digests, and output artifact references. Hold and Outbox also
 append domain entries to Ledger. Ledger is useful evidence but is not yet a
 fully specified fsync, locking, compaction, or tamper-evident Journal.
+
+Program results have a versioned `succeeded | failed | partial` envelope. If a
+later action or language assertion fails, the CLI exits nonzero while retaining
+the completed action records, Plan drafts, artifact metadata, and a typed
+failure phase/cause. This is an honest partial execution report; it does not
+make the sequence transactional or prove that a failing runtime node has a
+durable receipt after every crash point.
+
+The installed `airlock-agent` entrypoint intentionally exposes a narrower
+surface than the supervisor binary: program/schema/capability and read-only
+state inspection remain available, while raw exec, direct mutation,
+dispatch/cancel, undo/reap, and flush are absent. This is evidence for the
+intended harness boundary, not proof that an external harness supplied no
+alternate machine-effect tool.
 
 ## Effect and PCMI strata
 
@@ -412,15 +439,16 @@ Acceptance conditions, not current guarantees:
 - end-to-end confidentiality and integrity enforcement;
 - persistent authority-laundering prevention across runs;
 - endpoint brokerage for contained work;
-- crash-safe and concurrent durable transitions; and
+- exhaustive crash-safe and concurrent durable transitions beyond the
+  bounded Hold/Outbox evidence already present; and
 - resource-exhaustion containment.
 
 See [`docs/security-model.md`](docs/security-model.md) for the precise boundary.
 
 ## Vouch evidence
 
-Vouch is the first workload, not an ontology. The runnable proof in
-`scripts/prove-vouch.ts` constructs and admits one generic Plan:
+Vouch is the first workload, not an ontology. The proof in
+`scripts/prove-vouch.ts` constructs and admits one generic restore Plan:
 
 ```text
 Capture archive
@@ -435,9 +463,17 @@ The fixture proves that the process did not change live state before Apply,
 that the restore delta installs and can be undone, that the replacement request
 remains staged with zero fetch calls, and that node/resource receipts exist.
 
-It does not run Vouch, OpenShell, a remote sandbox, live SQLite backup,
-unwritable collision handling, endpoint brokerage, or an actual replacement.
-It is evidence for the generic decomposition and native local path, not strong
+The second proof, `scripts/prove-vouch-operations.ts`, executes a checked-in
+Airlock program with 12 actions and 16 Plan nodes. It covers file
+capture/list/glob, native mkdir, tar snapshot and listing, an artifact pipe,
+OpenShell-shaped argv atoms, copy/move/remove, staged HTTP, targeted undo,
+timeout, cancellation, and a 128-byte output-limit partial process receipt.
+Its CLI receipt schema is versioned.
+
+Neither proof runs Vouch or OpenShell, a remote sandbox, a live SQLite backup,
+unwritable collision handling, endpoint brokerage, dispatch, or an actual
+replacement. Together they are stronger local evidence for the generic
+decomposition and native host path, not a representative corpus or strong
 confidence in the full product.
 
 ## macOS v1 acceptance direction
@@ -454,9 +490,11 @@ macOS v1 is judged on what this release implements:
 The future VM backend may later widen the enforceable set and strengthen
 confidentiality. It is not used to postpone or manufacture the v1 claim.
 
-No strong claim is available today. The repository lacks the full frozen
-corpus, repeated platform runs, crash and concurrency campaigns, and adversarial
-security evidence described in [`docs/acceptance.md`](docs/acceptance.md).
+No strong claim is available today. The repository has targeted cross-process
+lock/recovery tests and a small parity suite, but still lacks the full frozen
+corpus, repeated platform runs, exhaustive fault/overlap campaigns, and
+adversarial security evidence described in
+[`docs/acceptance.md`](docs/acceptance.md).
 
 ## Open questions
 
@@ -494,4 +532,4 @@ Airlock does not:
 - treat installed code or definitions as trustworthy by existence;
 - claim confidentiality from the current native profile;
 - claim a VM that is not implemented; or
-- describe one Vouch-derived fixture as a representative corpus.
+- describe the current Vouch/parity fixtures as a representative corpus.

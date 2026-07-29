@@ -39,23 +39,44 @@ Evidence present today:
 - native-contained write and network fences are tested on macOS;
 - the CLI runs an admitted native effectful program, applies its delta through
   Hold, and undoes it;
-- a Vouch-derived native proof captures an archive, invokes `/usr/bin/tar`,
+- one Vouch-derived native proof captures an archive, invokes `/usr/bin/tar`,
   proves live state was unchanged before Apply, applies and undoes a directory
-  delta, and stages a replacement request without dispatch; and
+  delta, and stages a replacement request without dispatch;
+- a second Vouch-derived program executes 12 generic host operations / 16 Plan
+  nodes and separately proves process timeout, cancellation, and bounded-output
+  receipts;
+- four checked-in parity fixtures exercise common file/process/control/native
+  rewrite shapes;
+- Hold and Outbox have bounded cross-process lease, stale-owner recovery, and
+  journal/recovery tests; and
+- the paired supervisor/agent macOS artifacts are locally ad-hoc signed,
+  hashed, verified, installed, and probed as one release pair; and
+- a later program failure returns a nonzero, versioned partial report that
+  retains completed action records, Plan drafts, artifacts, and typed failure
+  context; and
 - inert tool definitions load and lower to existing generic actions.
 
 Evidence absent today:
 
 - the frozen representative corpus and direct-shell baseline;
 - repeated runs across every supported macOS build/architecture;
-- full crash injection and concurrent mutation/commit campaigns;
+- exhaustive crash injection and overlapping mutation/commit campaigns beyond
+  the bounded recovery/locking evidence already present;
 - hostile execution-closure, path-race, descriptor, daemonization, and
   resource-exhaustion campaigns;
 - end-to-end label and persistent-authority enforcement;
 - contained endpoint brokerage; and
-- a real Vouch/OpenShell remote replacement.
+- a real Vouch/OpenShell remote replacement; and
+- Developer ID signing, notarization, and public artifact provenance.
 
-No confidence level above candidate is justified while those gaps remain.
+Direct unit/integration evidence establishes bounded properties:
+construction-site counts, structured argv, explicit native refusal/fences,
+staged-only Hold journal promotion, cross-process lease
+serialization/reclamation, process-group waiting, and paired local artifact
+verification. This does not meet this contract's definition of strong
+confidence. Product-level shell-replacement and security claims remain
+candidate because the corpus, platform, fault, and hostile gates are
+incomplete.
 
 ## Evaluation harness
 
@@ -154,8 +175,9 @@ All applicable gates must pass:
     integrity.
 
 Gates 1–8 have meaningful repository coverage now. Gate 9 is implemented for
-the current runtime path but not established as a fully crash-safe Journal.
-Gate 10 exists in the pure label component but is not enforced end to end.
+completed current runtime nodes and versioned CLI results, but a failing node
+does not yet have a proven durable crash-safe receipt path. Gate 10 exists in
+the pure label component but is not enforced end to end.
 
 ## Native containment gates
 
@@ -198,6 +220,11 @@ Required outcomes:
 - possible dispatch becomes `uncertain`;
 - uncertainty is not automatically retried without idempotency evidence; and
 - multi-entry partial outcomes identify each completed transition.
+
+Current evidence covers bounded cross-process Hold/Outbox serialization,
+stale/dead lease-owner reclamation, lock-directory bounds, recovered
+`committing` uncertainty, and promotion of a valid staged-only Hold journal.
+It does not yet cover every point and overlap listed above.
 
 ## Security and red-team gates
 

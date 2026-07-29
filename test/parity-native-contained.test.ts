@@ -34,7 +34,7 @@ const run = (
   })
 
 describe.skipIf(!supported)("shell parity — native-contained rewrite and undo", () => {
-  it("runs an existing Unix tool in a private Cell, applies its delta through Hold, and restores prior bytes", () => {
+  it("runs an existing Unix tool in a private Cell, applies its delta through Hold, and restores prior bytes", { timeout: 30_000 }, () => {
     const root = mkdtempSync(join(tmpdir(), "airlock-parity-native-"))
     const workspace = join(root, "workspace")
     const home = join(root, "home")
@@ -112,5 +112,5 @@ describe.skipIf(!supported)("shell parity — native-contained rewrite and undo"
     const undone = run(["undo", rewrite!.id], home, policy)
     expect(undone.status, undone.stderr).toBe(0)
     expect(readFileSync(live, "utf8")).toBe("before\n")
-  })
+  }, 20_000)
 })

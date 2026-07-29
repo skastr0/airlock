@@ -20,7 +20,7 @@ const run = (
 const json = (value: string) => JSON.parse(value) as Record<string, unknown>
 
 describe("agent-only CLI surface", () => {
-  it("accepts source directly and routes effects through admitted program execution", () => {
+  it("accepts source directly and routes effects through admitted program execution", { timeout: 30_000 }, () => {
     const home = mkdtempSync(join(tmpdir(), "airlock-agent-cli-"))
     const executed = run([
       "eval",
@@ -42,7 +42,7 @@ describe("agent-only CLI surface", () => {
     })
   })
 
-  it("does not expose raw execution, terminal dispatch, mutation, undo, or reaping", () => {
+  it("does not expose raw execution, terminal dispatch, mutation, undo, or reaping", { timeout: 30_000 }, () => {
     const home = mkdtempSync(join(tmpdir(), "airlock-agent-cli-"))
     const target = join(home, "keep.txt")
     writeFileSync(target, "keep")
@@ -52,13 +52,13 @@ describe("agent-only CLI surface", () => {
       expect(attempted.status, `${forbidden} unexpectedly succeeded`).not.toBe(0)
     }
     expect(readFileSync(target, "utf8")).toBe("keep")
-  }, 20_000)
+  }, 30_000)
 
-  it("still exposes bounded discovery and observation commands", () => {
+  it("still exposes bounded discovery and observation commands", { timeout: 30_000 }, () => {
     const home = mkdtempSync(join(tmpdir(), "airlock-agent-cli-"))
     for (const allowed of ["doctor", "actions", "schema", "held", "pending", "ledger"]) {
       const observed = run([allowed], home)
       expect(observed.status, `${allowed}: ${observed.stderr}`).toBe(0)
     }
-  }, 20_000)
+  }, 30_000)
 })

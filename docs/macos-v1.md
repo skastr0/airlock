@@ -21,9 +21,9 @@ the supervisor-selected profile or policy.
 
 ## Install and probe
 
-The standalone builder emits a Darwin binary for `bun-darwin-arm64` or
-`bun-darwin-x64`. Build support is not test evidence; release reports must name
-the architecture and macOS build that actually ran.
+The standalone builder emits paired supervisor and agent binaries for
+`bun-darwin-arm64` or `bun-darwin-x64`. Build support is not test evidence;
+release reports must name the architecture and macOS build that actually ran.
 
 ```sh
 bun install
@@ -31,7 +31,19 @@ bun run verify
 bun run build:macos
 sh scripts/install-macos.sh
 airlock doctor
+airlock-agent actions
 ```
+
+The builder ad-hoc signs both local artifacts, verifies their signatures, and
+writes SHA-256 and JSON manifests. The installer verifies both source and
+copied artifacts and probes both entrypoints before displacing either live
+binary; replacement and uninstall preserve prior binaries through a unique
+Trash transaction. Developer ID signing, notarization, and public provenance
+remain release-owner gates.
+
+`airlock` is the supervisor surface. `airlock-agent` omits raw exec, direct
+mutation, dispatch/cancel, undo/reap, and flush while retaining program,
+schema/capability, and read-only state commands.
 
 `airlock doctor` and `airlock capabilities` return the same machine-readable
 report. It distinguishes an enforced mechanism from something merely present
@@ -140,6 +152,7 @@ Established by implementation and tests:
 - network denial during Invoke;
 - separate executable and argv atoms;
 - output capture and limits;
+- same-process-group descendant ownership until exit, timeout, or cancellation;
 - top-level regular-file/directory delta detection;
 - preflight drift and source checks;
 - live merge through recoverable Hold transitions; and
@@ -149,14 +162,13 @@ Not established:
 
 - confidentiality or secret isolation, because `file-read*` is ambient;
 - complete loader/helper/hook/plugin/config execution closure;
-- daemonization-proof descendant ownership;
+- daemonization/session-escape-proof descendant ownership;
 - endpoint leases or contained network access;
 - symlink, special-file, hardlink, ACL, xattr, sparse-file, device, mount, or
   remote-filesystem Apply;
 - live SQLite/WAL, foreign writers, or other active protocol state;
 - atomic all-or-nothing multi-entry merge;
-- crash reconciliation and retained private-workspace lifecycle across every
-  transition; or
+- retained private-workspace lifecycle across every transition; or
 - resource-exhaustion resistance beyond current process/output bounds.
 
 Unsupported work returns a typed error. It does not fall back to compatibility.
@@ -189,6 +201,8 @@ attribute them to macOS v1.
   atomicity is not claimed.
 - HTTP intent remains staged until Outbox commit.
 - A recovered `committing` Outbox entry is `uncertain`.
+- Hold and Outbox serialize cross-process recovery transitions with a bounded
+  recoverable Airlock-home lease; Hold can promote a valid staged-only journal.
 - Reaping retained recovery material remains a separate terminal authority.
 
 ## v1 evidence boundary
@@ -199,7 +213,8 @@ published envelopes. Today the accurate judgment is:
 
 > usable developer preview — broad claim not yet earned
 
-The current Vouch-derived proof is one valuable native-contained fixture. It
-does not replace the missing representative corpus, repeated macOS runs,
-fault-injection matrix, concurrent-operation evidence, or hostile containment
+The current Vouch evidence includes a restore/apply/stage/undo fixture and a
+12-action host-operation program. The repository also contains four
+shell-parity fixtures. These do not replace the missing representative corpus,
+repeated macOS runs, exhaustive fault/overlap matrix, or hostile containment
 tests.

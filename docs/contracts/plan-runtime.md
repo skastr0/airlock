@@ -1,7 +1,9 @@
 # Plan and runtime contract
 
-> Status: candidate v1 seam. The algebra and laws are release obligations; the
-> exact Schema fields remain versioned implementation work.
+> Status: implemented candidate seam. The current Schema fields and four-node
+> interpretation run in the repository. Only the two laws in
+> [`DESIGN.md`](../../DESIGN.md) are frozen invariants; the completeness of
+> these algebras remains evidence-seeking.
 
 ## Purpose
 
@@ -17,14 +19,16 @@ Airlock source or ActionCall
   → ActionDefinition lowering
   → PlanDraft
   → Resolution and Admission
-  → AdmittedPlan
+  → admitted Plan
   → total runtime interpretation
-  → immutable Receipts
+  → versioned results, receipts, and artifacts
 ```
 
 `PlanDraft` contains unresolved requirements and no authority. `AdmittedPlan`
-contains runtime-minted handles, bound resource and executable identities,
-policy/definition digests, budgets, labels, and a plan digest.
+is the architectural name for the implemented `Plan` after Admission. It
+contains runtime-minted handles and resolutions, an authority admission,
+definition digests, and a plan digest. Requirements may carry budgets and
+label requirements; those are not standalone top-level `Plan` fields.
 
 The canonical structured execution payload is:
 
@@ -62,7 +66,7 @@ PlanNode =
 Pure control and data transformations compose these nodes but cannot add
 effect constructors.
 
-## Closed runtime algebra
+## Runtime-operation vocabulary
 
 ```text
 RuntimeOp =
@@ -102,14 +106,30 @@ The interpreter must reject an unhandled constructor. A runtime world effect
 without an originating Plan node or an authorized administrative transition
 is a defect and a construction-test failure.
 
-## Terminal-authority laws
+The current program-level result envelope is versioned and reports
+`succeeded`, `failed`, or `partial`. On a later failure, it preserves completed
+action request/result records, Plan drafts, artifacts, and a typed
+phase/cause. That evidence describes completed work; it is not an all-or-
+nothing transaction and does not satisfy the acceptance gate for a durable
+receipt at every failed/crashed transition.
 
-1. `HoldTransition` is the only way to replace a managed live binding.
-2. `Reap` is the only way to irreversibly discard retained recovery material.
-3. `DispatchExternal` is reachable only inside `Outbox.commit`.
-4. Definitions and adapters cannot mint grants, handles, labels, endorsements,
+## Authority obligations
+
+Only obligations 1 and 2 below are the frozen repository laws: Reap owns
+irreversible removal, and compatibility restrictions follow the ratchet.
+The remaining items are implemented construction properties or candidate
+seam obligations; they must not be promoted into additional laws by wording.
+
+1. Managed mutation uses Hold rename transitions; `Reap` is the only way to
+   irreversibly discard retained recovery material.
+2. Zero-config compatibility remains broad; selected restrictions can only
+   narrow authority and cannot silently fall back.
+3. Current external dispatch is reachable only inside `Outbox.commit`.
+4. Candidate definitions and adapters must not mint grants, handles, labels, endorsements,
    declassifications, Plan constructors, or runtime operations.
-5. Every attempted transition produces a typed outcome and durable receipt.
+5. Completed current runtime nodes produce typed outcomes and correlated
+   receipts. A durable receipt for every attempted transition remains an
+   acceptance gate.
 6. `uncertain` is preserved when an external result cannot be known; it is
    never collapsed into success/failure or automatically retried without
    idempotency evidence.
@@ -126,8 +146,10 @@ The wire/data contracts are Effect Schema values with:
 - exhaustive transition decoding;
 - capability requirements in Effect service contracts.
 
-One `ManagedRuntime` owns the composed services. CLI/RPC code decodes input and
-calls the runtime; it does not duplicate planning or authority policy.
+The current CLI composes the service Layers into one `BunRuntime`. CLI code
+decodes input and calls the runtime; it does not duplicate planning or
+authority policy. A persistent `ManagedRuntime`/daemon remains design
+direction, not current behavior.
 
 ## Contract change
 

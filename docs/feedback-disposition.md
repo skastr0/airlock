@@ -30,8 +30,14 @@ No review elevated another design preference to the same status.
 - a narrow native-contained macOS Cell with private writes, live-write denial,
   network denial, delta generation, drift checks, and Hold-backed Apply;
 - durable HTTP Outbox staging with the wire site inside commit;
+- bounded recoverable cross-process Hold/Outbox leases and staged Hold-journal
+  promotion;
+- same-process-group descendant waiting plus bounded timeout, cancellation,
+  and output receipts;
+- paired supervisor/agent macOS binaries with a reduced agent command surface;
 - inert JSON tool-definition loading and lowering; and
-- one Vouch-derived native restore/apply/stage/undo proof.
+- two Vouch-derived local proofs: restore/apply/stage/undo and a 12-action
+  host-operation workflow.
 
 These facts narrow the old statement that all Plan, language, Cell, native, and
 Vouch paths were merely candidate architecture.
@@ -43,7 +49,8 @@ Vouch paths were merely candidate architecture.
 - end-to-end information-label enforcement;
 - persistent authority-laundering prevention;
 - endpoint brokerage and non-extractable credentials;
-- a crash-safe concurrent Journal;
+- a complete crash-safe concurrent Journal beyond the bounded Hold/Outbox
+  evidence;
 - atomic or explicitly partial multi-entry Apply semantics;
 - a real Vouch/OpenShell remote replacement; and
 - broad shell-free task coverage.
@@ -139,9 +146,10 @@ Decision:
 
 ### Strong confidence remains unearned
 
-The Vouch-derived proof is real and useful, but it is one controlled fixture.
-There is no complete representative corpus, crash/concurrency campaign, or
-red-team result. The correct current judgment is:
+The Vouch-derived proofs and four parity fixtures are real and useful, but they
+are still a controlled local suite. The bounded lock/recovery tests do not
+form a complete crash/concurrency campaign. There is no representative corpus
+or red-team result. The correct current judgment is:
 
 ```text
 usable developer preview — broad claim not yet earned
@@ -174,7 +182,7 @@ The architecture keeps three strata:
 
 | Stratum | Current disposition |
 | --- | --- |
-| domain capabilities | Hold and Outbox are implemented nuclei; Plan, Admission, labels, native actions, and definitions are evidence-seeking candidates |
+| domain capabilities | Hold and Outbox are implemented nuclei with bounded durability/concurrency evidence; Plan, Admission, labels, native actions, and definitions are evidence-seeking candidates |
 | interaction seams | Schema-first Plans, handles, artifacts, receipts, deltas, and tagged failures carry ordering/authority/uncertainty contracts |
 | adapter glue | CLI, Bun process runner, Seatbelt/APFS glue, file readers, Vouch harness, and future broker/VM remain local and replaceable |
 
@@ -189,7 +197,8 @@ The next decisions should be made from:
 
 - a frozen shell-free task corpus and direct-shell baseline;
 - a disposable real Vouch/OpenShell fixture;
-- fault injection and overlapping-operation tests;
+- exhaustive fault injection and overlapping-operation tests beyond the
+  bounded lease/journal cases already covered;
 - hostile interpreter, config, descriptor, path-race, and resource tests;
 - end-to-end label and persistent-authority workloads; and
 - endpoint-broker evidence if contained networking is added.

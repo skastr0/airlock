@@ -1,6 +1,7 @@
 # Vouch-first adoption and evidence
 
-> Status: first adoption corpus and one runnable native-contained proof.
+> Status: first adoption workload, two runnable local native-contained proofs,
+> and parser-backed full-workflow examples.
 > Vouch supplies workload evidence; it does not define Airlock's ontology.
 
 ## Why Vouch goes first
@@ -78,6 +79,23 @@ The proof asserts:
 This is concrete evidence for the current native Plan/Runtime/Hold/Outbox path.
 It is candidate-level evidence because it is one controlled fixture.
 
+### Expanded host-operation proof
+
+`scripts/prove-vouch-operations.ts` runs
+`examples/vouch/host-workflow.air`; its test is
+`test/vouch-operations-e2e.test.ts`. The program executes 12 actions / 16 Plan
+nodes covering list/glob/capture, native mkdir, tar snapshot and list, artifact
+stdin, OpenShell-shaped argv atoms, managed copy/move/remove, and staged HTTP.
+
+The surrounding proof also establishes targeted Hold undo, process timeout,
+`AbortSignal` cancellation, and a 128-byte output-limit partial process
+receipt. The Outbox remains pending with no commit; public endpoint data is
+redacted while the owner-only body remains staged. The CLI Plan receipt is
+versioned.
+
+This expands the operation surface beyond the restore fixture. It is still a
+controlled local proof rather than a representative corpus.
+
 ## What the proof does not do
 
 It does not:
@@ -89,7 +107,8 @@ It does not:
 - use a contained endpoint broker;
 - dispatch the replacement request;
 - validate remote health or replacement completion;
-- run the whole lifecycle through the checked-in `.air` examples;
+- run the whole Vouch/OpenShell lifecycle through the checked-in `.air`
+  examples;
 - prove complete execution closure for tar or Python;
 - prove confidentiality;
 - exercise crash injection or concurrent merges/commits;
@@ -102,8 +121,9 @@ mean it cannot be cited as external replacement evidence.
 
 ## Program corpus
 
-`examples/vouch/snapshot.air`, `restore.air`, and `replace.air` are parser-
-backed workload examples. Their companion contract test verifies:
+`examples/vouch/host-workflow.air` is executed. `snapshot.air`, `restore.air`,
+and `replace.air` remain parser-backed full-workflow examples. Their companion
+contract test verifies:
 
 - no shell escape or Vouch-specific runtime action;
 - structured `run` calls with executable, args, streams, timeout, and profile;
