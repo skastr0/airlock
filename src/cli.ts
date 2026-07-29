@@ -373,6 +373,54 @@ const exec = Command.make(
     }))
 ).pipe(Command.withDescription("Run an absolute executable with argv atoms; no command-string form exists"))
 
+const executeProgram = (
+  source: string,
+  rawBindings: Option.Option<string>,
+  profile: "compatibility" | "native-contained" | "vm-enclosed",
+  requestedWorkspace: string
+) =>
+  Effect.gen(function* () {
+    const workspace = nodePath.resolve(requestedWorkspace)
+    const policy = yield* supervisorPolicy(profile, workspace)
+    const bindingsValue = yield* parseBindings(rawBindings)
+    const runtimeLayer = RuntimeLive.pipe(
+      Layer.provideMerge(RuntimeConfigLive(new RuntimeConfig({
+        workspace,
+        profile,
+        environment: profile === "compatibility" ? compatibilityEnvironment() : {}
+      })))
+    )
+    const programLayer = ProgramExecutionLive(policy).pipe(
+      Layer.provideMerge(NativeFileSystemLive(new NativeFilesystemConfig({ workspace }))),
+      Layer.provideMerge(runtimeLayer)
+    )
+    const runner = yield* ProgramRunner.pipe(Effect.provide(programLayer))
+    const result = yield* runner.run(new ProgramRequest({ source, bindings: bindingsValue }))
+    return {
+      schemaVersion: "airlock/program-run/v1",
+      profile,
+      workspace,
+      result: {
+        result: result.result,
+        plans: result.plans.map((plan) => ({
+          id: plan.id,
+          actionReference: plan.actionReference,
+          nodes: plan.nodes.map((node) => ({
+            id: node.id,
+            kind: node._tag,
+            dependsOn: [...node.dependsOn]
+          }))
+        })),
+        artifacts: result.artifacts.map((artifact) => ({
+          id: artifact.id,
+          mediaType: artifact.mediaType,
+          byteLength: artifact.bytes.byteLength,
+          provenance: artifact.provenance
+        }))
+      }
+    }
+  })
+
 const run = Command.make(
   "run",
   {
@@ -384,63 +432,47 @@ const run = Command.make(
   ({ program, bindings, profile, workspace: requestedWorkspace }) =>
     rendered(
       Effect.gen(function* () {
-        const workspace = nodePath.resolve(requestedWorkspace)
-        const policy = yield* supervisorPolicy(profile, workspace)
-        const bindingsValue = yield* parseBindings(bindings)
         const fs = yield* FileSystem.FileSystem
         const source = yield* fs.readFileString(program).pipe(
           Effect.mapError((error) => new CliInputError({ field: "program.air", reason: String(error) }))
         )
-        const runtimeLayer = RuntimeLive.pipe(
-          Layer.provideMerge(RuntimeConfigLive(new RuntimeConfig({
-            workspace,
-            profile,
-            environment: profile === "compatibility" ? compatibilityEnvironment() : {}
-          })))
-        )
-        const programLayer = ProgramExecutionLive(policy).pipe(
-          Layer.provideMerge(NativeFileSystemLive(new NativeFilesystemConfig({ workspace }))),
-          Layer.provideMerge(runtimeLayer)
-        )
-        const runner = yield* ProgramRunner.pipe(Effect.provide(programLayer))
-        const result = yield* runner.run(new ProgramRequest({ source, bindings: bindingsValue }))
-        return {
-          schemaVersion: "airlock/program-run/v1",
-          profile,
-          workspace,
-          result: {
-            result: result.result,
-            plans: result.plans.map((plan) => ({
-              id: plan.id,
-              actionReference: plan.actionReference,
-              nodes: plan.nodes.map((node) => ({
-                id: node.id,
-                kind: node._tag,
-                dependsOn: [...node.dependsOn]
-              }))
-            })),
-            artifacts: result.artifacts.map((artifact) => ({
-              id: artifact.id,
-              mediaType: artifact.mediaType,
-              byteLength: artifact.bytes.byteLength,
-              provenance: artifact.provenance
-            }))
-          }
-        }
+        return yield* executeProgram(source, bindings, profile, requestedWorkspace)
       })
     )
 ).pipe(Command.withDescription("Run an Airlock program through explicit admission, runtime, Hold, and Outbox seams"))
+
+const evalProgram = Command.make(
+  "eval",
+  {
+    source: Options.text("source"),
+    bindings: Options.text("bindings").pipe(Options.optional),
+    profile: profileOption,
+    workspace: Options.text("workspace").pipe(Options.withDefault(process.cwd()))
+  },
+  ({ source, bindings, profile, workspace }) =>
+    rendered(executeProgram(source, bindings, profile, workspace))
+).pipe(Command.withDescription("Run Airlock source supplied as one structured argument by an agent harness"))
 
 // ── ledger ──────────────────────────────────────────────────────────────────
 
 const ledger = Command.make("ledger", {}, () => rendered(Effect.flatMap(Ledger, (l) => l.entries)))
   .pipe(Command.withDescription("The append-only record of every act"))
 
-const root = Command.make("airlock").pipe(Command.withSubcommands([
+const supervisorRoot = Command.make("airlock").pipe(Command.withSubcommands([
   rm, write, undo, held, reap,
   send, pending, commit, cancel, flush,
-  doctor, capabilities, actions, schema, exec, run,
+  doctor, capabilities, actions, schema, exec, run, evalProgram,
   ledger
+]))
+
+/**
+ * The agent launcher deliberately omits terminal and bypass surfaces. Effects
+ * enter through ProgramExecution and supervisor-supplied admission policy;
+ * raw Invoke, Apply/undo, dispatch, and Reaper authority stay outside the
+ * agent-facing command graph.
+ */
+const agentRoot = Command.make("airlock-agent").pipe(Command.withSubcommands([
+  doctor, capabilities, actions, schema, run, evalProgram, held, pending, ledger
 ]))
 
 /** One composition root. Pristine components retain authority; CLI is glue. */
@@ -459,6 +491,8 @@ const MainLayer = Layer.mergeAll(StateLayer, MacosExecutionLayer, CellLayer).pip
   Layer.provideMerge(BunContext.layer)
 )
 
-const cli = Command.run(root, { name: "airlock", version: AIRLOCK_VERSION })
+const main = process.env["AIRLOCK_AGENT_SURFACE"] === "1"
+  ? Command.run(agentRoot, { name: "airlock-agent", version: AIRLOCK_VERSION })(process.argv)
+  : Command.run(supervisorRoot, { name: "airlock", version: AIRLOCK_VERSION })(process.argv)
 
-cli(process.argv).pipe(Effect.provide(MainLayer), BunRuntime.runMain)
+main.pipe(Effect.provide(MainLayer), BunRuntime.runMain)
