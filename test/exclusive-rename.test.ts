@@ -7,6 +7,7 @@ import {
   lstatSync,
   mkdirSync,
   readFileSync,
+  renameSync,
   writeFileSync
 } from "node:fs"
 import { fileURLToPath } from "node:url"
@@ -55,6 +56,34 @@ const racingLayer = (
   }
 }
 
+const postRenameParentMoveLayer = (
+  base: typeof ExclusiveRename.Service,
+  target: string,
+  parent: string,
+  parkedParent: string
+) => {
+  let fired = false
+  return {
+    layer: Layer.succeed(
+      ExclusiveRename,
+      ExclusiveRename.of({
+        moveNoReplace: (source, destination) =>
+          base.moveNoReplace(source, destination).pipe(
+            Effect.tap(() =>
+              !fired && destination === target
+                ? Effect.sync(() => {
+                    fired = true
+                    renameSync(parent, parkedParent)
+                  })
+                : Effect.void
+            )
+          )
+      })
+    ),
+    fired: () => fired
+  }
+}
+
 const world = <A, E>(
   body: (context: {
     readonly fs: FileSystem.FileSystem
@@ -79,6 +108,71 @@ const world = <A, E>(
   ).pipe(Effect.provide(BunContext.layer))
 
 describe("ExclusiveRename — macOS Hold boundary", () => {
+  it.effect("reports a confirmed rename and exact recovery evidence when directory sync fails", () =>
+    world(({ fs, path, root, home, base }) =>
+      Effect.gen(function* () {
+        const live = path.join(root, "live")
+        const parked = path.join(root, "live-after-rename")
+        const target = path.join(live, "managed.txt")
+        yield* fs.makeDirectory(live)
+        const injected = postRenameParentMoveLayer(
+          base,
+          target,
+          live,
+          parked
+        )
+        const hold = yield* Effect.provide(
+          Hold,
+          holdLayer(home, injected.layer)
+        )
+
+        const error = yield* hold
+          .overwrite(target, "installed bytes")
+          .pipe(Effect.flip)
+        expect(injected.fired()).toBe(true)
+        expect(error).toMatchObject({
+          _tag: "HoldRecoveryRequired",
+          target,
+          phase: "install",
+          recovery: {
+            act: "overwrite",
+            journalState: "prepared",
+            rename: "confirmed",
+            next: "journal-reconciliation-required",
+            destination: target,
+            failedDirectory: live
+          }
+        })
+        if (error._tag !== "HoldRecoveryRequired") return
+
+        yield* fs.rename(parked, live)
+        expect(yield* fs.readFileString(target)).toBe("installed bytes")
+        const raw = JSON.parse(
+          yield* fs.readFileString(
+            path.join(home, "hold", error.id, "manifest.json")
+          )
+        ) as {
+          readonly state: string
+          readonly installed?: { readonly inode: number }
+        }
+        expect(raw).toMatchObject({
+          state: "prepared",
+          installed: { inode: expect.any(Number) }
+        })
+
+        const reconstructed = yield* Effect.provide(
+          Hold,
+          holdLayer(home, MacosExclusiveRenameTestLive)
+        )
+        expect((yield* reconstructed.held).map((entry) => entry.id)).toContain(
+          error.id
+        )
+        yield* reconstructed.undo(error.id)
+        expect(yield* fs.exists(target)).toBe(false)
+      })
+    )
+  )
+
   it.effect("preserves foreign, staged, and held file bytes when install loses the race", () =>
     world(({ fs, path, root, home, base }) =>
       Effect.gen(function* () {

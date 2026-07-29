@@ -100,7 +100,19 @@ export class HoldRecoveryRequired extends Schema.TaggedError<HoldRecoveryRequire
   {
     id: ActId,
     target: Schema.String,
-    phase: Schema.Literal("install", "ledger"),
+    phase: Schema.Literal("retain", "install", "restore", "undo", "ledger"),
+    recovery: Schema.optional(
+      Schema.Struct({
+        act: Schema.Literal("remove", "overwrite", "displaced"),
+        journalState: Schema.Literal("prepared", "held"),
+        rename: Schema.Literal("confirmed"),
+        next: Schema.Literal("journal-reconciliation-required"),
+        source: Schema.String,
+        destination: Schema.String,
+        syncedDirectories: Schema.Array(Schema.String),
+        failedDirectory: Schema.String
+      })
+    ),
     reason: Schema.String
   }
 ) {}
@@ -242,10 +254,20 @@ class RetainedMetadata extends Schema.Class<RetainedMetadata>("RetainedMetadata"
   bytes: Schema.Number
 }) {}
 
+class InstalledIdentity extends Schema.Class<InstalledIdentity>("InstalledIdentity")({
+  kind: Schema.Literal("file", "directory"),
+  device: Schema.Number,
+  inode: Schema.Number,
+  birthtimeMillis: Schema.Number,
+  mode: Schema.Number,
+  bytes: Schema.Number
+}) {}
+
 class HoldJournal extends Schema.Class<HoldJournal>("HoldJournal")({
   state: Schema.Literal("prepared", "held", "restored"),
   manifest: HeldManifest,
-  retained: Schema.optional(RetainedMetadata)
+  retained: Schema.optional(RetainedMetadata),
+  installed: Schema.optional(InstalledIdentity)
 }) {}
 
 type Entry = Readonly<{
@@ -256,7 +278,20 @@ type Entry = Readonly<{
 type ReplaceSource = Readonly<{
   readonly kind: "file" | "directory"
   readonly metadata: ReplaceMetadata
+  readonly identity: InstalledIdentity
 }>
+
+class HoldPostRenameDirectorySyncFailed extends Schema.TaggedError<HoldPostRenameDirectorySyncFailed>()(
+  "HoldPostRenameDirectorySyncFailed",
+  {
+    source: Schema.String,
+    destination: Schema.String,
+    operation: Schema.String,
+    syncedDirectories: Schema.Array(Schema.String),
+    failedDirectory: Schema.String,
+    reason: Schema.String
+  }
+) {}
 
 const encodeJournal = Schema.encode(Schema.parseJson(HoldJournal))
 const decodeJournal = Schema.decode(Schema.parseJson(HoldJournal))
@@ -346,16 +381,29 @@ const make = Effect.gen(function* () {
     target: string,
     operation: string
   ) =>
-    exclusiveRename.moveNoReplace(source, target).pipe(
-      Effect.zipRight(
-        Effect.forEach(
-          [...new Set([path.dirname(source), path.dirname(target)])],
-          (directory) =>
-            syncDirectory(directory, `${operation} directory sync`),
-          { concurrency: 1, discard: true }
-        )
-      )
-    )
+    Effect.gen(function* () {
+      yield* exclusiveRename.moveNoReplace(source, target)
+      const syncedDirectories: string[] = []
+      for (const directory of [
+        ...new Set([path.dirname(source), path.dirname(target)])
+      ]) {
+        const synced = yield* syncDirectory(
+          directory,
+          `${operation} directory sync`
+        ).pipe(Effect.either)
+        if (synced._tag === "Left") {
+          return yield* new HoldPostRenameDirectorySyncFailed({
+            source,
+            destination: target,
+            operation,
+            syncedDirectories,
+            failedDirectory: directory,
+            reason: synced.left.reason
+          })
+        }
+        syncedDirectories.push(directory)
+      }
+    })
 
   const exclusiveFailure = (
     operation: string,
@@ -640,10 +688,47 @@ const make = Effect.gen(function* () {
             inode: info.ino,
             mode: info.mode,
             bytes: info.size
+          }),
+          identity: new InstalledIdentity({
+            kind,
+            device: info.dev,
+            inode: info.ino,
+            birthtimeMillis: info.birthtimeMs,
+            mode: info.mode,
+            bytes: info.size
           })
         } satisfies ReplaceSource)
       })
     )
+
+  const matchesInstalledIdentity = (
+    target: string,
+    expected: InstalledIdentity
+  ) =>
+    Effect.tryPromise({
+      try: async () => {
+        let info: Awaited<ReturnType<typeof lstat>>
+        try {
+          info = await lstat(target)
+        } catch (cause) {
+          if (isNotFound(cause)) return false
+          throw cause
+        }
+        const kind = info.isDirectory()
+          ? ("directory" as const)
+          : info.isFile()
+            ? ("file" as const)
+            : undefined
+        return kind !== undefined &&
+          kind === expected.kind &&
+          info.dev === expected.device &&
+          info.ino === expected.inode &&
+          info.birthtimeMs === expected.birthtimeMillis &&
+          info.mode === expected.mode &&
+          info.size === expected.bytes
+      },
+      catch: fsError("verify prepared install identity", target)
+    })
 
   const replacementTargetExists = (target: string) =>
     Effect.tryPromise({
@@ -726,6 +811,64 @@ const make = Effect.gen(function* () {
     )
   })
 
+  const postRenameRecoveryRequired = (
+    manifest: HeldManifest,
+    phase: "retain" | "install" | "restore" | "undo",
+    journalState: "prepared" | "held",
+    failure: HoldPostRenameDirectorySyncFailed
+  ) =>
+    new HoldRecoveryRequired({
+      id: manifest.id,
+      target: manifest.target,
+      phase,
+      recovery: {
+        act: manifest.act,
+        journalState,
+        rename: "confirmed",
+        next: "journal-reconciliation-required",
+        source: failure.source,
+        destination: failure.destination,
+        syncedDirectories: failure.syncedDirectories,
+        failedDirectory: failure.failedDirectory
+      },
+      reason: failure.reason
+    })
+
+  const bindInstallIdentity = Effect.fnUntraced(function* (
+    manifest: HeldManifest,
+    source: string
+  ) {
+    const sourceEntry = yield* inspectSource(source)
+    const journal = yield* readJournal(manifest.id).pipe(
+      Effect.catchTag(
+        "UnknownAct",
+        () => new HoldFilesystemError({
+          operation: "bind prepared install identity",
+          target: manifestFile(manifest.id),
+          reason: `hold act ${manifest.id} disappeared before install`
+        })
+      )
+    )
+    if (journal.state === "restored") {
+      return yield* new HoldRecoveryRequired({
+        id: manifest.id,
+        target: manifest.target,
+        phase: "install",
+        reason: "hold journal was already restored before install identity binding"
+      })
+    }
+    const bound = new HoldJournal({
+      ...journal,
+      installed: sourceEntry.identity
+    })
+    yield* writeJournal(bound)
+    return {
+      journal: bound,
+      journalState: journal.state,
+      sourceEntry
+    }
+  })
+
   // Rename `target` into a fresh act. The prepared journal is persisted before
   // the only destructive transition. On recovery, payload presence proves the
   // rename completed; target presence proves it did not.
@@ -754,7 +897,16 @@ const make = Effect.gen(function* () {
       payloadFile(id),
       "retain target"
     ).pipe(
-      Effect.mapError(exclusiveFailure("retain target", payloadFile(id)))
+      Effect.mapError((error) =>
+        error instanceof HoldPostRenameDirectorySyncFailed
+          ? postRenameRecoveryRequired(
+              manifest,
+              "retain",
+              "prepared",
+              error
+            )
+          : exclusiveFailure("retain target", payloadFile(id))(error)
+      )
     )
     yield* writeJournal(
       new HoldJournal({ state: "held", manifest, retained: entry.retained })
@@ -820,6 +972,20 @@ const make = Effect.gen(function* () {
       content,
       "write staged replacement"
     )
+    const bound = yield* bindInstallIdentity(
+      manifest,
+      stageFile(manifest.id)
+    ).pipe(
+      Effect.mapError((error) =>
+        error instanceof SourceNotFound
+          ? new HoldFilesystemError({
+              operation: "bind staged replacement identity",
+              target: stageFile(manifest.id),
+              reason: "durable stage disappeared before install"
+            })
+          : error
+      )
+    )
     const occupied = yield* pathExists(manifest.target)
     if (occupied) return yield* new TargetOccupied({ target: manifest.target })
     yield* renameExclusiveDurable(
@@ -828,14 +994,20 @@ const make = Effect.gen(function* () {
       "install staged replacement"
     ).pipe(
       Effect.mapError((error) =>
-        error._tag === "ExclusiveRenameTargetExists"
+        error instanceof HoldPostRenameDirectorySyncFailed
+          ? postRenameRecoveryRequired(
+              manifest,
+              "install",
+              bound.journalState,
+              error
+            )
+          : error._tag === "ExclusiveRenameTargetExists"
           ? new TargetOccupied({ target: manifest.target })
           : exclusiveFailure("install staged replacement", manifest.target)(error)
       )
     )
-    if (!manifest.hasPayload) {
-      yield* writeJournal(new HoldJournal({ state: "held", manifest }))
-    }
+    yield* writeJournal(new HoldJournal({ ...bound.journal, state: "held" }))
+    return bound.sourceEntry
   })
 
   // `source` is already a complete Cell output. Installing it is a rename,
@@ -845,6 +1017,7 @@ const make = Effect.gen(function* () {
     manifest: HeldManifest,
     source: string
   ) {
+    const bound = yield* bindInstallIdentity(manifest, source)
     const occupied = yield* pathExists(manifest.target)
     if (occupied) return yield* new TargetOccupied({ target: manifest.target })
     yield* renameExclusiveDurable(
@@ -853,7 +1026,14 @@ const make = Effect.gen(function* () {
       "install replacement source"
     ).pipe(
       Effect.mapError((error) =>
-        error._tag === "ExclusiveRenameTargetExists"
+        error instanceof HoldPostRenameDirectorySyncFailed
+          ? postRenameRecoveryRequired(
+              manifest,
+              "install",
+              bound.journalState,
+              error
+            )
+          : error._tag === "ExclusiveRenameTargetExists"
           ? new TargetOccupied({ target: manifest.target })
           : error._tag === "ExclusiveRenameFailed" &&
             error.errno === 2
@@ -861,9 +1041,8 @@ const make = Effect.gen(function* () {
           : exclusiveFailure("install replacement source", manifest.target)(error)
       )
     )
-    if (!manifest.hasPayload) {
-      yield* writeJournal(new HoldJournal({ state: "held", manifest }))
-    }
+    yield* writeJournal(new HoldJournal({ ...bound.journal, state: "held" }))
+    return bound.sourceEntry
   })
 
   const recoverFailedInstall = Effect.fnUntraced(function* (manifest: HeldManifest) {
@@ -886,7 +1065,14 @@ const make = Effect.gen(function* () {
         "restore target after failed install"
       ).pipe(
         Effect.mapError((error) =>
-          error._tag === "ExclusiveRenameTargetExists"
+          error instanceof HoldPostRenameDirectorySyncFailed
+            ? postRenameRecoveryRequired(
+                manifest,
+                "restore",
+                manifest.hasPayload ? "held" : "prepared",
+                error
+              )
+            : error._tag === "ExclusiveRenameTargetExists"
             ? new HoldRecoveryIndeterminate({
                 id: manifest.id,
                 target: manifest.target
@@ -994,9 +1180,40 @@ const make = Effect.gen(function* () {
         })
       }
 
-      // A prepared creation either installed its staged replacement (target
-      // exists) or never crossed the live boundary. Its stage bytes remain in
-      // the act for the reaper; no recovery path unlinks them.
+      // Runtime-private stages never confer undo authority over a live managed
+      // name. Presence is therefore enough to retain or retire their payload.
+      if (manifest.purpose === "runtime-private") {
+        yield* writeJournal(
+          new HoldJournal({
+            ...journal,
+            state: targetExists ? "held" : "restored",
+            manifest: new HeldManifest({
+              ...manifest,
+              hasPayload: false,
+              status: targetExists ? "held" : "restored"
+            })
+          })
+        )
+        return
+      }
+
+      // A managed prepared creation may become undoable only when the target
+      // is the exact filesystem object bound before the rename. Mere path
+      // presence could be a foreign creator racing a crash.
+      if (targetExists) {
+        if (
+          journal.installed === undefined ||
+          !(yield* matchesInstalledIdentity(
+            manifest.target,
+            journal.installed
+          ))
+        ) {
+          return yield* new HoldRecoveryIndeterminate({
+            id: manifest.id,
+            target: manifest.target
+          })
+        }
+      }
       yield* writeJournal(
         new HoldJournal({
           ...journal,
@@ -1113,8 +1330,20 @@ const make = Effect.gen(function* () {
           : yield* holdTarget(target, "overwrite", existing)
         const installed = yield* installStaged(manifest, content).pipe(Effect.either)
         if (installed._tag === "Left") {
+          if (
+            installed.left instanceof HoldRecoveryRequired &&
+            installed.left.recovery !== undefined
+          ) {
+            return yield* installed.left
+          }
           const recovered = yield* recoverFailedInstall(manifest).pipe(Effect.either)
           if (recovered._tag === "Left") {
+            if (
+              recovered.left instanceof HoldRecoveryRequired &&
+              recovered.left.recovery !== undefined
+            ) {
+              return yield* recovered.left
+            }
             return yield* failedInstallRecoveryRequired(
               manifest,
               installed.left,
@@ -1213,8 +1442,20 @@ const make = Effect.gen(function* () {
             )
         const installed = yield* installSource(manifest, source).pipe(Effect.either)
         if (installed._tag === "Left") {
+          if (
+            installed.left instanceof HoldRecoveryRequired &&
+            installed.left.recovery !== undefined
+          ) {
+            return yield* installed.left
+          }
           const recovered = yield* recoverFailedInstall(manifest).pipe(Effect.either)
           if (recovered._tag === "Left") {
+            if (
+              recovered.left instanceof HoldRecoveryRequired &&
+              recovered.left.recovery !== undefined
+            ) {
+              return yield* recovered.left
+            }
             return yield* failedInstallRecoveryRequired(
               manifest,
               installed.left,
@@ -1238,8 +1479,8 @@ const make = Effect.gen(function* () {
           id: manifest.id,
           source,
           target,
-          kind: sourceEntry.kind,
-          metadata: sourceEntry.metadata,
+          kind: installed.right.kind,
+          metadata: installed.right.metadata,
           previousHeld: manifest.hasPayload,
           at: manifest.at
         })
@@ -1294,7 +1535,14 @@ const make = Effect.gen(function* () {
             "restore held payload"
           ).pipe(
             Effect.mapError((error) =>
-              error._tag === "ExclusiveRenameTargetExists"
+              error instanceof HoldPostRenameDirectorySyncFailed
+                ? postRenameRecoveryRequired(
+                    manifest,
+                    "undo",
+                    "held",
+                    error
+                  )
+                : error._tag === "ExclusiveRenameTargetExists"
                 ? new UndoConflict({ target: manifest.target })
                 : exclusiveFailure("restore held payload", manifest.target)(error)
             )

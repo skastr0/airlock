@@ -130,6 +130,58 @@ describe("Hold — undoable mutations", () => {
     )
   )
 
+  it.effect("prepared creation recovery refuses a foreign target identity", () =>
+    world(({ fs, hold, path, tmp }) =>
+      Effect.gen(function* () {
+        const target = path.join(tmp, "prepared-creation.txt")
+        const original = path.join(tmp, "airlock-installed.txt")
+        const receipt = yield* hold.overwrite(target, "airlock bytes")
+        const home = path.join(tmp, "airlock-home")
+        const journalPath = path.join(
+          home,
+          "hold",
+          receipt.id,
+          "manifest.json"
+        )
+        const journal = JSON.parse(
+          yield* fs.readFileString(journalPath)
+        ) as {
+          readonly state: string
+          readonly installed?: {
+            readonly device: number
+            readonly inode: number
+          }
+        }
+        expect(journal.installed).toMatchObject({
+          device: expect.any(Number),
+          inode: expect.any(Number)
+        })
+
+        yield* fs.rename(target, original)
+        yield* fs.writeFileString(target, "foreign bytes")
+        yield* fs.writeFileString(
+          journalPath,
+          JSON.stringify({ ...journal, state: "prepared" })
+        )
+
+        const recovery = yield* Effect.provide(
+          Hold,
+          layersFor(home)
+        ).pipe(Effect.flip)
+        expect(recovery).toMatchObject({
+          _tag: "HoldRecoveryIndeterminate",
+          id: receipt.id,
+          target
+        })
+        expect(yield* fs.readFileString(target)).toBe("foreign bytes")
+        expect(yield* fs.readFileString(original)).toBe("airlock bytes")
+        expect((yield* hold.undo(receipt.id).pipe(Effect.flip))._tag).toBe(
+          "NotHeld"
+        )
+      })
+    )
+  )
+
   it.effect("the airlock home is a protected path", () =>
     world(({ hold, path, tmp }) =>
       Effect.gen(function* () {
