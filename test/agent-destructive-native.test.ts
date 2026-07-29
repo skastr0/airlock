@@ -4,6 +4,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  realpathSync,
   writeFileSync
 } from "node:fs"
 import { tmpdir } from "node:os"
@@ -59,6 +60,10 @@ describe.skipIf(!supported)(
         const policy = join(root, "policy.json")
 
         mkdirSync(nested, { recursive: true })
+        const canonicalProtectedDirectory = join(
+          realpathSync(workspace),
+          "protected"
+        )
         writeFileSync(target, "exact bytes that must survive\n")
         writeFileSync(
           policy,
@@ -131,15 +136,20 @@ describe.skipIf(!supported)(
           readonly target: string
           readonly hasPayload: boolean
           readonly status: string
+          readonly purpose?: string
         }>
         const removal = recoverable.find(
-          ({ target: heldTarget }) => heldTarget === protectedDirectory
+          ({ target: heldTarget }) =>
+            heldTarget === canonicalProtectedDirectory
         )
         expect(removal).toMatchObject({
-          target: protectedDirectory,
+          target: canonicalProtectedDirectory,
           hasPayload: true,
           status: "held"
         })
+        expect(
+          recoverable.filter(({ purpose }) => purpose === "runtime-private")
+        ).toHaveLength(1)
 
         const deniedUndo = invoke(
           "agent",

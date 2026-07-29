@@ -4,6 +4,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  realpathSync,
   writeFileSync
 } from "node:fs"
 import { tmpdir } from "node:os"
@@ -41,6 +42,7 @@ describe.skipIf(!supported)("shell parity — native-contained rewrite and undo"
     const policy = join(root, "policy.json")
     const live = join(workspace, "live.txt")
     mkdirSync(workspace)
+    const canonicalLive = join(realpathSync(workspace), "live.txt")
     writeFileSync(live, "before\n")
     writeFileSync(join(workspace, "replacement.txt"), "after\n")
     writeFileSync(policy, JSON.stringify({
@@ -101,13 +103,17 @@ describe.skipIf(!supported)("shell parity — native-contained rewrite and undo"
       readonly previousHeld?: boolean
       readonly hasPayload: boolean
       readonly status: string
+      readonly purpose?: string
     }>
-    const rewrite = recoverable.find(({ target }) => target === live)
+    const rewrite = recoverable.find(({ target }) => target === canonicalLive)
     expect(rewrite).toMatchObject({
       hasPayload: true,
       status: "held"
     })
-    expect(rewrite?.target).toBe(live)
+    expect(rewrite?.target).toBe(canonicalLive)
+    expect(
+      recoverable.filter(({ purpose }) => purpose === "runtime-private")
+    ).toHaveLength(1)
 
     const undone = run(["undo", rewrite!.id], home, policy)
     expect(undone.status, undone.stderr).toBe(0)

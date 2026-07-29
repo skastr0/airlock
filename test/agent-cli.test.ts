@@ -101,7 +101,7 @@ describe("agent-only CLI surface", () => {
         "eval",
         "--workspace", workspace,
         "--source",
-        `return process.run({ executable: "/usr/bin/touch", args: ["inside.txt"], cwd: ${JSON.stringify(workspace)}, cellProfile: "native-contained", stdout: "capture", stderr: "capture" })`
+        'return process.run({ executable: "/usr/bin/touch", args: ["inside.txt"], cwd: workspace, cellProfile: "native-contained", stdout: "capture", stderr: "capture" })'
       ], home, environment)
       expect(contained.status, contained.stderr).toBe(0)
       expect(existsSync(join(workspace, "inside.txt"))).toBe(true)
@@ -118,7 +118,7 @@ describe("agent-only CLI surface", () => {
         "eval",
         "--workspace", workspace,
         "--source",
-        `return process.run({ executable: "/usr/bin/touch", args: [${JSON.stringify(outside)}], cwd: ${JSON.stringify(workspace)}, cellProfile: "compatibility", stdout: "capture", stderr: "capture" })`
+        `return process.run({ executable: "/usr/bin/touch", args: [${JSON.stringify(outside)}], cwd: workspace, cellProfile: "compatibility", stdout: "capture", stderr: "capture" })`
       ], home, environment)
       expect(nodeDowngrade.status, nodeDowngrade.stderr).toBe(0)
       expect(json(nodeDowngrade.stdout)).toMatchObject({

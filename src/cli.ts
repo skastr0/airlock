@@ -43,7 +43,7 @@ export class CliInputError extends Schema.TaggedError<CliInputError>()(
 
 const emit = (value: unknown) => Console.log(JSON.stringify(value, null, 2))
 
-const rendered = <A, E extends { readonly _tag: string }, R>(
+const rendered = <A, E, R>(
   effect: Effect.Effect<A, E, R>
 ) =>
   effect.pipe(
@@ -59,7 +59,7 @@ const renderedProgram = <A extends {
   readonly result: {
     readonly state: string
   }
-}, E extends { readonly _tag: string }, R>(
+}, E, R>(
   effect: Effect.Effect<A, E, R>
 ) =>
   effect.pipe(
@@ -303,6 +303,40 @@ const discoveredTools = (workspace: string) =>
     Effect.mapError((error) => new CliInputError({ field: "tool-definitions", reason: error.message ?? error._tag }))
   )
 
+const bindPolicyPathScopes = (
+  policy: AdmissionPolicy
+): Effect.Effect<AdmissionPolicy, never, FileSystem.FileSystem> => {
+  if (policy.profile !== "native-contained") return Effect.succeed(policy)
+
+  return Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem
+    const pathAllowlist = yield* Effect.forEach(
+      policy.pathAllowlist,
+      (scope) => {
+        const recursive = scope.endsWith("/**")
+        const rawRoot = recursive ? scope.slice(0, -3) : scope
+        const root = rawRoot.length === 0 ? nodePath.parse(scope).root : rawRoot
+        if (!nodePath.isAbsolute(root)) return Effect.succeed(scope)
+        return fs.realPath(nodePath.resolve(root)).pipe(
+          Effect.map((canonical) =>
+            recursive
+              ? canonical === nodePath.parse(canonical).root
+                ? `${canonical}**`
+                : `${canonical}/**`
+              : canonical
+          ),
+          // Policies may name a future path. Keep that selector inert and
+          // lexical; admission will still fail closed if it does not match the
+          // canonical workspace or a requested resource.
+          Effect.catchAll(() => Effect.succeed(scope))
+        )
+      },
+      { concurrency: 1 }
+    )
+    return new AdmissionPolicy({ ...policy, pathAllowlist })
+  })
+}
+
 /**
  * Policies are supervisor input, never inferred from an action request. The
  * compatibility policy is deliberately broad under the ratchet; contained
@@ -330,6 +364,50 @@ const supervisorPolicy = (
       : failInput("AIRLOCK_POLICY_FILE", `policy profile ${policy.profile} does not match selected ${profile}`)
     )
   ))
+}
+
+/**
+ * Native containment must give every downstream authority seam the same
+ * physical workspace name. In particular, resolving only lexically would let
+ * an agent select an allowed path whose ancestor is a symlink to a directory
+ * outside the supervisor's policy.
+ *
+ * Compatibility intentionally retains its existing lexical behavior. This is
+ * an opt-in containment check, not a new zero-config restriction.
+ */
+const bindProgramWorkspace = (
+  profile: ProgramProfile,
+  requestedWorkspace: string
+): Effect.Effect<string, CliInputError, FileSystem.FileSystem> => {
+  const requested = nodePath.resolve(requestedWorkspace)
+  if (profile !== "native-contained") return Effect.succeed(requested)
+
+  return Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem
+    const workspace = yield* fs.realPath(requested).pipe(
+      Effect.mapError((cause) =>
+        new CliInputError({
+          field: "workspace",
+          reason: `cannot resolve native-contained workspace ${requested}: ${String(cause)}`
+        })
+      )
+    )
+    const info = yield* fs.stat(workspace).pipe(
+      Effect.mapError((cause) =>
+        new CliInputError({
+          field: "workspace",
+          reason: `cannot inspect native-contained workspace ${workspace}: ${String(cause)}`
+        })
+      )
+    )
+    if (info.type !== "Directory") {
+      return yield* failInput(
+        "workspace",
+        `native-contained workspace must resolve to a directory; found ${info.type} at ${workspace}`
+      )
+    }
+    return workspace
+  })
 }
 
 // ── mutation verbs ──────────────────────────────────────────────────────────
@@ -564,10 +642,15 @@ const executeProgram = (
   requestedWorkspace: string
 ) =>
   Effect.gen(function* () {
-    const workspace = nodePath.resolve(requestedWorkspace)
-    const policy = yield* supervisorPolicy(profile, workspace)
+    const workspace = yield* bindProgramWorkspace(profile, requestedWorkspace)
+    const policy = yield* supervisorPolicy(profile, workspace).pipe(
+      Effect.flatMap(bindPolicyPathScopes)
+    )
     const tools = yield* discoveredTools(workspace)
-    const bindingsValue = yield* parseBindings(rawBindings)
+    const parsedBindings = yield* parseBindings(rawBindings)
+    const bindingsValue = profile === "native-contained"
+      ? { ...parsedBindings, workspace }
+      : parsedBindings
     const runtimeLayer = RuntimeLive.pipe(
       Layer.provideMerge(RuntimeConfigLive(new RuntimeConfig({
         workspace,

@@ -293,7 +293,7 @@ describe("agent-hostile admission and containment", () => {
           "--workspace",
           fixture.workspace,
           "--source",
-          `return process.run({ executable: "/usr/bin/touch", args: [${JSON.stringify(marker)}], cwd: ${JSON.stringify(fixture.workspace)}, cellProfile: "compatibility", stdout: "capture", stderr: "capture" })`
+          `return process.run({ executable: "/usr/bin/touch", args: [${JSON.stringify(marker)}], cwd: workspace, cellProfile: "compatibility", stdout: "capture", stderr: "capture" })`
         ],
         fixture.home,
         fixture.environment
@@ -411,7 +411,7 @@ describe("agent-hostile admission and containment", () => {
             "--workspace",
             fixture.workspace,
             "--source",
-            `return process.run({ executable: "/usr/bin/curl", args: ["--connect-timeout", "1", "--max-time", "2", "-fsS", ${JSON.stringify(endpoint)}], cwd: ${JSON.stringify(fixture.workspace)}, cellProfile: "native-contained", stdout: "capture", stderr: "capture", timeout: 5s })`
+            `return process.run({ executable: "/usr/bin/curl", args: ["--connect-timeout", "1", "--max-time", "2", "-fsS", ${JSON.stringify(endpoint)}], cwd: workspace, cellProfile: "native-contained", stdout: "capture", stderr: "capture", timeout: 5s })`
           ],
           fixture.home,
           fixture.environment
@@ -444,7 +444,16 @@ describe("agent-hostile admission and containment", () => {
         ])
         expect(hits).toBe(0)
         expect(readFileSync(sentinel, "utf8")).toBe("keep")
-        expect(entries(join(fixture.home, "hold"))).toEqual([])
+        const held = runAgent(["held"], fixture.home, fixture.environment)
+        expect(held.status, held.stderr).toBe(0)
+        const retained = JSON.parse(held.stdout) as ReadonlyArray<{
+          readonly target: string
+          readonly purpose?: string
+        }>
+        expect(retained).toEqual([
+          expect.objectContaining({ purpose: "runtime-private" })
+        ])
+        expect(retained.some(({ target }) => target === sentinel)).toBe(false)
         expect(entries(join(fixture.home, "outbox"))).toEqual([])
       } finally {
         await new Promise<void>((resolveClose) => {

@@ -3,6 +3,7 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
+  realpathSync,
   writeFileSync
 } from "node:fs"
 import { tmpdir } from "node:os"
@@ -40,9 +41,10 @@ describe.skipIf(!supported)("native-contained agent CLI", () => {
     const policy = join(root, "policy.json")
     const created = join(workspace, "created.txt")
     mkdirSync(workspace)
+    const canonicalCreated = join(realpathSync(workspace), "created.txt")
     writeFileSync(
       program,
-      `return process.run({ executable: "/usr/bin/touch", args: ["created.txt"], cwd: ${JSON.stringify(workspace)}, cellProfile: "native-contained", stdout: "capture", stderr: "capture" })\n`
+      'return process.run({ executable: "/usr/bin/touch", args: ["created.txt"], cwd: workspace, cellProfile: "native-contained", stdout: "capture", stderr: "capture" })\n'
     )
     writeFileSync(policy, JSON.stringify({
       schemaVersion: "airlock/admission-policy/v1",
@@ -93,9 +95,13 @@ describe.skipIf(!supported)("native-contained agent CLI", () => {
     expect(held.status, held.stderr).toBe(0)
     expect(JSON.parse(held.stdout)).toEqual([
       expect.objectContaining({
-        target: created,
+        target: canonicalCreated,
         act: "overwrite",
         hasPayload: false,
+        status: "held"
+      }),
+      expect.objectContaining({
+        purpose: "runtime-private",
         status: "held"
       })
     ])
