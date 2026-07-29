@@ -6,11 +6,13 @@ import { Context, Effect, Layer } from "effect"
 import { utimes } from "node:fs/promises"
 import { fileURLToPath } from "node:url"
 import * as AirlockHome from "../src/AirlockHome.ts"
-import { Hold, HoldLive } from "../src/Hold.ts"
+import { Hold, HoldLayer } from "../src/Hold.ts"
 import { Ledger, LedgerLive } from "../src/Ledger.ts"
+import { MacosExclusiveRenameTestLive } from "./support/ExclusiveRenameTestLive.ts"
 
 const layersFor = (home: string) =>
-  HoldLive.pipe(
+  HoldLayer.pipe(
+    Layer.provideMerge(MacosExclusiveRenameTestLive),
     Layer.provideMerge(LedgerLive),
     Layer.provideMerge(AirlockHome.layer(home)),
     Layer.provideMerge(BunContext.layer)
@@ -428,7 +430,7 @@ describe("Hold — undoable mutations", () => {
     )
   )
 
-  it.effect("replaceFrom rejects missing and cross-volume sources before mutation", () =>
+  it.effect("replaceFrom rejects missing and special sources before mutation", () =>
     world(({ fs, hold, path, tmp }) =>
       Effect.gen(function* () {
         const target = path.join(tmp, "target")
@@ -437,10 +439,10 @@ describe("Hold — undoable mutations", () => {
           .pipe(Effect.flip)
         expect(missing._tag).toBe("SourceNotFound")
 
-        // /dev is devfs on macOS; its device differs from the writable test
-        // workspace. The source is rejected before any rename can happen.
-        const crossVolume = yield* hold.replaceFrom(target, "/dev/null").pipe(Effect.flip)
-        expect(crossVolume._tag).toBe("SourceVolumeMismatch")
+        // A device is not representable by Hold's file/directory contract and
+        // is rejected before volume admission or any rename can happen.
+        const special = yield* hold.replaceFrom(target, "/dev/null").pipe(Effect.flip)
+        expect(special._tag).toBe("HoldFilesystemError")
         expect(yield* fs.exists(target)).toBe(false)
       })
     )

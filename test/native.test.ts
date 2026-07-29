@@ -5,17 +5,22 @@ import { Effect, Layer } from "effect"
 import { readFile } from "node:fs/promises"
 import * as AirlockHome from "../src/AirlockHome.ts"
 import { ActId } from "../src/domain.ts"
-import { Hold, HoldLive } from "../src/Hold.ts"
+import { Hold, HoldLayer } from "../src/Hold.ts"
 import { LedgerLive } from "../src/Ledger.ts"
 import {
   NativeFileSystem,
   NativeFileSystemLive,
   NativeFilesystemConfig
 } from "../src/native/index.ts"
+import { MacosExclusiveRenameTestLive } from "./support/ExclusiveRenameTestLive.ts"
+
+const HoldTestLive = HoldLayer.pipe(
+  Layer.provide(MacosExclusiveRenameTestLive)
+)
 
 const layersFor = (home: string, workspace: string) =>
   NativeFileSystemLive(new NativeFilesystemConfig({ workspace })).pipe(
-    Layer.provideMerge(HoldLive),
+    Layer.provideMerge(HoldTestLive),
     Layer.provideMerge(LedgerLive),
     Layer.provideMerge(AirlockHome.layer(home)),
     Layer.provideMerge(BunContext.layer)

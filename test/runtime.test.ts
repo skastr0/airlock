@@ -17,7 +17,7 @@ import {
   WorkspaceEntryFingerprint,
   WorkspaceFingerprint
 } from "../src/cell/index.ts"
-import { Hold, HoldFilesystemError, HoldLive } from "../src/Hold.ts"
+import { Hold, HoldFilesystemError, HoldLayer } from "../src/Hold.ts"
 import { LedgerLive } from "../src/Ledger.ts"
 import { OutboxLive } from "../src/Outbox.ts"
 import {
@@ -32,6 +32,11 @@ import {
   RuntimeInitialArtifact,
   RuntimeLive
 } from "../src/runtime/index.ts"
+import { MacosExclusiveRenameTestLive } from "./support/ExclusiveRenameTestLive.ts"
+
+const HoldTestLive = HoldLayer.pipe(
+  Layer.provide(MacosExclusiveRenameTestLive)
+)
 
 const node = (id: string) => NodeId.make(id)
 const artifact = (id: string) => ArtifactId.make(id)
@@ -60,7 +65,7 @@ const compatibilityLayer = (workspace: string, home: string) => RuntimeLive.pipe
     }))
   }))),
   Layer.provideMerge(impossibleCell),
-  Layer.provideMerge(HoldLive), Layer.provideMerge(OutboxLive), Layer.provideMerge(LedgerLive),
+  Layer.provideMerge(HoldTestLive), Layer.provideMerge(OutboxLive), Layer.provideMerge(LedgerLive),
   Layer.provideMerge(AirlockHome.layer(home)),
   Layer.provideMerge(RuntimeConfigLive(new RuntimeConfig({ workspace }))),
   Layer.provideMerge(BunContext.layer)
@@ -70,7 +75,7 @@ const nativeLayer = (
   workspace: string,
   home: string,
   cell: Layer.Layer<Cell, any, any>,
-  hold: Layer.Layer<Hold, any, any> = HoldLive
+  hold: Layer.Layer<Hold, any, any> = HoldTestLive
 ) => RuntimeLive.pipe(
   Layer.provideMerge(cell), Layer.provideMerge(ProcessRunnerLive), Layer.provideMerge(MacosPlatformLive),
   Layer.provideMerge(hold), Layer.provideMerge(OutboxLive), Layer.provideMerge(LedgerLive),

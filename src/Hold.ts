@@ -20,6 +20,10 @@ import {
   UnknownAct
 } from "./domain.ts"
 import { Ledger, type LedgerError } from "./Ledger.ts"
+import {
+  ExclusiveRename,
+  type ExclusiveRenameError
+} from "./platform/ExclusiveRename.ts"
 import { makeExclusiveFileLock } from "./platform/ExclusiveFileLock.ts"
 
 // The recovery floor, by construction: the destructive part of every mutation
@@ -235,6 +239,7 @@ const make = Effect.gen(function* () {
   const path = yield* Path.Path
   const home = yield* AirlockHome
   const ledger = yield* Ledger
+  const exclusiveRename = yield* ExclusiveRename
 
   const actDir = (id: string) => path.join(home.holdDir, id)
   const manifestFile = (id: string) => path.join(actDir(id), "manifest.json")
@@ -274,7 +279,13 @@ const make = Effect.gen(function* () {
       catch: fsError(operation, directory)
     })
 
-  const renameDurable = (
+  /**
+   * Replacing rename is intentionally limited to journal publication. Journal
+   * candidates are replicas of the same state record, so publishing the newer
+   * candidate may replace the canonical name. It must never install live
+   * managed bytes or recovery payloads.
+   */
+  const renameJournalReplacingDurable = (
     source: string,
     target: string,
     operation: string
@@ -290,6 +301,38 @@ const make = Effect.gen(function* () {
         )
       )
     )
+
+  const renameExclusiveDurable = (
+    source: string,
+    target: string,
+    operation: string
+  ) =>
+    exclusiveRename.moveNoReplace(source, target).pipe(
+      Effect.zipRight(
+        Effect.forEach(
+          [...new Set([path.dirname(source), path.dirname(target)])],
+          (directory) =>
+            syncDirectory(directory, `${operation} directory sync`),
+          { concurrency: 1, discard: true }
+        )
+      )
+    )
+
+  const exclusiveFailure = (
+    operation: string,
+    target: string
+  ) => (
+    error: ExclusiveRenameError | HoldFilesystemError
+  ): HoldFilesystemError => {
+    if (error._tag === "HoldFilesystemError") return error
+    const reason =
+      error._tag === "ExclusiveRenameTargetExists"
+        ? `target appeared during atomic no-replace rename from ${error.source}`
+        : error._tag === "ExclusiveRenameUnavailable"
+          ? `${error.platform}: ${error.reason}`
+          : `${error.reason} (errno ${error.errno})`
+    return new HoldFilesystemError({ operation, target, reason })
+  }
 
   const writeNewDurable = (
     target: string,
@@ -325,7 +368,7 @@ const make = Effect.gen(function* () {
           "write staged hold journal"
         ).pipe(
           Effect.zipRight(
-            renameDurable(staged, target, "install hold journal")
+            renameJournalReplacingDurable(staged, target, "install hold journal")
           )
         )
       })
@@ -454,7 +497,7 @@ const make = Effect.gen(function* () {
     })
     const selected = valid[0]!
     if (selected.file !== manifestFile(id)) {
-      yield* renameDurable(
+      yield* renameJournalReplacingDurable(
         selected.file,
         manifestFile(id),
         "promote staged hold journal"
@@ -527,9 +570,26 @@ const make = Effect.gen(function* () {
           ? new SourceNotFound({ source })
           : fsError("lstat replacement source", source)(cause)
     }).pipe(
-      Effect.flatMap((info) => {
+      Effect.flatMap((info): Effect.Effect<
+        ReplaceSource,
+        UnsupportedReplacementSymlink | HoldFilesystemError
+      > => {
         if (info.isSymbolicLink()) {
-          return new UnsupportedReplacementSymlink({ path: source, role: "source" })
+          return Effect.fail(
+            new UnsupportedReplacementSymlink({
+              path: source,
+              role: "source"
+            })
+          )
+        }
+        if (!info.isFile() && !info.isDirectory()) {
+          return Effect.fail(
+            new HoldFilesystemError({
+              operation: "inspect replacement source",
+              target: source,
+              reason: "only regular files and directories are supported"
+            })
+          )
         }
         const kind = info.isDirectory()
           ? ("directory" as const)
@@ -650,7 +710,13 @@ const make = Effect.gen(function* () {
       at
     })
     yield* reserveAct(manifest, entry.retained)
-    yield* renameDurable(target, payloadFile(id), "retain target")
+    yield* renameExclusiveDurable(
+      target,
+      payloadFile(id),
+      "retain target"
+    ).pipe(
+      Effect.mapError(exclusiveFailure("retain target", payloadFile(id)))
+    )
     yield* writeJournal(
       new HoldJournal({ state: "held", manifest, retained: entry.retained })
     )
@@ -690,10 +756,16 @@ const make = Effect.gen(function* () {
     )
     const occupied = yield* pathExists(manifest.target)
     if (occupied) return yield* new TargetOccupied({ target: manifest.target })
-    yield* renameDurable(
+    yield* renameExclusiveDurable(
       stageFile(manifest.id),
       manifest.target,
       "install staged replacement"
+    ).pipe(
+      Effect.mapError((error) =>
+        error._tag === "ExclusiveRenameTargetExists"
+          ? new TargetOccupied({ target: manifest.target })
+          : exclusiveFailure("install staged replacement", manifest.target)(error)
+      )
     )
     if (!manifest.hasPayload) {
       yield* writeJournal(new HoldJournal({ state: "held", manifest }))
@@ -709,12 +781,18 @@ const make = Effect.gen(function* () {
   ) {
     const occupied = yield* pathExists(manifest.target)
     if (occupied) return yield* new TargetOccupied({ target: manifest.target })
-    yield* renameDurable(source, manifest.target, "install replacement source").pipe(
+    yield* renameExclusiveDurable(
+      source,
+      manifest.target,
+      "install replacement source"
+    ).pipe(
       Effect.mapError((error) =>
-        error._tag === "HoldFilesystemError" &&
-        error.reason.includes("NotFound")
+        error._tag === "ExclusiveRenameTargetExists"
+          ? new TargetOccupied({ target: manifest.target })
+          : error._tag === "ExclusiveRenameFailed" &&
+            error.errno === 2
           ? new SourceNotFound({ source })
-          : error
+          : exclusiveFailure("install replacement source", manifest.target)(error)
       )
     )
     if (!manifest.hasPayload) {
@@ -736,10 +814,22 @@ const make = Effect.gen(function* () {
           target: manifest.target
         })
       }
-      yield* renameDurable(
+      yield* renameExclusiveDurable(
         payloadFile(manifest.id),
         manifest.target,
         "restore target after failed install"
+      ).pipe(
+        Effect.mapError((error) =>
+          error._tag === "ExclusiveRenameTargetExists"
+            ? new HoldRecoveryIndeterminate({
+                id: manifest.id,
+                target: manifest.target
+              })
+            : exclusiveFailure(
+                "restore target after failed install",
+                manifest.target
+              )(error)
+        )
       )
     }
     yield* writeJournal(
@@ -1066,10 +1156,16 @@ const make = Effect.gen(function* () {
       yield* fs
         .makeDirectory(path.dirname(manifest.target), { recursive: true })
         .pipe(Effect.mapError(fsError("create undo parent", path.dirname(manifest.target))))
-      yield* renameDurable(
+      yield* renameExclusiveDurable(
         payloadFile(id),
         manifest.target,
         "restore held payload"
+      ).pipe(
+        Effect.mapError((error) =>
+          error._tag === "ExclusiveRenameTargetExists"
+            ? new UndoConflict({ target: manifest.target })
+            : exclusiveFailure("restore held payload", manifest.target)(error)
+        )
       )
     }
     yield* writeJournal(
@@ -1147,4 +1243,5 @@ const make = Effect.gen(function* () {
   })
 })
 
-export const HoldLive = Layer.effect(Hold, make)
+/** Component layer: tests and alternate platforms provide the capability. */
+export const HoldLayer = Layer.effect(Hold, make)
