@@ -80,8 +80,8 @@ const renderedProgram = <A extends {
           process.exitCode = 1
         }))
       )
-      )
     )
+  )
 
 const projectInlineArtifact = (artifact: {
   readonly id: string

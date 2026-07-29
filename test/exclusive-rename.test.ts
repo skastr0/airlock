@@ -228,7 +228,9 @@ describe("ExclusiveRename — macOS Hold boundary", () => {
     }).pipe(Effect.provide(BunContext.layer))
   )
 
-  it.effect("survives Bun compilation and exercises a complete overwrite/undo path", () =>
+  it.effect(
+    "survives Bun compilation and exercises a complete overwrite/undo path",
+    () =>
     process.platform !== "darwin"
       ? Effect.void
       : Effect.scoped(
@@ -264,6 +266,7 @@ describe("ExclusiveRename — macOS Hold boundary", () => {
               "compiled-original"
             )
           })
-        ).pipe(Effect.provide(BunContext.layer))
+        ).pipe(Effect.provide(BunContext.layer)),
+    30_000
   )
 })

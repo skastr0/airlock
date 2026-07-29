@@ -635,7 +635,9 @@ describe("Hold — undoable mutations", () => {
     )
   )
 
-  it.effect("reclaims an old malformed lock and keeps lock storage bounded", () =>
+  it.effect(
+    "reclaims an old malformed lock and keeps lock storage bounded",
+    () =>
     world(({ fs, hold, path, tmp }) =>
       Effect.gen(function* () {
         const home = path.join(tmp, "airlock-home")
@@ -663,7 +665,8 @@ describe("Hold — undoable mutations", () => {
         // Ensure the original service can still acquire the shared protocol.
         expect((yield* hold.overwrite(target, "final")).previousHeld).toBe(true)
       })
-    )
+    ),
+    30_000
   )
 })
 

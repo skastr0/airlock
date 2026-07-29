@@ -53,7 +53,7 @@ import {
   Runtime,
   RuntimeInitialArtifact,
   type RuntimeArtifact,
-  type RuntimeRun
+  RuntimeRun
 } from "../runtime/index.ts"
 import {
   ExportedToolAction,
@@ -123,7 +123,8 @@ export class ProgramRunFailure extends Schema.Class<ProgramRunFailure>("ProgramR
   action: Schema.String,
   phase: Schema.Literal("language", "admission", "native-filesystem", "runtime", "outbox", "contract"),
   causeTag: Schema.optional(Schema.String),
-  reason: Schema.String
+  reason: Schema.String,
+  runtime: Schema.optional(RuntimeRun)
 }) {}
 
 export class ProgramRunResult extends Schema.Class<ProgramRunResult>("ProgramRunResult")({
@@ -154,7 +155,8 @@ export class ProgramActionExecutionFailed extends Schema.TaggedError<ProgramActi
       { default: () => "runtime" as const }
     ),
     causeTag: Schema.optional(Schema.String),
-    reason: Schema.String
+    reason: Schema.String,
+    runtime: Schema.optional(RuntimeRun)
   }
 ) {}
 
@@ -270,6 +272,9 @@ export class ProgramRunner extends Context.Tag("airlock/ProgramRunner")<
 
 const nativeNames = new Set<NativeActionName>(NativeActionCatalog.map((action) => action.name))
 const encoder = new TextEncoder()
+const decodeStrictNativeActionCall = Schema.decodeUnknown(NativeActionCall, {
+  onExcessProperty: "error"
+})
 
 const isRecord = (value: LanguageValue | undefined): value is LanguageRecord =>
   typeof value === "object" && value !== null && !Array.isArray(value) && !("kind" in value && value.kind === "Duration")
@@ -294,6 +299,36 @@ const asStringList = (value: LanguageValue | undefined, field: string, action: s
 }
 
 const object = (value: LanguageRecord): Record<string, unknown> => ({ ...value })
+
+const isDurationValue = (
+  value: LanguageValue | undefined
+): value is { readonly kind: "Duration"; readonly value: number; readonly unit: "ms" | "s" | "m" | "h" | "d" } =>
+  typeof value === "object" && value !== null &&
+  !Array.isArray(value) &&
+  (value as { readonly kind?: unknown }).kind === "Duration" &&
+  typeof (value as { readonly value?: unknown }).value === "number" &&
+  typeof (value as { readonly unit?: unknown }).unit === "string"
+
+const durationMillis = (
+  duration: { readonly kind: "Duration"; readonly value: number; readonly unit: "ms" | "s" | "m" | "h" | "d" }
+) => {
+  const factor: Record<typeof duration.unit, number> = {
+    ms: 1,
+    s: 1_000,
+    m: 60_000,
+    h: 3_600_000,
+    d: 86_400_000
+  }
+  return duration.value * factor[duration.unit]
+}
+
+const strictNativeAction = (
+  action: string,
+  value: unknown
+): Effect.Effect<NativeActionCallValue, ProgramActionDecodeFailed> =>
+  decodeStrictNativeActionCall(value).pipe(
+    Effect.mapError((error) => new ProgramActionDecodeFailed({ action, reason: error.message }))
+  )
 
 /** Decode compact language aliases into the canonical native action vocabulary. */
 export const decodeProgramAction = (

@@ -120,19 +120,17 @@ describe("agent-only CLI surface", () => {
         "--source",
         `return process.run({ executable: "/usr/bin/touch", args: [${JSON.stringify(outside)}], cwd: workspace, cellProfile: "compatibility", stdout: "capture", stderr: "capture" })`
       ], home, environment)
-      expect(nodeDowngrade.status, nodeDowngrade.stderr).toBe(0)
+      expect(nodeDowngrade.status, nodeDowngrade.stderr).toBe(1)
       expect(json(nodeDowngrade.stdout)).toMatchObject({
         profile: "native-contained",
         result: {
-          result: {
-            state: "failed",
-            receipts: [
-              expect.objectContaining({
-                state: "failed",
-                error_tag: "RuntimeCapabilityDenied"
-              })
-            ]
-          }
+          state: "failed",
+          result: null,
+          failure: expect.objectContaining({
+            action: "process.run",
+            phase: "runtime",
+            causeTag: "RuntimePlanInvalid"
+          })
         }
       })
       expect(existsSync(outside)).toBe(false)

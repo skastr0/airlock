@@ -1,5 +1,5 @@
 import { FileSystem, Path } from "@effect/platform"
-import { Context, DateTime, Effect, Layer, Schema } from "effect"
+import { Cause, Context, DateTime, Effect, Exit, Layer, Schema } from "effect"
 import { lstat, open } from "node:fs/promises"
 import { AirlockHome } from "./AirlockHome.ts"
 import {
@@ -936,6 +936,36 @@ const make = Effect.gen(function* () {
         `automatic recovery also failed (${reasonOf(recoveryCause)})`
     })
 
+  const recordAfterDurableMutation = (
+    restore: <A, E, R>(
+      effect: Effect.Effect<A, E, R>
+    ) => Effect.Effect<A, E, R>,
+    manifest: HeldManifest,
+    entry: LedgerEntry
+  ) =>
+    restore(
+      ledger.record(entry).pipe(
+        Effect.mapError((cause) =>
+          recoveryRequired(manifest, "ledger", cause)
+        )
+      )
+    ).pipe(
+      Effect.exit,
+      Effect.flatMap((recorded) => {
+        if (Exit.isSuccess(recorded)) return Effect.void
+        return Cause.isInterruptedOnly(recorded.cause)
+          ? Effect.fail(
+              new HoldRecoveryRequired({
+                id: manifest.id,
+                target: manifest.target,
+                phase: "ledger",
+                reason: "Interrupt: ledger append interrupted after durable mutation"
+              })
+            )
+          : Effect.failCause(recorded.cause)
+      })
+    )
+
   const reconcileJournal = Effect.fnUntraced(function* (journal: HoldJournal) {
     if (journal.state === "restored") return
     const { manifest } = journal
@@ -1044,22 +1074,28 @@ const make = Effect.gen(function* () {
     const target = path.resolve(rawTarget)
     yield* guard(target)
     const entry = yield* inspect(target)
-    const manifest = yield* holdTarget(target, "remove", entry)
-    yield* ledger.record(
-      new LedgerEntry({
-        at: manifest.at,
-        effect: "mutation",
-        act: "remove",
-        ref: manifest.id,
-        detail: target
+    return yield* Effect.uninterruptibleMask((restore) =>
+      Effect.gen(function* () {
+        const manifest = yield* holdTarget(target, "remove", entry)
+        yield* recordAfterDurableMutation(
+          restore,
+          manifest,
+          new LedgerEntry({
+            at: manifest.at,
+            effect: "mutation",
+            act: "remove",
+            ref: manifest.id,
+            detail: target
+          })
+        )
+        return new RemoveReceipt({
+          id: manifest.id,
+          target,
+          kind: entry.kind,
+          at: manifest.at
+        })
       })
-    ).pipe(Effect.mapError((cause) => recoveryRequired(manifest, "ledger", cause)))
-    return new RemoveReceipt({
-      id: manifest.id,
-      target,
-      kind: entry.kind,
-      at: manifest.at
-    })
+    )
   })
 
   const overwrite = Effect.fn("Hold.overwrite")(function* (
@@ -1069,38 +1105,43 @@ const make = Effect.gen(function* () {
     const target = path.resolve(rawTarget)
     yield* guard(target)
     const exists = yield* pathExists(target)
-    const manifest = exists
-      ? yield* inspect(target).pipe(
-          Effect.flatMap((entry) => holdTarget(target, "overwrite", entry))
-        )
-      : yield* prepareCreation(target)
-    const installed = yield* installStaged(manifest, content).pipe(Effect.either)
-    if (installed._tag === "Left") {
-      const recovered = yield* recoverFailedInstall(manifest).pipe(Effect.either)
-      if (recovered._tag === "Left") {
-        return yield* failedInstallRecoveryRequired(
+    const existing = exists ? yield* inspect(target) : undefined
+    return yield* Effect.uninterruptibleMask((restore) =>
+      Effect.gen(function* () {
+        const manifest = existing === undefined
+          ? yield* prepareCreation(target)
+          : yield* holdTarget(target, "overwrite", existing)
+        const installed = yield* installStaged(manifest, content).pipe(Effect.either)
+        if (installed._tag === "Left") {
+          const recovered = yield* recoverFailedInstall(manifest).pipe(Effect.either)
+          if (recovered._tag === "Left") {
+            return yield* failedInstallRecoveryRequired(
+              manifest,
+              installed.left,
+              recovered.left
+            )
+          }
+          return yield* installed.left
+        }
+        yield* recordAfterDurableMutation(
+          restore,
           manifest,
-          installed.left,
-          recovered.left
+          new LedgerEntry({
+            at: manifest.at,
+            effect: "mutation",
+            act: "overwrite",
+            ref: manifest.id,
+            detail: target
+          })
         )
-      }
-      return yield* installed.left
-    }
-    yield* ledger.record(
-      new LedgerEntry({
-        at: manifest.at,
-        effect: "mutation",
-        act: "overwrite",
-        ref: manifest.id,
-        detail: target
+        return new OverwriteReceipt({
+          id: manifest.id,
+          target,
+          previousHeld: manifest.hasPayload,
+          at: manifest.at
+        })
       })
-    ).pipe(Effect.mapError((cause) => recoveryRequired(manifest, "ledger", cause)))
-    return new OverwriteReceipt({
-      id: manifest.id,
-      target,
-      previousHeld: manifest.hasPayload,
-      at: manifest.at
-    })
+    )
   })
 
   const retireRuntimePrivate = Effect.fn("Hold.retireRuntimePrivate")(function* (
@@ -1109,27 +1150,33 @@ const make = Effect.gen(function* () {
     const target = path.resolve(rawTarget)
     yield* guard(target)
     const entry = yield* inspect(target)
-    const manifest = yield* holdTarget(
-      target,
-      "remove",
-      entry,
-      "runtime-private"
-    )
-    yield* ledger.record(
-      new LedgerEntry({
-        at: manifest.at,
-        effect: "mutation",
-        act: "retire-runtime-private",
-        ref: manifest.id,
-        detail: target
+    return yield* Effect.uninterruptibleMask((restore) =>
+      Effect.gen(function* () {
+        const manifest = yield* holdTarget(
+          target,
+          "remove",
+          entry,
+          "runtime-private"
+        )
+        yield* recordAfterDurableMutation(
+          restore,
+          manifest,
+          new LedgerEntry({
+            at: manifest.at,
+            effect: "mutation",
+            act: "retire-runtime-private",
+            ref: manifest.id,
+            detail: target
+          })
+        )
+        return new RuntimePrivateRetentionReceipt({
+          id: manifest.id,
+          target,
+          kind: entry.kind,
+          at: manifest.at
+        })
       })
-    ).pipe(Effect.mapError((cause) => recoveryRequired(manifest, "ledger", cause)))
-    return new RuntimePrivateRetentionReceipt({
-      id: manifest.id,
-      target,
-      kind: entry.kind,
-      at: manifest.at
-    })
+    )
   })
 
   const replaceFrom = Effect.fn("Hold.replaceFrom")(function* (
@@ -1148,50 +1195,56 @@ const make = Effect.gen(function* () {
       return yield* new OverlappingReplacementPaths({ source, target })
     }
     const sourceEntry = yield* inspectSource(source)
-    const targetExists = yield* replacementTargetExists(target)
-    const existingTarget = targetExists ? yield* inspect(target) : undefined
-    yield* admitReplacement(
-      source,
-      target,
-      sourceEntry,
-      existingTarget?.retained.device
-    )
-    const manifest = existingTarget !== undefined
-      ? yield* holdTarget(target, "overwrite", existingTarget)
-      : yield* prepareCreation(
+    return yield* Effect.uninterruptibleMask((restore) =>
+      Effect.gen(function* () {
+        const targetExists = yield* replacementTargetExists(target)
+        const existingTarget = targetExists ? yield* inspect(target) : undefined
+        yield* admitReplacement(
+          source,
           target,
-          sourceEntry.kind === "directory" ? "directory" : "file"
+          sourceEntry,
+          existingTarget?.retained.device
         )
-    const installed = yield* installSource(manifest, source).pipe(Effect.either)
-    if (installed._tag === "Left") {
-      const recovered = yield* recoverFailedInstall(manifest).pipe(Effect.either)
-      if (recovered._tag === "Left") {
-        return yield* failedInstallRecoveryRequired(
+        const manifest = existingTarget !== undefined
+          ? yield* holdTarget(target, "overwrite", existingTarget)
+          : yield* prepareCreation(
+              target,
+              sourceEntry.kind === "directory" ? "directory" : "file"
+            )
+        const installed = yield* installSource(manifest, source).pipe(Effect.either)
+        if (installed._tag === "Left") {
+          const recovered = yield* recoverFailedInstall(manifest).pipe(Effect.either)
+          if (recovered._tag === "Left") {
+            return yield* failedInstallRecoveryRequired(
+              manifest,
+              installed.left,
+              recovered.left
+            )
+          }
+          return yield* installed.left
+        }
+        yield* recordAfterDurableMutation(
+          restore,
           manifest,
-          installed.left,
-          recovered.left
+          new LedgerEntry({
+            at: manifest.at,
+            effect: "mutation",
+            act: "overwrite",
+            ref: manifest.id,
+            detail: `${source} -> ${target}`
+          })
         )
-      }
-      return yield* installed.left
-    }
-    yield* ledger.record(
-      new LedgerEntry({
-        at: manifest.at,
-        effect: "mutation",
-        act: "overwrite",
-        ref: manifest.id,
-        detail: `${source} -> ${target}`
+        return new ReplaceReceipt({
+          id: manifest.id,
+          source,
+          target,
+          kind: sourceEntry.kind,
+          metadata: sourceEntry.metadata,
+          previousHeld: manifest.hasPayload,
+          at: manifest.at
+        })
       })
-    ).pipe(Effect.mapError((cause) => recoveryRequired(manifest, "ledger", cause)))
-    return new ReplaceReceipt({
-      id: manifest.id,
-      source,
-      target,
-      kind: sourceEntry.kind,
-      metadata: sourceEntry.metadata,
-      previousHeld: manifest.hasPayload,
-      at: manifest.at
-    })
+    )
   })
 
   const replaceByStaging = <E>(
@@ -1217,51 +1270,57 @@ const make = Effect.gen(function* () {
         target: manifest.target
       })
     }
-    const at = yield* DateTime.now
-    const targetExists = yield* pathExists(manifest.target)
-    let displaced: ActId | undefined
-    if (targetExists) {
-      if (manifest.act === "overwrite") {
-        const entry = yield* inspect(manifest.target)
-        const current = yield* holdTarget(manifest.target, "displaced", entry)
-        displaced = current.id
-      } else {
-        return yield* new UndoConflict({ target: manifest.target })
-      }
-    }
-    if (manifest.hasPayload) {
-      yield* fs
-        .makeDirectory(path.dirname(manifest.target), { recursive: true })
-        .pipe(Effect.mapError(fsError("create undo parent", path.dirname(manifest.target))))
-      yield* renameExclusiveDurable(
-        payloadFile(id),
-        manifest.target,
-        "restore held payload"
-      ).pipe(
-        Effect.mapError((error) =>
-          error._tag === "ExclusiveRenameTargetExists"
-            ? new UndoConflict({ target: manifest.target })
-            : exclusiveFailure("restore held payload", manifest.target)(error)
+    return yield* Effect.uninterruptibleMask((restore) =>
+      Effect.gen(function* () {
+        const at = yield* DateTime.now
+        const targetExists = yield* pathExists(manifest.target)
+        let displaced: ActId | undefined
+        if (targetExists) {
+          if (manifest.act === "overwrite") {
+            const entry = yield* inspect(manifest.target)
+            const current = yield* holdTarget(manifest.target, "displaced", entry)
+            displaced = current.id
+          } else {
+            return yield* new UndoConflict({ target: manifest.target })
+          }
+        }
+        if (manifest.hasPayload) {
+          yield* fs
+            .makeDirectory(path.dirname(manifest.target), { recursive: true })
+            .pipe(Effect.mapError(fsError("create undo parent", path.dirname(manifest.target))))
+          yield* renameExclusiveDurable(
+            payloadFile(id),
+            manifest.target,
+            "restore held payload"
+          ).pipe(
+            Effect.mapError((error) =>
+              error._tag === "ExclusiveRenameTargetExists"
+                ? new UndoConflict({ target: manifest.target })
+                : exclusiveFailure("restore held payload", manifest.target)(error)
+            )
+          )
+        }
+        yield* writeJournal(
+          new HoldJournal({
+            ...journal,
+            state: "restored",
+            manifest: new HeldManifest({ ...manifest, hasPayload: false, status: "restored" })
+          })
         )
-      )
-    }
-    yield* writeJournal(
-      new HoldJournal({
-        ...journal,
-        state: "restored",
-        manifest: new HeldManifest({ ...manifest, hasPayload: false, status: "restored" })
+        yield* recordAfterDurableMutation(
+          restore,
+          manifest,
+          new LedgerEntry({
+            at,
+            effect: "mutation",
+            act: "undo",
+            ref: id,
+            detail: manifest.target
+          })
+        )
+        return new UndoReceipt({ id, target: manifest.target, displaced, at })
       })
     )
-    yield* ledger.record(
-      new LedgerEntry({
-        at,
-        effect: "mutation",
-        act: "undo",
-        ref: id,
-        detail: manifest.target
-      })
-    ).pipe(Effect.mapError((cause) => recoveryRequired(manifest, "ledger", cause)))
-    return new UndoReceipt({ id, target: manifest.target, displaced, at })
   })
 
   const held = listJournals.pipe(

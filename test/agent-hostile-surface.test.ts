@@ -298,18 +298,18 @@ describe("agent-hostile admission and containment", () => {
         fixture.home,
         fixture.environment
       )
-      expect(nodeDowngrade.status, nodeDowngrade.stderr).toBe(0)
+      expect(nodeDowngrade.status, nodeDowngrade.stderr).toBe(1)
       const report = decodeProgramReport(nodeDowngrade.stdout)
-      const result = Schema.decodeUnknownSync(RuntimeResult)(report.result.result)
       expect(report.profile).toBe("native-contained")
-      expect(result.state).toBe("failed")
-      expect(result.receipts).toEqual([
-        expect.objectContaining({
-          sequence: 1,
-          state: "failed",
-          error_tag: "RuntimeCapabilityDenied"
+      expect(report.result).toMatchObject({
+        state: "failed",
+        result: null,
+        failure: expect.objectContaining({
+          action: "process.run",
+          phase: "runtime",
+          causeTag: "RuntimePlanInvalid"
         })
-      ])
+      })
       expect(existsSync(marker)).toBe(false)
       expect(entries(join(fixture.home, "hold"))).toEqual([])
       expect(entries(join(fixture.home, "outbox"))).toEqual([])
@@ -430,7 +430,7 @@ describe("agent-hostile admission and containment", () => {
           expect.objectContaining({
             sequence: 1,
             state: "failed",
-            error_tag: "RuntimeNodeFailure"
+            error_tag: "RuntimeProcessFailure"
           }),
           expect.objectContaining({
             sequence: 2,

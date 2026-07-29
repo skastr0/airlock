@@ -1,4 +1,4 @@
-import { Context, DateTime, Effect, Layer, Schema } from "effect"
+import { Cause, Context, DateTime, Effect, Exit, Layer, Schema } from "effect"
 import {
   EmissionId,
   EmissionNotPending,
@@ -351,27 +351,42 @@ const make = Effect.gen(function* () {
     const dispatchJson = yield* encodeDispatch(summary.dispatch).pipe(
       Effect.mapError(() => parseFailure(id, "dispatch-encode"))
     )
-    yield* store.create(id, manifestJson, dispatchJson)
     const staged = toEmission(manifest, "staged")
-    yield* ledger.record(
-      new LedgerEntry({
-        at: stagedAt,
-        effect: "emission",
-        act: "stage",
-        ref: id,
-        detail: `${http.method} ${summary.intent.endpoint}`
+    const stageRecovery = (reason: string) =>
+      new OutboxRecoveryRequired({
+        id,
+        phase: "ledger-after-stage",
+        status: "staged",
+        emission: staged,
+        reason
       })
-    ).pipe(
-      Effect.mapError(
-        (error) =>
-          new OutboxRecoveryRequired({
-            id,
-            phase: "ledger-after-stage",
-            status: "staged",
-            emission: staged,
-            reason: ledgerFailureReason(error)
-          })
-      )
+    yield* Effect.uninterruptibleMask((restore) =>
+      Effect.gen(function* () {
+        // Publishing the staged directory and publishing its caller-visible
+        // recovery receipt are one cancellation boundary. Filesystem work is
+        // deliberately small; only the fallible Ledger append is restored.
+        yield* store.create(id, manifestJson, dispatchJson)
+        const recorded = yield* restore(
+          ledger.record(
+            new LedgerEntry({
+              at: stagedAt,
+              effect: "emission",
+              act: "stage",
+              ref: id,
+              detail: `${http.method} ${summary.intent.endpoint}`
+            })
+          ).pipe(
+            Effect.mapError((error) =>
+              stageRecovery(ledgerFailureReason(error))
+            )
+          )
+        ).pipe(Effect.exit)
+        if (Exit.isFailure(recorded)) {
+          return yield* Cause.isInterruptedOnly(recorded.cause)
+            ? stageRecovery("ledger append interrupted after durable stage")
+            : Effect.failCause(recorded.cause)
+        }
+      })
     )
     return staged
   })
@@ -379,7 +394,8 @@ const make = Effect.gen(function* () {
   // The point of no return. This lexical body contains the only wire-capable
   // call in Outbox; all other methods manipulate inert durable state.
   const commit = Effect.fn("Outbox.commit")(function* (id: EmissionId) {
-    return yield* store.withExclusive(Effect.gen(function* () {
+    return yield* store.withExclusive(Effect.uninterruptibleMask((restore) =>
+      Effect.gen(function* () {
       yield* transition(id, "staged", "committing")
       const stored = yield* store.read(id, "committing")
       const manifest = yield* decodeManifest(stored.manifestJson).pipe(
@@ -390,31 +406,47 @@ const make = Effect.gen(function* () {
         Effect.mapError(() => parseFailure(id, "dispatch.json"))
       )
 
-      const delivered = yield* Effect.tryPromise({
-        try: async (signal) => {
-          const response = await fetch(dispatch.url, {
-            method: dispatch.method,
-            headers: dispatch.headers,
-            redirect: "manual",
-            signal,
-            ...(dispatch.body === undefined
-              ? {}
-              : { body: dispatch.body })
-          })
-          // Response content will become a bounded Capture artifact. Outbox v1
-          // needs only dispatch status, so it cancels rather than buffering an
-          // attacker-controlled body.
-          await response.body?.cancel()
-          return {
-            status: response.status
-          }
-        },
-        catch: () =>
-          new EmissionDispatchUncertain({
-            id,
-            reason: "transport-failed"
-          })
-      }).pipe(Effect.either)
+      // Dispatch is the interruptible portion. Once dispatch has begun,
+      // interruption is an honest uncertain outcome rather than a bare fiber
+      // interruption that erases the caller's operation receipt.
+      const deliveredExit = yield* restore(
+        Effect.tryPromise({
+          try: async (signal) => {
+            const response = await fetch(dispatch.url, {
+              method: dispatch.method,
+              headers: dispatch.headers,
+              redirect: "manual",
+              signal,
+              ...(dispatch.body === undefined
+                ? {}
+                : { body: dispatch.body })
+            })
+            // Response content will become a bounded Capture artifact. Outbox
+            // v1 needs only dispatch status, so it cancels rather than buffering
+            // an attacker-controlled body.
+            await response.body?.cancel()
+            return {
+              status: response.status
+            }
+          },
+          catch: () =>
+            new EmissionDispatchUncertain({
+              id,
+              reason: "transport-failed"
+            })
+        }).pipe(Effect.either)
+      ).pipe(Effect.exit)
+
+      if (Exit.isFailure(deliveredExit)) {
+        yield* markUncertainIfCommitting(id)
+        return yield* Cause.isInterruptedOnly(deliveredExit.cause)
+          ? new EmissionDispatchUncertain({
+              id,
+              reason: "interrupted"
+            })
+          : Effect.failCause(deliveredExit.cause)
+      }
+      const delivered = deliveredExit.value
 
       if (delivered._tag === "Left") {
         yield* markUncertainIfCommitting(id)
@@ -458,55 +490,76 @@ const make = Effect.gen(function* () {
       }
 
       const committed = toEmission(manifest, "committed", outcome)
-      yield* ledger.record(
-        new LedgerEntry({
-          at: completedAt,
-          effect: "emission",
-          act: "commit",
-          ref: id,
-          detail: `${manifest.intent.method} ${manifest.intent.endpoint} -> ${outcome.status}`
+      const commitRecovery = (reason: string) =>
+        new OutboxRecoveryRequired({
+          id,
+          phase: "ledger-after-commit",
+          status: "committed",
+          emission: committed,
+          reason
         })
-      ).pipe(
-        Effect.mapError(
-          (error) =>
-            new OutboxRecoveryRequired({
-              id,
-              phase: "ledger-after-commit",
-              status: "committed",
-              emission: committed,
-              reason: ledgerFailureReason(error)
-            })
+      const recorded = yield* restore(
+        ledger.record(
+          new LedgerEntry({
+            at: completedAt,
+            effect: "emission",
+            act: "commit",
+            ref: id,
+            detail: `${manifest.intent.method} ${manifest.intent.endpoint} -> ${outcome.status}`
+          })
+        ).pipe(
+          Effect.mapError((error) =>
+            commitRecovery(ledgerFailureReason(error))
+          )
         )
-      )
+      ).pipe(Effect.exit)
+      if (Exit.isFailure(recorded)) {
+        return yield* Cause.isInterruptedOnly(recorded.cause)
+          ? commitRecovery("ledger append interrupted after durable commit")
+          : Effect.failCause(recorded.cause)
+      }
       return committed
-    }).pipe(Effect.ensuring(markUncertainIfCommitting(id))))
+    })
+    ).pipe(Effect.ensuring(markUncertainIfCommitting(id))))
   })
 
   const cancel = Effect.fn("Outbox.cancel")(function* (id: EmissionId) {
-    yield* transition(id, "staged", "cancelled")
-    const cancelled = yield* inspect(id)
-    const at = yield* DateTime.now
-    yield* ledger.record(
-      new LedgerEntry({
-        at,
-        effect: "emission",
-        act: "cancel",
-        ref: id,
-        detail: `${cancelled.intent.method} ${cancelled.intent.endpoint}`
-      })
-    ).pipe(
-      Effect.mapError(
-        (error) =>
+    return yield* Effect.uninterruptibleMask((restore) =>
+      Effect.gen(function* () {
+        yield* transition(id, "staged", "cancelled")
+        const cancelled = yield* inspect(id)
+        const at = yield* DateTime.now
+        const cancelRecovery = (reason: string) =>
           new OutboxRecoveryRequired({
             id,
             phase: "ledger-after-cancel",
             status: "cancelled",
             emission: cancelled,
-            reason: ledgerFailureReason(error)
+            reason
           })
-      )
+        const recorded = yield* restore(
+          ledger.record(
+            new LedgerEntry({
+              at,
+              effect: "emission",
+              act: "cancel",
+              ref: id,
+              detail: `${cancelled.intent.method} ${cancelled.intent.endpoint}`
+            })
+          ).pipe(
+            Effect.mapError((error) =>
+              cancelRecovery(ledgerFailureReason(error))
+            )
+          )
+        ).pipe(Effect.exit)
+        if (Exit.isFailure(recorded)) {
+          return yield* Cause.isInterruptedOnly(recorded.cause)
+            ? cancelRecovery("ledger append interrupted after durable cancel")
+            : Effect.failCause(recorded.cause)
+        }
+        return cancelled
+      })
     )
-    return cancelled
   })
 
   const pending = store.list("staged").pipe(

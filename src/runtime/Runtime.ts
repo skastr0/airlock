@@ -9,17 +9,23 @@ import {
   revalidateNodeAuthority
 } from "../admission/index.ts"
 import { Cell, CellReceipt, CellRequest, WorkspaceDeltaCandidate } from "../cell/index.ts"
-import { Hold } from "../Hold.ts"
+import { Hold, HoldRecoveryRequired } from "../Hold.ts"
 import { ActId, EmissionRequest, RemoveReceipt } from "../domain.ts"
 import {
   NativeFileSystem,
   NativeListEntry,
+  NativeMkdirPartiallyApplied,
   NativeMkdirReceipt,
+  NativeMovePartiallyApplied,
   NativeMoveReceipt,
   NativeStat,
   NativeWriteReceipt
 } from "../native/index.ts"
-import { Outbox, OutboxEmission } from "../Outbox.ts"
+import {
+  Outbox,
+  OutboxEmission,
+  OutboxRecoveryRequired
+} from "../Outbox.ts"
 import {
   ArtifactId,
   Artifact,
@@ -149,6 +155,56 @@ export class RuntimeMergeEvidence extends Schema.Class<RuntimeMergeEvidence>(
   paths: Schema.Array(Schema.String)
 }) {}
 
+/**
+ * Durable recovery evidence belongs to the Runtime integration receipt rather
+ * than being flattened into an error string. Each variant preserves the
+ * pristine component's exact recovery handle so a supervisor can inspect,
+ * cancel, undo, or reconcile the already-observed world state.
+ */
+export class RuntimeHoldRecoveryEvidence extends Schema.TaggedClass<RuntimeHoldRecoveryEvidence>()(
+  "RuntimeHoldRecoveryEvidence",
+  {
+    nodeId: Schema.String,
+    operation: Schema.String,
+    recovery: HoldRecoveryRequired
+  }
+) {}
+
+export class RuntimeMoveRecoveryEvidence extends Schema.TaggedClass<RuntimeMoveRecoveryEvidence>()(
+  "RuntimeMoveRecoveryEvidence",
+  {
+    nodeId: Schema.String,
+    operation: Schema.String,
+    recovery: NativeMovePartiallyApplied
+  }
+) {}
+
+export class RuntimeMkdirRecoveryEvidence extends Schema.TaggedClass<RuntimeMkdirRecoveryEvidence>()(
+  "RuntimeMkdirRecoveryEvidence",
+  {
+    nodeId: Schema.String,
+    operation: Schema.String,
+    recovery: NativeMkdirPartiallyApplied
+  }
+) {}
+
+export class RuntimeOutboxRecoveryEvidence extends Schema.TaggedClass<RuntimeOutboxRecoveryEvidence>()(
+  "RuntimeOutboxRecoveryEvidence",
+  {
+    nodeId: Schema.String,
+    operation: Schema.String,
+    recovery: OutboxRecoveryRequired
+  }
+) {}
+
+export const RuntimeRecoveryEvidence = Schema.Union(
+  RuntimeHoldRecoveryEvidence,
+  RuntimeMoveRecoveryEvidence,
+  RuntimeMkdirRecoveryEvidence,
+  RuntimeOutboxRecoveryEvidence
+)
+export type RuntimeRecoveryEvidence = typeof RuntimeRecoveryEvidence.Type
+
 export class RuntimeRun extends Schema.Class<RuntimeRun>("RuntimeRun")({
   schemaVersion: Schema.optionalWith(
     Schema.Literal("airlock/runtime-run/v1"),
@@ -164,6 +220,9 @@ export class RuntimeRun extends Schema.Class<RuntimeRun>("RuntimeRun")({
     default: () => []
   }),
   lifecycle: Schema.optionalWith(Schema.Array(RuntimeLifecycleReceipt), {
+    default: () => []
+  }),
+  recovery: Schema.optionalWith(Schema.Array(RuntimeRecoveryEvidence), {
     default: () => []
   })
 }) {}
@@ -232,6 +291,16 @@ export class RuntimeArtifactClaimMismatch extends Schema.TaggedError<RuntimeArti
   }
 ) {}
 
+export class RuntimeRecoveryRequired extends Schema.TaggedError<RuntimeRecoveryRequired>()(
+  "RuntimeRecoveryRequired",
+  {
+    nodeId: Schema.String,
+    operation: Schema.String,
+    causeTag: Schema.String,
+    reason: Schema.String
+  }
+) {}
+
 export class RuntimeAuthorityInvalid extends Schema.TaggedError<RuntimeAuthorityInvalid>()(
   "RuntimeAuthorityInvalid",
   {
@@ -251,6 +320,7 @@ export type RuntimeError =
   | RuntimeProcessFailure
   | RuntimeAuthorityInvalid
   | RuntimeArtifactClaimMismatch
+  | RuntimeRecoveryRequired
 
 export class Runtime extends Context.Tag("airlock/Runtime")<
   Runtime,
@@ -1123,19 +1193,71 @@ const make = Effect.gen(function* () {
           ))
         )
 
-  const nativeNodeFailure = (node: PlanNode, operation: string) =>
-    (error: { readonly _tag: string }) => new RuntimeNodeFailure({
-      nodeId: node.id,
-      operation,
-      reason: `${error._tag}: ${errorReason(error)}`
-    })
+  const nativeNodeFailure = (
+    node: PlanNode,
+    operation: string,
+    recovery: Array<RuntimeRecoveryEvidence>
+  ) =>
+    (error: { readonly _tag: string }) => {
+      switch (error._tag) {
+        case "HoldRecoveryRequired": {
+          const preserved = error as HoldRecoveryRequired
+          recovery.push(new RuntimeHoldRecoveryEvidence({
+            nodeId: node.id,
+            operation,
+            recovery: preserved
+          }))
+          return new RuntimeRecoveryRequired({
+            nodeId: node.id,
+            operation,
+            causeTag: error._tag,
+            reason: errorReason(error)
+          })
+        }
+        case "NativeMovePartiallyApplied": {
+          const preserved = error as NativeMovePartiallyApplied
+          recovery.push(new RuntimeMoveRecoveryEvidence({
+            nodeId: node.id,
+            operation,
+            recovery: preserved
+          }))
+          return new RuntimeRecoveryRequired({
+            nodeId: node.id,
+            operation,
+            causeTag: error._tag,
+            reason: errorReason(error)
+          })
+        }
+        case "NativeMkdirPartiallyApplied": {
+          const preserved = error as NativeMkdirPartiallyApplied
+          recovery.push(new RuntimeMkdirRecoveryEvidence({
+            nodeId: node.id,
+            operation,
+            recovery: preserved
+          }))
+          return new RuntimeRecoveryRequired({
+            nodeId: node.id,
+            operation,
+            causeTag: error._tag,
+            reason: errorReason(error)
+          })
+        }
+        default:
+          return new RuntimeNodeFailure({
+            nodeId: node.id,
+            operation,
+            reason: `${error._tag}: ${errorReason(error)}`
+          })
+      }
+    }
 
   const runNode = (
     plan: Plan,
     node: PlanNode,
     artifacts: Map<ArtifactId, RuntimeArtifact>,
     cellWorkspaces: Map<NodeId, RuntimeCellWorkspace>,
-    processes: Map<NodeId, RuntimeProcessEvidence>
+    processes: Map<NodeId, RuntimeProcessEvidence>,
+    recovery: Array<RuntimeRecoveryEvidence>
   ): Effect.Effect<ReadonlyArray<ArtifactId>, RuntimeError> =>
     Effect.gen(function* () {
       yield* enforce(node)
@@ -1146,7 +1268,7 @@ const make = Effect.gen(function* () {
               switch (node.operation) {
                 case "read": {
                   const bytes = yield* native.readBytes(node.locator).pipe(
-                    Effect.mapError(nativeNodeFailure(node, "Capture.file.read"))
+                    Effect.mapError(nativeNodeFailure(node, "Capture.file.read", recovery))
                   )
                   const mediaType = node.format === "text"
                     ? "text/plain; charset=utf-8"
@@ -1163,7 +1285,7 @@ const make = Effect.gen(function* () {
                 }
                 case "inspect": {
                   const result = yield* native.inspect(node.locator).pipe(
-                    Effect.mapError(nativeNodeFailure(node, "Capture.file.inspect"))
+                    Effect.mapError(nativeNodeFailure(node, "Capture.file.inspect", recovery))
                   )
                   return yield* materializeStructuredResult(
                     node,
@@ -1175,7 +1297,7 @@ const make = Effect.gen(function* () {
                 }
                 case "stat": {
                   const result = yield* native.stat(node.locator).pipe(
-                    Effect.mapError(nativeNodeFailure(node, "Capture.file.stat"))
+                    Effect.mapError(nativeNodeFailure(node, "Capture.file.stat", recovery))
                   )
                   return yield* materializeStructuredResult(
                     node,
@@ -1187,7 +1309,7 @@ const make = Effect.gen(function* () {
                 }
                 case "list": {
                   const result = yield* native.list(node.locator).pipe(
-                    Effect.mapError(nativeNodeFailure(node, "Capture.file.list"))
+                    Effect.mapError(nativeNodeFailure(node, "Capture.file.list", recovery))
                   )
                   return yield* materializeStructuredResult(
                     node,
@@ -1202,7 +1324,7 @@ const make = Effect.gen(function* () {
                     node.locator,
                     node.pattern!
                   ).pipe(
-                    Effect.mapError(nativeNodeFailure(node, "Capture.file.glob"))
+                    Effect.mapError(nativeNodeFailure(node, "Capture.file.glob", recovery))
                   )
                   return yield* materializeStructuredResult(
                     node,
@@ -1258,7 +1380,7 @@ const make = Effect.gen(function* () {
               const result = yield* native.writeBytes(
                 node.target,
                 source.bytes
-              ).pipe(Effect.mapError(nativeNodeFailure(node, "Apply.write")))
+              ).pipe(Effect.mapError(nativeNodeFailure(node, "Apply.write", recovery)))
               return yield* materializeStructuredResult(
                 node,
                 artifacts,
@@ -1269,7 +1391,7 @@ const make = Effect.gen(function* () {
             }
             case "remove": {
               const result = yield* native.remove(node.target).pipe(
-                Effect.mapError(nativeNodeFailure(node, "Apply.remove"))
+                Effect.mapError(nativeNodeFailure(node, "Apply.remove", recovery))
               )
               return yield* materializeStructuredResult(
                 node,
@@ -1283,7 +1405,7 @@ const make = Effect.gen(function* () {
               const result = yield* native.copy(
                 node.source!,
                 node.target
-              ).pipe(Effect.mapError(nativeNodeFailure(node, "Apply.copy")))
+              ).pipe(Effect.mapError(nativeNodeFailure(node, "Apply.copy", recovery)))
               return yield* materializeStructuredResult(
                 node,
                 artifacts,
@@ -1296,7 +1418,7 @@ const make = Effect.gen(function* () {
               const result = yield* native.move(
                 node.source!,
                 node.target
-              ).pipe(Effect.mapError(nativeNodeFailure(node, "Apply.move")))
+              ).pipe(Effect.mapError(nativeNodeFailure(node, "Apply.move", recovery)))
               return yield* materializeStructuredResult(
                 node,
                 artifacts,
@@ -1308,7 +1430,7 @@ const make = Effect.gen(function* () {
             case "mkdir": {
               const result = yield* native.mkdir(node.target, {
                 parents: node.parents
-              }).pipe(Effect.mapError(nativeNodeFailure(node, "Apply.mkdir")))
+              }).pipe(Effect.mapError(nativeNodeFailure(node, "Apply.mkdir", recovery)))
               return yield* materializeStructuredResult(
                 node,
                 artifacts,
@@ -1369,16 +1491,33 @@ const make = Effect.gen(function* () {
               })
             })
           }
-          const staged = yield* outbox.stage(new EmissionRequest({
+          const stagedResult = yield* outbox.stage(new EmissionRequest({
             url: node.endpoint,
             method: node.method,
             headers: node.headers,
             ...(body === undefined ? {} : { body })
-          }), node.holdMillis).pipe(Effect.mapError((error) => new RuntimeNodeFailure({
-            nodeId: node.id,
-            operation: "stage external",
-            reason: `${error._tag}: ${errorReason(error)}`
-          })))
+          }), node.holdMillis).pipe(Effect.either)
+          if (stagedResult._tag === "Left") {
+            if (stagedResult.left._tag === "OutboxRecoveryRequired") {
+              recovery.push(new RuntimeOutboxRecoveryEvidence({
+                nodeId: node.id,
+                operation: "stage external",
+                recovery: stagedResult.left
+              }))
+              return yield* new RuntimeRecoveryRequired({
+                nodeId: node.id,
+                operation: "stage external",
+                causeTag: stagedResult.left._tag,
+                reason: stagedResult.left.reason
+              })
+            }
+            return yield* new RuntimeNodeFailure({
+              nodeId: node.id,
+              operation: "stage external",
+              reason: `${stagedResult.left._tag}: ${errorReason(stagedResult.left)}`
+            })
+          }
+          const staged = stagedResult.right
           return yield* materializeStructuredResult(
             node,
             artifacts,
@@ -1463,6 +1602,7 @@ const make = Effect.gen(function* () {
       const receipts: Receipt[] = []
       const stateByNode = new Map<NodeId, NodeState>()
       const processes = new Map<NodeId, RuntimeProcessEvidence>()
+      const recovery: RuntimeRecoveryEvidence[] = []
       let failed = false
       for (const node of ordered) {
         const retainedBinding = yield* retainedBindingFor(
@@ -1526,7 +1666,8 @@ const make = Effect.gen(function* () {
             node,
             artifacts,
             cellWorkspaces,
-            processes
+            processes,
+            recovery
           ).pipe(Effect.either)
         const materialized = [...artifacts.keys()].filter(
           (id) => !artifactsBefore.has(id)
@@ -1566,7 +1707,9 @@ const make = Effect.gen(function* () {
             artifacts,
             claimed,
             handles.map((handle) => handle.resourceIdentity),
-            result.left._tag
+            result.left instanceof RuntimeRecoveryRequired
+              ? result.left.causeTag
+              : result.left._tag
           ))
           stateByNode.set(node.id, "failed")
           failed = true
@@ -1598,7 +1741,8 @@ const make = Effect.gen(function* () {
         finishedAt,
         receipts,
         artifacts: [...artifacts.values()],
-        processes: [...processes.values()]
+        processes: [...processes.values()],
+        recovery
       })
     })
 
