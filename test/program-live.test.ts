@@ -224,32 +224,11 @@ describe("ProgramExecutionLive", () => {
         return yield* program.run(new ProgramRequest({
           source: `
             let source = file.read({ path: "/work/input.txt", format: "text" })
-            let first = process.run({
-              executable: "/usr/bin/printf",
-              args: [],
-              cwd: "/work",
-              stdin: { kind: "text", value: source },
-              cellProfile: "compatibility"
-            })
-            let second = process.run({
-              executable: "/usr/bin/printf",
-              args: [],
-              cwd: "/work",
-              stdin: { kind: "artifact", id: first.stdout_artifact.id },
-              cellProfile: "compatibility"
-            })
+            let first = process.run({ executable: "/usr/bin/printf", args: [], cwd: "/work", stdin: { kind: "text", value: source }, cellProfile: "compatibility" })
+            let second = process.run({ executable: "/usr/bin/printf", args: [], cwd: "/work", stdin: { kind: "artifact", id: first.stdout_artifact.id }, cellProfile: "compatibility" })
             let written = file.write({ path: "/work/output.txt", content: second.stdout })
-            let emission = http.stage({
-              endpoint: "https://example.test/collect",
-              method: "POST",
-              body: second.stdout,
-              holdMillis: 5000
-            })
-            return {
-              output: second.stdout,
-              write_state: written.state,
-              emission_state: emission.state
-            }
+            let emission = http.stage({ endpoint: "https://example.test/collect", method: "POST", body: second.stdout, holdMillis: 5000 })
+            return { output: second.stdout, write_state: written.state, emission_state: emission.state }
           `
         }))
       }).pipe(Effect.provide(ProgramTest))
