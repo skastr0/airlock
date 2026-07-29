@@ -1,0 +1,1 @@
+return process.run({ executable: "/bin/rm", args: ["-rf", "protected"], cwd: workspace, stdin: "discard", stdout: "capture", stderr: "capture", cellProfile: "native-contained" })
