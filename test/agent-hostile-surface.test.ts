@@ -230,7 +230,9 @@ describe("agent-hostile command surface", () => {
         "eval",
         "held",
         "pending",
-        "ledger"
+        "ledger",
+        "runs",
+        "run-receipt"
       ])
       expect(discovered.some((command) => terminalCommands.includes(command))).toBe(
         false
@@ -411,7 +413,7 @@ describe("agent-hostile admission and containment", () => {
             "--workspace",
             fixture.workspace,
             "--source",
-            `return process.run({ executable: "/usr/bin/curl", args: ["--connect-timeout", "1", "--max-time", "2", "-fsS", ${JSON.stringify(endpoint)}], cwd: workspace, cellProfile: "native-contained", stdout: "capture", stderr: "capture", timeout: 5s })`
+            `return process.run({ executable: "/usr/bin/curl", args: ["--connect-timeout", "1", "--max-time", "2", "-fsS", ${JSON.stringify(endpoint)}], cwd: workspace, cellProfile: "native-contained", stdout: "capture", stderr: "capture", timeoutMs: 5000 })`
           ],
           fixture.home,
           fixture.environment

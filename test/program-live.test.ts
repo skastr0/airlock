@@ -299,7 +299,9 @@ const RuntimeTest = Layer.succeed(Runtime, Runtime.of({
       artifacts,
       processes
     }))
-  }
+  },
+  inspect: () => Effect.die("program test runtime has no persisted runs"),
+  recent: Effect.succeed([])
 }))
 
 const policy = new AdmissionPolicy({

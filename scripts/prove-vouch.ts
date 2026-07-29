@@ -333,7 +333,8 @@ export const runVouchProof = async (): Promise<VouchProofReport> => {
     Layer.provideMerge(cellLayer),
     Layer.provideMerge(RuntimeConfigLive(new RuntimeConfig({
       workspace: fixture.workspace,
-      profile: "native-contained"
+      profile: "native-contained",
+      runJournalDirectory: join(fixture.home, "runs")
     })))
   )
 

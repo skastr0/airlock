@@ -62,10 +62,57 @@ describe("agent-only CLI surface", () => {
 
   it("still exposes bounded discovery and observation commands", { timeout: 30_000 }, () => {
     const home = mkdtempSync(join(tmpdir(), "airlock-agent-cli-"))
-    for (const allowed of ["doctor", "actions", "schema", "held", "pending", "ledger"]) {
+    for (const allowed of [
+      "doctor",
+      "actions",
+      "schema",
+      "held",
+      "pending",
+      "ledger",
+      "runs"
+    ]) {
       const observed = run([allowed], home)
       expect(observed.status, `${allowed}: ${observed.stderr}`).toBe(0)
     }
+  })
+
+  it("exposes redacted durable Runtime receipts by Plan id", { timeout: 30_000 }, () => {
+    const home = mkdtempSync(join(tmpdir(), "airlock-agent-runs-"))
+    const executed = run([
+      "eval",
+      "--workspace", home,
+      "--source",
+      'return file.write({ path: "journaled.txt", content: "receipt" })'
+    ], home)
+    expect(executed.status, executed.stderr).toBe(0)
+    const report = json(executed.stdout) as {
+      readonly result: {
+        readonly plans: ReadonlyArray<{ readonly id: string }>
+      }
+    }
+    const planId = report.result.plans[0]?.id
+    expect(planId).toBeTypeOf("string")
+
+    const inspected = run([
+      "run-receipt",
+      "--plan-id", planId!
+    ], home)
+    expect(inspected.status, inspected.stderr).toBe(0)
+    expect(json(inspected.stdout)).toMatchObject({
+      schemaVersion: "airlock/runtime-run-snapshot/v1",
+      planId,
+      state: "succeeded",
+      receipts: [
+        expect.objectContaining({
+          state: "succeeded"
+        })
+      ]
+    })
+    const listed = run(["runs"], home)
+    expect(listed.status, listed.stderr).toBe(0)
+    expect(JSON.parse(listed.stdout)).toEqual([
+      expect.objectContaining({ planId })
+    ])
   })
 
   it.skipIf(

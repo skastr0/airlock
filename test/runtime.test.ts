@@ -54,8 +54,12 @@ const impossibleCell = Layer.succeed(Cell, Cell.of({
   revalidate: () => Effect.die("compatibility never calls Cell.revalidate")
 }))
 
-const compatibilityLayer = (workspace: string, home: string) => RuntimeLive.pipe(
-  Layer.provideMerge(Layer.succeed(ProcessRunner, ProcessRunner.of({
+const compatibilityLayer = (
+  workspace: string,
+  home: string,
+  runner: Layer.Layer<ProcessRunner, never, never> = Layer.succeed(
+    ProcessRunner,
+    ProcessRunner.of({
     run: (request) => Effect.map(DateTime.now, (at) => new ProcessReceipt({
       executable: request.executable, args: request.args, cwd: request.cwd, pid: 1, exitCode: 0, signal: null,
       stdout: typeof request.stdin === "object" && request.stdin._tag === "bytes"
@@ -63,12 +67,18 @@ const compatibilityLayer = (workspace: string, home: string) => RuntimeLive.pipe
         : new TextEncoder().encode(request.args.join("|")),
       stderr: new Uint8Array(), startedAt: at, finishedAt: at
     }))
-  }))),
+    })
+  )
+) => RuntimeLive.pipe(
+  Layer.provideMerge(runner),
   Layer.provideMerge(impossibleCell),
   Layer.provideMerge(NativeFileSystemLive(new NativeFilesystemConfig({ workspace }))),
   Layer.provideMerge(HoldTestLive), Layer.provideMerge(OutboxLive), Layer.provideMerge(LedgerLive),
   Layer.provideMerge(AirlockHome.layer(home)),
-  Layer.provideMerge(RuntimeConfigLive(new RuntimeConfig({ workspace }))),
+  Layer.provideMerge(RuntimeConfigLive(new RuntimeConfig({
+    workspace,
+    runJournalDirectory: join(home, "runs")
+  }))),
   Layer.provideMerge(BunContext.layer)
 )
 
@@ -82,7 +92,11 @@ const nativeLayer = (
   Layer.provideMerge(NativeFileSystemLive(new NativeFilesystemConfig({ workspace }))),
   Layer.provideMerge(hold), Layer.provideMerge(OutboxLive), Layer.provideMerge(LedgerLive),
   Layer.provideMerge(AirlockHome.layer(home)),
-  Layer.provideMerge(RuntimeConfigLive(new RuntimeConfig({ workspace, profile: "native-contained" }))),
+  Layer.provideMerge(RuntimeConfigLive(new RuntimeConfig({
+    workspace,
+    profile: "native-contained",
+    runJournalDirectory: join(home, "runs")
+  }))),
   Layer.provideMerge(BunContext.layer)
 )
 
@@ -250,6 +264,98 @@ describe("runtime Plan interpreter", () => {
         expect(result.state).toBe("failed")
         expect(result.receipts.map((receipt) => receipt.state)).toEqual(["failed", "cancelled"])
       }))
+    )
+  )
+
+  it.effect("persists completed Apply evidence when a later Invoke is interrupted", () =>
+    Effect.sync(() => {
+      const workspace = mkdtempSync(join(tmpdir(), "airlock-runtime-journal-"))
+      return { workspace, home: join(workspace, ".airlock-home") }
+    }).pipe(
+      Effect.flatMap(({ workspace, home }) =>
+        Effect.gen(function* () {
+          const started = yield* Deferred.make<void>()
+          const blockingRunner = Layer.succeed(
+            ProcessRunner,
+            ProcessRunner.of({
+              run: () =>
+                Deferred.succeed(started, undefined).pipe(
+                  Effect.zipRight(Effect.never)
+                )
+            })
+          )
+          const layer = compatibilityLayer(
+            workspace,
+            home,
+            blockingRunner
+          )
+          const inputId = artifact("durable-input")
+          const writeReceiptId = artifact("durable-write-receipt")
+          const authority = plan([
+            new ApplyNode({
+              id: node("durable-apply"),
+              dependsOn: [],
+              requires: [],
+              produces: [writeReceiptId],
+              operation: "write",
+              target: "applied.txt",
+              sourceArtifact: inputId
+            }),
+            new InvokeNode({
+              id: node("interrupted-after-apply"),
+              dependsOn: [node("durable-apply")],
+              requires: [],
+              produces: [],
+              executable: "/bin/sleep",
+              args: ["60"],
+              cwd: workspace,
+              env: {},
+              stdout: "discard",
+              stderr: "discard",
+              cellProfile: "compatibility"
+            })
+          ])
+          const input = new RuntimeInitialArtifact({
+            id: inputId,
+            bytes: new TextEncoder().encode("durable bytes"),
+            mediaType: "text/plain",
+            provenance: "test:cancellation"
+          })
+
+          yield* Effect.gen(function* () {
+            const runtime = yield* Runtime
+            const fiber = yield* runtime.execute(authority, [input]).pipe(
+              Effect.fork
+            )
+            yield* Deferred.await(started)
+            const exit = yield* Fiber.interrupt(fiber)
+            const snapshot = yield* runtime.inspect(
+              authority.admission.plan.id
+            )
+
+            expect(exit._tag).toBe("Failure")
+            expect(readFileSync(join(workspace, "applied.txt"), "utf8")).toBe(
+              "durable bytes"
+            )
+            expect(snapshot.state).toBe("partial")
+            expect(snapshot.receipts).toEqual([
+              expect.objectContaining({
+                nodeId: node("durable-apply"),
+                state: "succeeded",
+                outputArtifacts: [writeReceiptId]
+              }),
+              expect.objectContaining({
+                nodeId: node("interrupted-after-apply"),
+                state: "cancelled",
+                errorTag: "RuntimeInterrupted"
+              })
+            ])
+            expect(
+              snapshot.artifacts.map((item) => item.id)
+            ).toEqual(expect.arrayContaining([inputId, writeReceiptId]))
+          }).pipe(Effect.provide(layer))
+        })
+      )
     )
   )
 })
@@ -625,7 +731,7 @@ describe("native-contained runtime", () => {
         const layer = nativeLayer(workspace, home, interruptedCell)
         yield* Effect.gen(function* () {
           const runtime = yield* Runtime
-          const fiber = yield* runtime.execute(plan([
+          const authority = plan([
             new InvokeNode({
               id: node("cancelled-invoke"),
               dependsOn: [],
@@ -640,11 +746,15 @@ describe("native-contained runtime", () => {
               stderr: "discard",
               cellProfile: "native-contained"
             })
-          ])).pipe(Effect.fork)
+          ])
+          const fiber = yield* runtime.execute(authority).pipe(Effect.fork)
           const privateWorkspace = yield* Deferred.await(ready)
           const exit = yield* Fiber.interrupt(fiber)
           const hold = yield* Hold
           const held = yield* hold.held
+          const snapshot = yield* runtime.inspect(
+            authority.admission.plan.id
+          )
 
           expect(exit._tag).toBe("Failure")
           expect(existsSync(privateWorkspace)).toBe(false)
@@ -655,6 +765,23 @@ describe("native-contained runtime", () => {
               status: "held"
             })
           ])
+          expect(snapshot).toMatchObject({
+            planId: authority.admission.plan.id,
+            state: "cancelled",
+            receipts: [
+              expect.objectContaining({
+                nodeId: node("cancelled-invoke"),
+                state: "cancelled",
+                errorTag: "RuntimeInterrupted"
+              })
+            ],
+            lifecycle: [
+              expect.objectContaining({
+                state: "held",
+                privateWorkspace
+              })
+            ]
+          })
         }).pipe(Effect.provide(layer))
       }))
     )

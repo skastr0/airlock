@@ -7,7 +7,7 @@ import * as nodePath from "node:path"
 import * as nodeOs from "node:os"
 import { AdmissionPolicy } from "./admission/index.ts"
 import { NativeActionCatalog } from "./actions/index.ts"
-import { layerFromEnv } from "./AirlockHome.ts"
+import { AirlockHome, layerFromEnv } from "./AirlockHome.ts"
 import { ActId, EmissionId, EmissionRequest, ScopeEscape } from "./domain.ts"
 import { Hold } from "./Hold.ts"
 import { HoldLive } from "./HoldLive.ts"
@@ -28,7 +28,12 @@ import {
   loadKnownToolDefinitions,
   makeFileToolDefinitionReader
 } from "./tools/index.ts"
-import { RuntimeConfig, RuntimeConfigLive, RuntimeLive } from "./runtime/index.ts"
+import {
+  makeFileRuntimeRunJournal,
+  RuntimeConfig,
+  RuntimeConfigLive,
+  RuntimeLive
+} from "./runtime/index.ts"
 import { AIRLOCK_VERSION } from "./version.ts"
 
 /**
@@ -659,6 +664,7 @@ const executeProgram = (
   requestedWorkspace: string
 ) =>
   Effect.gen(function* () {
+    const home = yield* AirlockHome
     const workspace = yield* bindProgramWorkspace(profile, requestedWorkspace)
     const policy = yield* supervisorPolicy(profile, workspace).pipe(
       Effect.flatMap(bindPolicyPathScopes)
@@ -672,6 +678,7 @@ const executeProgram = (
       Layer.provideMerge(RuntimeConfigLive(new RuntimeConfig({
         workspace,
         profile,
+        runJournalDirectory: nodePath.join(home.home, "runs"),
         environment: profile === "compatibility" ? compatibilityEnvironment() : {}
       }))),
       Layer.provideMerge(
@@ -787,11 +794,46 @@ const agentEvalProgram = Command.make(
 const ledger = Command.make("ledger", {}, () => rendered(Effect.flatMap(Ledger, (l) => l.entries)))
   .pipe(Command.withDescription("The append-only record of every act"))
 
+const runs = Command.make("runs", {}, () =>
+  rendered(
+    Effect.gen(function* () {
+      const home = yield* AirlockHome
+      return yield* makeFileRuntimeRunJournal(
+        nodePath.join(home.home, "runs")
+      ).recent
+    })
+  )
+).pipe(
+  Command.withDescription(
+    "List the latest redacted durable receipt for each Runtime Plan"
+  )
+)
+
+const runReceipt = Command.make(
+  "run-receipt",
+  {
+    planId: Options.text("plan-id")
+  },
+  ({ planId }) =>
+    rendered(
+      Effect.gen(function* () {
+        const home = yield* AirlockHome
+        return yield* makeFileRuntimeRunJournal(
+          nodePath.join(home.home, "runs")
+        ).inspect(planId)
+      })
+    )
+).pipe(
+  Command.withDescription(
+    "Inspect the latest durable Runtime receipt for one Plan id"
+  )
+)
+
 const supervisorRoot = Command.make("airlock").pipe(Command.withSubcommands([
   rm, write, undo, held, reap,
   send, pending, commit, cancel, flush,
   doctor, capabilities, actions, schema, exec, run, evalProgram,
-  ledger
+  ledger, runs, runReceipt
 ]))
 
 /**
@@ -804,7 +846,7 @@ const supervisorRoot = Command.make("airlock").pipe(Command.withSubcommands([
 const agentRoot = Command.make("airlock-agent").pipe(Command.withSubcommands([
   doctor, capabilities, actions, schema,
   agentRun, agentEvalProgram,
-  held, pending, ledger
+  held, pending, ledger, runs, runReceipt
 ]))
 
 /** One composition root. Pristine components retain authority; CLI is glue. */

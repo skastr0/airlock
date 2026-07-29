@@ -1,7 +1,14 @@
 import { Path } from "@effect/platform"
 import { Cause, Context, DateTime, Effect, Exit, Layer, Schema } from "effect"
 import { createHash } from "node:crypto"
-import { lstat, readFile, readdir } from "node:fs/promises"
+import {
+  lstat,
+  mkdir,
+  open,
+  readFile,
+  readdir,
+  rename
+} from "node:fs/promises"
 import * as nodePath from "node:path"
 import {
   type ExecutionAuthority,
@@ -61,6 +68,7 @@ export type RuntimeProfile = typeof RuntimeProfile.Type
 export class RuntimeConfig extends Schema.Class<RuntimeConfig>("RuntimeConfig")({
   workspace: Schema.String,
   profile: Schema.optionalWith(RuntimeProfile, { default: () => "compatibility" as const }),
+  runJournalDirectory: Schema.optional(Schema.String),
   environment: Schema.optionalWith(Schema.Record({ key: Schema.String, value: Schema.String }), {
     default: () => ({})
   })
@@ -227,6 +235,57 @@ export class RuntimeRun extends Schema.Class<RuntimeRun>("RuntimeRun")({
   })
 }) {}
 
+export class RuntimeRunSnapshot extends Schema.Class<RuntimeRunSnapshot>(
+  "RuntimeRunSnapshot"
+)({
+  schemaVersion: Schema.Literal("airlock/runtime-run-snapshot/v1"),
+  planId: Schema.String,
+  state: Schema.Literal(
+    "running",
+    "succeeded",
+    "failed",
+    "partial",
+    "cancelled"
+  ),
+  startedAt: Schema.DateTimeUtc,
+  observedAt: Schema.DateTimeUtc,
+  sequence: Schema.Number,
+  receipts: Schema.Array(Receipt),
+  artifacts: Schema.Array(Artifact),
+  lifecycle: Schema.Array(RuntimeLifecycleReceipt),
+  recovery: Schema.Array(RuntimeRecoveryEvidence)
+}) {}
+
+export class RuntimeRunJournalError extends Schema.TaggedError<RuntimeRunJournalError>()(
+  "RuntimeRunJournalError",
+  {
+    operation: Schema.Literal("record", "inspect", "list", "decode"),
+    path: Schema.String,
+    reason: Schema.String
+  }
+) {}
+
+export class RuntimeRunNotFound extends Schema.TaggedError<RuntimeRunNotFound>()(
+  "RuntimeRunNotFound",
+  { planId: Schema.String }
+) {}
+
+export class RuntimeRunJournal extends Context.Tag("airlock/RuntimeRunJournal")<
+  RuntimeRunJournal,
+  {
+    readonly record: (
+      snapshot: RuntimeRunSnapshot
+    ) => Effect.Effect<void, RuntimeRunJournalError>
+    readonly inspect: (
+      planId: string
+    ) => Effect.Effect<RuntimeRunSnapshot, RuntimeRunJournalError | RuntimeRunNotFound>
+    readonly recent: Effect.Effect<
+      ReadonlyArray<RuntimeRunSnapshot>,
+      RuntimeRunJournalError
+    >
+  }
+>() {}
+
 export class RuntimePlanInvalid extends Schema.TaggedError<RuntimePlanInvalid>()(
   "RuntimePlanInvalid",
   { planId: Schema.String, reason: Schema.String }
@@ -329,6 +388,13 @@ export class Runtime extends Context.Tag("airlock/Runtime")<
       authority: ExecutionAuthority,
       initialArtifacts?: ReadonlyArray<RuntimeInitialArtifact>
     ) => Effect.Effect<RuntimeRun, RuntimePlanInvalid | RuntimeLifecycleFailure>
+    readonly inspect: (
+      planId: string
+    ) => Effect.Effect<RuntimeRunSnapshot, RuntimeRunJournalError | RuntimeRunNotFound>
+    readonly recent: Effect.Effect<
+      ReadonlyArray<RuntimeRunSnapshot>,
+      RuntimeRunJournalError
+    >
   }
 >() {}
 
@@ -338,6 +404,233 @@ export const RuntimeConfigLive = (config: RuntimeConfig) =>
 const RuntimeConfigTag = Context.GenericTag<RuntimeConfig>("airlock/RuntimeConfig")
 const text = new TextEncoder()
 const textDecoder = new TextDecoder("utf-8", { fatal: true })
+const encodeRunSnapshot = Schema.encode(
+  Schema.parseJson(RuntimeRunSnapshot)
+)
+const decodeRunSnapshot = Schema.decode(
+  Schema.parseJson(RuntimeRunSnapshot)
+)
+
+const journalReason = (cause: unknown) =>
+  cause instanceof Error ? cause.message : String(cause)
+
+const journalPathMissing = (cause: unknown) =>
+  typeof cause === "object" &&
+  cause !== null &&
+  "code" in cause &&
+  cause.code === "ENOENT"
+
+const runJournalDirectory = (root: string, planId: string) =>
+  nodePath.join(
+    root,
+    createHash("sha256").update(planId).digest("hex")
+  )
+
+const latestRunSnapshot = (
+  root: string,
+  planId: string
+): Effect.Effect<
+  RuntimeRunSnapshot,
+  RuntimeRunJournalError | RuntimeRunNotFound
+> =>
+  Effect.gen(function* () {
+    const directory = runJournalDirectory(root, planId)
+    const entries = yield* Effect.tryPromise({
+      try: () => readdir(directory),
+      catch: (
+        cause
+      ): RuntimeRunNotFound | RuntimeRunJournalError =>
+        journalPathMissing(cause)
+          ? new RuntimeRunNotFound({ planId })
+          : new RuntimeRunJournalError({
+              operation: "inspect",
+              path: directory,
+              reason: journalReason(cause)
+            })
+    })
+    const latest = entries
+      .filter((entry) => entry.endsWith(".json"))
+      .sort()
+      .at(-1)
+    if (latest === undefined) {
+      return yield* new RuntimeRunNotFound({ planId })
+    }
+    const file = nodePath.join(directory, latest)
+    const encoded = yield* Effect.tryPromise({
+      try: () => readFile(file, "utf8"),
+      catch: (cause) =>
+        new RuntimeRunJournalError({
+          operation: "inspect",
+          path: file,
+          reason: journalReason(cause)
+        })
+    })
+    const snapshot = yield* decodeRunSnapshot(encoded).pipe(
+      Effect.mapError((cause) =>
+        new RuntimeRunJournalError({
+          operation: "decode",
+          path: file,
+          reason: String(cause)
+        })
+      )
+    )
+    if (snapshot.planId !== planId) {
+      return yield* new RuntimeRunJournalError({
+        operation: "decode",
+        path: file,
+        reason: "snapshot Plan identity does not match its journal directory"
+      })
+    }
+    return snapshot
+  })
+
+export const makeFileRuntimeRunJournal = (root: string) => {
+    const record = (snapshot: RuntimeRunSnapshot) =>
+      encodeRunSnapshot(snapshot).pipe(
+        Effect.mapError((cause) =>
+          new RuntimeRunJournalError({
+            operation: "record",
+            path: root,
+            reason: String(cause)
+          })
+        ),
+        Effect.flatMap((encoded) =>
+          Effect.tryPromise({
+            try: async () => {
+              const directory = runJournalDirectory(root, snapshot.planId)
+              await mkdir(directory, { recursive: true, mode: 0o700 })
+              const identity =
+                `${DateTime.toEpochMillis(snapshot.observedAt)}`.padStart(16, "0") +
+                `-${String(snapshot.sequence).padStart(8, "0")}` +
+                `-${crypto.randomUUID()}`
+              const temporary = nodePath.join(directory, `.${identity}.next`)
+              const published = nodePath.join(directory, `${identity}.json`)
+              const handle = await open(temporary, "wx", 0o600)
+              try {
+                await handle.writeFile(encoded, "utf8")
+                await handle.sync()
+              } finally {
+                await handle.close()
+              }
+              await rename(temporary, published)
+              const directoryHandle = await open(directory, "r")
+              try {
+                await directoryHandle.sync()
+              } finally {
+                await directoryHandle.close()
+              }
+            },
+            catch: (cause) =>
+              new RuntimeRunJournalError({
+                operation: "record",
+                path: runJournalDirectory(root, snapshot.planId),
+                reason: journalReason(cause)
+              })
+          })
+        )
+      )
+
+    const recent = Effect.tryPromise({
+      try: async () => {
+        await mkdir(root, { recursive: true, mode: 0o700 })
+        return readdir(root, { withFileTypes: true })
+      },
+      catch: (cause) =>
+        new RuntimeRunJournalError({
+          operation: "list",
+          path: root,
+          reason: journalReason(cause)
+        })
+    }).pipe(
+      Effect.flatMap((entries) =>
+        Effect.forEach(
+          entries.filter((entry) => entry.isDirectory()),
+          (entry) =>
+            Effect.tryPromise({
+              try: () => readdir(nodePath.join(root, entry.name)),
+              catch: (cause) =>
+                new RuntimeRunJournalError({
+                  operation: "list",
+                  path: nodePath.join(root, entry.name),
+                  reason: journalReason(cause)
+                })
+            }).pipe(
+              Effect.flatMap((files) => {
+                const latest = files
+                  .filter((file) => file.endsWith(".json"))
+                  .sort()
+                  .at(-1)
+                if (latest === undefined) return Effect.succeed(undefined)
+                const file = nodePath.join(root, entry.name, latest)
+                return Effect.tryPromise({
+                  try: () => readFile(file, "utf8"),
+                  catch: (cause) =>
+                    new RuntimeRunJournalError({
+                      operation: "list",
+                      path: file,
+                      reason: journalReason(cause)
+                    })
+                }).pipe(
+                  Effect.flatMap((encoded) =>
+                    decodeRunSnapshot(encoded).pipe(
+                      Effect.mapError((cause) =>
+                        new RuntimeRunJournalError({
+                          operation: "decode",
+                          path: file,
+                          reason: String(cause)
+                        })
+                      )
+                    )
+                  )
+                )
+              })
+            ),
+          { concurrency: 8 }
+        )
+      ),
+      Effect.map((snapshots) =>
+        snapshots
+          .filter(
+            (snapshot): snapshot is RuntimeRunSnapshot =>
+              snapshot !== undefined
+          )
+          .sort(
+            (a, b) =>
+              DateTime.toEpochMillis(b.observedAt) -
+              DateTime.toEpochMillis(a.observedAt)
+          )
+      )
+    )
+
+  return RuntimeRunJournal.of({
+    record,
+    inspect: (planId) => latestRunSnapshot(root, planId),
+    recent
+  })
+}
+
+const makeMemoryRuntimeRunJournal = () => {
+  const snapshots = new Map<string, RuntimeRunSnapshot>()
+  return RuntimeRunJournal.of({
+    record: (snapshot) =>
+      Effect.sync(() => {
+        snapshots.set(snapshot.planId, snapshot)
+      }),
+    inspect: (planId) => {
+      const snapshot = snapshots.get(planId)
+      return snapshot === undefined
+        ? Effect.fail(new RuntimeRunNotFound({ planId }))
+        : Effect.succeed(snapshot)
+    },
+    recent: Effect.sync(() =>
+      [...snapshots.values()].sort(
+        (a, b) =>
+          DateTime.toEpochMillis(b.observedAt) -
+          DateTime.toEpochMillis(a.observedAt)
+      )
+    )
+  })
+}
 
 const digest = (bytes: Uint8Array): Digest =>
   `sha256:${createHash("sha256").update(bytes).digest("hex")}` as Digest
@@ -848,6 +1141,9 @@ const make = Effect.gen(function* () {
   const hold = yield* Hold
   const native = yield* NativeFileSystem
   const outbox = yield* Outbox
+  const runJournal = config.runJournalDirectory === undefined
+    ? makeMemoryRuntimeRunJournal()
+    : makeFileRuntimeRunJournal(config.runJournalDirectory)
   const workspace = path.resolve(config.workspace)
 
   const localPath = (locator: string) => nodePath.isAbsolute(locator) ? locator : path.join(workspace, locator)
@@ -1577,9 +1873,60 @@ const make = Effect.gen(function* () {
   ): Effect.Effect<RuntimeRun, RuntimePlanInvalid | RuntimeLifecycleFailure> => {
     const plan = authority.admission.plan
     const cellWorkspaces = new Map<NodeId, RuntimeCellWorkspace>()
+    let ordered: ReadonlyArray<PlanNode> = []
+    let startedAt: DateTime.Utc | undefined
+    const artifacts = new Map<ArtifactId, RuntimeArtifact>(
+      initialArtifacts.map((input) => [input.id, materializeInitialArtifact(input)])
+    )
+    const receipts: Receipt[] = []
+    const stateByNode = new Map<NodeId, NodeState>()
+    const processes = new Map<NodeId, RuntimeProcessEvidence>()
+    const recovery: RuntimeRecoveryEvidence[] = []
+    let currentNode: PlanNode | undefined
+    let failed = false
+    let snapshotSequence = 0
+    const persistSnapshot = (
+      state: RuntimeRunSnapshot["state"],
+      lifecycle: ReadonlyArray<RuntimeLifecycleReceipt> = []
+    ) => {
+      const beganAt = startedAt
+      return beganAt === undefined
+        ? Effect.void
+        : DateTime.now.pipe(
+            Effect.flatMap((observedAt) =>
+              runJournal.record(new RuntimeRunSnapshot({
+                schemaVersion: "airlock/runtime-run-snapshot/v1",
+                planId: plan.id,
+                state,
+                startedAt: beganAt,
+                observedAt,
+                sequence: ++snapshotSequence,
+                receipts,
+                artifacts: [...artifacts.values()].map(
+                  (item) => item.artifact
+                ),
+                lifecycle,
+                recovery
+              }))
+            ),
+            Effect.mapError((error) =>
+              new RuntimeLifecycleFailure({
+                planId: plan.id,
+                privateWorkspaces: [...cellWorkspaces.values()].map(
+                  (item) => item.privateWorkspace
+                ),
+                reason: `${error._tag}: ${error.reason}`
+              })
+            ),
+            Effect.uninterruptible
+          )
+    }
+
     const runPlan = Effect.gen(function* () {
-      const ordered = yield* validatePlan(plan, config.profile, workspace)
-      const startedAt = yield* DateTime.now
+      ordered = yield* validatePlan(plan, config.profile, workspace)
+      const beganAt = yield* DateTime.now
+      startedAt = beganAt
+      yield* persistSnapshot("running")
       const producedIds = new Set(ordered.flatMap((node) => node.produces))
       const inputIds = initialArtifacts.map((input) => input.id)
       const duplicateInput = inputIds.find((id, index) => inputIds.indexOf(id) !== index)
@@ -1596,15 +1943,8 @@ const make = Effect.gen(function* () {
           reason: `initial artifact is also produced by a node: ${collidingInput}`
         })
       }
-      const artifacts = new Map<ArtifactId, RuntimeArtifact>(
-        initialArtifacts.map((input) => [input.id, materializeInitialArtifact(input)])
-      )
-      const receipts: Receipt[] = []
-      const stateByNode = new Map<NodeId, NodeState>()
-      const processes = new Map<NodeId, RuntimeProcessEvidence>()
-      const recovery: RuntimeRecoveryEvidence[] = []
-      let failed = false
       for (const node of ordered) {
+        currentNode = node
         const retainedBinding = yield* retainedBindingFor(
           authority,
           node
@@ -1622,6 +1962,8 @@ const make = Effect.gen(function* () {
           ))
           stateByNode.set(node.id, "failed")
           failed = true
+          currentNode = undefined
+          yield* persistSnapshot("running")
           continue
         }
         const dependenciesSucceeded = node.dependsOn.every(
@@ -1642,6 +1984,8 @@ const make = Effect.gen(function* () {
           ))
           stateByNode.set(node.id, "cancelled")
           failed = true
+          currentNode = undefined
+          yield* persistSnapshot("running")
           continue
         }
         const artifactsBefore = new Set(artifacts.keys())
@@ -1725,25 +2069,29 @@ const make = Effect.gen(function* () {
           ))
           stateByNode.set(node.id, "succeeded")
         }
+        currentNode = undefined
+        yield* persistSnapshot("running")
       }
       const finishedAt = yield* DateTime.now
       const succeeded = receipts.filter(
         (receipt) => receipt.state === "succeeded"
       ).length
-      return new RuntimeRun({
+      const run = new RuntimeRun({
         planId: plan.id,
         state: failed
           ? succeeded > 0
             ? "partial"
             : "failed"
           : "succeeded",
-        startedAt,
+        startedAt: beganAt,
         finishedAt,
         receipts,
         artifacts: [...artifacts.values()],
         processes: [...processes.values()],
         recovery
       })
+      yield* persistSnapshot(run.state)
+      return run
     })
 
     /*
@@ -1761,6 +2109,56 @@ const make = Effect.gen(function* () {
             receipt.state === "failed"
         )
         if (Exit.isFailure(runExit)) {
+          if (
+            Cause.isInterruptedOnly(runExit.cause) &&
+            startedAt !== undefined
+          ) {
+            for (const node of ordered) {
+              if (stateByNode.has(node.id)) continue
+              const materialized = node.produces.filter((id) =>
+                artifacts.has(id)
+              )
+              receipts.push(yield* nodeReceipt(
+                plan,
+                node,
+                receipts.length + 1,
+                "cancelled",
+                artifacts,
+                materialized,
+                handlesFor(plan, node).map(
+                  (handle) => handle.resourceIdentity
+                ),
+                node.id === currentNode?.id
+                  ? "RuntimeInterrupted"
+                  : "RuntimeDependencyCancelled"
+              ))
+              stateByNode.set(node.id, "cancelled")
+            }
+            const finishedAt = yield* DateTime.now
+            const succeeded = receipts.some(
+              (receipt) => receipt.state === "succeeded"
+            )
+            yield* persistSnapshot(
+              succeeded || recovery.length > 0
+                ? "partial"
+                : "cancelled",
+              lifecycle
+            )
+            return new RuntimeRun({
+              planId: plan.id,
+              state:
+                succeeded || recovery.length > 0
+                  ? "partial"
+                  : "failed",
+              startedAt,
+              finishedAt,
+              receipts,
+              artifacts: [...artifacts.values()],
+              processes: [...processes.values()],
+              lifecycle,
+              recovery
+            })
+          }
           if (retentionFailures.length === 0) {
             return yield* Effect.failCause(runExit.cause)
           }
@@ -1785,17 +2183,23 @@ const make = Effect.gen(function* () {
           : succeeded
             ? "partial" as const
             : "failed" as const
-        return new RuntimeRun({
+        const finalized = new RuntimeRun({
           ...run,
           state,
           finishedAt,
           lifecycle
         })
+        yield* persistSnapshot(state, lifecycle)
+        return finalized
       })
     )
   }
 
-  return Runtime.of({ execute })
+  return Runtime.of({
+    execute,
+    inspect: runJournal.inspect,
+    recent: runJournal.recent
+  })
 })
 
 /** Adapter composition root. A VM Cell is deliberately not substituted here. */
