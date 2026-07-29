@@ -106,6 +106,25 @@ describe("inert tool definitions", () => {
     })
   )
 
+  it.effect("requires one absolute executable and callable dotted namespace segments", () =>
+    Effect.gen(function* () {
+      const cases: ReadonlyArray<readonly [string, Record<string, unknown>, string]> = [
+        ["multiple", { executables: [{ realm: "machine", selector: "/usr/bin/tar" }, { realm: "machine", selector: "/usr/bin/bsdtar" }] }, "executables"],
+        ["relative", { executables: [{ realm: "machine", selector: "tar" }] }, "executables[].selector"],
+        ["bad-id", { id: "unix-archive" }, "id"],
+        ["bad-action", { actions: [{ ...definition().actions[0] as Record<string, unknown>, name: "extract-file" }] }, "actions.extract-file.name"]
+      ]
+      for (const [, candidate, field] of cases) {
+        const error = yield* decodeToolDefinition(document(definition(candidate))).pipe(Effect.flip)
+        expect(error).toBeInstanceOf(InvalidToolDefinition)
+        expect(error).toMatchObject({ field })
+      }
+
+      const dotted = yield* decodeToolDefinition(document(definition({ id: "unix.archive" })))
+      expect(dotted.definition.id).toBe("unix.archive")
+    })
+  )
+
   it.effect("loads only from explicit locations in precedence order and fails closed on identity collisions", () =>
     Effect.gen(function* () {
       const visited: string[] = []

@@ -241,6 +241,17 @@ const nonBlank = (definition: ToolDefinition, field: string, value: string) =>
     ? Effect.fail(new InvalidToolDefinition({ id: definition.id, field, reason: "must not be blank" }))
     : Effect.void
 
+const identifierSegment = /^[A-Za-z_][A-Za-z0-9_]*$/
+
+const callableNamespace = (definition: ToolDefinition, field: string, value: string) =>
+  value.split(".").length > 0 && value.split(".").every((segment) => identifierSegment.test(segment))
+    ? Effect.void
+    : Effect.fail(new InvalidToolDefinition({
+      id: definition.id,
+      field,
+      reason: "must be dot-separated Airlock identifier segments"
+    }))
+
 /**
  * The definition format accepts a deliberately small JSON-Schema-shaped
  * vocabulary. It is a validation format, never a hook for executable code or
@@ -380,12 +391,28 @@ export const validateToolDefinition = (
 ): Effect.Effect<ToolDefinition, InvalidToolDefinition | DuplicateToolAction> =>
   Effect.gen(function* () {
     yield* nonBlank(definition, "id", definition.id)
+    yield* callableNamespace(definition, "id", definition.id)
     yield* nonBlank(definition, "version", definition.version)
     if (definition.executables.length === 0) {
       return yield* new InvalidToolDefinition({
         id: definition.id,
         field: "executables",
         reason: "must declare at least one compatible executable selector"
+      })
+    }
+    if (definition.executables.length !== 1) {
+      return yield* new InvalidToolDefinition({
+        id: definition.id,
+        field: "executables",
+        reason: "v1 definitions must declare exactly one executable selector"
+      })
+    }
+    const selector = definition.executables[0]!.selector
+    if (!selector.startsWith("/") || selector.includes("\0")) {
+      return yield* new InvalidToolDefinition({
+        id: definition.id,
+        field: "executables[].selector",
+        reason: "must be one absolute executable path without NUL"
       })
     }
     if (definition.actions.length === 0) {
@@ -401,6 +428,7 @@ export const validateToolDefinition = (
     }
     for (const action of definition.actions) {
       yield* nonBlank(definition, "actions[].name", action.name)
+      yield* callableNamespace(definition, `actions.${action.name}.name`, action.name)
       yield* parseToolSchema(definition, action, "input", action.inputSchema).pipe(
         Effect.asVoid,
         Effect.mapError((error) => new InvalidToolDefinition({ id: definition.id, field: `actions.${action.name}.inputSchema${error.path.slice(1)}`, reason: error.reason }))

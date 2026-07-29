@@ -308,13 +308,14 @@ describe("inert tool action lowering", () => {
         }
       ]
 
-      for (const testCase of cases) {
+      for (const [index, testCase] of cases.entries()) {
+        const actionName = `case_${index}`
         const loaded = yield* load(archiveDefinition([{
           ...testCase.action,
-          name: testCase.name
+          name: actionName
         }]))
         const error = yield* lowerToolAction(
-          request(loaded, testCase.input, { action: testCase.name })
+          request(loaded, testCase.input, { action: actionName })
         ).pipe(Effect.flip)
         expect(error, testCase.name).toBeInstanceOf(ToolTemplateRejected)
         expect(error, testCase.name).toMatchObject({ reason: testCase.reason })
