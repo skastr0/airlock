@@ -188,6 +188,111 @@ describe("Hold — undoable mutations", () => {
       })
     )
   )
+
+  it.effect("replaceFrom renames a Cell file into place and undo restores the prior target", () =>
+    world(({ fs, hold, path, tmp }) =>
+      Effect.gen(function* () {
+        const target = path.join(tmp, "target.txt")
+        const source = path.join(tmp, "cell-output.txt")
+        yield* fs.writeFileString(target, "before")
+        yield* fs.writeFileString(source, "after")
+
+        const receipt = yield* hold.replaceFrom(target, source)
+        expect(receipt.kind).toBe("file")
+        expect(receipt.metadata.bytes).toBe("after".length)
+        expect(receipt.previousHeld).toBe(true)
+        expect(yield* fs.exists(source)).toBe(false)
+        expect(yield* fs.readFileString(target)).toBe("after")
+
+        yield* hold.undo(receipt.id)
+        expect(yield* fs.readFileString(target)).toBe("before")
+      })
+    )
+  )
+
+  it.effect("replaceFrom installs a whole binary-containing directory without copying", () =>
+    world(({ fs, hold, path, tmp }) =>
+      Effect.gen(function* () {
+        const source = path.join(tmp, "cell-tree")
+        const target = path.join(tmp, "published-tree")
+        const binary = new Uint8Array([0, 255, 17, 128, 64])
+        yield* fs.makeDirectory(path.join(source, "nested"), { recursive: true })
+        yield* fs.writeFile(path.join(source, "nested", "output.bin"), binary)
+
+        const receipt = yield* hold.replaceFrom(target, source)
+        expect(receipt.kind).toBe("directory")
+        expect(yield* fs.exists(source)).toBe(false)
+        expect(Array.from(yield* fs.readFile(path.join(target, "nested", "output.bin")))).toEqual(
+          Array.from(binary)
+        )
+
+        yield* hold.undo(receipt.id)
+        expect(yield* fs.exists(target)).toBe(false)
+      })
+    )
+  )
+
+  it.effect("replaceFrom rejects missing and cross-volume sources before mutation", () =>
+    world(({ fs, hold, path, tmp }) =>
+      Effect.gen(function* () {
+        const target = path.join(tmp, "target")
+        const missing = yield* hold
+          .replaceFrom(target, path.join(tmp, "missing-cell-output"))
+          .pipe(Effect.flip)
+        expect(missing._tag).toBe("SourceNotFound")
+
+        // /dev is devfs on macOS; its device differs from the writable test
+        // workspace. The source is rejected before any rename can happen.
+        const crossVolume = yield* hold.replaceFrom(target, "/dev/null").pipe(Effect.flip)
+        expect(crossVolume._tag).toBe("SourceVolumeMismatch")
+        expect(yield* fs.exists(target)).toBe(false)
+      })
+    )
+  )
+
+  it.effect("replaceFrom fails closed on source and dangling target symlinks", () =>
+    world(({ fs, hold, path, tmp }) =>
+      Effect.gen(function* () {
+        const target = path.join(tmp, "target")
+        const sourceLink = path.join(tmp, "cell-output-link")
+        yield* fs.symlink("/missing-cell-output", sourceLink)
+
+        const sourceError = yield* hold.replaceFrom(target, sourceLink).pipe(Effect.flip)
+        expect(sourceError._tag).toBe("UnsupportedReplacementSymlink")
+        expect(yield* fs.readLink(sourceLink)).toBe("/missing-cell-output")
+
+        const source = path.join(tmp, "cell-output")
+        yield* fs.writeFileString(source, "safe")
+        yield* fs.symlink("/missing-target", target)
+        const targetError = yield* hold.replaceFrom(target, source).pipe(Effect.flip)
+        expect(targetError._tag).toBe("UnsupportedReplacementSymlink")
+        expect(yield* fs.readLink(target)).toBe("/missing-target")
+        expect(yield* fs.exists(source)).toBe(true)
+      })
+    )
+  )
+
+  it.effect("replaceFrom rejects both source/target ancestry overlaps before holding either path", () =>
+    world(({ fs, hold, path, tmp }) =>
+      Effect.gen(function* () {
+        const container = path.join(tmp, "container")
+        const nestedSource = path.join(container, "cell-output")
+        yield* fs.makeDirectory(container, { recursive: true })
+        yield* fs.writeFileString(nestedSource, "inside target")
+
+        const sourceInside = yield* hold.replaceFrom(container, nestedSource).pipe(Effect.flip)
+        expect(sourceInside._tag).toBe("OverlappingReplacementPaths")
+        expect(yield* fs.readFileString(nestedSource)).toBe("inside target")
+
+        const sourceTree = path.join(tmp, "source-tree")
+        const nestedTarget = path.join(sourceTree, "output")
+        yield* fs.makeDirectory(sourceTree, { recursive: true })
+        const targetInside = yield* hold.replaceFrom(nestedTarget, sourceTree).pipe(Effect.flip)
+        expect(targetInside._tag).toBe("OverlappingReplacementPaths")
+        expect(yield* fs.exists(sourceTree)).toBe(true)
+      })
+    )
+  )
 })
 
 describe("construction invariant", () => {

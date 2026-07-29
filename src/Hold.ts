@@ -1,5 +1,6 @@
 import { FileSystem, Path } from "@effect/platform"
 import { Context, DateTime, Effect, Layer, Option, Schema } from "effect"
+import { lstat } from "node:fs/promises"
 import { AirlockHome } from "./AirlockHome.ts"
 import {
   ActId,
@@ -52,9 +53,61 @@ export class TargetOccupied extends Schema.TaggedError<TargetOccupied>()(
   { target: Schema.String }
 ) {}
 
+export class SourceNotFound extends Schema.TaggedError<SourceNotFound>()(
+  "SourceNotFound",
+  { source: Schema.String }
+) {}
+
+export class SourceVolumeMismatch extends Schema.TaggedError<SourceVolumeMismatch>()(
+  "SourceVolumeMismatch",
+  {
+    source: Schema.String,
+    target: Schema.String,
+    holdDir: Schema.String,
+    sourceDevice: Schema.Number,
+    targetDevice: Schema.Number,
+    holdDevice: Schema.Number
+  }
+) {}
+
+export class SourceEqualsTarget extends Schema.TaggedError<SourceEqualsTarget>()(
+  "SourceEqualsTarget",
+  { source: Schema.String, target: Schema.String }
+) {}
+
+export class OverlappingReplacementPaths extends Schema.TaggedError<OverlappingReplacementPaths>()(
+  "OverlappingReplacementPaths",
+  { source: Schema.String, target: Schema.String }
+) {}
+
+export class UnsupportedReplacementSymlink extends Schema.TaggedError<UnsupportedReplacementSymlink>()(
+  "UnsupportedReplacementSymlink",
+  {
+    path: Schema.String,
+    role: Schema.Literal("source", "target")
+  }
+) {}
+
 type HoldIoError = HoldFilesystemError | CrossVolumeHold
 type HoldRecoveryError = HoldFilesystemError | HoldRecoveryIndeterminate
 type HoldMutationError = HoldIoError | LedgerError
+
+export class ReplaceMetadata extends Schema.Class<ReplaceMetadata>("ReplaceMetadata")({
+  device: Schema.Number,
+  inode: Schema.optional(Schema.Number),
+  mode: Schema.Number,
+  bytes: Schema.Number
+}) {}
+
+export class ReplaceReceipt extends Schema.Class<ReplaceReceipt>("ReplaceReceipt")({
+  id: ActId,
+  source: Schema.String,
+  target: Schema.String,
+  kind: Schema.Literal("file", "directory"),
+  metadata: ReplaceMetadata,
+  previousHeld: Schema.Boolean,
+  at: Schema.DateTimeUtc
+}) {}
 
 export class Hold extends Context.Tag("airlock/Hold")<
   Hold,
@@ -71,6 +124,20 @@ export class Hold extends Context.Tag("airlock/Hold")<
     ) => Effect.Effect<
       OverwriteReceipt,
       ProtectedPath | HoldMutationError | TargetOccupied
+    >
+    readonly replaceFrom: (
+      target: string,
+      source: string
+    ) => Effect.Effect<
+      ReplaceReceipt,
+      | ProtectedPath
+      | SourceNotFound
+      | SourceVolumeMismatch
+      | SourceEqualsTarget
+      | OverlappingReplacementPaths
+      | UnsupportedReplacementSymlink
+      | HoldMutationError
+      | TargetOccupied
     >
     readonly undo: (
       id: ActId
@@ -110,6 +177,11 @@ type Entry = Readonly<{
   readonly retained: RetainedMetadata
 }>
 
+type ReplaceSource = Readonly<{
+  readonly kind: "file" | "directory"
+  readonly metadata: ReplaceMetadata
+}>
+
 const encodeJournal = Schema.encode(Schema.parseJson(HoldJournal))
 const decodeJournal = Schema.decode(Schema.parseJson(HoldJournal))
 const decodeLegacyManifest = Schema.decode(Schema.parseJson(HeldManifest))
@@ -118,6 +190,12 @@ const newActId = () => ActId.make(`act_${crypto.randomUUID().slice(0, 13)}`)
 
 const reasonOf = (cause: unknown) =>
   cause instanceof Error ? cause.message : String(cause)
+
+const isNotFound = (cause: unknown) =>
+  typeof cause === "object" &&
+  cause !== null &&
+  "code" in cause &&
+  (cause as { readonly code?: unknown }).code === "ENOENT"
 
 const make = Effect.gen(function* () {
   const fs = yield* FileSystem.FileSystem
@@ -195,6 +273,57 @@ const make = Effect.gen(function* () {
       })
     )
 
+  // `HeldManifest` intentionally models files and directories only. lstat is
+  // therefore a fail-closed preflight: do not let an unrepresentable dangling
+  // symlink reach an exists/stat path that would follow it and lose the name.
+  const inspectSource = (source: string) =>
+    Effect.tryPromise({
+      try: () => lstat(source),
+      catch: (cause) =>
+        isNotFound(cause)
+          ? new SourceNotFound({ source })
+          : fsError("lstat replacement source", source)(cause)
+    }).pipe(
+      Effect.flatMap((info) => {
+        if (info.isSymbolicLink()) {
+          return new UnsupportedReplacementSymlink({ path: source, role: "source" })
+        }
+        const kind = info.isDirectory()
+          ? ("directory" as const)
+          : ("file" as const)
+        return Effect.succeed({
+          kind,
+          metadata: new ReplaceMetadata({
+            device: info.dev,
+            inode: info.ino,
+            mode: info.mode,
+            bytes: info.size
+          })
+        } satisfies ReplaceSource)
+      })
+    )
+
+  const replacementTargetExists = (target: string) =>
+    Effect.tryPromise({
+      try: async () => {
+        try {
+          return await lstat(target)
+        } catch (cause) {
+          if (isNotFound(cause)) return undefined
+          throw cause
+        }
+      },
+      catch: (cause) => fsError("lstat replacement target", target)(cause)
+    }).pipe(
+      Effect.flatMap((info) => {
+        if (info === undefined) return Effect.succeed(false)
+        if (info.isSymbolicLink()) {
+          return new UnsupportedReplacementSymlink({ path: target, role: "target" })
+        }
+        return Effect.succeed(true)
+      })
+    )
+
   // A rename into or out of the hold is only atomic on one volume. We admit
   // the path before allocating an act or moving any live entry.
   const admitSameVolume = (target: string) =>
@@ -211,6 +340,35 @@ const make = Effect.gen(function* () {
           ? Effect.void
           : new CrossVolumeHold({ target, holdDir: home.holdDir })
       )
+    )
+
+  const admitReplacement = (
+    source: string,
+    target: string,
+    entry: ReplaceSource,
+    existingTargetDevice?: number
+  ) =>
+    Effect.all({
+      hold: fs
+        .stat(home.holdDir)
+        .pipe(Effect.mapError(fsError("stat hold directory", home.holdDir))),
+      targetParent: fs
+        .stat(path.dirname(target))
+        .pipe(Effect.mapError(fsError("stat target parent", path.dirname(target))))
+    }).pipe(
+      Effect.flatMap(({ hold, targetParent }) => {
+        const targetDevice = existingTargetDevice ?? targetParent.dev
+        return hold.dev === targetDevice && hold.dev === entry.metadata.device
+          ? Effect.void
+          : new SourceVolumeMismatch({
+              source,
+              target,
+              holdDir: home.holdDir,
+              sourceDevice: entry.metadata.device,
+              targetDevice,
+              holdDevice: hold.dev
+            })
+      })
     )
 
   const reserveAct = Effect.fnUntraced(function* (
@@ -255,7 +413,10 @@ const make = Effect.gen(function* () {
     return manifest
   })
 
-  const prepareCreation = Effect.fnUntraced(function* (target: string) {
+  const prepareCreation = Effect.fnUntraced(function* (
+    target: string,
+    kind: "file" | "directory" = "file"
+  ) {
     yield* admitSameVolume(target)
     const id = newActId()
     const at = yield* DateTime.now
@@ -263,7 +424,7 @@ const make = Effect.gen(function* () {
       id,
       act: "overwrite",
       target,
-      kind: "file",
+      kind,
       hasPayload: false,
       status: "held",
       at
@@ -288,6 +449,29 @@ const make = Effect.gen(function* () {
     yield* fs
       .rename(stageFile(manifest.id), manifest.target)
       .pipe(Effect.mapError(fsError("install staged replacement", manifest.target)))
+    if (!manifest.hasPayload) {
+      yield* writeJournal(new HoldJournal({ state: "held", manifest }))
+    }
+  })
+
+  // `source` is already a complete Cell output. Installing it is a rename,
+  // not a copy or a tool-specific interpretation. The prepared creation path
+  // lets startup recover a crash after this rename but before its held receipt.
+  const installSource = Effect.fnUntraced(function* (
+    manifest: HeldManifest,
+    source: string
+  ) {
+    const occupied = yield* fs
+      .exists(manifest.target)
+      .pipe(Effect.mapError(fsError("check replacement target", manifest.target)))
+    if (occupied) return yield* new TargetOccupied({ target: manifest.target })
+    yield* fs.rename(source, manifest.target).pipe(
+      Effect.mapError((error) =>
+        error._tag === "SystemError" && error.reason === "NotFound"
+          ? new SourceNotFound({ source })
+          : fsError("install replacement source", source)(error)
+      )
+    )
     if (!manifest.hasPayload) {
       yield* writeJournal(new HoldJournal({ state: "held", manifest }))
     }
@@ -462,6 +646,57 @@ const make = Effect.gen(function* () {
     })
   })
 
+  const replaceFrom = Effect.fn("Hold.replaceFrom")(function* (
+    rawTarget: string,
+    rawSource: string
+  ) {
+    const target = path.resolve(rawTarget)
+    const source = path.resolve(rawSource)
+    yield* guard(target)
+    const sourceInsideTarget = source.startsWith(`${target}/`)
+    const targetInsideSource = target.startsWith(`${source}/`)
+    if (source === target) {
+      return yield* new SourceEqualsTarget({ source, target })
+    }
+    if (sourceInsideTarget || targetInsideSource) {
+      return yield* new OverlappingReplacementPaths({ source, target })
+    }
+    const sourceEntry = yield* inspectSource(source)
+    const targetExists = yield* replacementTargetExists(target)
+    const existingTarget = targetExists ? yield* inspect(target) : undefined
+    yield* admitReplacement(
+      source,
+      target,
+      sourceEntry,
+      existingTarget?.retained.device
+    )
+    const manifest = existingTarget !== undefined
+      ? yield* holdTarget(target, "overwrite", existingTarget)
+      : yield* prepareCreation(
+          target,
+          sourceEntry.kind === "directory" ? "directory" : "file"
+        )
+    yield* installSource(manifest, source)
+    yield* ledger.record(
+      new LedgerEntry({
+        at: manifest.at,
+        effect: "mutation",
+        act: "overwrite",
+        ref: manifest.id,
+        detail: `${source} -> ${target}`
+      })
+    )
+    return new ReplaceReceipt({
+      id: manifest.id,
+      source,
+      target,
+      kind: sourceEntry.kind,
+      metadata: sourceEntry.metadata,
+      previousHeld: manifest.hasPayload,
+      at: manifest.at
+    })
+  })
+
   const undo = Effect.fn("Hold.undo")(function* (id: ActId) {
     const journal = yield* readJournal(id)
     if (journal.state !== "held") {
@@ -550,7 +785,7 @@ const make = Effect.gen(function* () {
     return new ReapReport({ reaped: expired.map((journal) => journal.manifest.id), at: now })
   })
 
-  return Hold.of({ remove, overwrite, undo, undoLast, held, reap })
+  return Hold.of({ remove, overwrite, replaceFrom, undo, undoLast, held, reap })
 })
 
 export const HoldLive = Layer.effect(Hold, make)
