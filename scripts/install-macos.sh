@@ -176,24 +176,36 @@ else
 fi
 mkdir -p "$TRASH"
 TRANSACTION="$(mktemp -d "$TRASH/.airlock.replaced.XXXXXXXX")"
+MOVED_OLD_AIRLOCK=0
+MOVED_OLD_AGENT=0
+INSTALLED_AIRLOCK=0
+INSTALLED_AGENT=0
 
 rollback() {
-  status=$?
+  status="${1:-75}"
   # Avoid invoking the EXIT trap again when this function exits after it has
   # restored the pair.
   trap - 0 HUP INT TERM
-  if [ -e "$TARGET" ] || [ -L "$TARGET" ]; then mv "$TARGET" "$TRANSACTION/failed-airlock" || true; fi
-  if [ -e "$AGENT_TARGET" ] || [ -L "$AGENT_TARGET" ]; then mv "$AGENT_TARGET" "$TRANSACTION/failed-airlock-agent" || true; fi
-  if [ "$HAS_TARGET" -eq 1 ] && { [ -e "$TRANSACTION/airlock" ] || [ -L "$TRANSACTION/airlock" ]; }; then mv "$TRANSACTION/airlock" "$TARGET" || true; fi
-  if [ "$HAS_AGENT_TARGET" -eq 1 ] && { [ -e "$TRANSACTION/airlock-agent" ] || [ -L "$TRANSACTION/airlock-agent" ]; }; then mv "$TRANSACTION/airlock-agent" "$AGENT_TARGET" || true; fi
+  # Only paths installed by this transaction may be displaced. A failed
+  # earlier boundary can leave the other original binary live.
+  if [ "$INSTALLED_AIRLOCK" -eq 1 ]; then mv "$TARGET" "$TRANSACTION/failed-airlock" || true; fi
+  if [ "$INSTALLED_AGENT" -eq 1 ]; then mv "$AGENT_TARGET" "$TRANSACTION/failed-airlock-agent" || true; fi
+  if [ "$MOVED_OLD_AIRLOCK" -eq 1 ]; then mv "$TRANSACTION/airlock" "$TARGET" || true; fi
+  if [ "$MOVED_OLD_AGENT" -eq 1 ]; then mv "$TRANSACTION/airlock-agent" "$AGENT_TARGET" || true; fi
   exit "$status"
 }
-trap rollback 0 HUP INT TERM
+trap 'status=$?; rollback "$status"' 0 HUP INT TERM
 
-if [ "$HAS_TARGET" -eq 1 ] && ! mv "$TARGET" "$TRANSACTION/airlock"; then rollback; fi
-if [ "$HAS_AGENT_TARGET" -eq 1 ] && ! mv "$AGENT_TARGET" "$TRANSACTION/airlock-agent"; then rollback; fi
-if ! mv "$CANDIDATE" "$TARGET" || ! mv "$AGENT_CANDIDATE" "$AGENT_TARGET"; then
-  rollback
+if [ "$HAS_TARGET" -eq 1 ]; then
+  if mv "$TARGET" "$TRANSACTION/airlock"; then MOVED_OLD_AIRLOCK=1; else rollback 75; fi
+fi
+if [ "$HAS_AGENT_TARGET" -eq 1 ]; then
+  if mv "$AGENT_TARGET" "$TRANSACTION/airlock-agent"; then MOVED_OLD_AGENT=1; else rollback 75; fi
+fi
+if mv "$CANDIDATE" "$TARGET"; then INSTALLED_AIRLOCK=1; else rollback 75; fi
+if mv "$AGENT_CANDIDATE" "$AGENT_TARGET"; then INSTALLED_AGENT=1; else rollback 75; fi
+if [ "$INSTALLED_AIRLOCK" -ne 1 ] || [ "$INSTALLED_AGENT" -ne 1 ]; then
+  rollback 75
 fi
 trap - 0 HUP INT TERM
 

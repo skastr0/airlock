@@ -193,4 +193,40 @@ describe("macOS distribution scripts", () => {
     expect(readFileSync(target, "utf8")).toBe("prior-supervisor")
     expect(readFileSync(agentTarget, "utf8")).toBe("prior-agent")
   })
+
+  it("restores the byte-identical prior pair and returns failure at every install rename boundary", () => {
+    for (const failAt of [1, 2, 3, 4]) {
+      const temporary = root()
+      const { checksum, source } = fixture(temporary)
+      const prefix = join(temporary, "prefix")
+      const bin = join(prefix, "bin")
+      const target = join(bin, "airlock")
+      const agentTarget = join(bin, "airlock-agent")
+      const shims = join(temporary, "shims")
+      const counter = join(temporary, "mv-count")
+      mkdirSync(bin, { recursive: true })
+      mkdirSync(shims)
+      writeFileSync(target, `prior-supervisor-${failAt}`)
+      writeFileSync(agentTarget, `prior-agent-${failAt}`)
+      const moveShim = join(shims, "mv")
+      writeFileSync(
+        moveShim,
+        "#!/bin/sh\ncount=0\nif [ -f \"$AIRLOCK_MV_COUNTER\" ]; then count=$(cat \"$AIRLOCK_MV_COUNTER\"); fi\ncount=$((count + 1))\nprintf '%s' \"$count\" > \"$AIRLOCK_MV_COUNTER\"\nif [ \"$count\" -eq \"$AIRLOCK_FAIL_MV_AT\" ]; then exit 91; fi\nexec /bin/mv \"$@\"\n"
+      )
+      chmodSync(moveShim, 0o755)
+      const failed = run(
+        install,
+        ["--source", source, "--checksum", checksum, "--prefix", prefix, "--replace"],
+        temporary,
+        {
+          AIRLOCK_FAIL_MV_AT: String(failAt),
+          AIRLOCK_MV_COUNTER: counter,
+          PATH: `${shims}:${process.env.PATH ?? "/usr/bin:/bin"}`
+        }
+      )
+      expect(failed.status).toBe(75)
+      expect(readFileSync(target, "utf8")).toBe(`prior-supervisor-${failAt}`)
+      expect(readFileSync(agentTarget, "utf8")).toBe(`prior-agent-${failAt}`)
+    }
+  })
 })
