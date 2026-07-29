@@ -10,6 +10,9 @@
   },
   "scripts": {
     "dev": "bun run ./src/cli.ts",
+    "build:macos": "bun scripts/build-macos.ts",
+    "install:macos": "sh scripts/install-macos.sh",
+    "uninstall:macos": "sh scripts/uninstall-macos.sh",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "verify": "bun run typecheck && bun run test"
