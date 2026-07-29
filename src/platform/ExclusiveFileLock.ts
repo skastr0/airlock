@@ -1,4 +1,4 @@
-import { Effect } from "effect"
+import { Cause, Effect, Exit } from "effect"
 import {
   lstat,
   open,
@@ -163,7 +163,20 @@ export const makeExclusiveFileLock = <E>(
       })
 
       if (claimed) {
-        yield* syncRoot("publish-lock-sync-directory")
+        const publication = yield* syncRoot(
+          "publish-lock-sync-directory"
+        ).pipe(Effect.exit)
+        if (Exit.isFailure(publication)) {
+          const cleanup = yield* retire(
+            options.abandoned,
+            "abandon-unpublished-lock"
+          ).pipe(Effect.exit)
+          return yield* Exit.isFailure(cleanup)
+            ? Effect.failCause(
+                Cause.sequential(publication.cause, cleanup.cause)
+              )
+            : Effect.failCause(publication.cause)
+        }
         return owner.token
       }
 
@@ -230,7 +243,24 @@ export const makeExclusiveFileLock = <E>(
       restore(acquire()).pipe(
         Effect.flatMap((token) =>
           restore(effect).pipe(
-            Effect.ensuring(release(token).pipe(Effect.orDie))
+            Effect.exit,
+            Effect.flatMap((use) =>
+              release(token).pipe(
+                Effect.exit,
+                Effect.flatMap((released) => {
+                  if (Exit.isFailure(released)) {
+                    return Exit.isFailure(use)
+                      ? Effect.failCause(
+                          Cause.sequential(use.cause, released.cause)
+                        )
+                      : Effect.failCause(released.cause)
+                  }
+                  return Exit.isFailure(use)
+                    ? Effect.failCause(use.cause)
+                    : Effect.succeed(use.value)
+                })
+              )
+            )
           )
         )
       )

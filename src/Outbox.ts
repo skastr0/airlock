@@ -51,7 +51,7 @@ type StageError =
   | UnsupportedExternalIntent
   | OutboxStorageFailed
   | OutboxStateCorrupt
-  | LedgerError
+  | OutboxRecoveryRequired
 
 type ReadError =
   | UnknownEmission
@@ -68,9 +68,27 @@ type CommitError =
   | ReadError
   | TransitionError
   | EmissionDispatchUncertain
-  | LedgerError
+  | OutboxRecoveryRequired
 
-type CancelError = TransitionError | OutboxStateCorrupt | LedgerError
+type CancelError =
+  | TransitionError
+  | OutboxStateCorrupt
+  | OutboxRecoveryRequired
+
+export class OutboxRecoveryRequired extends Schema.TaggedError<OutboxRecoveryRequired>()(
+  "OutboxRecoveryRequired",
+  {
+    id: EmissionId,
+    phase: Schema.Literal(
+      "ledger-after-stage",
+      "ledger-after-commit",
+      "ledger-after-cancel"
+    ),
+    status: Schema.Literal("staged", "committed", "cancelled"),
+    emission: OutboxEmission,
+    reason: Schema.String
+  }
+) {}
 
 export class Outbox extends Context.Tag("airlock/Outbox")<
   Outbox,
@@ -98,7 +116,7 @@ export class Outbox extends Context.Tag("airlock/Outbox")<
         readonly failed: ReadonlyArray<string>
         readonly waiting: number
       },
-      OutboxStorageFailed | OutboxStateCorrupt | LedgerError
+      OutboxStorageFailed | OutboxStateCorrupt | OutboxRecoveryRequired
     >
   }
 >() {}
@@ -119,6 +137,9 @@ const decodeOutcome = Schema.decode(
 )
 
 const textEncoder = new TextEncoder()
+
+const ledgerFailureReason = (error: LedgerError) =>
+  `${error._tag}: ${error.reason}`
 
 const newEmissionId = () =>
   EmissionId.make(`emi_${crypto.randomUUID().slice(0, 13)}`)
@@ -331,6 +352,7 @@ const make = Effect.gen(function* () {
       Effect.mapError(() => parseFailure(id, "dispatch-encode"))
     )
     yield* store.create(id, manifestJson, dispatchJson)
+    const staged = toEmission(manifest, "staged")
     yield* ledger.record(
       new LedgerEntry({
         at: stagedAt,
@@ -339,8 +361,19 @@ const make = Effect.gen(function* () {
         ref: id,
         detail: `${http.method} ${summary.intent.endpoint}`
       })
+    ).pipe(
+      Effect.mapError(
+        (error) =>
+          new OutboxRecoveryRequired({
+            id,
+            phase: "ledger-after-stage",
+            status: "staged",
+            emission: staged,
+            reason: ledgerFailureReason(error)
+          })
+      )
     )
-    return toEmission(manifest, "staged")
+    return staged
   })
 
   // The point of no return. This lexical body contains the only wire-capable
@@ -424,6 +457,7 @@ const make = Effect.gen(function* () {
         })
       }
 
+      const committed = toEmission(manifest, "committed", outcome)
       yield* ledger.record(
         new LedgerEntry({
           at: completedAt,
@@ -432,8 +466,19 @@ const make = Effect.gen(function* () {
           ref: id,
           detail: `${manifest.intent.method} ${manifest.intent.endpoint} -> ${outcome.status}`
         })
+      ).pipe(
+        Effect.mapError(
+          (error) =>
+            new OutboxRecoveryRequired({
+              id,
+              phase: "ledger-after-commit",
+              status: "committed",
+              emission: committed,
+              reason: ledgerFailureReason(error)
+            })
+        )
       )
-      return toEmission(manifest, "committed", outcome)
+      return committed
     }).pipe(Effect.ensuring(markUncertainIfCommitting(id))))
   })
 
@@ -449,6 +494,17 @@ const make = Effect.gen(function* () {
         ref: id,
         detail: `${cancelled.intent.method} ${cancelled.intent.endpoint}`
       })
+    ).pipe(
+      Effect.mapError(
+        (error) =>
+          new OutboxRecoveryRequired({
+            id,
+            phase: "ledger-after-cancel",
+            status: "cancelled",
+            emission: cancelled,
+            reason: ledgerFailureReason(error)
+          })
+      )
     )
     return cancelled
   })
@@ -478,10 +534,7 @@ const make = Effect.gen(function* () {
       const result = yield* commit(emission.id).pipe(Effect.either)
       if (result._tag === "Right") {
         committed.push(result.right)
-      } else if (
-        result.left._tag === "LedgerFilesystemError" ||
-        result.left._tag === "LedgerDecodeError"
-      ) {
+      } else if (result.left._tag === "OutboxRecoveryRequired") {
         return yield* result.left
       } else {
         failed.push(emission.id)
