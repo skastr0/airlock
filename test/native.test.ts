@@ -201,5 +201,6 @@ describe("NativeFileSystem — scoped native actions", () => {
     const source = await readFile(new URL("../src/native/NativeFileSystem.ts", import.meta.url), "utf-8")
     expect(source).not.toContain("fs.remove")
     expect(source).not.toContain("unlink(")
+    expect(source).not.toContain("native-stage")
   })
 })
