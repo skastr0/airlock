@@ -176,7 +176,7 @@ Airlock follows **Pristine Components, Messy Integrations**:
 
 Hold and Outbox are earned nuclei because they already encode real invariants
 and have executable tests. They now serialize recovery transitions across
-processes with a bounded, recoverable exclusive-file lease. Hold durably stages
+processes with a bounded, cancellable, recoverable exclusive-file lease. Hold durably stages
 and promotes its journal, including recovery from a staged-only candidate;
 Outbox serializes stage/claim/recovery through the same Airlock-home lock
 boundary. This is real durability and concurrency evidence, not certification

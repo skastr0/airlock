@@ -302,11 +302,13 @@ Implemented properties include:
 - no direct unlink in native filesystem actions; and
 - one construction-counted irreversible removal site in `Hold.reap`.
 
-The Hold root is protected by a bounded cross-process exclusive-file lease.
+The Hold root is protected by a bounded, cancellable cross-process
+exclusive-file lease.
 Journal publication stages and syncs a candidate before rename, startup picks
 the best valid journal candidate, and recovery can promote a staged-only
 candidate after an injected publication failure. Tests exercise competing
-processes, stale-owner reclamation, and bounded lock-directory growth.
+processes, interrupted waiters, stale-owner reclamation, and bounded
+lock-directory growth.
 
 The current evidence still does not establish crash safety at every filesystem
 and kernel point, every overlapping Apply/undo/reap schedule, metadata
@@ -318,8 +320,8 @@ Outbox stores a redacted public manifest and an owner-only private HTTP
 dispatch document. Staging writes durable local state and a Ledger entry.
 Cancellation renames staged state without contacting the network.
 
-Outbox uses the same bounded Airlock-home exclusive-file lease to serialize
-stage, claim, and recovery transitions across processes. A recovered
+Outbox uses the same bounded, cancellable Airlock-home exclusive-file lease to
+serialize stage, claim, and recovery transitions across processes. A recovered
 `committing` directory remains `uncertain`; the lease does not turn ambiguous
 external delivery into a retryable success/failure result.
 
@@ -371,9 +373,13 @@ durable receipt after every crash point.
 The installed `airlock-agent` entrypoint intentionally exposes a narrower
 surface than the supervisor binary: program/schema/capability and read-only
 state inspection remain available, while raw exec, direct mutation,
-dispatch/cancel, undo/reap, and flush are absent. This is evidence for the
-intended harness boundary, not proof that an external harness supplied no
-alternate machine-effect tool.
+dispatch/cancel, undo/reap, and flush are absent. Its program commands have no
+agent-controlled profile option; the supervisor may pin
+`AIRLOCK_AGENT_PROFILE`, with compatibility as the default. Programs can
+request structured Invoke/Apply nodes inside that profile. A node-level
+downgrade is denied with a failed `RuntimeCapabilityDenied` receipt rather
+than executed. This is evidence for the intended harness boundary, not proof
+that an external harness supplied no alternate machine-effect tool.
 
 ## Effect and PCMI strata
 

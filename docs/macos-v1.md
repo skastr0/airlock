@@ -43,7 +43,11 @@ remain release-owner gates.
 
 `airlock` is the supervisor surface. `airlock-agent` omits raw exec, direct
 mutation, dispatch/cancel, undo/reap, and flush while retaining program,
-schema/capability, and read-only state commands.
+schema/capability, and read-only state commands. Agent program commands do not
+accept `--profile`; the supervisor may pin `AIRLOCK_AGENT_PROFILE`, otherwise
+compatibility remains the default. A program may request structured
+Invoke/Apply nodes, but an attempted node downgrade is returned as a failed
+`RuntimeCapabilityDenied` receipt without performing the effect.
 
 `airlock doctor` and `airlock capabilities` return the same machine-readable
 report. It distinguishes an enforced mechanism from something merely present

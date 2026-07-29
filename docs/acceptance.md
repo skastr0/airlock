@@ -48,7 +48,8 @@ Evidence present today:
 - four checked-in parity fixtures exercise common file/process/control/native
   rewrite shapes;
 - Hold and Outbox have bounded cross-process lease, stale-owner recovery, and
-  journal/recovery tests; and
+  journal/recovery tests, including cancellation of contended waiters without
+  stealing the live owner; and
 - the paired supervisor/agent macOS artifacts are locally ad-hoc signed,
   hashed, verified, installed, and probed as one release pair; and
 - a later program failure returns a nonzero, versioned partial report that

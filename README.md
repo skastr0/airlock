@@ -120,7 +120,11 @@ default is `~/.airlock`.
 `airlock` is the supervisor surface. `airlock-agent` is intentionally
 narrower: it exposes program execution, schemas/capabilities, and read-only
 state inspection, but omits raw exec, direct mutation, dispatch/cancel,
-undo/reap, and flush.
+undo/reap, and flush. Agent `run`/`eval` has no `--profile` option; the
+supervisor may pin it with `AIRLOCK_AGENT_PROFILE` (otherwise compatibility
+remains the ratchet default). A program can still request structured Invoke or
+Apply work, but a node that attempts to weaken the selected profile returns a
+failed `RuntimeCapabilityDenied` receipt and does not perform the effect.
 
 The current program action vocabulary is generic:
 

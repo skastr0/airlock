@@ -47,11 +47,12 @@ Supported local mutation passes through Hold. The live binding is displaced
 by rename, undo checks the current binding before restoration, and
 `Hold.reap` owns the only irreversible removal site.
 
-Hold and Outbox serialize their recovery transitions through a bounded
-Airlock-home exclusive-file lease. The owner record is durably published,
-stale/dead owners can be reclaimed by rename, and tests exercise competing
-processes and bounded lock-directory growth. Hold also stages and syncs journal
-candidates before promotion and recovers a valid staged-only candidate.
+Hold and Outbox serialize their recovery transitions through a bounded,
+cancellable Airlock-home exclusive-file lease. The owner record is durably
+published, stale/dead owners can be reclaimed by rename, and tests exercise
+competing processes, interruption without stealing the live owner, and bounded
+lock-directory growth. Hold also stages and syncs journal candidates before
+promotion and recovers a valid staged-only candidate.
 
 The current envelope covers modeled files/directories and supported
 same-volume transitions. It does not establish safety for symlinks, hardlink
@@ -104,7 +105,10 @@ back to compatibility.
 
 The installed `airlock-agent` binary narrows the command surface by omitting
 raw exec, direct mutation, dispatch/cancel, undo/reap, and flush. This is a
-useful defense-in-depth boundary. It does not prove the external harness
+useful defense-in-depth boundary. It also removes the agent-controlled profile
+option: the supervisor pins `AIRLOCK_AGENT_PROFILE`, and a structured node
+that asks for a weaker profile receives a failed `RuntimeCapabilityDenied`
+receipt without performing the effect. It does not prove the external harness
 withheld every alternate machine-effect tool.
 
 ### Inert tool definitions

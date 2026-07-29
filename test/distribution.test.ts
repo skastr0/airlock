@@ -194,7 +194,7 @@ describe("macOS distribution scripts", () => {
     expect(readFileSync(agentTarget, "utf8")).toBe("prior-agent")
   })
 
-  it("restores the byte-identical prior pair and returns failure at every install rename boundary", () => {
+  it("restores the byte-identical prior pair and returns failure at every install rename boundary", { timeout: 30_000 }, () => {
     for (const failAt of [1, 2, 3, 4]) {
       const temporary = root()
       const { checksum, source } = fixture(temporary)

@@ -112,5 +112,5 @@ describe.skipIf(!supported)("shell parity — native-contained rewrite and undo"
     const undone = run(["undo", rewrite!.id], home, policy)
     expect(undone.status, undone.stderr).toBe(0)
     expect(readFileSync(live, "utf8")).toBe("before\n")
-  }, 20_000)
+  })
 })
