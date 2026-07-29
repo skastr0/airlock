@@ -15,7 +15,13 @@ import {
 } from "../src/plan/index.ts"
 import { MacosPlatformLive } from "../src/platform/macos/index.ts"
 import { ProcessReceipt, ProcessRequest, ProcessRunner, ProcessRunnerLive } from "../src/process/Process.ts"
-import { Runtime, RuntimeConfig, RuntimeConfigLive, RuntimeLive } from "../src/runtime/index.ts"
+import {
+  Runtime,
+  RuntimeConfig,
+  RuntimeConfigLive,
+  RuntimeInitialArtifact,
+  RuntimeLive
+} from "../src/runtime/index.ts"
 
 const node = (id: string) => NodeId.make(id)
 const artifact = (id: string) => ArtifactId.make(id)
@@ -37,7 +43,10 @@ const compatibilityLayer = (workspace: string, home: string) => RuntimeLive.pipe
   Layer.provideMerge(Layer.succeed(ProcessRunner, ProcessRunner.of({
     run: (request) => Effect.map(DateTime.now, (at) => new ProcessReceipt({
       executable: request.executable, args: request.args, cwd: request.cwd, pid: 1, exitCode: 0, signal: null,
-      stdout: new TextEncoder().encode(request.args.join("|")), stderr: new Uint8Array(), startedAt: at, finishedAt: at
+      stdout: typeof request.stdin === "object" && request.stdin._tag === "bytes"
+        ? request.stdin.bytes
+        : new TextEncoder().encode(request.args.join("|")),
+      stderr: new Uint8Array(), startedAt: at, finishedAt: at
     }))
   }))),
   Layer.provideMerge(impossibleCell),
@@ -55,8 +64,14 @@ const nativeLayer = (workspace: string, home: string, cell: Layer.Layer<Cell, an
   Layer.provideMerge(BunContext.layer)
 )
 
-const execute = (value: Plan, layer: Layer.Layer<Runtime, any, any>) =>
-  Effect.flatMap(Runtime, (runtime) => runtime.execute(value)).pipe(Effect.provide(layer))
+const execute = (
+  value: Plan,
+  layer: Layer.Layer<Runtime, any, any>,
+  initialArtifacts: ReadonlyArray<RuntimeInitialArtifact> = []
+) =>
+  Effect.flatMap(Runtime, (runtime) => runtime.execute(value, initialArtifacts)).pipe(
+    Effect.provide(layer)
+  )
 
 const fingerprint = (absolute: string, display: string): WorkspaceEntryFingerprint => {
   const info = lstatSync(absolute)
@@ -92,6 +107,47 @@ describe("runtime Plan interpreter", () => {
         expect(result.state).toBe("succeeded")
         expect(readFileSync(join(workspace, "result.txt"), "utf8")).toBe("%s|a value; never shell syntax")
       }))
+    )
+  )
+
+  it.effect("feeds explicit initial artifact bytes to stdin without materializing an ambient file", () =>
+    Effect.sync(() => mkdtempSync(join(tmpdir(), "airlock-runtime-"))).pipe(
+      Effect.flatMap((workspace) => {
+        const stdin = artifact("stdin")
+        const stdout = artifact("stdout")
+        const input = new RuntimeInitialArtifact({
+          id: stdin,
+          bytes: new TextEncoder().encode("structured pipe"),
+          mediaType: "text/plain; charset=utf-8",
+          provenance: "test:inline"
+        })
+        return Effect.gen(function* () {
+          const result = yield* execute(
+            plan([
+              new InvokeNode({
+                id: node("consume"),
+                dependsOn: [],
+                requires: [],
+                produces: [stdout],
+                executable: "/usr/bin/cat",
+                args: [],
+                cwd: workspace,
+                env: {},
+                stdin,
+                stdoutArtifact: stdout,
+                stdout: "capture",
+                stderr: "discard",
+                cellProfile: "compatibility"
+              })
+            ]),
+            compatibilityLayer(workspace, join(workspace, ".airlock-home")),
+            [input]
+          )
+          const output = result.artifacts.find((entry) => entry.artifact.id === stdout)
+          expect(new TextDecoder().decode(output?.bytes)).toBe("structured pipe")
+          expect(output?.artifact.provenance).toBe("invoke:stdout:/usr/bin/cat")
+        })
+      })
     )
   )
 

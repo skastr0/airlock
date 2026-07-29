@@ -8,7 +8,7 @@ import { Hold } from "../Hold.ts"
 import { EmissionRequest } from "../domain.ts"
 import { Outbox } from "../Outbox.ts"
 import {
-  type ArtifactId,
+  ArtifactId,
   Artifact,
   type Digest,
   type Handle,
@@ -44,6 +44,20 @@ export class RuntimeArtifact extends Schema.Class<RuntimeArtifact>("RuntimeArtif
   artifact: Artifact,
   bytes: Schema.Uint8Array,
   cellReceipt: Schema.optional(CellReceipt)
+}) {}
+
+/**
+ * Bytes supplied by the trusted caller before execution. This is the explicit
+ * boundary for program literals and cross-fragment streams; Runtime never
+ * invents a temporary file or reads an ambient path to materialize stdin.
+ */
+export class RuntimeInitialArtifact extends Schema.Class<RuntimeInitialArtifact>(
+  "RuntimeInitialArtifact"
+)({
+  id: ArtifactId,
+  bytes: Schema.Uint8Array,
+  mediaType: Schema.String,
+  provenance: Schema.String
 }) {}
 
 export class RuntimeRun extends Schema.Class<RuntimeRun>("RuntimeRun")({
@@ -95,7 +109,12 @@ export type RuntimeError =
 
 export class Runtime extends Context.Tag("airlock/Runtime")<
   Runtime,
-  { readonly execute: (plan: Plan) => Effect.Effect<RuntimeRun, RuntimePlanInvalid> }
+  {
+    readonly execute: (
+      plan: Plan,
+      initialArtifacts?: ReadonlyArray<RuntimeInitialArtifact>
+    ) => Effect.Effect<RuntimeRun, RuntimePlanInvalid>
+  }
 >() {}
 
 export const RuntimeConfigLive = (config: RuntimeConfig) =>
@@ -119,6 +138,20 @@ const artifact = (id: ArtifactId, bytes: Uint8Array, provenance: string, cellRec
     }),
     bytes,
     ...(cellReceipt === undefined ? {} : { cellReceipt })
+  })
+
+export const materializeInitialArtifact = (
+  input: RuntimeInitialArtifact
+): RuntimeArtifact =>
+  new RuntimeArtifact({
+    artifact: new Artifact({
+      id: input.id,
+      digest: digest(input.bytes),
+      mediaType: input.mediaType,
+      byteLength: input.bytes.byteLength,
+      provenance: input.provenance
+    }),
+    bytes: input.bytes
   })
 
 const receiptId = (): ReceiptId => `receipt_${crypto.randomUUID()}` as ReceiptId
@@ -478,10 +511,31 @@ const make = Effect.gen(function* () {
       }
     })
 
-  const execute = (plan: Plan): Effect.Effect<RuntimeRun, RuntimePlanInvalid> => Effect.gen(function* () {
+  const execute = (
+    plan: Plan,
+    initialArtifacts: ReadonlyArray<RuntimeInitialArtifact> = []
+  ): Effect.Effect<RuntimeRun, RuntimePlanInvalid> => Effect.gen(function* () {
     const ordered = yield* validatePlan(plan)
     const startedAt = yield* DateTime.now
-    const artifacts = new Map<ArtifactId, RuntimeArtifact>()
+    const producedIds = new Set(ordered.flatMap((node) => node.produces))
+    const inputIds = initialArtifacts.map((input) => input.id)
+    const duplicateInput = inputIds.find((id, index) => inputIds.indexOf(id) !== index)
+    if (duplicateInput !== undefined) {
+      return yield* new RuntimePlanInvalid({
+        planId: plan.id,
+        reason: `duplicate initial artifact id: ${duplicateInput}`
+      })
+    }
+    const collidingInput = inputIds.find((id) => producedIds.has(id))
+    if (collidingInput !== undefined) {
+      return yield* new RuntimePlanInvalid({
+        planId: plan.id,
+        reason: `initial artifact is also produced by a node: ${collidingInput}`
+      })
+    }
+    const artifacts = new Map<ArtifactId, RuntimeArtifact>(
+      initialArtifacts.map((input) => [input.id, materializeInitialArtifact(input)])
+    )
     const receipts: Receipt[] = []
     const stateByNode = new Map<NodeId, NodeState>()
     let failed = false
