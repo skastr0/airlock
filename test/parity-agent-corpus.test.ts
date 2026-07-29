@@ -15,6 +15,20 @@ import { describe, expect, it } from "vitest"
 const repository = resolve(import.meta.dirname, "..")
 const corpus = join(repository, "examples", "parity", "corpus")
 
+const developerTool = (name: string): string | undefined => {
+  const located = spawnSync("/usr/bin/xcrun", ["-f", name], {
+    encoding: "utf8"
+  })
+  if (located.status !== 0) return undefined
+  const candidate = located.stdout.trim()
+  return candidate.length > 0 && existsSync(candidate)
+    ? realpathSync(candidate)
+    : undefined
+}
+
+const gitExecutable = developerTool("git")
+const makeExecutable = developerTool("make")
+
 const Receipt = Schema.Struct({
   node_id: Schema.String,
   sequence: Schema.Number,
@@ -74,7 +88,8 @@ const executeCorpus = (
   workspace: string,
   home: string,
   profile: AgentProfile,
-  policy?: string
+  policy?: string,
+  bindings: Readonly<Record<string, string>> = {}
 ) => {
   const canonicalWorkspace = realpathSync(workspace)
   const executed = runAgent([
@@ -83,7 +98,7 @@ const executeCorpus = (
     "--workspace",
     canonicalWorkspace,
     "--bindings",
-    JSON.stringify({ workspace: canonicalWorkspace })
+    JSON.stringify({ workspace: canonicalWorkspace, ...bindings })
   ], home, profile, policy)
   expect(
     executed.status,
@@ -96,7 +111,11 @@ const writeNativePolicy = (
   root: string,
   workspace: string,
   executables: ReadonlyArray<string>,
-  principal: string
+  principal: string,
+  executableEdges: ReadonlyArray<{
+    readonly root: string
+    readonly descendants: ReadonlyArray<string>
+  }> = []
 ) => {
   const canonicalWorkspace = realpathSync(workspace)
   const policy = join(root, "policy.json")
@@ -108,6 +127,7 @@ const writeNativePolicy = (
     admittedBy: "operator:parity-agent-corpus",
     pathAllowlist: [`${canonicalWorkspace}/**`],
     executableAllowlist: executables,
+    executableEdges,
     endpointAllowlist: []
   }))
   return policy
@@ -198,7 +218,8 @@ describe("agent-only macOS shell-parity corpus", () => {
 
   it.skipIf(
     !macosCell ||
-    !["/usr/bin/sed", "/usr/bin/git"].every(existsSync)
+    !existsSync("/usr/bin/sed") ||
+    gitExecutable === undefined
   )(
     "edits in a native Cell, applies through Hold, and validates the live Git diff",
     { timeout: 60_000 },
@@ -218,7 +239,7 @@ describe("agent-only macOS shell-parity corpus", () => {
       const policy = writeNativePolicy(
         root,
         workspace,
-        ["/usr/bin/sed", "/usr/bin/git"],
+        ["/usr/bin/sed", gitExecutable!],
         "agent:parity-edit"
       )
 
@@ -227,7 +248,8 @@ describe("agent-only macOS shell-parity corpus", () => {
         workspace,
         home,
         "native-contained",
-        policy
+        policy,
+        { git_executable: gitExecutable! }
       )
       expect(report.profile).toBe("native-contained")
       expect(nodeKinds(report)).toEqual([
@@ -333,7 +355,7 @@ describe("agent-only macOS shell-parity corpus", () => {
     }
   )
 
-  it.skipIf(!macosCell || !existsSync("/usr/bin/git"))(
+  it.skipIf(!macosCell || gitExecutable === undefined)(
     "initializes, authors, stages, commits, and verifies a local Git repository",
     { timeout: 60_000 },
     () => {
@@ -344,7 +366,7 @@ describe("agent-only macOS shell-parity corpus", () => {
       const policy = writeNativePolicy(
         root,
         workspace,
-        ["/usr/bin/git"],
+        [gitExecutable!],
         "agent:parity-git"
       )
 
@@ -353,7 +375,8 @@ describe("agent-only macOS shell-parity corpus", () => {
         workspace,
         home,
         "native-contained",
-        policy
+        policy,
+        { git_executable: gitExecutable! }
       )
       expect(nodeKinds(report)).toEqual([
         "Invoke", "Apply",
@@ -395,7 +418,8 @@ describe("agent-only macOS shell-parity corpus", () => {
 
   it.skipIf(
     !macosCell ||
-    !["/usr/bin/make", "/usr/bin/awk", "/bin/test", "/bin/mkdir"].every(existsSync)
+    makeExecutable === undefined ||
+    !["/usr/bin/awk", "/bin/test", "/bin/mkdir"].every(existsSync)
   )(
     "runs a descendant-owning build tool and commits its generated report",
     { timeout: 60_000 },
@@ -423,8 +447,22 @@ describe("agent-only macOS shell-parity corpus", () => {
       const policy = writeNativePolicy(
         root,
         workspace,
-        ["/usr/bin/make"],
-        "agent:parity-build"
+        [makeExecutable!],
+        "agent:parity-build",
+        [
+          {
+            root: makeExecutable!,
+            descendants: [
+              "/bin/sh",
+              "/bin/bash",
+              "/bin/mkdir",
+              "/usr/bin/awk",
+              "/bin/test",
+              "/usr/bin/tr",
+              "/usr/bin/printf"
+            ]
+          }
+        ]
       )
 
       const report = executeCorpus(
@@ -432,7 +470,8 @@ describe("agent-only macOS shell-parity corpus", () => {
         workspace,
         home,
         "native-contained",
-        policy
+        policy,
+        { make_executable: makeExecutable! }
       )
       expect(nodeKinds(report)).toEqual([
         "Invoke",

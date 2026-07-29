@@ -4,10 +4,10 @@ assert edited.state == "succeeded", "contained edit failed"
 let source = workspace + "/src/app.ts"
 let content = file.read({ path: source, format: "text" })
 
-let diff = process.run({ executable: "/usr/bin/git", args: ["diff", "--no-ext-diff", "--no-textconv", "--", "src/app.ts"], cwd: workspace, env: { GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null", GIT_PAGER: "cat", LANG: "C", LC_ALL: "C" }, stdin: "discard", stdout: "capture", stderr: "capture", timeoutMs: 30000, cellProfile: "native-contained" })
+let diff = process.run({ executable: git_executable, args: ["diff", "--no-ext-diff", "--no-textconv", "--", "src/app.ts"], cwd: workspace, env: { GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null", GIT_PAGER: "cat", LANG: "C", LC_ALL: "C" }, stdin: "discard", stdout: "capture", stderr: "capture", timeoutMs: 30000, cellProfile: "native-contained" })
 assert diff.state == "succeeded", "git diff failed"
 
-let diff_check = process.run({ executable: "/usr/bin/git", args: ["diff", "--check"], cwd: workspace, env: { GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null", GIT_PAGER: "cat", LANG: "C", LC_ALL: "C" }, stdin: "discard", stdout: "capture", stderr: "capture", timeoutMs: 30000, cellProfile: "native-contained" })
+let diff_check = process.run({ executable: git_executable, args: ["diff", "--check"], cwd: workspace, env: { GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null", GIT_PAGER: "cat", LANG: "C", LC_ALL: "C" }, stdin: "discard", stdout: "capture", stderr: "capture", timeoutMs: 30000, cellProfile: "native-contained" })
 assert diff_check.state == "succeeded", "edited tree failed git diff --check"
 
 return { edited: edited, content: content, diff: diff, diff_check: diff_check }

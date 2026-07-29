@@ -1,4 +1,4 @@
-let built = process.run({ executable: "/usr/bin/make", args: ["--no-print-directory", "verify"], cwd: workspace, env: { LANG: "C", LC_ALL: "C" }, stdin: "discard", stdout: "capture", stderr: "capture", timeoutMs: 30000, cellProfile: "native-contained" })
+let built = process.run({ executable: make_executable, args: ["--no-print-directory", "verify"], descendantExecutables: ["/bin/sh", "/bin/bash", "/bin/mkdir", "/usr/bin/awk", "/bin/test", "/usr/bin/tr", "/usr/bin/printf"], cwd: workspace, env: { LANG: "C", LC_ALL: "C" }, stdin: "discard", stdout: "capture", stderr: "capture", timeoutMs: 30000, cellProfile: "native-contained" })
 assert built.state == "succeeded", "project build check failed"
 
 let report_path = workspace + "/build/export-count.txt"
