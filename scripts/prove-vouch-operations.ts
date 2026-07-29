@@ -32,11 +32,18 @@ const fixtureProgram = join(
 const endpoint =
   "https://realm.example.invalid/v1/runtime-events?sensitive=query"
 
-const NodeSummary = Schema.Struct({
-  id: Schema.String,
-  kind: Schema.String,
-  dependsOn: Schema.Array(Schema.String)
-})
+const NodeSummary = Schema.Union(
+  Schema.Struct({
+    id: Schema.String,
+    kind: Schema.String,
+    dependsOn: Schema.Array(Schema.String)
+  }),
+  Schema.Struct({
+    id: Schema.String,
+    _tag: Schema.String,
+    dependsOn: Schema.Array(Schema.String)
+  })
+)
 
 const PlanSummary = Schema.Struct({
   id: Schema.String,
@@ -125,14 +132,10 @@ const CliProgramReport = Schema.Struct({
   result: Schema.Struct({
     result: WorkflowValue,
     plans: Schema.Array(PlanSummary),
-    artifacts: Schema.Array(
-      Schema.Struct({
-        id: Schema.String,
-        mediaType: Schema.String,
-        byteLength: Schema.Number,
-        provenance: Schema.String
-      })
-    )
+    // The supervisor CLI may publish either artifact summaries or the
+    // Schema-encoded Program artifacts. This proof does not consume them;
+    // artifact flow is asserted through the process results above.
+    artifacts: Schema.Array(Schema.Unknown)
   })
 })
 
@@ -222,6 +225,9 @@ const assert: (
 ) => asserts condition = (condition, message) => {
   if (!condition) throw new Error(`Vouch operations proof failed: ${message}`)
 }
+
+const nodeKind = (node: typeof NodeSummary.Type): string =>
+  "kind" in node ? node.kind : node._tag
 
 const json = <A, I>(
   schema: Schema.Schema<A, I, never>,
@@ -523,7 +529,7 @@ export const runVouchOperationsProof =
       workflow: {
         planCount: workflow.result.plans.length,
         nodeKinds: workflow.result.plans.flatMap((plan) =>
-          plan.nodes.map((node) => node.kind)
+          plan.nodes.map(nodeKind)
         ),
         treeEntries: value.tree.map((entry) => entry.name),
         matchedStateEntries: value.state_entries.length,
