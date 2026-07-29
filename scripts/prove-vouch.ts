@@ -12,7 +12,11 @@ import {
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import * as AirlockHome from "../src/AirlockHome.ts"
-import { admit, AdmissionPolicy } from "../src/admission/index.ts"
+import {
+  admit,
+  AdmissionPolicy,
+  bindAdmissionForUse
+} from "../src/admission/index.ts"
 import { CellLive } from "../src/cell/index.ts"
 import { Hold } from "../src/Hold.ts"
 import { HoldLive } from "../src/HoldLive.ts"
@@ -323,11 +327,11 @@ export const runVouchProof = async (): Promise<VouchProofReport> => {
   }) as typeof fetch
 
   try {
-    return await Effect.runPromise(
-      Effect.gen(function* () {
+    const proof = Effect.gen(function* () {
         const admitted = yield* admit(draft, policy)
+        const authority = yield* bindAdmissionForUse(admitted)
         const runtime = yield* Runtime
-        const run = yield* runtime.execute(admitted.plan)
+        const run = yield* runtime.execute(authority)
 
         assert(run.state === "succeeded", `runtime ended ${run.state}`)
         assert(
@@ -512,6 +516,8 @@ export const runVouchProof = async (): Promise<VouchProofReport> => {
           }))
         })
       }).pipe(Effect.provide(runtimeLayer))
+    return await Effect.runPromise(
+      proof as Effect.Effect<VouchProofReport, unknown, never>
     )
   } finally {
     globalThis.fetch = originalFetch

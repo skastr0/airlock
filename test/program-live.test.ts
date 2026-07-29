@@ -1,8 +1,7 @@
-import { DateTime, Effect, Layer } from "effect"
+import { DateTime, Effect, Layer, Schema } from "effect"
 import { describe, expect, it } from "vitest"
 import { AdmissionPolicy } from "../src/admission/index.ts"
 import {
-  NativeFileSystem,
   NativeMkdirReceipt,
   NativeMoveReceipt,
   NativeStat,
@@ -10,8 +9,10 @@ import {
 } from "../src/native/index.ts"
 import {
   Artifact,
+  ArtifactId,
   Digest,
-  type InvokeNode
+  type InvokeNode,
+  type PlanNode
 } from "../src/plan/index.ts"
 import {
   canonicalizeProgramAction,
@@ -21,105 +22,75 @@ import {
   ProgramRunner,
   draftForAction
 } from "../src/program/index.ts"
-import { Runtime, RuntimeArtifact, RuntimeRun } from "../src/runtime/index.ts"
-import { Outbox, OutboxEmission } from "../src/Outbox.ts"
+import {
+  Runtime,
+  RuntimeArtifact,
+  RuntimeProcessEvidence,
+  RuntimeRun
+} from "../src/runtime/index.ts"
+import { OutboxEmission } from "../src/Outbox.ts"
 import {
   HttpIntentSummary,
   RedactedEmissionRequest
 } from "../src/outbox/Contract.ts"
-import { ArtifactId } from "../src/plan/index.ts"
-import { ActId, EmissionId } from "../src/domain.ts"
+import { ActId, EmissionId, RemoveReceipt } from "../src/domain.ts"
+import { ProcessReceipt } from "../src/process/Process.ts"
 
 const now = DateTime.unsafeFromDate(new Date("2026-07-29T00:00:00.000Z"))
+const encoder = new TextEncoder()
+const decoder = new TextDecoder()
 
 const nativeWrites: Array<{ readonly path: string; readonly text: string }> = []
 
-const NativeTest = Layer.succeed(NativeFileSystem, NativeFileSystem.of({
-  workspace: "/work",
-  inspect: (path) => Effect.succeed(new NativeStat({
-    path, kind: "file", bytes: 4, mode: 0o600, device: 1, inode: 2
-  })),
-  stat: (path) => Effect.succeed(new NativeStat({
-    path, kind: "file", bytes: 4, mode: 0o600, device: 1, inode: 2
-  })),
-  readBytes: () => Effect.succeed(new TextEncoder().encode("seed")),
-  readText: () => Effect.succeed("seed"),
-  readJson: () => Effect.succeed({ value: "seed" }),
-  list: () => Effect.succeed([]),
-  glob: () => Effect.succeed([]),
-  writeBytes: (path, bytes) => {
-    nativeWrites.push({ path, text: new TextDecoder().decode(bytes) })
-    return Effect.succeed(new NativeWriteReceipt({
-      receipt: {
-        id: "act-write",
-        source: "/private/stage",
-        target: path,
-        kind: "file",
-        previousHeld: false,
-        at: now,
-        metadata: { device: 1, inode: 2, mode: 0o600, bytes: bytes.byteLength }
-      },
-      bytes: bytes.byteLength
-    }))
-  },
-  writeText: (path, text) => {
-    nativeWrites.push({ path, text })
-    return Effect.succeed(new NativeWriteReceipt({
-      receipt: {
-        id: "act-write",
-        source: "/private/stage",
-        target: path,
-        kind: "file",
-        previousHeld: false,
-        at: now,
-        metadata: { device: 1, inode: 2, mode: 0o600, bytes: text.length }
-      },
-      bytes: text.length
-    }))
-  },
-  remove: (target) => Effect.succeed({
-    id: ActId.make("act-remove"), target, kind: "file", at: now
-  }),
-  copy: (_source, target) => Effect.succeed(new NativeWriteReceipt({
-    receipt: {
-      id: "act-copy", source: "/private/stage", target, kind: "file",
-      previousHeld: false, at: now,
-      metadata: { device: 1, inode: 2, mode: 0o600, bytes: 4 }
-    },
-    bytes: 4
-  })),
-  move: (source, target) => Effect.succeed(new NativeMoveReceipt({
-    install: new NativeWriteReceipt({
-      receipt: {
-        id: "act-move-install", source: "/private/stage", target, kind: "file",
-        previousHeld: false, at: now,
-        metadata: { device: 1, inode: 2, mode: 0o600, bytes: 4 }
-      },
-      bytes: 4
-    }),
-    sourceRemoval: { id: "act-move-remove", target: source, kind: "file", at: now }
-  })),
-  mkdir: (path) => Effect.succeed(new NativeMkdirReceipt({ path, installs: [] }))
-}))
-
 const runtimeInputs: Array<ReadonlyArray<InlineArtifact>> = []
+const staged: string[] = []
 let invocation = 0
 
+const artifact = (
+  id: ArtifactId,
+  bytes: Uint8Array,
+  provenance: string,
+  mediaType = "application/octet-stream"
+) => new RuntimeArtifact({
+  artifact: new Artifact({
+    id,
+    digest: Digest.make(`sha256:${id}:${bytes.byteLength}`),
+    mediaType,
+    byteLength: bytes.byteLength,
+    provenance
+  }),
+  bytes
+})
+
+const encodedArtifact = <A, I>(
+  id: ArtifactId,
+  schema: Schema.Schema<A, I, never>,
+  value: A,
+  provenance: string
+) => artifact(
+  id,
+  encoder.encode(Schema.encodeSync(Schema.parseJson(schema))(value)),
+  provenance,
+  "application/json"
+)
+
+const writeReceipt = (target: string, bytes: number) => new NativeWriteReceipt({
+  receipt: {
+    id: ActId.make("act-write"),
+    source: "/private/stage",
+    target,
+    kind: "file",
+    previousHeld: false,
+    at: now,
+    metadata: { device: 1, inode: 2, mode: 0o600, bytes }
+  },
+  bytes
+})
+
 const RuntimeTest = Layer.succeed(Runtime, Runtime.of({
-  execute: (plan, inputs = []) => {
-    invocation += 1
-    runtimeInputs.push(inputs.map((input) => new InlineArtifact({
-      id: input.id,
-      bytes: input.bytes,
-      mediaType: input.mediaType,
-      provenance: input.provenance
-    })))
-    const invoke = plan.nodes.find((node): node is InvokeNode => node._tag === "Invoke")!
-    const stdin = invoke.stdin === undefined
-      ? new Uint8Array()
-      : inputs.find((input) => input.id === invoke.stdin)?.bytes ?? new Uint8Array()
-    const stdout = new TextEncoder().encode(`${new TextDecoder().decode(stdin)}:${invocation}`)
-    const artifacts = [
+  execute: (authority, inputs = []) => {
+    const plan = authority.admission.plan
+    const artifacts: RuntimeArtifact[] = [
       ...inputs.map((input) => new RuntimeArtifact({
         artifact: new Artifact({
           id: input.id,
@@ -129,71 +100,206 @@ const RuntimeTest = Layer.succeed(Runtime, Runtime.of({
           provenance: input.provenance
         }),
         bytes: input.bytes
-      })),
-      ...(invoke.stdoutArtifact === undefined ? [] : [new RuntimeArtifact({
-        artifact: new Artifact({
-          id: invoke.stdoutArtifact,
-          digest: Digest.make(`sha256:stdout-${invocation}`),
-          mediaType: "application/octet-stream",
-          byteLength: stdout.byteLength,
-          provenance: "test:stdout"
-        }),
-        bytes: stdout
-      })]),
-      ...(invoke.stderrArtifact === undefined ? [] : [new RuntimeArtifact({
-        artifact: new Artifact({
-          id: invoke.stderrArtifact,
-          digest: Digest.make(`sha256:stderr-${invocation}`),
-          mediaType: "application/octet-stream",
-          byteLength: 0,
-          provenance: "test:stderr"
-        }),
-        bytes: new Uint8Array()
-      })])
+      }))
     ]
+    const processes: RuntimeProcessEvidence[] = []
+
+    const materialize = (node: PlanNode) => {
+      switch (node._tag) {
+        case "Capture": {
+          const id = node.produces[0]!
+          if (node.operation === "read") {
+            const bytes = node.format === "json"
+              ? encoder.encode('{"value":"seed"}')
+              : encoder.encode("seed")
+            artifacts.push(artifact(
+              id,
+              bytes,
+              `test:capture:${node.operation}`,
+              node.format === "json" ? "application/json" : "text/plain"
+            ))
+            return
+          }
+          if (node.operation === "list") {
+            artifacts.push(encodedArtifact(
+              id,
+              Schema.Array(Schema.Unknown),
+              [],
+              "test:capture:list"
+            ))
+            return
+          }
+          if (node.operation === "glob") {
+            artifacts.push(encodedArtifact(
+              id,
+              Schema.Array(Schema.String),
+              [],
+              "test:capture:glob"
+            ))
+            return
+          }
+          artifacts.push(encodedArtifact(
+            id,
+            NativeStat,
+            new NativeStat({
+              path: node.locator,
+              kind: "file",
+              bytes: 4,
+              mode: 0o600,
+              device: 1,
+              inode: 2
+            }),
+            `test:capture:${node.operation}`
+          ))
+          return
+        }
+        case "Apply": {
+          if (node.operation === "merge") return
+          const id = node.produces[0]!
+          switch (node.operation) {
+            case "write": {
+              const source = artifacts.find(
+                (candidate) => candidate.artifact.id === node.sourceArtifact
+              )
+              const bytes = source?.bytes ?? new Uint8Array()
+              nativeWrites.push({ path: node.target, text: decoder.decode(bytes) })
+              artifacts.push(encodedArtifact(
+                id,
+                NativeWriteReceipt,
+                writeReceipt(node.target, bytes.byteLength),
+                "test:apply:write"
+              ))
+              return
+            }
+            case "remove":
+              artifacts.push(encodedArtifact(
+                id,
+                RemoveReceipt,
+                new RemoveReceipt({
+                  id: ActId.make("act-remove"),
+                  target: node.target,
+                  kind: "file",
+                  at: now
+                }),
+                "test:apply:remove"
+              ))
+              return
+            case "copy":
+              artifacts.push(encodedArtifact(
+                id,
+                NativeWriteReceipt,
+                writeReceipt(node.target, 4),
+                "test:apply:copy"
+              ))
+              return
+            case "move":
+              artifacts.push(encodedArtifact(
+                id,
+                NativeMoveReceipt,
+                new NativeMoveReceipt({
+                  install: writeReceipt(node.target, 4),
+                  sourceRemoval: new RemoveReceipt({
+                    id: ActId.make("act-move-remove"),
+                    target: node.source!,
+                    kind: "file",
+                    at: now
+                  })
+                }),
+                "test:apply:move"
+              ))
+              return
+            case "mkdir":
+              artifacts.push(encodedArtifact(
+                id,
+                NativeMkdirReceipt,
+                new NativeMkdirReceipt({ path: node.target, installs: [] }),
+                "test:apply:mkdir"
+              ))
+              return
+          }
+        }
+        case "Invoke": {
+          invocation += 1
+          runtimeInputs.push(inputs.map((input) => new InlineArtifact({
+            id: input.id,
+            bytes: input.bytes,
+            mediaType: input.mediaType,
+            provenance: input.provenance
+          })))
+          const stdin = node.stdin === undefined
+            ? new Uint8Array()
+            : inputs.find((input) => input.id === node.stdin)?.bytes ??
+              artifacts.find((candidate) => candidate.artifact.id === node.stdin)?.bytes ??
+              new Uint8Array()
+          const stdout = encoder.encode(`${decoder.decode(stdin)}:${invocation}`)
+          const stderr = new Uint8Array()
+          const receipt = new ProcessReceipt({
+            executable: node.executable,
+            args: node.args,
+            cwd: node.cwd ?? "/work",
+            pid: invocation,
+            exitCode: 0,
+            signal: null,
+            stdout,
+            stderr,
+            startedAt: now,
+            finishedAt: now
+          })
+          processes.push(new RuntimeProcessEvidence({
+            nodeId: node.id,
+            outcome: "exited",
+            receipt
+          }))
+          if (node.stdoutArtifact !== undefined) {
+            artifacts.push(artifact(node.stdoutArtifact, stdout, "test:invoke:stdout"))
+          }
+          if (node.stderrArtifact !== undefined) {
+            artifacts.push(artifact(node.stderrArtifact, stderr, "test:invoke:stderr"))
+          }
+          return
+        }
+        case "RequestExternal": {
+          const id = node.produces[0]!
+          staged.push(node.endpoint)
+          artifacts.push(encodedArtifact(
+            id,
+            OutboxEmission,
+            new OutboxEmission({
+              id: EmissionId.make("emi_test"),
+              status: "staged",
+              intent: new HttpIntentSummary({
+                kind: "http",
+                method: node.method,
+                endpoint: node.endpoint,
+                headerNames: Object.keys(node.headers),
+                bodyBytes: encoder.encode(node.body ?? "").byteLength
+              }),
+              request: new RedactedEmissionRequest({
+                method: node.method,
+                url: node.endpoint,
+                headers: {}
+              }),
+              stagedAt: now,
+              holdUntil: DateTime.add(now, { millis: node.holdMillis })
+            }),
+            "test:external:stage"
+          ))
+        }
+      }
+    }
+
+    for (const node of plan.nodes) materialize(node)
+
     return Effect.succeed(new RuntimeRun({
       planId: plan.id,
       state: "succeeded",
       startedAt: now,
       finishedAt: now,
       receipts: [],
-      artifacts
+      artifacts,
+      processes
     }))
   }
-}))
-
-const staged: string[] = []
-const OutboxTest = Layer.succeed(Outbox, Outbox.of({
-  stage: (request, holdMillis) => {
-    if ("_tag" in request && request._tag === "ExternalCommandIntent") {
-      return Effect.never
-    }
-    const endpoint = request.url
-    staged.push(endpoint)
-    return Effect.succeed(new OutboxEmission({
-      id: EmissionId.make("emi_test"),
-      status: "staged",
-      intent: new HttpIntentSummary({
-        kind: "http",
-        method: request.method,
-        endpoint,
-        headerNames: [],
-        bodyBytes: 0
-      }),
-      request: new RedactedEmissionRequest({
-        method: request.method,
-        url: endpoint,
-        headers: {}
-      }),
-      stagedAt: now,
-      holdUntil: DateTime.add(now, { millis: holdMillis })
-    }))
-  },
-  inspect: () => Effect.never,
-  commit: () => Effect.never,
-  cancel: () => Effect.never,
-  pending: Effect.succeed([]),
-  flush: Effect.succeed({ committed: [], failed: [], waiting: 0 })
 }))
 
 const policy = new AdmissionPolicy({
@@ -208,7 +314,7 @@ const policy = new AdmissionPolicy({
 })
 
 const ProgramTest = ProgramExecutionLive(policy).pipe(
-  Layer.provide(Layer.mergeAll(NativeTest, RuntimeTest, OutboxTest))
+  Layer.provide(RuntimeTest)
 )
 
 describe("ProgramExecutionLive", () => {
@@ -228,7 +334,7 @@ describe("ProgramExecutionLive", () => {
             let second = process.run({ executable: "/usr/bin/printf", args: [], cwd: "/work", stdin: { kind: "artifact", id: first.stdout_artifact.id }, cellProfile: "compatibility" })
             let written = file.write({ path: "/work/output.txt", content: second.stdout })
             let emission = http.stage({ endpoint: "https://example.test/collect", method: "POST", body: second.stdout, holdMillis: 5000 })
-            return { output: second.stdout, write_state: written.state, emission_state: emission.state }
+            return { output: second.stdout, process_outcome: second.process_outcome, exit_code: second.exit_code, process_signal: second.signal, write_state: written.state, emission_state: emission.state }
           `
         }))
       }).pipe(Effect.provide(ProgramTest))
@@ -236,6 +342,9 @@ describe("ProgramExecutionLive", () => {
 
     expect(result.result).toEqual({
       output: "seed:1:2",
+      process_outcome: "exited",
+      exit_code: 0,
+      process_signal: null,
       write_state: "applied",
       emission_state: "staged"
     })
@@ -298,6 +407,26 @@ describe("ProgramExecutionLive", () => {
       target: "/work",
       sourceArtifact: request.draft.nodes[0]!.produces[2]
     })
+  })
+
+  it("preserves explicit compatibility stdin inheritance in the Plan", async () => {
+    const call = await Effect.runPromise(canonicalizeProgramAction("process.run", {
+      action: "process.run",
+      executable: "/usr/bin/cat",
+      args: [],
+      cwd: "/work",
+      stdin: "inherit",
+      cellProfile: "compatibility"
+    }))
+    const request = await Effect.runPromise(
+      draftForAction(call, 0, "stdin-inherit")
+    )
+
+    expect(request.draft.nodes[0]).toMatchObject({
+      _tag: "Invoke",
+      stdinDisposition: "inherit"
+    })
+    expect(request.inlineArtifacts).toEqual([])
   })
 
   it("keeps native observation and mutation semantics entirely in the admitted Plan", async () => {

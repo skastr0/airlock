@@ -6,6 +6,7 @@ import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSyn
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import * as AirlockHome from "../src/AirlockHome.ts"
+import type { ExecutionAuthority } from "../src/admission/index.ts"
 import {
   Cell,
   CellLive,
@@ -25,7 +26,7 @@ import {
 } from "../src/native/index.ts"
 import { OutboxLive } from "../src/Outbox.ts"
 import {
-  ArtifactId, AuthorityAdmission, CaptureNode, Digest, NodeId, Plan, PlanId, RequestExternalNode, ApplyNode, InvokeNode
+  ArtifactId, CaptureNode, NodeId, RequestExternalNode, ApplyNode, InvokeNode
 } from "../src/plan/index.ts"
 import { MacosPlatformLive } from "../src/platform/macos/index.ts"
 import { ProcessReceipt, ProcessRunner, ProcessRunnerLive } from "../src/process/Process.ts"
@@ -37,6 +38,7 @@ import {
   RuntimeLive
 } from "../src/runtime/index.ts"
 import { MacosExclusiveRenameTestLive } from "./support/ExclusiveRenameTestLive.ts"
+import { runtimeAuthority as plan } from "./support/RuntimeAuthority.ts"
 
 const HoldTestLive = HoldLayer.pipe(
   Layer.provide(MacosExclusiveRenameTestLive)
@@ -46,12 +48,6 @@ const node = (id: string) => NodeId.make(id)
 const artifact = (id: string) => ArtifactId.make(id)
 const now = () => DateTime.unsafeMake(new Date("2026-07-29T00:00:00.000Z"))
 const darwinCell = globalThis.process.platform === "darwin" && existsSync("/usr/bin/sandbox-exec") && typeof Bun !== "undefined"
-
-const plan = (nodes: Plan["nodes"]) => new Plan({
-  schemaVersion: "airlock/plan/v1", id: PlanId.make("plan/runtime-test"), actionReference: "test.runtime", nodes,
-  handles: [], resolutions: [], admission: new AuthorityAdmission({ grantIds: [], admittedBy: "test", admittedAt: now() }),
-  definitionDigests: [], planDigest: Digest.make("sha256:test")
-})
 
 const impossibleCell = Layer.succeed(Cell, Cell.of({
   run: () => Effect.die("compatibility never calls Cell.run"),
@@ -91,7 +87,7 @@ const nativeLayer = (
 )
 
 const execute = (
-  value: Plan,
+  value: ExecutionAuthority,
   layer: Layer.Layer<Runtime, any, any>,
   initialArtifacts: ReadonlyArray<RuntimeInitialArtifact> = []
 ) =>

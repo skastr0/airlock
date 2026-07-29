@@ -4,8 +4,7 @@ import {
   admit,
   AdmissionPolicy,
   bindAdmissionForUse,
-  ExecutionAuthority,
-  revalidateNodeAuthority
+  type ExecutionAuthority
 } from "../admission/index.ts"
 import { parse, type Program, type Statement, type Expression } from "../language/index.ts"
 import { LanguageDiagnostic } from "../language/lexer.ts"
@@ -27,11 +26,14 @@ import {
   ResourceNeed
 } from "../actions/index.ts"
 import {
-  NativeFileSystem,
-  type NativeListEntry,
-  type NativeStat
+  NativeListEntry,
+  NativeMkdirReceipt,
+  NativeMoveReceipt,
+  NativeStat,
+  NativeWriteReceipt
 } from "../native/index.ts"
-import { HttpExternalIntent, Outbox } from "../Outbox.ts"
+import { OutboxEmission } from "../Outbox.ts"
+import { RemoveReceipt } from "../domain.ts"
 import {
   ApplyNode,
   ArtifactId,
@@ -582,6 +584,7 @@ export const draftForAction = (
           cwd: call.cwd,
           env: call.env,
           ...(stdinArtifact === undefined ? {} : { stdin: stdinArtifact }),
+          stdinDisposition: call.stdin === "inherit" ? "inherit" : "discard",
           ...(stdoutArtifact === undefined ? {} : { stdoutArtifact }),
           ...(stderrArtifact === undefined ? {} : { stderrArtifact }),
           ...(deltaArtifact === undefined ? {} : { deltaArtifact }),
@@ -762,6 +765,7 @@ const runtimeArtifactValue = (item: RuntimeArtifact | undefined): LanguageValue 
       }
 
 const decodedText = new TextDecoder()
+const strictDecodedText = new TextDecoder("utf-8", { fatal: true })
 
 const actionResult = (
   value: LanguageValue,
@@ -788,6 +792,9 @@ const runtimeRunValue = (
   plan: Plan
 ): LanguageRecord => {
   const invoke = plan.nodes.find((node): node is InvokeNode => node._tag === "Invoke")
+  const processEvidence = invoke === undefined
+    ? undefined
+    : run.processes.find((candidate) => candidate.nodeId === invoke.id)
   const byId = new Map(run.artifacts.map((item) => [item.artifact.id, item]))
   const stdout = invoke?.stdoutArtifact === undefined ? undefined : byId.get(invoke.stdoutArtifact)
   const stderr = invoke?.stderrArtifact === undefined ? undefined : byId.get(invoke.stderrArtifact)
@@ -795,6 +802,9 @@ const runtimeRunValue = (
   return {
     state: run.state,
     plan_id: run.planId,
+    process_outcome: processEvidence?.outcome ?? null,
+    exit_code: processEvidence?.receipt.exitCode ?? null,
+    signal: processEvidence?.receipt.signal ?? null,
     stdout: stdout === undefined ? null : decodedText.decode(stdout.bytes),
     stderr: stderr === undefined ? null : decodedText.decode(stderr.bytes),
     stdout_artifact: runtimeArtifactValue(stdout),
@@ -810,23 +820,113 @@ const runtimeRunValue = (
   }
 }
 
-const inlineArtifact = (
-  request: ProgramActionRequest,
-  id: ArtifactId
-): Effect.Effect<InlineArtifact, ProgramActionExecutionFailed> => {
-  const matches = request.inlineArtifacts.filter((candidate) => candidate.id === id)
-  if (matches.length !== 1) {
+const runtimeArtifact = (
+  run: RuntimeRun,
+  node: CaptureNode | ApplyNode | RequestExternalNode,
+  action: string
+): Effect.Effect<RuntimeArtifact, ProgramActionExecutionFailed> => {
+  if (node.produces.length !== 1) {
     return Effect.fail(new ProgramActionExecutionFailed({
-      action: request.call.action,
+      action,
       phase: "contract",
-      causeTag: "ProgramArtifactUnavailable",
-      reason: matches.length === 0
-        ? `inline artifact ${id} is unavailable`
-        : `inline artifact ${id} is ambiguous`
+      causeTag: "ProgramPlanShapeMismatch",
+      reason: `${node._tag} ${node.id} must declare exactly one result artifact`
     }))
   }
-  return Effect.succeed(matches[0]!)
+  const id = node.produces[0]!
+  const matches = run.artifacts.filter((candidate) => candidate.artifact.id === id)
+  return matches.length === 1
+    ? Effect.succeed(matches[0]!)
+    : Effect.fail(new ProgramActionExecutionFailed({
+        action,
+        phase: "runtime",
+        causeTag: "ProgramRuntimeArtifactUnavailable",
+        reason: matches.length === 0
+          ? `runtime did not materialize ${id}`
+          : `runtime materialized ${id} more than once`
+      }))
 }
+
+const decodeRuntimeJson = <A, I>(
+  item: RuntimeArtifact,
+  schema: Schema.Schema<A, I, never>,
+  action: string
+): Effect.Effect<A, ProgramActionExecutionFailed> =>
+  Effect.try({
+    try: () => strictDecodedText.decode(item.bytes),
+    catch: (cause) => executionFailure(action, "contract")(cause)
+  }).pipe(
+    Effect.flatMap((json) =>
+      Schema.decode(Schema.parseJson(schema))(json).pipe(
+        Effect.mapError(executionFailure(action, "contract"))
+      )
+    )
+  )
+
+const failedRuntimeReceipt = (run: RuntimeRun) =>
+  run.receipts.find((receipt) => receipt.state === "failed")
+
+const requireSuccessfulRuntime = (
+  run: RuntimeRun,
+  action: string
+): Effect.Effect<void, ProgramActionExecutionFailed> => {
+  if (run.state === "succeeded") return Effect.void
+  const failed = failedRuntimeReceipt(run)
+  return Effect.fail(new ProgramActionExecutionFailed({
+    action,
+    phase: "runtime",
+    causeTag: failed?.errorTag ?? "ProgramRuntimeFailed",
+    reason: failed === undefined
+      ? `runtime finished ${run.state} without a failed node receipt`
+      : `runtime node ${failed.nodeId} finished ${failed.state}`
+  }))
+}
+
+const processEvidence = (
+  run: RuntimeRun,
+  plan: Plan,
+  action: string
+) => {
+  const invokes = plan.nodes.filter(
+    (node): node is InvokeNode => node._tag === "Invoke"
+  )
+  if (invokes.length !== 1) {
+    return Effect.fail(new ProgramActionExecutionFailed({
+      action,
+      phase: "contract",
+      causeTag: "ProgramPlanShapeMismatch",
+      reason: `expected exactly one Invoke node; found ${invokes.length}`
+    }))
+  }
+  const matches = run.processes.filter(
+    (candidate) => candidate.nodeId === invokes[0]!.id
+  )
+  return matches.length === 1
+    ? Effect.succeed({ invoke: invokes[0]!, evidence: matches[0]! })
+    : Effect.fail(new ProgramActionExecutionFailed({
+        action,
+        phase: "runtime",
+        causeTag: "ProgramProcessEvidenceUnavailable",
+        reason: `expected exactly one process receipt for ${invokes[0]!.id}; found ${matches.length}`
+      }))
+}
+
+const toolRuntimeIsDecodable = (
+  run: RuntimeRun,
+  invoke: InvokeNode
+) =>
+  run.receipts.every((receipt) =>
+    receipt.state === "succeeded" ||
+    (
+      receipt.nodeId === invoke.id &&
+      receipt.state === "failed" &&
+      receipt.errorTag === "RuntimeProcessFailure"
+    ) ||
+    (
+      receipt.state === "cancelled" &&
+      receipt.errorTag === "RuntimeDependencyFailed"
+    )
+  )
 
 const validateRuntimeRequest = (
   request: ProgramActionRequest,
@@ -927,76 +1027,72 @@ const externalFor = (
 /**
  * Trusted Plan adapter. Every native operation and operand is taken from the
  * admitted Plan; the bound ActionCall is used only to select result decoding.
- * Filesystem effects cross NativeFileSystem/Hold, while Invoke and
- * RequestExternal cross the core Runtime. This layer has no direct host I/O.
+ * Runtime is the sole Plan interpreter and terminal-authority path. This layer
+ * has no filesystem, process, Hold, Outbox, or network service.
  */
 export const ProgramPlanRuntimeLive = Layer.effect(
   ProgramPlanRuntime,
   Effect.gen(function* () {
-    const native = yield* NativeFileSystem
     const runtime = yield* Runtime
-    const outbox = yield* Outbox
-
-    const nativeFailure = (action: string) => executionFailure(action, "native-filesystem")
 
     return ProgramPlanRuntime.of({
       execute: (request, requestedAuthority) =>
         Effect.gen(function* () {
-          // Rebuild every binding at the last shared adapter boundary. Native
-          // one-node actions use it immediately; Runtime must repeat the same
-          // check per node so a long Invoke cannot outlive its grant.
-          const bindings = yield* Effect.forEach(
-            requestedAuthority.admission.plan.nodes,
-            (node) => revalidateNodeAuthority(requestedAuthority, node.id),
-            { concurrency: 1 }
-          ).pipe(
-            Effect.mapError(executionFailure(
-              request.call.action,
-              "admission"
-            ))
-          )
-          const authority = new ExecutionAuthority({
-            ...requestedAuthority,
-            bindings,
-            boundAt: bindings[0]?.boundAt ?? requestedAuthority.boundAt
-          })
+          const authority = requestedAuthority
           const plan = authority.admission.plan
           const call = yield* validateRuntimeRequest(request, plan)
+          const inputs = request.inlineArtifacts.map((input) => new RuntimeInitialArtifact({
+            id: input.id,
+            bytes: input.bytes,
+            mediaType: input.mediaType,
+            provenance: input.provenance
+          }))
+          const run = yield* runtime.execute(authority, inputs).pipe(
+            Effect.mapError(executionFailure(call.action, "runtime"))
+          )
+          const outputs = runtimeInlineArtifacts(run)
+
           switch (call.action) {
             case "file.inspect":
             case "file.stat": {
+              yield* requireSuccessfulRuntime(run, call.action)
               const capture = yield* captureFor(
                 plan,
                 call.action,
                 call.action === "file.inspect" ? "inspect" : "stat"
               )
-              const stat = yield* native.stat(capture.locator).pipe(Effect.mapError(nativeFailure(call.action)))
+              const result = yield* runtimeArtifact(run, capture, call.action)
+              const stat = yield* decodeRuntimeJson(result, NativeStat, call.action)
               return actionResult(statValue(stat))
             }
             case "file.read": {
+              yield* requireSuccessfulRuntime(run, call.action)
               const capture = yield* captureFor(plan, call.action, "read")
+              const result = yield* runtimeArtifact(run, capture, call.action)
               switch (capture.format) {
-                case "text":
-                  return actionResult(yield* native.readText(capture.locator).pipe(Effect.mapError(nativeFailure(call.action))))
-                case "bytes": {
-                  const bytes = yield* native.readBytes(capture.locator).pipe(Effect.mapError(nativeFailure(call.action)))
-                  return actionResult([...bytes])
-                }
-                case "json": {
-                  const json = yield* native.readJson(capture.locator).pipe(Effect.mapError(nativeFailure(call.action)))
-                  const value = yield* Schema.decodeUnknown(LanguageValueSchema)(json).pipe(
-                    Effect.mapError(executionFailure(call.action, "contract"))
-                  )
-                  return actionResult(value)
-                }
+                case "text": return actionResult(yield* Effect.try({
+                  try: () => strictDecodedText.decode(result.bytes),
+                  catch: executionFailure(call.action, "contract")
+                }))
+                case "bytes": return actionResult([...result.bytes])
+                case "json": return actionResult(
+                  yield* decodeRuntimeJson(result, LanguageValueSchema, call.action)
+                )
               }
             }
             case "file.list": {
+              yield* requireSuccessfulRuntime(run, call.action)
               const capture = yield* captureFor(plan, call.action, "list")
-              const entries = yield* native.list(capture.locator).pipe(Effect.mapError(nativeFailure(call.action)))
+              const result = yield* runtimeArtifact(run, capture, call.action)
+              const entries = yield* decodeRuntimeJson(
+                result,
+                Schema.Array(NativeListEntry),
+                call.action
+              )
               return actionResult(entries.map(listEntryValue))
             }
             case "file.glob": {
+              yield* requireSuccessfulRuntime(run, call.action)
               const capture = yield* captureFor(plan, call.action, "glob")
               if (capture.pattern === undefined) {
                 return yield* new ProgramActionExecutionFailed({
@@ -1006,23 +1102,22 @@ export const ProgramPlanRuntimeLive = Layer.effect(
                   reason: "Capture.glob has no pattern"
                 })
               }
-              const matches = yield* native.glob(capture.locator, capture.pattern).pipe(Effect.mapError(nativeFailure(call.action)))
+              const result = yield* runtimeArtifact(run, capture, call.action)
+              const matches = yield* decodeRuntimeJson(
+                result,
+                Schema.Array(Schema.String),
+                call.action
+              )
               return actionResult([...matches])
             }
             case "file.write": {
+              yield* requireSuccessfulRuntime(run, call.action)
               const apply = yield* applyFor(plan, call.action, "write")
-              const sourceId = apply.sourceArtifact
-              if (sourceId === undefined) {
-                return yield* new ProgramActionExecutionFailed({
-                  action: call.action,
-                  phase: "contract",
-                  causeTag: "ProgramArtifactUnavailable",
-                  reason: "file.write has no source artifact"
-                })
-              }
-              const source = yield* inlineArtifact(request, sourceId)
-              const applied = yield* native.writeBytes(apply.target, source.bytes).pipe(
-                Effect.mapError(nativeFailure(call.action))
+              const result = yield* runtimeArtifact(run, apply, call.action)
+              const applied = yield* decodeRuntimeJson(
+                result,
+                NativeWriteReceipt,
+                call.action
               )
               return actionResult({
                 state: "applied",
@@ -1034,8 +1129,14 @@ export const ProgramPlanRuntimeLive = Layer.effect(
               })
             }
             case "file.remove": {
+              yield* requireSuccessfulRuntime(run, call.action)
               const apply = yield* applyFor(plan, call.action, "remove")
-              const removed = yield* native.remove(apply.target).pipe(Effect.mapError(nativeFailure(call.action)))
+              const result = yield* runtimeArtifact(run, apply, call.action)
+              const removed = yield* decodeRuntimeJson(
+                result,
+                RemoveReceipt,
+                call.action
+              )
               return actionResult({
                 state: "applied",
                 action: call.action,
@@ -1045,6 +1146,7 @@ export const ProgramPlanRuntimeLive = Layer.effect(
               })
             }
             case "file.copy": {
+              yield* requireSuccessfulRuntime(run, call.action)
               const apply = yield* applyFor(plan, call.action, "copy")
               if (apply.source === undefined) {
                 return yield* new ProgramActionExecutionFailed({
@@ -1054,8 +1156,11 @@ export const ProgramPlanRuntimeLive = Layer.effect(
                   reason: "Apply.copy has no source"
                 })
               }
-              const copied = yield* native.copy(apply.source, apply.target).pipe(
-                Effect.mapError(nativeFailure(call.action))
+              const result = yield* runtimeArtifact(run, apply, call.action)
+              const copied = yield* decodeRuntimeJson(
+                result,
+                NativeWriteReceipt,
+                call.action
               )
               return actionResult({
                 state: "applied",
@@ -1068,6 +1173,7 @@ export const ProgramPlanRuntimeLive = Layer.effect(
               })
             }
             case "file.move": {
+              yield* requireSuccessfulRuntime(run, call.action)
               const apply = yield* applyFor(plan, call.action, "move")
               if (apply.source === undefined) {
                 return yield* new ProgramActionExecutionFailed({
@@ -1077,8 +1183,11 @@ export const ProgramPlanRuntimeLive = Layer.effect(
                   reason: "Apply.move has no source"
                 })
               }
-              const moved = yield* native.move(apply.source, apply.target).pipe(
-                Effect.mapError(nativeFailure(call.action))
+              const result = yield* runtimeArtifact(run, apply, call.action)
+              const moved = yield* decodeRuntimeJson(
+                result,
+                NativeMoveReceipt,
+                call.action
               )
               return actionResult({
                 state: "applied",
@@ -1090,9 +1199,13 @@ export const ProgramPlanRuntimeLive = Layer.effect(
               })
             }
             case "file.mkdir": {
+              yield* requireSuccessfulRuntime(run, call.action)
               const apply = yield* applyFor(plan, call.action, "mkdir")
-              const made = yield* native.mkdir(apply.target, { parents: apply.parents }).pipe(
-                Effect.mapError(nativeFailure(call.action))
+              const result = yield* runtimeArtifact(run, apply, call.action)
+              const made = yield* decodeRuntimeJson(
+                result,
+                NativeMkdirReceipt,
+                call.action
               )
               return actionResult({
                 state: "applied",
@@ -1102,35 +1215,43 @@ export const ProgramPlanRuntimeLive = Layer.effect(
               })
             }
             case "process.run": {
-              const inputs = request.inlineArtifacts.map((input) => new RuntimeInitialArtifact({
-                id: input.id,
-                bytes: input.bytes,
-                mediaType: input.mediaType,
-                provenance: input.provenance
-              }))
-              const run = yield* runtime.execute(plan, inputs).pipe(
-                Effect.mapError(executionFailure(call.action, "runtime"))
-              )
-              if (request.tool !== undefined && run.state !== "succeeded") {
-                return yield* new ProgramActionExecutionFailed({
-                  action: request.tool.name,
-                  phase: "runtime",
-                  causeTag: "ProgramToolRuntimeFailed",
-                  reason: `tool runtime finished ${run.state}`
-                })
-              }
-              const outputs = runtimeInlineArtifacts(run)
               if (request.tool !== undefined) {
-                const invoke = plan.nodes.find((node): node is InvokeNode => node._tag === "Invoke")
-                const byId = new Map(run.artifacts.map((item) => [item.artifact.id, item]))
-                const stdout = invoke?.stdoutArtifact === undefined ? "" : decodedText.decode(byId.get(invoke.stdoutArtifact)?.bytes ?? new Uint8Array())
-                const stderr = invoke?.stderrArtifact === undefined ? "" : decodedText.decode(byId.get(invoke.stderrArtifact)?.bytes ?? new Uint8Array())
+                const { invoke, evidence } = yield* processEvidence(
+                  run,
+                  plan,
+                  request.tool.name
+                )
+                if (!toolRuntimeIsDecodable(run, invoke)) {
+                  const failed = failedRuntimeReceipt(run)
+                  return yield* new ProgramActionExecutionFailed({
+                    action: request.tool.name,
+                    phase: "runtime",
+                    causeTag: failed?.errorTag ?? "ProgramToolRuntimeFailed",
+                    reason: `tool runtime finished ${run.state} outside its process result`
+                  })
+                }
+                if (evidence.receipt.exitCode === null) {
+                  return yield* new ProgramActionExecutionFailed({
+                    action: request.tool.name,
+                    phase: "runtime",
+                    causeTag: "ProgramToolProcessIncomplete",
+                    reason: `tool process ended ${evidence.outcome}${
+                      evidence.receipt.signal === null
+                        ? ""
+                        : ` with ${evidence.receipt.signal}`
+                    } without an exit code`
+                  })
+                }
                 const value = yield* decodeToolResult({
                   definitionId: request.tool.definitionId,
                   actionName: request.tool.name,
                   resultDecoder: request.tool.resultDecoder,
                   ...(request.tool.outputSchema === undefined ? {} : { outputSchema: request.tool.outputSchema })
-                }, { exitCode: 0, stdout, stderr }).pipe(
+                }, {
+                  exitCode: evidence.receipt.exitCode,
+                  stdout: decodedText.decode(evidence.receipt.stdout),
+                  stderr: decodedText.decode(evidence.receipt.stderr)
+                }).pipe(
                   Effect.mapError(executionFailure(request.tool.name, "contract")),
                   Effect.flatMap((decoded) => Schema.decodeUnknown(LanguageValueSchema)(decoded).pipe(
                     Effect.mapError(executionFailure(request.tool!.name, "contract"))
@@ -1141,6 +1262,7 @@ export const ProgramPlanRuntimeLive = Layer.effect(
               return actionResult(runtimeRunValue(run, plan), outputs)
             }
             case "http.stage": {
+              yield* requireSuccessfulRuntime(run, call.action)
               const external = yield* externalFor(plan, call.action)
               if (external.bodyArtifact !== undefined) {
                 return yield* new ProgramActionExecutionFailed({
@@ -1150,13 +1272,11 @@ export const ProgramPlanRuntimeLive = Layer.effect(
                   reason: "program lowering must freeze the artifact-backed body into RequestExternal.body"
                 })
               }
-              const staged = yield* outbox.stage(new HttpExternalIntent({
-                url: external.endpoint,
-                method: external.method,
-                headers: external.headers,
-                ...(external.body === undefined ? {} : { body: external.body })
-              }), external.holdMillis).pipe(
-                Effect.mapError(executionFailure(call.action, "outbox"))
+              const result = yield* runtimeArtifact(run, external, call.action)
+              const staged = yield* decodeRuntimeJson(
+                result,
+                OutboxEmission,
+                call.action
               )
               return actionResult({
                 state: staged.status,
@@ -1175,8 +1295,8 @@ export const ProgramPlanRuntimeLive = Layer.effect(
 
 /**
  * Convenience composition for one managed application runtime. Platform
- * dependencies remain requirements of this layer; callers provide exactly one
- * NativeFileSystem, Runtime, and Outbox implementation.
+ * dependencies remain requirements of Runtime; Program receives exactly one
+ * interpreter and cannot acquire a second native authority path.
  */
 export const ProgramExecutionLive = (policy: AdmissionPolicy) => {
   const executor = ProgramPlanExecutorLive.pipe(

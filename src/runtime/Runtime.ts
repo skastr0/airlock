@@ -3,6 +3,11 @@ import { Cause, Context, DateTime, Effect, Exit, Layer, Schema } from "effect"
 import { createHash } from "node:crypto"
 import { lstat, readFile, readdir } from "node:fs/promises"
 import * as nodePath from "node:path"
+import {
+  type ExecutionAuthority,
+  type NodeAuthorityBinding,
+  revalidateNodeAuthority
+} from "../admission/index.ts"
 import { Cell, CellReceipt, CellRequest, WorkspaceDeltaCandidate } from "../cell/index.ts"
 import { Hold } from "../Hold.ts"
 import { ActId, EmissionRequest, RemoveReceipt } from "../domain.ts"
@@ -227,6 +232,15 @@ export class RuntimeArtifactClaimMismatch extends Schema.TaggedError<RuntimeArti
   }
 ) {}
 
+export class RuntimeAuthorityInvalid extends Schema.TaggedError<RuntimeAuthorityInvalid>()(
+  "RuntimeAuthorityInvalid",
+  {
+    nodeId: Schema.String,
+    causeTag: Schema.String,
+    reason: Schema.String
+  }
+) {}
+
 export type RuntimeError =
   | RuntimePlanInvalid
   | RuntimeNodeFailure
@@ -235,13 +249,14 @@ export type RuntimeError =
   | RuntimeMergeDrift
   | RuntimeDeltaUnsupported
   | RuntimeProcessFailure
+  | RuntimeAuthorityInvalid
   | RuntimeArtifactClaimMismatch
 
 export class Runtime extends Context.Tag("airlock/Runtime")<
   Runtime,
   {
     readonly execute: (
-      plan: Plan,
+      authority: ExecutionAuthority,
       initialArtifacts?: ReadonlyArray<RuntimeInitialArtifact>
     ) => Effect.Effect<RuntimeRun, RuntimePlanInvalid | RuntimeLifecycleFailure>
   }
@@ -322,6 +337,36 @@ const handlesFor = (plan: Plan, node: PlanNode): ReadonlyArray<Handle> => {
     const handle = resolutions.get(requirement) === undefined ? undefined : byId.get(resolutions.get(requirement)!)
     return handle === undefined ? [] : [handle]
   })
+}
+
+const retainedBindingFor = (
+  authority: ExecutionAuthority,
+  node: PlanNode
+): Effect.Effect<NodeAuthorityBinding, RuntimeAuthorityInvalid> => {
+  const matches = authority.bindings.filter(
+    (binding) => binding.nodeId === node.id
+  )
+  if (matches.length !== 1) {
+    return Effect.fail(new RuntimeAuthorityInvalid({
+      nodeId: node.id,
+      causeTag: "AdmissionContractInvalid",
+      reason: `expected exactly one retained node binding; found ${matches.length}`
+    }))
+  }
+  const binding = matches[0]!
+  const expected = handlesFor(authority.admission.plan, node)
+  const sameHandles =
+    binding.handles.length === expected.length &&
+    binding.handles.every((handle, index) =>
+      JSON.stringify(handle) === JSON.stringify(expected[index])
+    )
+  return sameHandles
+    ? Effect.succeed(binding)
+    : Effect.fail(new RuntimeAuthorityInvalid({
+        nodeId: node.id,
+        causeTag: "AdmissionContractInvalid",
+        reason: "retained node binding does not match the admitted handle closure"
+      }))
 }
 
 const planInvalid = (plan: Plan, reason: string) =>
@@ -1388,9 +1433,10 @@ const make = Effect.gen(function* () {
     )
 
   const execute = (
-    plan: Plan,
+    authority: ExecutionAuthority,
     initialArtifacts: ReadonlyArray<RuntimeInitialArtifact> = []
   ): Effect.Effect<RuntimeRun, RuntimePlanInvalid | RuntimeLifecycleFailure> => {
+    const plan = authority.admission.plan
     const cellWorkspaces = new Map<NodeId, RuntimeCellWorkspace>()
     const runPlan = Effect.gen(function* () {
       const ordered = yield* validatePlan(plan, config.profile, workspace)
@@ -1419,7 +1465,25 @@ const make = Effect.gen(function* () {
       const processes = new Map<NodeId, RuntimeProcessEvidence>()
       let failed = false
       for (const node of ordered) {
-        const handles = handlesFor(plan, node)
+        const retainedBinding = yield* retainedBindingFor(
+          authority,
+          node
+        ).pipe(Effect.either)
+        if (retainedBinding._tag === "Left") {
+          receipts.push(yield* nodeReceipt(
+            plan,
+            node,
+            receipts.length + 1,
+            "failed",
+            artifacts,
+            [],
+            [],
+            retainedBinding.left._tag
+          ))
+          stateByNode.set(node.id, "failed")
+          failed = true
+          continue
+        }
         const dependenciesSucceeded = node.dependsOn.every(
           (dependency) => stateByNode.get(dependency) === "succeeded"
         )
@@ -1431,7 +1495,9 @@ const make = Effect.gen(function* () {
             "cancelled",
             artifacts,
             [],
-            handles.map((handle) => handle.resourceIdentity),
+            retainedBinding.right.handles.map(
+              (handle) => handle.resourceIdentity
+            ),
             "RuntimeDependencyFailed"
           ))
           stateByNode.set(node.id, "cancelled")
@@ -1439,13 +1505,29 @@ const make = Effect.gen(function* () {
           continue
         }
         const artifactsBefore = new Set(artifacts.keys())
-        const result = yield* runNode(
-          plan,
-          node,
-          artifacts,
-          cellWorkspaces,
-          processes
-        ).pipe(Effect.either)
+        const revalidated = yield* revalidateNodeAuthority(
+          authority,
+          node.id
+        ).pipe(
+          Effect.mapError((error) => new RuntimeAuthorityInvalid({
+            nodeId: node.id,
+            causeTag: error._tag,
+            reason: errorReason(error)
+          })),
+          Effect.either
+        )
+        const handles = revalidated._tag === "Right"
+          ? revalidated.right.handles
+          : []
+        const result = revalidated._tag === "Left"
+          ? revalidated
+          : yield* runNode(
+            plan,
+            node,
+            artifacts,
+            cellWorkspaces,
+            processes
+          ).pipe(Effect.either)
         const materialized = [...artifacts.keys()].filter(
           (id) => !artifactsBefore.has(id)
         )

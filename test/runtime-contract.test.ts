@@ -1,6 +1,7 @@
 import { BunContext } from "@effect/platform-bun"
 import { describe, expect, it } from "@effect/vitest"
 import { Context, DateTime, Effect, Layer } from "effect"
+import { ExecutionAuthority } from "../src/admission/index.ts"
 import { Cell } from "../src/cell/index.ts"
 import {
   ActId,
@@ -24,13 +25,10 @@ import {
 import {
   ApplyNode,
   ArtifactId,
-  AuthorityAdmission,
   CaptureNode,
-  Digest,
   InvokeNode,
   NodeId,
-  Plan,
-  PlanId,
+  type PlanNode,
   RequestExternalNode
 } from "../src/plan/index.ts"
 import {
@@ -47,6 +45,10 @@ import {
   RuntimeLive,
   RuntimePlanInvalid
 } from "../src/runtime/index.ts"
+import {
+  runtimeAuthority as plan,
+  uncheckedRuntimeAuthority
+} from "./support/RuntimeAuthority.ts"
 
 const timestamp = DateTime.unsafeFromDate(new Date("2026-07-29T00:00:00.000Z"))
 const encoder = new TextEncoder()
@@ -54,22 +56,6 @@ const decoder = new TextDecoder()
 const nodeId = (value: string) => NodeId.make(value)
 const artifactId = (value: string) => ArtifactId.make(value)
 type ProcessRun = Context.Tag.Service<typeof ProcessRunner>["run"]
-
-const plan = (nodes: Plan["nodes"]) => new Plan({
-  schemaVersion: "airlock/plan/v1",
-  id: PlanId.make(`plan/runtime-contract-${crypto.randomUUID()}`),
-  actionReference: "test.runtime.contract",
-  nodes,
-  handles: [],
-  resolutions: [],
-  admission: new AuthorityAdmission({
-    grantIds: [],
-    admittedBy: "test",
-    admittedAt: timestamp
-  }),
-  definitionDigests: [],
-  planDigest: Digest.make("sha256:runtime-contract")
-})
 
 const processReceipt = (
   request: ProcessRequest,
@@ -283,7 +269,7 @@ const runtimeLayer = (
   )
 
 const execute = (
-  value: Plan,
+  value: ExecutionAuthority,
   layer: Layer.Layer<Runtime, never, never>,
   inputs: ReadonlyArray<RuntimeInitialArtifact> = []
 ) =>
@@ -292,6 +278,84 @@ const execute = (
   )
 
 describe("Runtime total Plan contract", () => {
+  it.effect("revalidates grant lifetime immediately before node execution", () => {
+    let processCalls = 0
+    const runner: ProcessRun = (request) => {
+      processCalls += 1
+      return Effect.succeed(processReceipt(request))
+    }
+    const authority = plan([
+      new InvokeNode({
+        id: nodeId("expired-authority"),
+        dependsOn: [],
+        requires: [],
+        produces: [],
+        executable: "/usr/bin/true",
+        args: [],
+        cwd: "/work",
+        env: {},
+        stdout: "discard",
+        stderr: "discard",
+        cellProfile: "compatibility"
+      })
+    ], {
+      grantTtlMillis: 1,
+      admittedAt: new Date("2000-01-01T00:00:00.000Z")
+    })
+
+    return Effect.gen(function* () {
+      const result = yield* execute(authority, runtimeLayer(runner))
+
+      expect(processCalls).toBe(0)
+      expect(result.state).toBe("failed")
+      expect(result.receipts[0]).toMatchObject({
+        nodeId: nodeId("expired-authority"),
+        state: "failed",
+        errorTag: "RuntimeAuthorityInvalid"
+      })
+      expect(result.processes).toEqual([])
+    })
+  })
+
+  it.effect("refuses a missing retained node binding before execution", () => {
+    let processCalls = 0
+    const runner: ProcessRun = (request) => {
+      processCalls += 1
+      return Effect.succeed(processReceipt(request))
+    }
+    const admitted = plan([
+      new InvokeNode({
+        id: nodeId("tampered-authority"),
+        dependsOn: [],
+        requires: [],
+        produces: [],
+        executable: "/usr/bin/true",
+        args: [],
+        cwd: "/work",
+        env: {},
+        stdout: "discard",
+        stderr: "discard",
+        cellProfile: "compatibility"
+      })
+    ])
+    const tampered = new ExecutionAuthority({
+      ...admitted,
+      bindings: []
+    })
+
+    return Effect.gen(function* () {
+      const result = yield* execute(tampered, runtimeLayer(runner))
+
+      expect(processCalls).toBe(0)
+      expect(result.state).toBe("failed")
+      expect(result.receipts[0]).toMatchObject({
+        nodeId: nodeId("tampered-authority"),
+        state: "failed",
+        errorTag: "RuntimeAuthorityInvalid"
+      })
+    })
+  })
+
   it.effect("preserves nonzero process evidence and both captured streams", () => {
     const stdout = artifactId("artifact/nonzero-stdout")
     const stderr = artifactId("artifact/nonzero-stderr")
@@ -423,7 +487,7 @@ describe("Runtime total Plan contract", () => {
       "external"
     ].map((name) => artifactId(`artifact/${name}`))
     const [read, inspect, stat, list, glob, environment, clock, write, copy, move, mkdir, remove, external] = produced
-    const nodes: Plan["nodes"] = [
+    const nodes: ReadonlyArray<PlanNode> = [
       new CaptureNode({
         id: nodeId("read"),
         dependsOn: [],
@@ -629,7 +693,7 @@ describe("Runtime total Plan contract", () => {
       })
       const runner: ProcessRun = () => Effect.die("validation must run first")
       return execute(
-        plan([invoke]),
+        uncheckedRuntimeAuthority([invoke]),
         runtimeLayer(runner, { profile: "native-contained" })
       ).pipe(
         Effect.flip,
@@ -650,7 +714,7 @@ describe("Runtime total Plan contract", () => {
       return Effect.succeed(processReceipt(request))
     }
     const invalidPlans = [
-      plan([
+      uncheckedRuntimeAuthority([
         new CaptureNode({
           id: nodeId("invalid-glob"),
           dependsOn: [],
@@ -661,7 +725,7 @@ describe("Runtime total Plan contract", () => {
           operation: "glob"
         })
       ]),
-      plan([
+      uncheckedRuntimeAuthority([
         new CaptureNode({
           id: nodeId("invalid-process-output"),
           dependsOn: [],
@@ -671,7 +735,7 @@ describe("Runtime total Plan contract", () => {
           locator: "stdout"
         })
       ]),
-      plan([
+      uncheckedRuntimeAuthority([
         new ApplyNode({
           id: nodeId("invalid-copy"),
           dependsOn: [],
@@ -681,7 +745,7 @@ describe("Runtime total Plan contract", () => {
           target: "copy.txt"
         })
       ]),
-      plan([
+      uncheckedRuntimeAuthority([
         new InvokeNode({
           id: nodeId("missing-delta"),
           dependsOn: [],
@@ -696,7 +760,7 @@ describe("Runtime total Plan contract", () => {
           cellProfile: "native-contained"
         })
       ]),
-      plan([
+      uncheckedRuntimeAuthority([
         new RequestExternalNode({
           id: nodeId("two-bodies"),
           dependsOn: [],

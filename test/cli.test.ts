@@ -144,7 +144,7 @@ describe("agent-facing CLI", () => {
     expect(json(listed.stdout)).toMatchObject({ definitions: [expect.objectContaining({ name: "printf_json.decode" })] })
   })
 
-  it("fails a tool-backed action when the runtime reports a failed plan", () => {
+  it("decodes a tool's actual nonzero process receipt as its exit status", () => {
     const home = mkdtempSync(join(tmpdir(), "airlock-cli-tools-failure-"))
     const tools = join(home, ".airlock", "tools")
     mkdirSync(join(home, ".airlock"))
@@ -174,25 +174,12 @@ describe("agent-facing CLI", () => {
     writeFileSync(program, `return exit_check.check({ cwd: ${JSON.stringify(home)} })`)
 
     const executed = run(["run", program, "--workspace", home], home)
-    expect(executed.status).toBe(1)
-
-    const report = json(executed.stdout) as {
-      readonly result: {
-        readonly state: string
-        readonly failure?: {
-          readonly action: string
-          readonly phase: string
-          readonly causeTag?: string
-          readonly reason: string
-        }
+    expect(executed.status).toBe(0)
+    expect(json(executed.stdout)).toMatchObject({
+      result: {
+        state: "succeeded",
+        result: 1
       }
-    }
-
-    expect(report.result.state).toBe("failed")
-    expect(report.result.failure).toMatchObject({
-      action: "exit_check.check",
-      phase: "runtime",
-      causeTag: "ProgramToolRuntimeFailed"
     })
   })
 
