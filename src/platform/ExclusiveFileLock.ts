@@ -226,10 +226,14 @@ export const makeExclusiveFileLock = <E>(
     )
 
   const withLock = <A, E2, R>(effect: Effect.Effect<A, E2, R>) =>
-    Effect.acquireUseRelease(
-      acquire(),
-      () => effect,
-      (token) => release(token).pipe(Effect.orDie)
+    Effect.uninterruptibleMask((restore) =>
+      restore(acquire()).pipe(
+        Effect.flatMap((token) =>
+          restore(effect).pipe(
+            Effect.ensuring(release(token).pipe(Effect.orDie))
+          )
+        )
+      )
     )
 
   return { acquire, release, withLock } as const
