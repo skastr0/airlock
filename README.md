@@ -18,6 +18,21 @@ construction checks for the mutation and wire gateways. It does not yet have
 the representative corpus, exhaustive crash/overlap matrix, or red-team
 evidence needed for a strong shell-replacement claim.
 
+## Install from npm
+
+Published releases support macOS only and require Bun 1.3.11 or newer. Once a
+release is available on npm, install the paired command surface with:
+
+```sh
+npm install --global @skastr0/airlock
+airlock --version
+airlock-agent actions
+```
+
+`airlock` is the supervisor CLI. `airlock-agent` is the reduced command
+surface intended for an agent harness; use the latter when the harness is
+removing direct shell authority from the agent.
+
 ## Install from a checkout
 
 Requirements: macOS and Bun 1.3.11.
