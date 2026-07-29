@@ -743,6 +743,20 @@ const make = Effect.gen(function* () {
       reason: `${cause instanceof Error && "_tag" in cause ? String(cause._tag) : "Error"}: ${reasonOf(cause)}`
     })
 
+  const failedInstallRecoveryRequired = (
+    manifest: HeldManifest,
+    installCause: unknown,
+    recoveryCause: unknown
+  ) =>
+    new HoldRecoveryRequired({
+      id: manifest.id,
+      target: manifest.target,
+      phase: "install",
+      reason:
+        `install failed (${reasonOf(installCause)}); ` +
+        `automatic recovery also failed (${reasonOf(recoveryCause)})`
+    })
+
   const reconcileJournal = Effect.fnUntraced(function* (journal: HoldJournal) {
     if (journal.state === "restored") return
     const { manifest } = journal
@@ -885,7 +899,11 @@ const make = Effect.gen(function* () {
     if (installed._tag === "Left") {
       const recovered = yield* recoverFailedInstall(manifest).pipe(Effect.either)
       if (recovered._tag === "Left") {
-        return yield* recoveryRequired(manifest, "install", installed.left)
+        return yield* failedInstallRecoveryRequired(
+          manifest,
+          installed.left,
+          recovered.left
+        )
       }
       return yield* installed.left
     }
@@ -940,7 +958,11 @@ const make = Effect.gen(function* () {
     if (installed._tag === "Left") {
       const recovered = yield* recoverFailedInstall(manifest).pipe(Effect.either)
       if (recovered._tag === "Left") {
-        return yield* recoveryRequired(manifest, "install", installed.left)
+        return yield* failedInstallRecoveryRequired(
+          manifest,
+          installed.left,
+          recovered.left
+        )
       }
       return yield* installed.left
     }
