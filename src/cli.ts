@@ -211,6 +211,28 @@ const profileOption = Options.choice("profile", [
   "vm-enclosed"
 ]).pipe(Options.withDefault("compatibility" as const))
 
+type ProgramProfile = "compatibility" | "native-contained" | "vm-enclosed"
+
+const isProgramProfile = (value: string): value is ProgramProfile =>
+  value === "compatibility" ||
+  value === "native-contained" ||
+  value === "vm-enclosed"
+
+/**
+ * The reduced harness binary does not accept a profile option from the agent.
+ * A supervisor may pin it in the process environment; omission retains the
+ * compatibility default required by the ratchet law.
+ */
+const agentProgramProfile = Effect.suspend(() => {
+  const requested = process.env["AIRLOCK_AGENT_PROFILE"] ?? "compatibility"
+  return isProgramProfile(requested)
+    ? Effect.succeed(requested)
+    : failInput(
+        "AIRLOCK_AGENT_PROFILE",
+        "expected compatibility, native-contained, or vm-enclosed"
+      )
+})
+
 const resolveWithin = (
   scope: string,
   raw: string
@@ -566,6 +588,61 @@ const evalProgram = Command.make(
     renderedProgram(executeProgram(source, bindings, profile, workspace))
 ).pipe(Command.withDescription("Run Airlock source supplied as one structured argument by an agent harness"))
 
+const agentRun = Command.make(
+  "run",
+  {
+    program: Args.file({ name: "program.air" }),
+    bindings: Options.text("bindings").pipe(Options.optional),
+    workspace: Options.text("workspace").pipe(Options.withDefault(process.cwd()))
+  },
+  ({ program, bindings, workspace: requestedWorkspace }) =>
+    renderedProgram(
+      Effect.gen(function* () {
+        const profile = yield* agentProgramProfile
+        const fs = yield* FileSystem.FileSystem
+        const source = yield* fs.readFileString(program).pipe(
+          Effect.mapError((error) =>
+            new CliInputError({
+              field: "program.air",
+              reason: String(error)
+            })
+          )
+        )
+        return yield* executeProgram(
+          source,
+          bindings,
+          profile,
+          requestedWorkspace
+        )
+      })
+    )
+).pipe(
+  Command.withDescription(
+    "Run an Airlock program under the supervisor-pinned agent profile"
+  )
+)
+
+const agentEvalProgram = Command.make(
+  "eval",
+  {
+    source: Options.text("source"),
+    bindings: Options.text("bindings").pipe(Options.optional),
+    workspace: Options.text("workspace").pipe(Options.withDefault(process.cwd()))
+  },
+  ({ source, bindings, workspace }) =>
+    renderedProgram(
+      agentProgramProfile.pipe(
+        Effect.flatMap((profile) =>
+          executeProgram(source, bindings, profile, workspace)
+        )
+      )
+    )
+).pipe(
+  Command.withDescription(
+    "Run supplied Airlock source under the supervisor-pinned agent profile"
+  )
+)
+
 // ── ledger ──────────────────────────────────────────────────────────────────
 
 const ledger = Command.make("ledger", {}, () => rendered(Effect.flatMap(Ledger, (l) => l.entries)))
@@ -580,12 +657,15 @@ const supervisorRoot = Command.make("airlock").pipe(Command.withSubcommands([
 
 /**
  * The agent launcher deliberately omits terminal and bypass surfaces. Effects
- * enter through ProgramExecution and supervisor-supplied admission policy;
- * raw Invoke, Apply/undo, dispatch, and Reaper authority stay outside the
- * agent-facing command graph.
+ * enter through ProgramExecution and supervisor-supplied admission policy.
+ * The program may request structured Invoke and Apply nodes, but it cannot
+ * select the enclosing profile, invoke a raw CLI escape, dispatch, undo, or
+ * reap from this command graph.
  */
 const agentRoot = Command.make("airlock-agent").pipe(Command.withSubcommands([
-  doctor, capabilities, actions, schema, run, evalProgram, held, pending, ledger
+  doctor, capabilities, actions, schema,
+  agentRun, agentEvalProgram,
+  held, pending, ledger
 ]))
 
 /** One composition root. Pristine components retain authority; CLI is glue. */

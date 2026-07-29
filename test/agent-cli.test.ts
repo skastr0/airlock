@@ -1,5 +1,11 @@
 import { spawnSync } from "node:child_process"
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs"
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  writeFileSync
+} from "node:fs"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
 import { describe, expect, it } from "vitest"
@@ -52,7 +58,7 @@ describe("agent-only CLI surface", () => {
       expect(attempted.status, `${forbidden} unexpectedly succeeded`).not.toBe(0)
     }
     expect(readFileSync(target, "utf8")).toBe("keep")
-  }, 30_000)
+  })
 
   it("still exposes bounded discovery and observation commands", { timeout: 30_000 }, () => {
     const home = mkdtempSync(join(tmpdir(), "airlock-agent-cli-"))
@@ -60,5 +66,76 @@ describe("agent-only CLI surface", () => {
       const observed = run([allowed], home)
       expect(observed.status, `${allowed}: ${observed.stderr}`).toBe(0)
     }
-  }, 30_000)
+  })
+
+  it.skipIf(
+    process.platform !== "darwin" ||
+    !existsSync("/usr/bin/sandbox-exec") ||
+    !existsSync("/usr/bin/touch")
+  )(
+    "keeps the execution profile outside agent control",
+    { timeout: 30_000 },
+    () => {
+      const root = mkdtempSync(join(tmpdir(), "airlock-agent-profile-"))
+      const workspace = join(root, "workspace")
+      const home = join(root, "home")
+      const policy = join(root, "policy.json")
+      const outside = join(root, "outside.txt")
+      mkdirSync(workspace)
+      writeFileSync(policy, JSON.stringify({
+        schemaVersion: "airlock/admission-policy/v1",
+        profile: "native-contained",
+        principal: "agent:profile-test",
+        realm: "local",
+        admittedBy: "operator:profile-test",
+        pathAllowlist: [`${workspace}/**`],
+        executableAllowlist: ["/usr/bin/touch"],
+        endpointAllowlist: []
+      }))
+      const environment = {
+        AIRLOCK_AGENT_PROFILE: "native-contained",
+        AIRLOCK_POLICY_FILE: policy
+      }
+
+      const contained = run([
+        "eval",
+        "--workspace", workspace,
+        "--source",
+        `return process.run({ executable: "/usr/bin/touch", args: ["inside.txt"], cwd: ${JSON.stringify(workspace)}, cellProfile: "native-contained", stdout: "capture", stderr: "capture" })`
+      ], home, environment)
+      expect(contained.status, contained.stderr).toBe(0)
+      expect(existsSync(join(workspace, "inside.txt"))).toBe(true)
+
+      const optionOverride = run([
+        "eval",
+        "--workspace", workspace,
+        "--profile", "compatibility",
+        "--source", "return true"
+      ], home, environment)
+      expect(optionOverride.status).not.toBe(0)
+
+      const nodeDowngrade = run([
+        "eval",
+        "--workspace", workspace,
+        "--source",
+        `return process.run({ executable: "/usr/bin/touch", args: [${JSON.stringify(outside)}], cwd: ${JSON.stringify(workspace)}, cellProfile: "compatibility", stdout: "capture", stderr: "capture" })`
+      ], home, environment)
+      expect(nodeDowngrade.status, nodeDowngrade.stderr).toBe(0)
+      expect(json(nodeDowngrade.stdout)).toMatchObject({
+        profile: "native-contained",
+        result: {
+          result: {
+            state: "failed",
+            receipts: [
+              expect.objectContaining({
+                state: "failed",
+                error_tag: "RuntimeCapabilityDenied"
+              })
+            ]
+          }
+        }
+      })
+      expect(existsSync(outside)).toBe(false)
+    }
+  )
 })
