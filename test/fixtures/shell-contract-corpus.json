@@ -1,0 +1,1029 @@
+{
+  "schemaVersion": "airlock/shell-contract-corpus/v1",
+  "evidenceKind": "contract-coverage-not-executed-task-evidence",
+  "cases": [
+    {
+      "id": "observe-workspace",
+      "family": "observation",
+      "intent": "Inspect the repository workspace identity and metadata",
+      "action": { "action": "file.inspect", "path": "/workspace" },
+      "expectedPlanNodes": ["Capture"]
+    },
+    {
+      "id": "read-readme-text",
+      "family": "observation",
+      "intent": "Read a project README as text",
+      "action": { "action": "file.read", "path": "/workspace/README.md", "format": "text" },
+      "expectedPlanNodes": ["Capture"]
+    },
+    {
+      "id": "read-image-bytes",
+      "family": "observation",
+      "intent": "Read a binary image without text decoding",
+      "action": { "action": "file.read", "path": "/workspace/assets/logo.png", "format": "bytes" },
+      "expectedPlanNodes": ["Capture"]
+    },
+    {
+      "id": "read-package-json",
+      "family": "observation",
+      "intent": "Read and decode project package metadata",
+      "action": { "action": "file.read", "path": "/workspace/package.json", "format": "json" },
+      "expectedPlanNodes": ["Capture"]
+    },
+    {
+      "id": "list-source-directory",
+      "family": "observation",
+      "intent": "List immediate source directory entries",
+      "action": { "action": "file.list", "path": "/workspace/src" },
+      "expectedPlanNodes": ["Capture"]
+    },
+    {
+      "id": "glob-typescript-sources",
+      "family": "observation",
+      "intent": "Find TypeScript sources recursively",
+      "action": { "action": "file.glob", "root": "/workspace", "pattern": "**/*.ts" },
+      "expectedPlanNodes": ["Capture"]
+    },
+    {
+      "id": "stat-lockfile",
+      "family": "observation",
+      "intent": "Capture lockfile metadata without following symlinks",
+      "action": { "action": "file.stat", "path": "/workspace/bun.lock", "followSymlinks": false },
+      "expectedPlanNodes": ["Capture"]
+    },
+    {
+      "id": "list-git-refs",
+      "family": "observation",
+      "intent": "List local Git reference names as filesystem data",
+      "action": { "action": "file.list", "path": "/workspace/.git/refs" },
+      "expectedPlanNodes": ["Capture"]
+    },
+    {
+      "id": "write-new-note",
+      "family": "file-mutation",
+      "intent": "Create a new project note from inline text",
+      "action": { "action": "file.write", "path": "/workspace/notes/next.md", "content": "next action\n" },
+      "expectedPlanNodes": ["Apply"]
+    },
+    {
+      "id": "write-empty-marker",
+      "family": "file-mutation",
+      "intent": "Create an intentionally empty marker file",
+      "action": { "action": "file.write", "path": "/workspace/.ready", "content": "" },
+      "expectedPlanNodes": ["Apply"]
+    },
+    {
+      "id": "overwrite-json-config",
+      "family": "file-mutation",
+      "intent": "Replace a JSON configuration with explicit bytes",
+      "action": { "action": "file.write", "path": "/workspace/config/runtime.json", "content": "{\"mode\":\"test\"}\n" },
+      "expectedPlanNodes": ["Apply"]
+    },
+    {
+      "id": "write-generated-artifact",
+      "family": "file-mutation",
+      "intent": "Install a generated artifact as a managed file",
+      "action": { "action": "file.write", "path": "/workspace/generated/report.txt", "sourceArtifact": "artifact/generated-report" },
+      "artifacts": [{ "id": "artifact/generated-report", "text": "generated report\n" }],
+      "expectedPlanNodes": ["Apply"]
+    },
+    {
+      "id": "mkdir-build",
+      "family": "file-mutation",
+      "intent": "Create one build directory",
+      "action": { "action": "file.mkdir", "path": "/workspace/build", "parents": false },
+      "expectedPlanNodes": ["Apply"]
+    },
+    {
+      "id": "mkdir-nested-cache",
+      "family": "file-mutation",
+      "intent": "Create a nested cache directory hierarchy",
+      "action": { "action": "file.mkdir", "path": "/workspace/.cache/compiler/objects", "parents": true },
+      "expectedPlanNodes": ["Apply"]
+    },
+    {
+      "id": "copy-release-manifest",
+      "family": "file-mutation",
+      "intent": "Copy a release manifest to a staging name",
+      "action": { "action": "file.copy", "source": "/workspace/release.json", "destination": "/workspace/staging/release.json" },
+      "expectedPlanNodes": ["Apply"]
+    },
+    {
+      "id": "copy-fixture-directory",
+      "family": "file-mutation",
+      "intent": "Copy a fixture directory within managed state",
+      "action": { "action": "file.copy", "source": "/workspace/test/fixtures/base", "destination": "/workspace/test/fixtures/work" },
+      "expectedPlanNodes": ["Apply"]
+    },
+    {
+      "id": "move-build-artifact",
+      "family": "file-mutation",
+      "intent": "Move a completed build artifact into its release location",
+      "action": { "action": "file.move", "source": "/workspace/build/app.tar", "destination": "/workspace/dist/app.tar" },
+      "expectedPlanNodes": ["Apply"]
+    },
+    {
+      "id": "move-backup-snapshot",
+      "family": "file-mutation",
+      "intent": "Rotate a snapshot into the backup name",
+      "action": { "action": "file.move", "source": "/workspace/state.tgz", "destination": "/workspace/backups/state.tgz" },
+      "expectedPlanNodes": ["Apply"]
+    },
+    {
+      "id": "remove-stale-directory",
+      "family": "file-mutation",
+      "intent": "Remove stale generated state through Hold",
+      "action": { "action": "file.remove", "path": "/workspace/generated/stale" },
+      "expectedPlanNodes": ["Apply"]
+    },
+    {
+      "id": "printf-structured-atoms",
+      "family": "structured-invocation",
+      "intent": "Pass spaces and shell metacharacters as inert argv atoms",
+      "action": {
+        "action": "process.run",
+        "executable": "/usr/bin/printf",
+        "args": ["%s\n", "space value", "$(not-executed)", "left; rm -rf /", "one|two"],
+        "cwd": "/workspace",
+        "cellProfile": "compatibility",
+        "timeoutMs": 5000,
+        "stdout": "capture",
+        "stderr": "capture"
+      },
+      "expectedPlanNodes": ["Invoke"]
+    },
+    {
+      "id": "print-explicit-environment",
+      "family": "structured-invocation",
+      "intent": "Invoke a tool with a minimal explicit environment",
+      "action": {
+        "action": "process.run",
+        "executable": "/usr/bin/printenv",
+        "args": ["LANG"],
+        "cwd": "/workspace",
+        "env": { "LANG": "C", "LC_ALL": "C" },
+        "cellProfile": "compatibility",
+        "timeoutMs": 5000,
+        "stdout": "capture",
+        "stderr": "capture"
+      },
+      "expectedPlanNodes": ["Invoke"]
+    },
+    {
+      "id": "bounded-true",
+      "family": "structured-invocation",
+      "intent": "Run a successful command with an explicit deadline and output cap",
+      "action": {
+        "action": "process.run",
+        "executable": "/usr/bin/true",
+        "args": [],
+        "cwd": "/workspace",
+        "cellProfile": "compatibility",
+        "timeoutMs": 1000,
+        "outputLimitBytes": 1024,
+        "stdout": "capture",
+        "stderr": "capture"
+      },
+      "expectedPlanNodes": ["Invoke"]
+    },
+    {
+      "id": "contained-pwd",
+      "family": "structured-invocation",
+      "intent": "Run an existing Unix executable inside a private workspace",
+      "action": {
+        "action": "process.run",
+        "executable": "/bin/pwd",
+        "args": [],
+        "cwd": "/workspace",
+        "cellProfile": "native-contained",
+        "timeoutMs": 5000,
+        "stdout": "capture",
+        "stderr": "capture"
+      },
+      "expectedPlanNodes": ["Invoke", "Apply"]
+    },
+    {
+      "id": "contained-chmod",
+      "family": "structured-invocation",
+      "intent": "Change a managed file mode in a private workspace",
+      "action": {
+        "action": "process.run",
+        "executable": "/bin/chmod",
+        "args": ["0644", "script.sh"],
+        "cwd": "/workspace",
+        "cellProfile": "native-contained",
+        "timeoutMs": 5000,
+        "stdout": "capture",
+        "stderr": "capture"
+      },
+      "expectedPlanNodes": ["Invoke", "Apply"]
+    },
+    {
+      "id": "contained-md5",
+      "family": "structured-invocation",
+      "intent": "Compute a digest with the platform tool inside a Cell",
+      "action": {
+        "action": "process.run",
+        "executable": "/sbin/md5",
+        "args": ["README.md"],
+        "cwd": "/workspace",
+        "cellProfile": "native-contained",
+        "timeoutMs": 5000,
+        "stdout": "capture",
+        "stderr": "capture"
+      },
+      "expectedPlanNodes": ["Invoke", "Apply"]
+    },
+    {
+      "id": "rg-source-search",
+      "family": "text-data",
+      "intent": "Search source files for a literal marker",
+      "action": {
+        "action": "process.run",
+        "executable": "/opt/homebrew/bin/rg",
+        "args": ["--line-number", "--fixed-strings", "TODO", "src"],
+        "cwd": "/workspace",
+        "cellProfile": "native-contained",
+        "timeoutMs": 10000,
+        "stdout": "capture",
+        "stderr": "capture"
+      },
+      "expectedPlanNodes": ["Invoke", "Apply"]
+    },
+    {
+      "id": "sed-transform",
+      "family": "text-data",
+      "intent": "Transform text with sed without shell quoting",
+      "action": {
+        "action": "process.run",
+        "executable": "/usr/bin/sed",
+        "args": ["-E", "s/[[:space:]]+$//", "input.txt"],
+        "cwd": "/workspace",
+        "cellProfile": "native-contained",
+        "timeoutMs": 10000,
+        "stdout": "capture",
+        "stderr": "capture"
+      },
+      "expectedPlanNodes": ["Invoke", "Apply"]
+    },
+    {
+      "id": "awk-tabular-projection",
+      "family": "text-data",
+      "intent": "Project tabular fields with awk",
+      "action": {
+        "action": "process.run",
+        "executable": "/usr/bin/awk",
+        "args": ["-F,", "{print $1,$3}", "data.csv"],
+        "cwd": "/workspace",
+        "cellProfile": "native-contained",
+        "timeoutMs": 10000,
+        "stdout": "capture",
+        "stderr": "capture"
+      },
+      "expectedPlanNodes": ["Invoke", "Apply"]
+    },
+    {
+      "id": "jq-json-query",
+      "family": "text-data",
+      "intent": "Select JSON data with jq",
+      "action": {
+        "action": "process.run",
+        "executable": "/opt/homebrew/bin/jq",
+        "args": ["-r", ".items[] | select(.active) | .id", "data.json"],
+        "cwd": "/workspace",
+        "cellProfile": "native-contained",
+        "timeoutMs": 10000,
+        "stdout": "capture",
+        "stderr": "capture"
+      },
+      "expectedPlanNodes": ["Invoke", "Apply"]
+    },
+    {
+      "id": "sort-lines",
+      "family": "text-data",
+      "intent": "Sort a text file deterministically",
+      "action": {
+        "action": "process.run",
+        "executable": "/usr/bin/sort",
+        "args": ["-u", "names.txt"],
+        "cwd": "/workspace",
+        "env": { "LC_ALL": "C" },
+        "cellProfile": "native-contained",
+        "timeoutMs": 10000,
+        "stdout": "capture",
+        "stderr": "capture"
+      },
+      "expectedPlanNodes": ["Invoke", "Apply"]
+    },
+    {
+      "id": "uniq-counts",
+      "family": "text-data",
+      "intent": "Count adjacent duplicate records",
+      "action": {
+        "action": "process.run",
+        "executable": "/usr/bin/uniq",
+        "args": ["-c", "sorted.txt"],
+        "cwd": "/workspace",
+        "cellProfile": "native-contained",
+        "timeoutMs": 10000,
+        "stdout": "capture",
+        "stderr": "capture"
+      },
+      "expectedPlanNodes": ["Invoke", "Apply"]
+    },
+    {
+      "id": "diff-files",
+      "family": "text-data",
+      "intent": "Compare two managed files",
+      "action": {
+        "action": "process.run",
+        "executable": "/usr/bin/diff",
+        "args": ["-u", "before.txt", "after.txt"],
+        "cwd": "/workspace",
+        "cellProfile": "native-contained",
+        "timeoutMs": 10000,
+        "stdout": "capture",
+        "stderr": "capture"
+      },
+      "expectedPlanNodes": ["Invoke", "Apply"]
+    },
+    {
+      "id": "apply-patch-file",
+      "family": "text-data",
+      "intent": "Apply a patch inside the private workspace",
+      "action": {
+        "action": "process.run",
+        "executable": "/usr/bin/patch",
+        "args": ["-p1", "-i", "change.patch"],
+        "cwd": "/workspace",
+        "cellProfile": "native-contained",
+        "timeoutMs": 10000,
+        "stdout": "capture",
+        "stderr": "capture"
+      },
+      "expectedPlanNodes": ["Invoke", "Apply"]
+    },
+    {
+      "id": "tar-create",
+      "family": "archive-compression",
+      "intent": "Create a compressed project archive with tar",
+      "action": {
+        "action": "process.run",
+        "executable": "/usr/bin/tar",
+        "args": ["-czf", "dist/source.tgz", "src"],
+        "cwd": "/workspace",
+        "env": { "COPYFILE_DISABLE": "1" },
+        "cellProfile": "native-contained",
+        "timeoutMs": 30000,
+        "stdout": "capture",
+        "stderr": "capture"
+      },
+      "expectedPlanNodes": ["Invoke", "Apply"]
+    },
+    {
+      "id": "tar-list",
+      "family": "archive-compression",
+      "intent": "List archive members without extracting",
+      "action": {
+        "action": "process.run",
+        "executable": "/usr/bin/tar",
+        "args": ["-tzf", "dist/source.tgz"],
+        "cwd": "/workspace",
+        "cellProfile": "native-contained",
+        "timeoutMs": 30000,
+        "stdout": "capture",
+        "stderr": "capture"
+      },
+      "expectedPlanNodes": ["Invoke", "Apply"]
+    },
+    {
+      "id": "tar-extract",
+      "family": "archive-compression",
+      "intent": "Extract an archive into a private destination",
+      "action": {
+        "action": "process.run",
+        "executable": "/usr/bin/tar",
+        "args": ["-xzf", "state.tgz", "-C", "restore"],
+        "cwd": "/workspace",
+        "cellProfile": "native-contained",
+        "timeoutMs": 30000,
+        "stdout": "capture",
+        "stderr": "capture"
+      },
+      "expectedPlanNodes": ["Invoke", "Apply"]
+    },
+    {
+      "id": "gzip-file",
+      "family": "archive-compression",
+      "intent": "Compress one generated file",
+      "action": {
+        "action": "process.run",
+        "executable": "/usr/bin/gzip",
+        "args": ["-9", "report.json"],
+        "cwd": "/workspace",
+        "cellProfile": "native-contained",
+        "timeoutMs": 30000,
+        "stdout": "capture",
+        "stderr": "capture"
+      },
+      "expectedPlanNodes": ["Invoke", "Apply"]
+    },
+    {
+      "id": "gunzip-file",
+      "family": "archive-compression",
+      "intent": "Decompress one generated file",
+      "action": {
+        "action": "process.run",
+        "executable": "/usr/bin/gunzip",
+        "args": ["report.json.gz"],
+        "cwd": "/workspace",
+        "cellProfile": "native-contained",
+        "timeoutMs": 30000,
+        "stdout": "capture",
+        "stderr": "capture"
+      },
+      "expectedPlanNodes": ["Invoke", "Apply"]
+    },
+    {
+      "id": "zip-directory",
+      "family": "archive-compression",
+      "intent": "Create a zip archive from a directory",
+      "action": {
+        "action": "process.run",
+        "executable": "/usr/bin/zip",
+        "args": ["-r", "dist/assets.zip", "assets"],
+        "cwd": "/workspace",
+        "cellProfile": "native-contained",
+        "timeoutMs": 30000,
+        "stdout": "capture",
+        "stderr": "capture"
+      },
+      "expectedPlanNodes": ["Invoke", "Apply"]
+    },
+    {
+      "id": "unzip-directory",
+      "family": "archive-compression",
+      "intent": "Extract a zip archive into a private directory",
+      "action": {
+        "action": "process.run",
+        "executable": "/usr/bin/unzip",
+        "args": ["-q", "assets.zip", "-d", "restored-assets"],
+        "cwd": "/workspace",
+        "cellProfile": "native-contained",
+        "timeoutMs": 30000,
+        "stdout": "capture",
+        "stderr": "capture"
+      },
+      "expectedPlanNodes": ["Invoke", "Apply"]
+    },
+    {
+      "id": "git-status",
+      "family": "git",
+      "intent": "Inspect repository status without porcelain parsing in Airlock",
+      "action": {
+        "action": "process.run",
+        "executable": "/usr/bin/git",
+        "args": ["status", "--porcelain=v2", "--branch"],
+        "cwd": "/workspace",
+        "cellProfile": "native-contained",
+        "timeoutMs": 30000,
+        "stdout": "capture",
+        "stderr": "capture"
+      },
+      "expectedPlanNodes": ["Invoke", "Apply"]
+    },
+    {
+      "id": "git-diff",
+      "family": "git",
+      "intent": "Capture an unstaged Git diff",
+      "action": {
+        "action": "process.run",
+        "executable": "/usr/bin/git",
+        "args": ["diff", "--no-ext-diff", "--", "src"],
+        "cwd": "/workspace",
+        "cellProfile": "native-contained",
+        "timeoutMs": 30000,
+        "stdout": "capture",
+        "stderr": "capture"
+      },
+      "expectedPlanNodes": ["Invoke", "Apply"]
+    },
+    {
+      "id": "git-log",
+      "family": "git",
+      "intent": "Read a bounded Git history",
+      "action": {
+        "action": "process.run",
+        "executable": "/usr/bin/git",
+        "args": ["log", "-n", "20", "--format=%H%x09%s"],
+        "cwd": "/workspace",
+        "cellProfile": "native-contained",
+        "timeoutMs": 30000,
+        "stdout": "capture",
+        "stderr": "capture"
+      },
+      "expectedPlanNodes": ["Invoke", "Apply"]
+    },
+    {
+      "id": "git-branch-list",
+      "family": "git",
+      "intent": "List local branches through Git",
+      "action": {
+        "action": "process.run",
+        "executable": "/usr/bin/git",
+        "args": ["branch", "--format=%(refname:short)"],
+        "cwd": "/workspace",
+        "cellProfile": "native-contained",
+        "timeoutMs": 30000,
+        "stdout": "capture",
+        "stderr": "capture"
+      },
+      "expectedPlanNodes": ["Invoke", "Apply"]
+    },
+    {
+      "id": "git-add",
+      "family": "git",
+      "intent": "Stage selected files inside the private repository view",
+      "action": {
+        "action": "process.run",
+        "executable": "/usr/bin/git",
+        "args": ["add", "--", "src/index.ts", "test/index.test.ts"],
+        "cwd": "/workspace",
+        "cellProfile": "native-contained",
+        "timeoutMs": 30000,
+        "stdout": "capture",
+        "stderr": "capture"
+      },
+      "expectedPlanNodes": ["Invoke", "Apply"]
+    },
+    {
+      "id": "git-commit",
+      "family": "git",
+      "intent": "Create a local Git commit without opening an editor",
+      "action": {
+        "action": "process.run",
+        "executable": "/usr/bin/git",
+        "args": ["-c", "commit.gpgsign=false", "commit", "-m", "test: cover contract"],
+        "cwd": "/workspace",
+        "env": { "GIT_EDITOR": "/usr/bin/false" },
+        "cellProfile": "native-contained",
+        "timeoutMs": 30000,
+        "stdout": "capture",
+        "stderr": "capture"
+      },
+      "expectedPlanNodes": ["Invoke", "Apply"]
+    },
+    {
+      "id": "git-switch-branch",
+      "family": "git",
+      "intent": "Create and switch to a local branch",
+      "action": {
+        "action": "process.run",
+        "executable": "/usr/bin/git",
+        "args": ["switch", "-c", "airlock-contract"],
+        "cwd": "/workspace",
+        "cellProfile": "native-contained",
+        "timeoutMs": 30000,
+        "stdout": "capture",
+        "stderr": "capture"
+      },
+      "expectedPlanNodes": ["Invoke", "Apply"]
+    },
+    {
+      "id": "git-rev-parse",
+      "family": "git",
+      "intent": "Resolve the current commit identity",
+      "action": {
+        "action": "process.run",
+        "executable": "/usr/bin/git",
+        "args": ["rev-parse", "--verify", "HEAD"],
+        "cwd": "/workspace",
+        "cellProfile": "native-contained",
+        "timeoutMs": 30000,
+        "stdout": "capture",
+        "stderr": "capture"
+      },
+      "expectedPlanNodes": ["Invoke", "Apply"]
+    },
+    {
+      "id": "make-test",
+      "family": "build-test",
+      "intent": "Run the repository test target with make",
+      "action": {
+        "action": "process.run",
+        "executable": "/usr/bin/make",
+        "args": ["test"],
+        "cwd": "/workspace",
+        "cellProfile": "native-contained",
+        "timeoutMs": 120000,
+        "stdout": "capture",
+        "stderr": "capture"
+      },
+      "expectedPlanNodes": ["Invoke", "Apply"]
+    },
+    {
+      "id": "xcodebuild-test",
+      "family": "build-test",
+      "intent": "Run an Xcode scheme test action",
+      "action": {
+        "action": "process.run",
+        "executable": "/usr/bin/xcodebuild",
+        "args": ["-scheme", "App", "-configuration", "Debug", "test"],
+        "cwd": "/workspace",
+        "cellProfile": "native-contained",
+        "timeoutMs": 600000,
+        "stdout": "capture",
+        "stderr": "capture"
+      },
+      "expectedPlanNodes": ["Invoke", "Apply"]
+    },
+    {
+      "id": "cargo-test",
+      "family": "build-test",
+      "intent": "Run Rust tests with Cargo",
+      "action": {
+        "action": "process.run",
+        "executable": "/opt/homebrew/bin/cargo",
+        "args": ["test", "--workspace", "--all-targets"],
+        "cwd": "/workspace",
+        "cellProfile": "native-contained",
+        "timeoutMs": 300000,
+        "stdout": "capture",
+        "stderr": "capture"
+      },
+      "expectedPlanNodes": ["Invoke", "Apply"]
+    },
+    {
+      "id": "go-test",
+      "family": "build-test",
+      "intent": "Run all Go package tests",
+      "action": {
+        "action": "process.run",
+        "executable": "/opt/homebrew/bin/go",
+        "args": ["test", "./..."],
+        "cwd": "/workspace",
+        "cellProfile": "native-contained",
+        "timeoutMs": 300000,
+        "stdout": "capture",
+        "stderr": "capture"
+      },
+      "expectedPlanNodes": ["Invoke", "Apply"]
+    },
+    {
+      "id": "npm-test",
+      "family": "build-test",
+      "intent": "Run a package test script without shell construction",
+      "action": {
+        "action": "process.run",
+        "executable": "/opt/homebrew/bin/npm",
+        "args": ["test", "--", "--runInBand"],
+        "cwd": "/workspace",
+        "cellProfile": "native-contained",
+        "timeoutMs": 300000,
+        "stdout": "capture",
+        "stderr": "capture"
+      },
+      "expectedPlanNodes": ["Invoke", "Apply"]
+    },
+    {
+      "id": "bun-test",
+      "family": "build-test",
+      "intent": "Run Bun tests as a structured invocation",
+      "action": {
+        "action": "process.run",
+        "executable": "/opt/homebrew/bin/bun",
+        "args": ["test"],
+        "cwd": "/workspace",
+        "cellProfile": "native-contained",
+        "timeoutMs": 300000,
+        "stdout": "capture",
+        "stderr": "capture"
+      },
+      "expectedPlanNodes": ["Invoke", "Apply"]
+    },
+    {
+      "id": "swift-test",
+      "family": "build-test",
+      "intent": "Run Swift package tests",
+      "action": {
+        "action": "process.run",
+        "executable": "/usr/bin/swift",
+        "args": ["test", "--parallel"],
+        "cwd": "/workspace",
+        "cellProfile": "native-contained",
+        "timeoutMs": 300000,
+        "stdout": "capture",
+        "stderr": "capture"
+      },
+      "expectedPlanNodes": ["Invoke", "Apply"]
+    },
+    {
+      "id": "python-script",
+      "family": "language-toolchain",
+      "intent": "Run an existing Python script without a shell",
+      "action": {
+        "action": "process.run",
+        "executable": "/usr/bin/python3",
+        "args": ["-I", "-S", "scripts/check.py", "--format", "json"],
+        "cwd": "/workspace",
+        "cellProfile": "native-contained",
+        "timeoutMs": 60000,
+        "stdout": "capture",
+        "stderr": "capture"
+      },
+      "expectedPlanNodes": ["Invoke", "Apply"]
+    },
+    {
+      "id": "ruby-script",
+      "family": "language-toolchain",
+      "intent": "Run an existing Ruby script without a shell",
+      "action": {
+        "action": "process.run",
+        "executable": "/usr/bin/ruby",
+        "args": ["scripts/check.rb", "--strict"],
+        "cwd": "/workspace",
+        "cellProfile": "native-contained",
+        "timeoutMs": 60000,
+        "stdout": "capture",
+        "stderr": "capture"
+      },
+      "expectedPlanNodes": ["Invoke", "Apply"]
+    },
+    {
+      "id": "node-script",
+      "family": "language-toolchain",
+      "intent": "Run an existing Node program without a shell",
+      "action": {
+        "action": "process.run",
+        "executable": "/opt/homebrew/bin/node",
+        "args": ["scripts/check.mjs", "--json"],
+        "cwd": "/workspace",
+        "cellProfile": "native-contained",
+        "timeoutMs": 60000,
+        "stdout": "capture",
+        "stderr": "capture"
+      },
+      "expectedPlanNodes": ["Invoke", "Apply"]
+    },
+    {
+      "id": "clang-compile",
+      "family": "language-toolchain",
+      "intent": "Compile a C source file to a private build output",
+      "action": {
+        "action": "process.run",
+        "executable": "/usr/bin/clang",
+        "args": ["-Wall", "-Werror", "-o", "build/tool", "src/tool.c"],
+        "cwd": "/workspace",
+        "cellProfile": "native-contained",
+        "timeoutMs": 120000,
+        "stdout": "capture",
+        "stderr": "capture"
+      },
+      "expectedPlanNodes": ["Invoke", "Apply"]
+    },
+    {
+      "id": "swiftc-compile",
+      "family": "language-toolchain",
+      "intent": "Compile a Swift source file to a private build output",
+      "action": {
+        "action": "process.run",
+        "executable": "/usr/bin/swiftc",
+        "args": ["-o", "build/tool", "Sources/tool.swift"],
+        "cwd": "/workspace",
+        "cellProfile": "native-contained",
+        "timeoutMs": 120000,
+        "stdout": "capture",
+        "stderr": "capture"
+      },
+      "expectedPlanNodes": ["Invoke", "Apply"]
+    },
+    {
+      "id": "pipe-artifact-to-wc",
+      "family": "artifact-stream",
+      "intent": "Feed captured bytes to wc through an explicit artifact",
+      "action": {
+        "action": "process.run",
+        "executable": "/usr/bin/wc",
+        "args": ["-l"],
+        "cwd": "/workspace",
+        "stdin": { "kind": "artifact", "id": "artifact/lines" },
+        "cellProfile": "native-contained",
+        "timeoutMs": 10000,
+        "stdout": "capture",
+        "stderr": "capture"
+      },
+      "artifacts": [{ "id": "artifact/lines", "text": "one\ntwo\nthree\n" }],
+      "expectedPlanNodes": ["Invoke", "Apply"]
+    },
+    {
+      "id": "pipe-artifact-to-jq",
+      "family": "artifact-stream",
+      "intent": "Feed JSON bytes to jq through an explicit artifact",
+      "action": {
+        "action": "process.run",
+        "executable": "/opt/homebrew/bin/jq",
+        "args": ["-r", ".name"],
+        "cwd": "/workspace",
+        "stdin": { "kind": "artifact", "id": "artifact/json-input" },
+        "cellProfile": "native-contained",
+        "timeoutMs": 10000,
+        "stdout": "capture",
+        "stderr": "capture"
+      },
+      "artifacts": [{ "id": "artifact/json-input", "text": "{\"name\":\"airlock\"}\n" }],
+      "expectedPlanNodes": ["Invoke", "Apply"]
+    },
+    {
+      "id": "pipe-artifact-to-sort",
+      "family": "artifact-stream",
+      "intent": "Feed unsorted records to sort through an explicit artifact",
+      "action": {
+        "action": "process.run",
+        "executable": "/usr/bin/sort",
+        "args": [],
+        "cwd": "/workspace",
+        "stdin": { "kind": "artifact", "id": "artifact/unsorted" },
+        "cellProfile": "native-contained",
+        "timeoutMs": 10000,
+        "stdout": "capture",
+        "stderr": "capture"
+      },
+      "artifacts": [{ "id": "artifact/unsorted", "text": "zeta\nalpha\n" }],
+      "expectedPlanNodes": ["Invoke", "Apply"]
+    },
+    {
+      "id": "pipe-archive-to-tar",
+      "family": "artifact-stream",
+      "intent": "Feed a frozen archive artifact to tar stdin",
+      "action": {
+        "action": "process.run",
+        "executable": "/usr/bin/tar",
+        "args": ["-xzf", "-", "-C", "restore"],
+        "cwd": "/workspace",
+        "stdin": { "kind": "artifact", "id": "artifact/archive-bytes" },
+        "cellProfile": "native-contained",
+        "timeoutMs": 30000,
+        "stdout": "capture",
+        "stderr": "capture"
+      },
+      "artifacts": [{ "id": "artifact/archive-bytes", "text": "contract fixture bytes" }],
+      "expectedPlanNodes": ["Invoke", "Apply"]
+    },
+    {
+      "id": "pipe-artifact-to-shasum",
+      "family": "artifact-stream",
+      "intent": "Digest frozen bytes through an explicit stdin artifact",
+      "action": {
+        "action": "process.run",
+        "executable": "/usr/bin/shasum",
+        "args": ["-a", "256"],
+        "cwd": "/workspace",
+        "stdin": { "kind": "artifact", "id": "artifact/digest-input" },
+        "cellProfile": "native-contained",
+        "timeoutMs": 10000,
+        "stdout": "capture",
+        "stderr": "capture"
+      },
+      "artifacts": [{ "id": "artifact/digest-input", "text": "bytes to digest\n" }],
+      "expectedPlanNodes": ["Invoke", "Apply"]
+    },
+    {
+      "id": "stage-http-get",
+      "family": "staged-http",
+      "intent": "Stage an HTTP GET without dispatching it",
+      "action": { "action": "http.stage", "endpoint": "https://api.example.test/v1/status", "method": "GET", "holdMillis": 30000 },
+      "expectedPlanNodes": ["RequestExternal"]
+    },
+    {
+      "id": "stage-http-post-json",
+      "family": "staged-http",
+      "intent": "Stage a JSON POST with explicit headers",
+      "action": {
+        "action": "http.stage",
+        "endpoint": "https://api.example.test/v1/jobs",
+        "method": "POST",
+        "headers": { "content-type": "application/json" },
+        "body": "{\"task\":\"build\"}",
+        "holdMillis": 60000
+      },
+      "expectedPlanNodes": ["RequestExternal"]
+    },
+    {
+      "id": "stage-http-put",
+      "family": "staged-http",
+      "intent": "Stage an idempotent resource replacement request",
+      "action": {
+        "action": "http.stage",
+        "endpoint": "https://api.example.test/v1/resources/42",
+        "method": "PUT",
+        "body": "{\"state\":\"ready\"}",
+        "holdMillis": 30000
+      },
+      "expectedPlanNodes": ["RequestExternal"]
+    },
+    {
+      "id": "stage-http-patch",
+      "family": "staged-http",
+      "intent": "Stage a partial remote update request",
+      "action": {
+        "action": "http.stage",
+        "endpoint": "https://api.example.test/v1/resources/42",
+        "method": "PATCH",
+        "body": "{\"enabled\":true}",
+        "holdMillis": 30000
+      },
+      "expectedPlanNodes": ["RequestExternal"]
+    },
+    {
+      "id": "stage-http-delete",
+      "family": "staged-http",
+      "intent": "Stage a remote deletion request for supervisor review",
+      "action": {
+        "action": "http.stage",
+        "endpoint": "https://api.example.test/v1/resources/42",
+        "method": "DELETE",
+        "holdMillis": 120000
+      },
+      "expectedPlanNodes": ["RequestExternal"]
+    },
+    {
+      "id": "stage-http-artifact-body",
+      "family": "staged-http",
+      "intent": "Freeze an artifact into a staged HTTP request body",
+      "action": {
+        "action": "http.stage",
+        "endpoint": "https://api.example.test/v1/reports",
+        "method": "POST",
+        "headers": { "content-type": "text/plain" },
+        "bodyArtifact": "artifact/http-report",
+        "holdMillis": 30000
+      },
+      "artifacts": [{ "id": "artifact/http-report", "text": "report body\n" }],
+      "expectedPlanNodes": ["RequestExternal"]
+    },
+    {
+      "id": "stage-webhook",
+      "family": "staged-http",
+      "intent": "Stage a webhook with correlation metadata",
+      "action": {
+        "action": "http.stage",
+        "endpoint": "https://hooks.example.test/airlock",
+        "method": "POST",
+        "headers": { "content-type": "application/json", "x-correlation-id": "contract-71" },
+        "body": "{\"event\":\"completed\"}",
+        "holdMillis": 45000
+      },
+      "expectedPlanNodes": ["RequestExternal"]
+    }
+  ],
+  "unsupported": [
+    {
+      "id": "reject-command-string-shell",
+      "programAction": "shell.eval",
+      "publishedClass": "unstructured command-string execution",
+      "reason": "The agent language exposes no shell or command-string action."
+    },
+    {
+      "id": "reject-symlink-apply",
+      "programAction": "file.symlink",
+      "publishedClass": "symlink Apply",
+      "reason": "macOS v1 does not advertise symlink mutation or merge."
+    },
+    {
+      "id": "reject-device-write",
+      "programAction": "device.write",
+      "publishedClass": "special files and devices",
+      "reason": "macOS v1 advertises managed regular files and directories only."
+    },
+    {
+      "id": "reject-mount-operation",
+      "programAction": "mount.attach",
+      "publishedClass": "mount mutation",
+      "reason": "Mounts and remote filesystems are outside the native Apply envelope."
+    },
+    {
+      "id": "reject-pty-session",
+      "programAction": "pty.open",
+      "publishedClass": "interactive PTY and job control",
+      "reason": "Full interactive PTY ownership is not an advertised v1 action."
+    },
+    {
+      "id": "reject-contained-socket",
+      "programAction": "socket.connect",
+      "publishedClass": "contained endpoint access",
+      "reason": "The current native Cell denies network and has no endpoint broker."
+    },
+    {
+      "id": "reject-daemon-detach",
+      "programAction": "process.daemonize",
+      "publishedClass": "daemonization and session escape",
+      "reason": "Complete ownership of detached descendants is not established."
+    },
+    {
+      "id": "reject-remote-filesystem-apply",
+      "programAction": "filesystem.remote_apply",
+      "publishedClass": "remote filesystem Apply",
+      "reason": "Remote filesystems require a cooperating realm and are not native managed state."
+    }
+  ]
+}
