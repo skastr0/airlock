@@ -254,6 +254,9 @@ describe("ExclusiveRename — macOS Hold boundary", () => {
             })
             expect(result.status, result.stderr).toBe(0)
             expect(JSON.parse(result.stdout.trim())).toEqual({
+              collision: "ExclusiveRenameTargetExists",
+              collisionSource: "compiled source",
+              collisionTarget: "compiled foreign",
               previousHeld: true,
               restored: "compiled-original"
             })
