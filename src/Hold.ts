@@ -16,7 +16,7 @@ import {
   UndoReceipt,
   UnknownAct
 } from "./domain.ts"
-import { Ledger } from "./Ledger.ts"
+import { Ledger, type LedgerError } from "./Ledger.ts"
 
 // The recovery floor, by construction: the destructive part of every mutation
 // is a rename. The single unlink site in this component is `reap` — the runner's
@@ -54,6 +54,7 @@ export class TargetOccupied extends Schema.TaggedError<TargetOccupied>()(
 
 type HoldIoError = HoldFilesystemError | CrossVolumeHold
 type HoldRecoveryError = HoldFilesystemError | HoldRecoveryIndeterminate
+type HoldMutationError = HoldIoError | LedgerError
 
 export class Hold extends Context.Tag("airlock/Hold")<
   Hold,
@@ -62,29 +63,29 @@ export class Hold extends Context.Tag("airlock/Hold")<
       target: string
     ) => Effect.Effect<
       RemoveReceipt,
-      TargetNotFound | ProtectedPath | HoldIoError
+      TargetNotFound | ProtectedPath | HoldMutationError
     >
     readonly overwrite: (
       target: string,
       content: string
     ) => Effect.Effect<
       OverwriteReceipt,
-      ProtectedPath | HoldIoError | TargetOccupied
+      ProtectedPath | HoldMutationError | TargetOccupied
     >
     readonly undo: (
       id: ActId
     ) => Effect.Effect<
       UndoReceipt,
-      UnknownAct | NotHeld | UndoConflict | HoldIoError
+      UnknownAct | NotHeld | UndoConflict | HoldMutationError
     >
     readonly undoLast: Effect.Effect<
       UndoReceipt,
-      NothingToUndo | UnknownAct | NotHeld | UndoConflict | HoldIoError
+      NothingToUndo | UnknownAct | NotHeld | UndoConflict | HoldMutationError
     >
     readonly held: Effect.Effect<ReadonlyArray<HeldManifest>, HoldFilesystemError>
     readonly reap: (
       olderThanMillis: number
-    ) => Effect.Effect<ReapReport, HoldFilesystemError>
+    ) => Effect.Effect<ReapReport, HoldFilesystemError | LedgerError>
   }
 >() {}
 
