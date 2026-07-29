@@ -6,8 +6,16 @@ import { Context, Effect, Layer } from "effect"
 import { utimes } from "node:fs/promises"
 import { fileURLToPath } from "node:url"
 import * as AirlockHome from "../src/AirlockHome.ts"
-import { Hold, HoldLayer } from "../src/Hold.ts"
-import { Ledger, LedgerLive } from "../src/Ledger.ts"
+import {
+  Hold,
+  HoldLayer,
+  HoldReapRecoveryRequired
+} from "../src/Hold.ts"
+import {
+  Ledger,
+  LedgerFilesystemError,
+  LedgerLive
+} from "../src/Ledger.ts"
 import { MacosExclusiveRenameTestLive } from "./support/ExclusiveRenameTestLive.ts"
 
 const layersFor = (home: string) =>
@@ -145,6 +153,60 @@ describe("Hold — undoable mutations", () => {
 
         const error = yield* hold.undo(receipt.id).pipe(Effect.flip)
         expect(error._tag).toBe("UnknownAct")
+      })
+    )
+  )
+
+  it.effect("a post-reap ledger failure returns an exact partial receipt", () =>
+    world(({ fs, hold, path, tmp }) =>
+      Effect.gen(function* () {
+        const first = path.join(tmp, "first-expired.txt")
+        const second = path.join(tmp, "second-expired.txt")
+        yield* fs.writeFileString(first, "first")
+        yield* fs.writeFileString(second, "second")
+        yield* hold.remove(first)
+        yield* hold.remove(second)
+
+        const home = path.join(tmp, "airlock-home")
+        const ordered = yield* hold.held
+        const failingLedger = Layer.succeed(
+          Ledger,
+          Ledger.of({
+            record: () =>
+              Effect.fail(
+                new LedgerFilesystemError({
+                  operation: "append",
+                  path: path.join(home, "ledger.jsonl"),
+                  reason: "injected post-reap ledger failure"
+                })
+              ),
+            entries: Effect.succeed([])
+          })
+        )
+        const failingHold = yield* Effect.provide(
+          Hold,
+          HoldLayer.pipe(
+            Layer.provideMerge(MacosExclusiveRenameTestLive),
+            Layer.provideMerge(failingLedger),
+            Layer.provideMerge(AirlockHome.layer(home)),
+            Layer.provideMerge(BunContext.layer)
+          )
+        )
+
+        const error = yield* failingHold.reap(0).pipe(Effect.flip)
+        expect(error).toBeInstanceOf(HoldReapRecoveryRequired)
+        expect(error).toMatchObject({
+          reaped: [ordered[0]!.id],
+          current: ordered[0]!.id,
+          phase: "ledger",
+          currentRemoval: "confirmed"
+        })
+        expect(yield* fs.exists(
+          path.join(home, "hold", ordered[0]!.id)
+        )).toBe(false)
+        expect(yield* fs.exists(
+          path.join(home, "hold", ordered[1]!.id)
+        )).toBe(true)
       })
     )
   )

@@ -105,6 +105,18 @@ export class HoldRecoveryRequired extends Schema.TaggedError<HoldRecoveryRequire
   }
 ) {}
 
+export class HoldReapRecoveryRequired extends Schema.TaggedError<HoldReapRecoveryRequired>()(
+  "HoldReapRecoveryRequired",
+  {
+    reaped: Schema.Array(ActId),
+    current: ActId,
+    phase: Schema.Literal("remove", "sync", "ledger"),
+    currentRemoval: Schema.Literal("possible", "confirmed"),
+    at: Schema.DateTimeUtc,
+    reason: Schema.String
+  }
+) {}
+
 type HoldIoError = HoldFilesystemError | CrossVolumeHold
 type HoldRecoveryError = HoldFilesystemError | HoldRecoveryIndeterminate
 type HoldMutationError = HoldIoError | LedgerError | HoldRecoveryRequired
@@ -189,7 +201,10 @@ export class Hold extends Context.Tag("airlock/Hold")<
     readonly held: Effect.Effect<ReadonlyArray<HeldManifest>, HoldFilesystemError>
     readonly reap: (
       olderThanMillis: number
-    ) => Effect.Effect<ReapReport, HoldFilesystemError | LedgerError>
+    ) => Effect.Effect<
+      ReapReport,
+      HoldFilesystemError | HoldReapRecoveryRequired
+    >
   }
 >() {}
 
@@ -1212,23 +1227,59 @@ const make = Effect.gen(function* () {
     const expired = all.filter((journal) =>
       DateTime.lessThanOrEqualTo(journal.manifest.at, cutoff)
     )
+    const reaped: ActId[] = []
     for (const journal of expired) {
+      const id = journal.manifest.id
       // The single physical deletion site in this component.
       yield* fs
-        .remove(actDir(journal.manifest.id), { recursive: true })
-        .pipe(Effect.mapError(fsError("reap hold act", actDir(journal.manifest.id))))
-      yield* syncDirectory(home.holdDir, "reap hold act directory sync")
+        .remove(actDir(id), { recursive: true })
+        .pipe(
+          Effect.mapError((cause) =>
+            new HoldReapRecoveryRequired({
+              reaped,
+              current: id,
+              phase: "remove",
+              currentRemoval: "possible",
+              at: now,
+              reason: reasonOf(cause)
+            })
+          )
+        )
+      reaped.push(id)
+      yield* syncDirectory(home.holdDir, "reap hold act directory sync").pipe(
+        Effect.mapError((cause) =>
+          new HoldReapRecoveryRequired({
+            reaped,
+            current: id,
+            phase: "sync",
+            currentRemoval: "confirmed",
+            at: now,
+            reason: reasonOf(cause)
+          })
+        )
+      )
       yield* ledger.record(
         new LedgerEntry({
           at: now,
           effect: "mutation",
           act: "reap",
-          ref: journal.manifest.id,
+          ref: id,
           detail: journal.manifest.target
         })
+      ).pipe(
+        Effect.mapError((cause) =>
+          new HoldReapRecoveryRequired({
+            reaped,
+            current: id,
+            phase: "ledger",
+            currentRemoval: "confirmed",
+            at: now,
+            reason: reasonOf(cause)
+          })
+        )
       )
     }
-    return new ReapReport({ reaped: expired.map((journal) => journal.manifest.id), at: now })
+    return new ReapReport({ reaped, at: now })
   })
 
   return Hold.of({
