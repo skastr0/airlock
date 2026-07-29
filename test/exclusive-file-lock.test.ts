@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest"
-import { Cause, Effect, Exit, Fiber } from "effect"
+import { Cause, Deferred, Effect, Exit, Fiber } from "effect"
 import {
   mkdir,
   mkdtemp,
@@ -24,14 +24,6 @@ describe("ExclusiveFileLock", () => {
       const root = join(temporary, "locks")
       const active = join(root, "active")
       await mkdir(root)
-      await writeFile(
-        active,
-        JSON.stringify({
-          token: "live-owner",
-          pid: process.pid,
-          createdAt: Date.now()
-        })
-      )
       const lock = makeExclusiveFileLock({
         root,
         active,
@@ -45,14 +37,26 @@ describe("ExclusiveFileLock", () => {
 
       const started = Date.now()
       await Effect.runPromise(Effect.gen(function* () {
+        const ownerReady = yield* Deferred.make<void>()
+        const releaseOwner = yield* Deferred.make<void>()
+        const owner = yield* lock.withLock(
+          Deferred.succeed(ownerReady, undefined).pipe(
+            Effect.zipRight(Deferred.await(releaseOwner))
+          )
+        ).pipe(Effect.fork)
+        yield* Deferred.await(ownerReady)
+        const before = yield* Effect.promise(() => readFile(active, "utf8"))
         const waiter = yield* Effect.fork(lock.withLock(Effect.void))
         yield* realDelay(40)
         yield* Fiber.interrupt(waiter)
+        const after = yield* Effect.promise(() => readFile(active, "utf8"))
+        expect(after).toBe(before)
+        yield* Deferred.succeed(releaseOwner, undefined)
+        yield* Fiber.join(owner)
       }))
 
       expect(Date.now() - started).toBeLessThan(500)
       expect(JSON.parse(await readFile(active, "utf8"))).toMatchObject({
-        token: "live-owner",
         pid: process.pid
       })
     } finally {
@@ -112,22 +116,21 @@ describe("ExclusiveFileLock", () => {
     }
   })
 
-  it("retires a published owner when directory sync fails without stranding its live pid", async () => {
+  it("closes an unpublished descriptor when directory sync fails", async () => {
     const temporary = await mkdtemp(join(tmpdir(), "airlock-lock-publish-"))
     try {
       const lockFiles = join(temporary, "lock-files")
       const missingSyncRoot = join(temporary, "missing-sync-root")
       const active = join(lockFiles, "active")
-      const abandoned = join(lockFiles, "abandoned")
       await mkdir(lockFiles)
       const lock = makeExclusiveFileLock({
-        // The claim files live in `lockFiles`; the deliberately absent root is
-        // deterministic fault injection for the post-publication directory
-        // sync, after the live-PID owner body is already durable.
+        // The stable claim inode lives in `lockFiles`; the deliberately absent
+        // root deterministically faults the post-publication directory sync
+        // after the owner body is already durable.
         root: missingSyncRoot,
         active,
         released: join(lockFiles, "released"),
-        abandoned,
+        abandoned: join(lockFiles, "abandoned"),
         timeoutMillis: 1_200,
         malformedGraceMillis: 100,
         onError: (operation, target, cause) => ({
@@ -143,12 +146,15 @@ describe("ExclusiveFileLock", () => {
       )
       expect(Exit.isFailure(first)).toBe(true)
       if (Exit.isFailure(first)) {
-        expect(Cause.failures(first.cause).length).toBeGreaterThanOrEqual(2)
+        expect(Array.from(Cause.failures(first.cause))).toEqual([
+          expect.objectContaining({
+            _tag: "TestLockFailure",
+            operation: "publish-lock-sync-directory",
+            target: missingSyncRoot
+          })
+        ])
       }
-      await expect(readFile(active, "utf8")).rejects.toMatchObject({
-        code: "ENOENT"
-      })
-      expect(JSON.parse(await readFile(abandoned, "utf8"))).toMatchObject({
+      expect(JSON.parse(await readFile(active, "utf8"))).toMatchObject({
         pid: process.pid
       })
 
@@ -158,9 +164,90 @@ describe("ExclusiveFileLock", () => {
       )
       expect(Exit.isFailure(second)).toBe(true)
       expect(Date.now() - started).toBeLessThan(500)
-      await expect(readFile(active, "utf8")).rejects.toMatchObject({
-        code: "ENOENT"
+
+      // The failed publisher closed its descriptor. A correctly configured
+      // runtime can immediately lock the same stable inode despite stale owner
+      // metadata from the failed publication.
+      const recovered = makeExclusiveFileLock({
+        root: lockFiles,
+        active,
+        released: join(lockFiles, "released"),
+        abandoned: join(lockFiles, "abandoned"),
+        timeoutMillis: 1_200,
+        onError: (operation, target, cause) => ({
+          _tag: "TestLockFailure" as const,
+          operation,
+          target,
+          cause: String(cause)
+        })
       })
+      const recoveredResult = await Effect.runPromise(
+        recovered.withLock(Effect.succeed("recovered"))
+      )
+      expect(recoveredResult).toBe("recovered")
+    } finally {
+      await rm(temporary, { recursive: true, force: true })
+    }
+  })
+
+  it("serializes every contender after stale owner metadata", async () => {
+    const temporary = await mkdtemp(join(tmpdir(), "airlock-lock-stale-"))
+    try {
+      const root = join(temporary, "locks")
+      const active = join(root, "active")
+      await mkdir(root)
+      await writeFile(
+        active,
+        JSON.stringify({
+          token: "dead-owner",
+          pid: 999_999,
+          createdAt: 0
+        })
+      )
+      const lock = makeExclusiveFileLock({
+        root,
+        active,
+        released: join(root, "released"),
+        abandoned: join(root, "abandoned"),
+        timeoutMillis: 4_000,
+        malformedGraceMillis: 0,
+        onError: (operation, target, cause) => ({
+          _tag: "TestLockFailure" as const,
+          operation,
+          target,
+          cause: String(cause)
+        })
+      })
+      let inside = 0
+      let maximumInside = 0
+      let entered = 0
+      const criticalSection = Effect.acquireUseRelease(
+        Effect.sync(() => {
+          inside += 1
+          entered += 1
+          maximumInside = Math.max(maximumInside, inside)
+        }),
+        () => realDelay(20),
+        () =>
+          Effect.sync(() => {
+            inside -= 1
+          })
+      )
+
+      const results = await Effect.runPromise(
+        Effect.all(
+          Array.from(
+            { length: 32 },
+            () => lock.withLock(criticalSection).pipe(Effect.either)
+          ),
+          { concurrency: "unbounded" }
+        )
+      )
+
+      expect(results.every((result) => result._tag === "Right")).toBe(true)
+      expect(entered).toBe(32)
+      expect(maximumInside).toBe(1)
+      expect(inside).toBe(0)
     } finally {
       await rm(temporary, { recursive: true, force: true })
     }

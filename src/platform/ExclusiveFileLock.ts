@@ -1,10 +1,6 @@
 import { Cause, Effect, Exit } from "effect"
-import {
-  lstat,
-  open,
-  readFile,
-  rename
-} from "node:fs/promises"
+import { constants } from "node:fs"
+import { open, readFile } from "node:fs/promises"
 
 type LockOwner = Readonly<{
   readonly token: string
@@ -15,9 +11,15 @@ type LockOwner = Readonly<{
 export interface ExclusiveFileLockOptions<E> {
   readonly root: string
   readonly active: string
+  /**
+   * Retained for the persisted v0 layout. The descriptor-backed macOS protocol
+   * never renames the stable lock inode, so these tombstones are no longer
+   * written.
+   */
   readonly released: string
   readonly abandoned: string
   readonly timeoutMillis?: number
+  /** @deprecated Kernel-owned leases need no malformed-owner grace period. */
   readonly malformedGraceMillis?: number
   readonly onError: (
     operation: string,
@@ -33,15 +35,6 @@ const errorCode = (cause: unknown) =>
   typeof (cause as { readonly code?: unknown }).code === "string"
     ? (cause as { readonly code: string }).code
     : undefined
-
-const processExists = (pid: number) => {
-  try {
-    process.kill(pid, 0)
-    return true
-  } catch (cause) {
-    return errorCode(cause) !== "ESRCH"
-  }
-}
 
 const parseOwner = (raw: string): LockOwner | undefined => {
   try {
@@ -70,20 +63,40 @@ const realDelay = (milliseconds: number) =>
     return Effect.sync(() => clearTimeout(timer))
   })
 
+type FileHandle = Awaited<ReturnType<typeof open>>
+
+type Lease = Readonly<{
+  readonly owner: LockOwner
+  readonly handle: FileHandle
+}>
+
+/*
+ * Darwin's O_EXLOCK is intentionally absent from Node's portable constants.
+ * On macOS it is 0x20 and asks open(2) to acquire a flock-style exclusive lock
+ * atomically with opening the file. O_NONBLOCK turns contention into EAGAIN
+ * instead of blocking an uninterruptible native call.
+ */
+const DARWIN_O_EXLOCK = 0x20
+
+const contended = (cause: unknown) => {
+  const code = errorCode(cause)
+  return code === "EAGAIN" || code === "EWOULDBLOCK"
+}
+
 /**
- * A bounded, cross-process lease made only from durable file creation and
- * atomic rename. At most `active`, `released`, and `abandoned` exist.
+ * A bounded, cross-process macOS lease over one stable inode.
  *
- * The active file is the claim: `open("wx")` creates it atomically. Its owner
- * body is synced before work begins. A malformed claim is given a grace period
- * so another process cannot steal the file during publication; a dead owner or
- * old malformed claim is atomically moved to the single abandoned slot.
+ * Authority is the open file description protected by O_EXLOCK, not the owner
+ * JSON or a reusable pathname. The kernel releases the lock when the descriptor
+ * closes or its process dies. Stale/malformed owner bytes are therefore inert
+ * diagnostics that the next successful holder replaces; there is no stale
+ * read-then-rename step and consequently no ABA window that can revoke a newer
+ * live owner.
  */
 export const makeExclusiveFileLock = <E>(
   options: ExclusiveFileLockOptions<E>
 ) => {
   const timeoutMillis = options.timeoutMillis ?? 30_000
-  const malformedGraceMillis = options.malformedGraceMillis ?? 2_000
 
   const fail = (operation: string, target: string, cause: unknown) =>
     options.onError(operation, target, cause)
@@ -101,151 +114,130 @@ export const makeExclusiveFileLock = <E>(
       catch: (cause) => fail(operation, options.root, cause)
     })
 
-  const retire = (
-    destination: string,
-    operation: string
-  ): Effect.Effect<boolean, E> =>
-    Effect.tryPromise({
-      try: async () => {
+  const attempt = Effect.fnUntraced(function* () {
+    if (process.platform !== "darwin") {
+      return yield* Effect.fail(
+        fail(
+          "acquire-lock",
+          options.active,
+          `O_EXLOCK lease is unavailable on ${process.platform}`
+        )
+      )
+    }
+
+    const owner: LockOwner = {
+      token: crypto.randomUUID(),
+      pid: process.pid,
+      createdAt: Date.now()
+    }
+    const claimed = yield* Effect.tryPromise({
+      try: async (): Promise<Lease | undefined> => {
+        let handle: FileHandle | undefined
         try {
-          await rename(options.active, destination)
-          return true
+          handle = await open(
+            options.active,
+            constants.O_RDWR |
+              constants.O_CREAT |
+              constants.O_NONBLOCK |
+              DARWIN_O_EXLOCK,
+            0o600
+          )
+          await handle.truncate(0)
+          await handle.writeFile(JSON.stringify(owner), "utf8")
+          await handle.sync()
+          return { owner, handle }
         } catch (cause) {
-          if (errorCode(cause) === "ENOENT") return false
+          const opened = handle !== undefined
+          if (handle !== undefined) {
+            try {
+              await handle.close()
+            } catch {
+              // Preserve the publication failure. Closing is best effort here;
+              // the kernel also releases the lease when this process exits.
+            }
+          }
+          if (!opened && contended(cause)) return undefined
           throw cause
         }
       },
-      catch: (cause) => fail(operation, options.active, cause)
-    }).pipe(
-      Effect.tap((retired) =>
-        retired ? syncRoot(`${operation}-sync-directory`) : Effect.void
-      )
-    )
+      catch: (cause) => fail("publish-lock-owner", options.active, cause)
+    })
+    if (claimed === undefined) return undefined
 
-  const acquire = Effect.fnUntraced(function* () {
-    const started = Date.now()
-    while (Date.now() - started < timeoutMillis) {
-      const owner: LockOwner = {
-        token: crypto.randomUUID(),
-        pid: process.pid,
-        createdAt: Date.now()
-      }
-      const claimed = yield* Effect.tryPromise({
-        try: async () => {
-          let handle
-          try {
-            handle = await open(options.active, "wx", 0o600)
-          } catch (cause) {
-            if (errorCode(cause) === "EEXIST") return false
-            throw cause
-          }
+    const publication = yield* syncRoot(
+      "publish-lock-sync-directory"
+    ).pipe(Effect.exit)
+    if (Exit.isSuccess(publication)) return claimed
 
-          try {
-            await handle.writeFile(JSON.stringify(owner), "utf8")
-            await handle.sync()
-          } catch (cause) {
-            try {
-              await handle.close()
-            } finally {
-              try {
-                await rename(options.active, options.abandoned)
-              } catch {
-                // Preserve the first failure. A later acquisition can reclaim
-                // the old malformed active claim after the grace interval.
-              }
-            }
-            throw cause
-          }
-          await handle.close()
-          return true
-        },
-        catch: (cause) => fail("publish-lock-owner", options.active, cause)
-      })
-
-      if (claimed) {
-        const publication = yield* syncRoot(
-          "publish-lock-sync-directory"
-        ).pipe(Effect.exit)
-        if (Exit.isFailure(publication)) {
-          const cleanup = yield* retire(
-            options.abandoned,
-            "abandon-unpublished-lock"
-          ).pipe(Effect.exit)
-          return yield* Exit.isFailure(cleanup)
-            ? Effect.failCause(
-                Cause.sequential(publication.cause, cleanup.cause)
-              )
-            : Effect.failCause(publication.cause)
-        }
-        return owner.token
-      }
-
-      const snapshot = yield* Effect.tryPromise({
-        try: async () => {
-          try {
-            const info = await lstat(options.active)
-            const raw = await readFile(options.active, "utf8")
-            return {
-              owner: parseOwner(raw),
-              ageMillis: Math.max(0, Date.now() - info.mtimeMs)
-            }
-          } catch (cause) {
-            if (errorCode(cause) === "ENOENT") return undefined
-            throw cause
-          }
-        },
-        catch: (cause) => fail("inspect-lock-owner", options.active, cause)
-      })
-
-      if (snapshot === undefined) continue
-      const reclaim =
-        snapshot.owner === undefined
-          ? snapshot.ageMillis >= malformedGraceMillis
-          : !processExists(snapshot.owner.pid)
-      if (reclaim) {
-        yield* retire(options.abandoned, "abandon-stale-lock")
-        continue
-      }
-      yield* realDelay(10)
-    }
-
-    return yield* Effect.fail(
-      fail(
-        "acquire-lock",
-        options.active,
-        `timed out after ${timeoutMillis}ms`
-      )
-    )
+    const closed = yield* Effect.tryPromise({
+      try: () => claimed.handle.close(),
+      catch: (cause) => fail("close-unpublished-lock", options.active, cause)
+    }).pipe(Effect.exit)
+    return yield* Exit.isFailure(closed)
+      ? Effect.failCause(Cause.sequential(publication.cause, closed.cause))
+      : Effect.failCause(publication.cause)
   })
 
-  const release = (token: string) =>
-    Effect.tryPromise({
-      try: async () => {
-        const owner = parseOwner(await readFile(options.active, "utf8"))
-        if (owner?.token !== token) {
-          throw new Error("active lock is not owned by this lease")
-        }
-      },
-      catch: (cause) => fail("verify-lock-owner", options.active, cause)
-    }).pipe(
-      Effect.zipRight(retire(options.released, "release-lock")),
-      Effect.flatMap((released) =>
-        released
-          ? Effect.void
-          : Effect.fail(
-              fail("release-lock", options.active, "active lock disappeared")
-            )
+  const acquire = (
+    restore: <A, E2, R>(
+      effect: Effect.Effect<A, E2, R>
+    ) => Effect.Effect<A, E2, R>
+  ) =>
+    Effect.gen(function* () {
+      const started = performance.now()
+      while (performance.now() - started < timeoutMillis) {
+        const claimed = yield* attempt()
+        if (claimed !== undefined) return claimed
+        // The claim attempt itself is a short uninterruptible resource
+        // transition. Only the contention wait is restored so cancellation
+        // cannot lose a successfully opened descriptor before finalization.
+        yield* restore(realDelay(10))
+      }
+      return yield* Effect.fail(
+        fail(
+          "acquire-lock",
+          options.active,
+          `timed out after ${timeoutMillis}ms`
+        )
       )
-    )
+    })
+
+  const release = (lease: Lease) =>
+    Effect.gen(function* () {
+      const verified = yield* Effect.tryPromise({
+        try: async () => {
+          const owner = parseOwner(await readFile(options.active, "utf8"))
+          if (owner?.token !== lease.owner.token) {
+            throw new Error("active lock is not owned by this lease")
+          }
+        },
+        catch: (cause) => fail("verify-lock-owner", options.active, cause)
+      }).pipe(Effect.exit)
+      const closed = yield* Effect.tryPromise({
+        try: () => lease.handle.close(),
+        catch: (cause) => fail("release-lock", options.active, cause)
+      }).pipe(Effect.exit)
+
+      if (Exit.isFailure(verified)) {
+        return yield* Exit.isFailure(closed)
+          ? Effect.failCause(
+              Cause.sequential(verified.cause, closed.cause)
+            )
+          : Effect.failCause(verified.cause)
+      }
+      return yield* Exit.isFailure(closed)
+        ? Effect.failCause(closed.cause)
+        : Effect.void
+    })
 
   const withLock = <A, E2, R>(effect: Effect.Effect<A, E2, R>) =>
     Effect.uninterruptibleMask((restore) =>
-      restore(acquire()).pipe(
-        Effect.flatMap((token) =>
+      acquire(restore).pipe(
+        Effect.flatMap((lease) =>
           restore(effect).pipe(
             Effect.exit,
             Effect.flatMap((use) =>
-              release(token).pipe(
+              release(lease).pipe(
                 Effect.exit,
                 Effect.flatMap((released) => {
                   if (Exit.isFailure(released)) {
@@ -266,5 +258,5 @@ export const makeExclusiveFileLock = <E>(
       )
     )
 
-  return { acquire, release, withLock } as const
+  return { withLock } as const
 }
