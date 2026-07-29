@@ -162,7 +162,8 @@ executable as element zero. There is no command-string execution form.
 The runtime uses Effect: data and wire boundaries are Schema-first, expected
 failures are tagged in the typed error channel, capability requirements are
 visible in service contracts, and the CLI composes the service Layers into one
-`BunRuntime`. A persistent managed daemon remains future work.
+scoped `ManagedRuntime` backed by `BunContext`, disposing it through `finally`.
+A persistent managed daemon remains future work.
 
 ## Component discipline
 

@@ -146,10 +146,11 @@ The wire/data contracts are Effect Schema values with:
 - exhaustive transition decoding;
 - capability requirements in Effect service contracts.
 
-The current CLI composes the service Layers into one `BunRuntime`. CLI code
-decodes input and calls the runtime; it does not duplicate planning or
-authority policy. A persistent `ManagedRuntime`/daemon remains design
-direction, not current behavior.
+The current CLI composes the service Layers into one scoped `ManagedRuntime`
+backed by `BunContext` and disposes it through `finally`. CLI code decodes
+input and calls the runtime; it does not duplicate planning or authority
+policy. A persistent daemon that retains that runtime across requests remains
+design direction, not current behavior.
 
 ## Contract change
 
