@@ -37,6 +37,8 @@ Evidence present today:
   site;
 - compatibility CLI/program execution is tested;
 - native-contained write and network fences are tested on macOS;
+- native-contained proof covers a private Invoke temp workspace and keeps its
+  bytes out of the live merge delta;
 - the CLI runs an admitted native effectful program, applies its delta through
   Hold, and undoes it;
 - one Vouch-derived native proof captures an archive, invokes `/usr/bin/tar`,

@@ -11,6 +11,8 @@ import {
   Artifact,
   ArtifactId,
   Digest,
+  Receipt,
+  ReceiptId,
   type InvokeNode,
   type PlanNode
 } from "../src/plan/index.ts"
@@ -25,6 +27,7 @@ import {
 import {
   Runtime,
   RuntimeArtifact,
+  RuntimeHoldRecoveryEvidence,
   RuntimeProcessEvidence,
   RuntimeRun
 } from "../src/runtime/index.ts"
@@ -34,6 +37,7 @@ import {
   RedactedEmissionRequest
 } from "../src/outbox/Contract.ts"
 import { ActId, EmissionId, RemoveReceipt } from "../src/domain.ts"
+import { HoldRecoveryRequired } from "../src/Hold.ts"
 import { ProcessReceipt } from "../src/process/Process.ts"
 
 const now = DateTime.unsafeFromDate(new Date("2026-07-29T00:00:00.000Z"))
@@ -496,5 +500,89 @@ describe("ProgramExecutionLive", () => {
       expect(request.draft.nodes[0]).toMatchObject(fixture.node)
       expect(request.draft.nodes[0]!.produces).toHaveLength(1)
     }
+  })
+
+  it("returns runtime failure evidence without failing the program", async () => {
+    const failedRuntimeLayer = Layer.succeed(Runtime, Runtime.of({
+      execute: (authority) => {
+        const plan = authority.admission.plan
+        const node = plan.nodes[0]
+        if (node === undefined) {
+          return Effect.die("missing plan node")
+        }
+        return Effect.succeed(new RuntimeRun({
+          planId: plan.id,
+          state: "failed",
+          startedAt: now,
+          finishedAt: now,
+          receipts: [
+            new Receipt({
+              id: ReceiptId.make("receipt-runtime-failed"),
+              planId: plan.id,
+              nodeId: node.id,
+              sequence: 1,
+              state: "failed",
+              at: now,
+              inputDigests: [],
+              outputArtifacts: [],
+              resourceIdentities: [],
+              errorTag: "RuntimeProcessFailure"
+            })
+          ],
+          artifacts: [],
+          processes: [],
+          recovery: [
+            new RuntimeHoldRecoveryEvidence({
+              nodeId: node.id,
+              operation: "write",
+              recovery: new HoldRecoveryRequired({
+                id: ActId.make("act-runtime-recovery"),
+                target: "/work/runtime-private",
+                phase: "ledger",
+                reason: "runtime retained recovery material"
+              })
+            })
+          ]
+        }))
+      },
+      inspect: () => Effect.die("program test runtime has no persisted runs"),
+      recent: Effect.succeed([])
+    }))
+    const layer = ProgramExecutionLive(policy).pipe(Layer.provide(failedRuntimeLayer))
+
+    const result = await Effect.runPromise(
+      Effect.gen(function* () {
+        const program = yield* ProgramRunner
+        return yield* program.run(new ProgramRequest({
+          source: `return process.run({ executable: "/usr/bin/true", args: [], cwd: "/work", cellProfile: "compatibility" })`
+        }))
+      }).pipe(Effect.provide(layer))
+    )
+
+    expect(result.state).toBe("succeeded")
+    expect(result.result).toMatchObject({
+      state: "failed",
+      recovery: [
+        {
+          _tag: "RuntimeHoldRecoveryEvidence",
+          recovery: {
+            target: "/work/runtime-private",
+            phase: "ledger"
+          }
+        }
+      ]
+    })
+    expect(result.actions[0]?.result.value).toMatchObject({
+      state: "failed",
+      process_outcome: null,
+      exit_code: null,
+      signal: null,
+      receipts: [
+        {
+          state: "failed",
+          error_tag: "RuntimeProcessFailure"
+        }
+      ]
+    })
   })
 })

@@ -135,8 +135,9 @@ For each contained Invoke, the current runtime:
 2. creates a fresh same-volume private workspace by APFS clone or copy;
 3. generates a Seatbelt profile using JSON-escaped path literals;
 4. permits process execution and ambient file reads;
-5. permits writes in the private workspace, declared temp paths, and
-   `/dev/null`;
+5. provisions a private temp workspace for the Invoke, exports `TMPDIR`,
+   `TMP`, and `TEMP` into it, and permits writes in the private workspace,
+   declared temp paths, and `/dev/null`;
 6. denies network;
 7. runs the requested executable in the private workspace;
 8. fingerprints the live and private views;
@@ -154,6 +155,7 @@ Established by implementation and tests:
 - private workspace preparation;
 - live source-workspace write denial during Invoke;
 - network denial during Invoke;
+- private Invoke temp isolation with temp-path exclusion from the merge delta;
 - separate executable and argv atoms;
 - output capture and limits;
 - same-process-group descendant ownership until exit, timeout, or cancellation;

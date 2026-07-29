@@ -32,7 +32,9 @@ describe.skipIf(!supported)("macOS Cell Bun construction proof", () => {
       loopbackDenied: true,
       sourceUnchanged: true,
       deltaObserved: true,
-      driftAbsent: true
+      driftAbsent: true,
+      privateTempIsolated: true,
+      privateTempExcludedFromDelta: true
     })
     expect(proof.evidence.delta).toContainEqual({ path: "created.txt", kind: "created" })
     expect(proof.evidence.drift).toEqual([])
