@@ -4,17 +4,23 @@ import { BunContext, BunRuntime } from "@effect/platform-bun"
 import { FileSystem } from "@effect/platform"
 import { Console, Effect, Layer, Option, Schema } from "effect"
 import * as nodePath from "node:path"
+import { AdmissionPolicy } from "./admission/index.ts"
 import { NativeActionCatalog } from "./actions/index.ts"
 import { layerFromEnv } from "./AirlockHome.ts"
 import { ActId, EmissionId, EmissionRequest, ScopeEscape } from "./domain.ts"
 import { Hold, HoldLive } from "./Hold.ts"
-import { parse } from "./language/parser.ts"
-import { evaluate, type ActionResolver, type LanguageValue } from "./language/evaluator.ts"
+import {
+  type LanguageValue,
+  LanguageValueSchema
+} from "./language/evaluator.ts"
 import { Ledger, LedgerLive } from "./Ledger.ts"
 import { Cell, CellLive, CellRequest } from "./cell/index.ts"
 import { MacosPlatform, MacosPlatformLive } from "./platform/macos/index.ts"
+import { NativeFileSystemLive, NativeFilesystemConfig } from "./native/index.ts"
 import { ProcessRequest, ProcessRunner, ProcessRunnerLive } from "./process/Process.ts"
 import { Outbox, OutboxLive } from "./Outbox.ts"
+import { ProgramExecutionLive, ProgramRequest, ProgramRunner } from "./program/index.ts"
+import { RuntimeConfig, RuntimeConfigLive, RuntimeLive } from "./runtime/index.ts"
 import { AIRLOCK_VERSION } from "./version.ts"
 
 /**
@@ -84,13 +90,61 @@ const parseBindings = (raw: Option.Option<string>): Effect.Effect<Readonly<Recor
       if (value === null || Array.isArray(value) || typeof value !== "object") {
         throw new Error("must be a JSON object")
       }
-      return value as Readonly<Record<string, LanguageValue>>
+      return value
     },
     catch: (cause) => new CliInputError({
       field: "bindings",
       reason: cause instanceof Error ? cause.message : String(cause)
     })
-  })
+  }).pipe(
+    Effect.flatMap(Schema.decodeUnknown(
+      Schema.Record({ key: Schema.String, value: LanguageValueSchema })
+    )),
+    Effect.mapError((cause) => new CliInputError({
+      field: "bindings",
+      reason: cause instanceof Error ? cause.message : String(cause)
+    }))
+  )
+}
+
+const compatibilityPolicy = (workspace: string) => new AdmissionPolicy({
+  schemaVersion: "airlock/admission-policy/v1",
+  profile: "compatibility",
+  principal: "airlock-cli-agent",
+  realm: "local",
+  admittedBy: "airlock-cli compatibility supervisor",
+  pathAllowlist: [workspace],
+  executableAllowlist: [],
+  endpointAllowlist: []
+})
+
+/**
+ * Policies are supervisor input, never inferred from an action request. The
+ * compatibility policy is deliberately broad under the ratchet; contained
+ * execution requires an independently supplied, schema-decoded policy.
+ */
+const supervisorPolicy = (
+  profile: "compatibility" | "native-contained" | "vm-enclosed",
+  workspace: string
+): Effect.Effect<AdmissionPolicy, CliInputError, FileSystem.FileSystem> => {
+  if (profile === "vm-enclosed") {
+    return failInput("profile", "vm-enclosed has no bundled VM Cell backend; refusing fallback")
+  }
+  const policyFile = process.env["AIRLOCK_POLICY_FILE"]
+  if (policyFile === undefined || policyFile.trim().length === 0) {
+    return profile === "compatibility"
+      ? Effect.succeed(compatibilityPolicy(workspace))
+      : failInput("AIRLOCK_POLICY_FILE", "is required for native-contained program execution")
+  }
+  return Effect.flatMap(FileSystem.FileSystem, (fs) => fs.readFileString(policyFile).pipe(
+    Effect.mapError((error) => new CliInputError({ field: "AIRLOCK_POLICY_FILE", reason: String(error) })),
+    Effect.flatMap(Schema.decodeUnknown(Schema.parseJson(AdmissionPolicy))),
+    Effect.mapError((error) => new CliInputError({ field: "AIRLOCK_POLICY_FILE", reason: error.message })),
+    Effect.flatMap((policy) => policy.profile === profile
+      ? Effect.succeed(policy)
+      : failInput("AIRLOCK_POLICY_FILE", `policy profile ${policy.profile} does not match selected ${profile}`)
+    )
+  ))
 }
 
 // ── mutation verbs ──────────────────────────────────────────────────────────
@@ -307,41 +361,59 @@ const exec = Command.make(
     }))
 ).pipe(Command.withDescription("Run an absolute executable with argv atoms; no command-string form exists"))
 
-/**
- * The language currently has a pure evaluator and an explicit ActionResolver
- * seam. Until the composed ProgramRunner has concrete admission and runtime
- * adapters, `run` is useful for pure programs and deliberately rejects every
- * effectful action rather than adding a second execution path in CLI glue.
- */
-const noActions: ActionResolver<never, CliInputError> = {
-  resolve: (action) => failInput("program", `no admitted ProgramRunner is installed; action '${action}' cannot execute`)
-}
-
 const run = Command.make(
   "run",
   {
     program: Args.file({ name: "program.air" }),
     bindings: Options.text("bindings").pipe(Options.optional),
-    profile: profileOption
+    profile: profileOption,
+    workspace: Options.text("workspace").pipe(Options.withDefault(process.cwd()))
   },
-  ({ program, bindings, profile }) =>
+  ({ program, bindings, profile, workspace: requestedWorkspace }) =>
     rendered(
-      (profile === "compatibility"
-        ? Effect.void
-        : failInput("profile", `${profile} requires an admitted ProgramRunner; refusing compatibility fallback`)
-      ).pipe(
-        Effect.zipRight(parseBindings(bindings)),
-        Effect.flatMap((parsedBindings) => Effect.flatMap(FileSystem.FileSystem, (fs) =>
-          fs.readFileString(program).pipe(
-            Effect.mapError((error) => new CliInputError({ field: "program.air", reason: String(error) })),
-            Effect.flatMap(parse),
-            Effect.flatMap((source) => evaluate(source, noActions, { bindings: parsedBindings }))
-          )
-        )),
-        Effect.map((result) => ({ schemaVersion: "airlock/program-run/v1", profile, result }))
-      )
+      Effect.gen(function* () {
+        const workspace = nodePath.resolve(requestedWorkspace)
+        const policy = yield* supervisorPolicy(profile, workspace)
+        const bindingsValue = yield* parseBindings(bindings)
+        const fs = yield* FileSystem.FileSystem
+        const source = yield* fs.readFileString(program).pipe(
+          Effect.mapError((error) => new CliInputError({ field: "program.air", reason: String(error) }))
+        )
+        const runtimeLayer = RuntimeLive.pipe(
+          Layer.provideMerge(RuntimeConfigLive(new RuntimeConfig({ workspace, profile })))
+        )
+        const programLayer = ProgramExecutionLive(policy).pipe(
+          Layer.provideMerge(NativeFileSystemLive(new NativeFilesystemConfig({ workspace }))),
+          Layer.provideMerge(runtimeLayer)
+        )
+        const runner = yield* ProgramRunner.pipe(Effect.provide(programLayer))
+        const result = yield* runner.run(new ProgramRequest({ source, bindings: bindingsValue }))
+        return {
+          schemaVersion: "airlock/program-run/v1",
+          profile,
+          workspace,
+          result: {
+            result: result.result,
+            plans: result.plans.map((plan) => ({
+              id: plan.id,
+              actionReference: plan.actionReference,
+              nodes: plan.nodes.map((node) => ({
+                id: node.id,
+                kind: node._tag,
+                dependsOn: [...node.dependsOn]
+              }))
+            })),
+            artifacts: result.artifacts.map((artifact) => ({
+              id: artifact.id,
+              mediaType: artifact.mediaType,
+              byteLength: artifact.bytes.byteLength,
+              provenance: artifact.provenance
+            }))
+          }
+        }
+      })
     )
-).pipe(Command.withDescription("Evaluate an Airlock program; effects require the admitted ProgramRunner"))
+).pipe(Command.withDescription("Run an Airlock program through explicit admission, runtime, Hold, and Outbox seams"))
 
 // ── ledger ──────────────────────────────────────────────────────────────────
 
