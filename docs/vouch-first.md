@@ -96,6 +96,11 @@ versioned.
 This expands the operation surface beyond the restore fixture. It is still a
 controlled local proof rather than a representative corpus.
 
+Separate agent-only parity workloads now cover repository search/pipelines,
+native editing, archives, local Git, build descendants, and recoverable
+recursive removal. They broaden the generic evidence without turning the
+Vouch-derived proofs into a representative corpus.
+
 ## What the proof does not do
 
 It does not:

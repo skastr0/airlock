@@ -92,5 +92,10 @@ process, artifact, Hold, Outbox, and receipt paths. They do **not**:
   atomicity, or exhaustive crash behavior; or
 - supply a frozen representative corpus or direct-shell baseline.
 
+The separate parity suite adds agent-only repository search/pipeline, native
+edit, tar, local Git, build-descendant, and recoverable recursive-removal
+workloads. Those are corroborating generic evidence, not Vouch execution and
+not a representative corpus.
+
 The source-operation inventory and provenance notes live in
 [`examples/vouch/OPERATIONS.md`](../../examples/vouch/OPERATIONS.md).

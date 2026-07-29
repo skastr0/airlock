@@ -12,8 +12,8 @@ It is not a confidentiality boundary: the current Seatbelt profile permits
 ambient host reads. A VM backend is a future, stronger enclosure and is not a
 macOS v1 release prerequisite.
 
-The repository has two runnable Vouch-derived local proofs, a small
-shell-parity suite, bounded Hold/Outbox cross-process recovery tests, and
+The repository has two runnable Vouch-derived local proofs, ten checked-in
+shell-parity workloads, bounded Hold/Outbox cross-process recovery tests, and
 construction checks for the mutation and wire gateways. It does not yet have
 the representative corpus, exhaustive crash/overlap matrix, or red-team
 evidence needed for a strong shell-replacement claim.
@@ -153,6 +153,10 @@ The current program action vocabulary is generic:
 There are no Vouch-, archive-, SQLite-, Git-, or OpenShell-specific runtime
 verbs. Existing Unix programs keep those application semantics.
 
+Inert JSON tool definitions now execute end to end through ordinary action
+lowering, Admission, Plans, Runtime, and Schema-decoded results. They improve
+typed ergonomics; they do not grant authority or add Plan constructors.
+
 ## Hold and Outbox
 
 Direct maintenance commands remain available:
@@ -210,6 +214,11 @@ These are local host-operation fixtures, not a real Vouch/OpenShell replacement
 run. They do not prove endpoint brokerage, confidentiality, complete execution
 closure, exhaustive crash recovery, concurrent multi-entry atomicity, metadata
 fidelity, or broad task coverage.
+
+Five additional agent-only workloads exercise repository observation/search
+and an artifact pipeline, native `sed` editing, tar round-trip, local Git,
+and `make` with descendant processes. A destructive native fixture also proves
+recursive removal remains Hold-backed and exactly undoable by the supervisor.
 
 ## Documentation
 

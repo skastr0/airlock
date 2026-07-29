@@ -47,6 +47,10 @@ Evidence present today:
   receipts;
 - four checked-in parity fixtures exercise common file/process/control/native
   rewrite shapes;
+- five further agent-only workloads exercise repository observation/search and
+  artifact piping, native `sed`, tar, local Git, and `make` descendants;
+- a destructive native workload proves recursive removal is Hold-backed and
+  exactly undoable through the supervisor;
 - Hold and Outbox have bounded cross-process lease, stale-owner recovery, and
   journal/recovery tests, including cancellation of contended waiters without
   stealing the live owner; and
@@ -55,7 +59,8 @@ Evidence present today:
 - a later program failure returns a nonzero, versioned partial report that
   retains completed action records, Plan drafts, artifacts, and typed failure
   context; and
-- inert tool definitions load and lower to existing generic actions.
+- inert tool definitions execute end to end through existing generic actions,
+  Admission, Plans, Runtime, and Schema-decoded results.
 
 Evidence absent today:
 

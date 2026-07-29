@@ -35,7 +35,10 @@ No review elevated another design preference to the same status.
 - same-process-group descendant waiting plus bounded timeout, cancellation,
   and output receipts;
 - paired supervisor/agent macOS binaries with a reduced agent command surface;
-- inert JSON tool-definition loading and lowering; and
+- inert JSON tool definitions executing through generic Admission/Plan/Runtime
+  with Schema-decoded results;
+- ten parity workloads, including agent-only repository, edit, archive, Git,
+  build-descendant, and recoverable recursive-removal cases; and
 - two Vouch-derived local proofs: restore/apply/stage/undo and a 12-action
   host-operation workflow.
 
@@ -146,7 +149,7 @@ Decision:
 
 ### Strong confidence remains unearned
 
-The Vouch-derived proofs and four parity fixtures are real and useful, but they
+The Vouch-derived proofs and ten parity workloads are real and useful, but they
 are still a controlled local suite. The bounded lock/recovery tests do not
 form a complete crash/concurrency campaign. There is no representative corpus
 or red-team result. The correct current judgment is:

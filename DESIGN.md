@@ -225,6 +225,9 @@ The checked-in parity fixtures and two Vouch-derived local proofs now exercise
 useful structured file, process, control-flow, Hold, Outbox, artifact, timeout,
 cancellation, and output-limit paths. They do not form a representative
 shell-replacement corpus and do not run a real OpenShell or remote replacement.
+The corpus also includes agent-only repository search/pipeline, native editing,
+archive, local Git, build/descendant, and recoverable recursive-removal
+workloads. Inert definitions execute through the same generic Plan path.
 
 Airlock may say that macOS v1 “replaces most shell usage for agents” only after
 the published acceptance corpus clears all applicable construction,

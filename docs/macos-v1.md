@@ -172,8 +172,23 @@ Not established:
   remote-filesystem Apply;
 - live SQLite/WAL, foreign writers, or other active protocol state;
 - atomic all-or-nothing multi-entry merge;
-- retained private-workspace lifecycle across every transition; or
+- startup reconciliation for private workspaces left before Runtime could
+  register/finalize their exact identity; or
 - resource-exhaustion resistance beyond current process/output bounds.
+
+Each native Invoke creates one private workspace tree. At Plan completion,
+failure, or cancellation, Runtime binds the exact directory identity and
+transfers it into Hold with `purpose: runtime-private`; it is never selected by
+ordinary undo and only the supervisor's Reaper may discard it. Runtime does not
+prefix-sweep neighboring paths. This closes the normal lifecycle path but does
+not make retention free: the tree remains held until reap, and an uncatchable
+process crash before finalization still requires future startup reconciliation.
+
+The measured pre-retirement repository no-op baseline was about 6.1 seconds
+and about 212 MiB of logical tree data per Invoke. Same-volume retirement is an
+O(1) rename, but full-tree fingerprinting and private-view construction remain
+material performance costs; changed clone pages or copy fallback consume real
+storage until reap.
 
 Unsupported work returns a typed error. It does not fall back to compatibility.
 
@@ -218,7 +233,8 @@ published envelopes. Today the accurate judgment is:
 > usable developer preview — broad claim not yet earned
 
 The current Vouch evidence includes a restore/apply/stage/undo fixture and a
-12-action host-operation program. The repository also contains four
-shell-parity fixtures. These do not replace the missing representative corpus,
+12-action host-operation program. Ten parity workloads additionally cover
+common control/file/process shapes, repository search/pipelines, native edit,
+tar, local Git, and build descendants. These do not replace the missing representative corpus,
 repeated macOS runs, exhaustive fault/overlap matrix, or hostile containment
 tests.
