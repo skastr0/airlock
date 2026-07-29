@@ -345,10 +345,9 @@ const make = Effect.gen(function* () {
 
   // The point of no return. This lexical body contains the only wire-capable
   // call in Outbox; all other methods manipulate inert durable state.
-  const commitUnclaimed = Effect.fn("Outbox.commit")(function* (id: EmissionId) {
-    yield* transition(id, "staged", "committing")
-
-    return yield* Effect.gen(function* () {
+  const commit = Effect.fn("Outbox.commit")(function* (id: EmissionId) {
+    return yield* store.withExclusive(Effect.gen(function* () {
+      yield* transition(id, "staged", "committing")
       const stored = yield* store.read(id, "committing")
       const manifest = yield* decodeManifest(stored.manifestJson).pipe(
         Effect.mapError(() => parseFailure(id, "manifest.json"))
@@ -435,11 +434,8 @@ const make = Effect.gen(function* () {
         })
       )
       return toEmission(manifest, "committed", outcome)
-    }).pipe(Effect.ensuring(markUncertainIfCommitting(id)))
+    }).pipe(Effect.ensuring(markUncertainIfCommitting(id))))
   })
-
-  const commit = (id: EmissionId) =>
-    store.withExclusive(commitUnclaimed(id))
 
   const cancel = Effect.fn("Outbox.cancel")(function* (id: EmissionId) {
     yield* transition(id, "staged", "cancelled")
