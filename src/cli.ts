@@ -1,8 +1,8 @@
 #!/usr/bin/env bun
 import { Args, Command, Options } from "@effect/cli"
-import { BunContext, BunRuntime } from "@effect/platform-bun"
+import { BunContext } from "@effect/platform-bun"
 import { FileSystem } from "@effect/platform"
-import { Console, Effect, Layer, Option, Schema } from "effect"
+import { Console, Effect, Layer, ManagedRuntime, Option, Schema } from "effect"
 import * as nodePath from "node:path"
 import * as nodeOs from "node:os"
 import { AdmissionPolicy } from "./admission/index.ts"
@@ -673,14 +673,16 @@ const executeProgram = (
         workspace,
         profile,
         environment: profile === "compatibility" ? compatibilityEnvironment() : {}
-      })))
+      }))),
+      Layer.provideMerge(
+        NativeFileSystemLive(new NativeFilesystemConfig({ workspace }))
+      )
     )
     const programLayer = ProgramExecutionWithToolsLive(
       policy,
       new Map(tools.map((tool) => [tool.name, tool])),
       profile
     ).pipe(
-      Layer.provideMerge(NativeFileSystemLive(new NativeFilesystemConfig({ workspace }))),
       Layer.provideMerge(runtimeLayer)
     )
     const runner = yield* ProgramRunner.pipe(Effect.provide(programLayer))
@@ -806,29 +808,36 @@ const agentRoot = Command.make("airlock-agent").pipe(Command.withSubcommands([
 ]))
 
 /** One composition root. Pristine components retain authority; CLI is glue. */
-const HomeLayer = layerFromEnv.pipe(Layer.provide(BunContext.layer))
+const PlatformAndHomeLayer = layerFromEnv.pipe(
+  Layer.provideMerge(BunContext.layer)
+)
+const LedgerLayer = LedgerLive.pipe(
+  Layer.provideMerge(PlatformAndHomeLayer)
+)
 const StateLayer = Layer.mergeAll(
-  LedgerLive,
-  Layer.provide(HoldLive, LedgerLive),
-  Layer.provide(OutboxLive, LedgerLive)
+  LedgerLayer,
+  HoldLive.pipe(Layer.provideMerge(LedgerLayer)),
+  OutboxLive.pipe(Layer.provideMerge(LedgerLayer))
 )
 
 const MacosExecutionLayer = Layer.mergeAll(ProcessRunnerLive, MacosPlatformLive)
-const CellLayer = Layer.provide(CellLive, MacosExecutionLayer)
-const PlatformLayer = Layer.merge(HomeLayer, BunContext.layer)
-const ReadyStateLayer = StateLayer.pipe(Layer.provideMerge(PlatformLayer))
-const StateWithNativeFileSystemLayer = NativeFileSystemLive(
+const NativeFileSystemLayer = NativeFileSystemLive(
   new NativeFilesystemConfig({ workspace: process.cwd() })
-).pipe(Layer.provideMerge(ReadyStateLayer))
-
-const MainLayer = Layer.mergeAll(
-  StateWithNativeFileSystemLayer,
-  MacosExecutionLayer,
-  CellLayer
+).pipe(Layer.provideMerge(StateLayer))
+const ExecutionDependencies = Layer.mergeAll(
+  NativeFileSystemLayer,
+  MacosExecutionLayer
 )
+const MainLayer = CellLive.pipe(Layer.provideMerge(ExecutionDependencies))
 
 const main = process.env["AIRLOCK_AGENT_SURFACE"] === "1"
   ? Command.run(agentRoot, { name: "airlock-agent", version: AIRLOCK_VERSION })(process.argv)
   : Command.run(supervisorRoot, { name: "airlock", version: AIRLOCK_VERSION })(process.argv)
 
-main.pipe(Effect.provide(MainLayer), BunRuntime.runMain)
+const runtime = ManagedRuntime.make(MainLayer)
+
+try {
+  await runtime.runPromise(main)
+} finally {
+  await runtime.dispose()
+}
