@@ -510,10 +510,13 @@ Journal publication stages and syncs a candidate before rename, startup picks
 the best valid journal candidate, and recovery can promote a staged-only
 candidate after an injected publication failure. Tests exercise competing
 processes, interrupted waiters, stale-owner reclamation, and bounded
-lock-directory growth. The replacing rename used to publish a journal replica
-is deliberately separate from the no-replace primitive used to install live
-managed bytes. A concurrent foreign target is preserved and returned as a
-typed conflict rather than overwritten.
+lock-directory growth. The direct mechanism proof launches 16 independent Bun
+processes against one stable lock inode; every contender completes, a separate
+kernel `O_EXCL` sentinel records no overlap, and the Schema-decoded event trace
+has maximum occupancy exactly one. The replacing rename used to publish a
+journal replica is deliberately separate from the no-replace primitive used
+to install live managed bytes. A concurrent foreign target is preserved and
+returned as a typed conflict rather than overwritten.
 
 Native write/copy/move/mkdir glue no longer creates an untracked staging path.
 It asks Hold to reserve a runtime-private act first, then populates the supplied

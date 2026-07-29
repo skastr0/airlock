@@ -60,7 +60,10 @@ Evidence present today:
   exactly undoable through the supervisor;
 - Hold and Outbox have bounded cross-process lease, stale-owner recovery, and
   journal/recovery tests, including cancellation of contended waiters without
-  stealing the live owner; and
+  stealing the live owner;
+- the shared `O_EXLOCK` mechanism has a direct macOS proof with 16 independent
+  Bun processes, 16 distinct PIDs, every contender completing, no independent
+  `O_EXCL` overlap violation, and maximum decoded event occupancy of one; and
 - the paired supervisor/agent macOS artifacts are locally ad-hoc signed,
   hashed, verified, installed, and probed as one release pair; and
 - a later program failure returns a nonzero, versioned partial report that
@@ -243,9 +246,11 @@ Required outcomes:
 - multi-entry partial outcomes identify each completed transition.
 
 Current evidence covers bounded cross-process Hold/Outbox serialization,
-stale/dead lease-owner reclamation, lock-directory bounds, recovered
-`committing` uncertainty, and promotion of a valid staged-only Hold journal.
-It does not yet cover every point and overlap listed above.
+including a direct 16-process proof of the shared kernel lease; stale/dead
+lease-owner reclamation; lock-directory bounds; recovered `committing`
+uncertainty; and promotion of a valid staged-only Hold journal. The independent
+sentinel and event trace prove one-holder mutual exclusion for that campaign.
+They do not cover every Hold/Outbox transition point and overlap listed above.
 
 ## Security and red-team gates
 

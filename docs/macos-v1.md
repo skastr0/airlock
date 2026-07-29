@@ -258,7 +258,9 @@ attribute them to macOS v1.
 - HTTP intent remains staged until Outbox commit.
 - A recovered `committing` Outbox entry is `uncertain`.
 - Hold and Outbox serialize cross-process recovery transitions with a bounded
-  recoverable Airlock-home lease; Hold can promote a valid staged-only journal.
+  recoverable Airlock-home lease; a direct 16-process Bun campaign proves
+  one-holder mutual exclusion for the shared `O_EXLOCK` mechanism, and Hold
+  can promote a valid staged-only journal.
 - Reaping retained recovery material remains a separate terminal authority.
 
 ## v1 evidence boundary

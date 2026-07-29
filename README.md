@@ -13,10 +13,11 @@ ambient host reads. A VM backend is a future, stronger enclosure and is not a
 macOS v1 release prerequisite.
 
 The repository has two runnable Vouch-derived local proofs, ten checked-in
-shell-parity workloads, bounded Hold/Outbox cross-process recovery tests, and
-construction checks for the mutation and wire gateways. It does not yet have
-the representative corpus, exhaustive crash/overlap matrix, or red-team
-evidence needed for a strong shell-replacement claim.
+shell-parity workloads, a direct 16-process macOS proof of the shared
+`O_EXLOCK` lease, bounded Hold/Outbox recovery tests, and construction checks
+for the mutation and wire gateways. It does not yet have the representative
+corpus, exhaustive crash/overlap matrix, or red-team evidence needed for a
+strong shell-replacement claim.
 
 ## Install from npm
 
@@ -174,8 +175,11 @@ contains the repository's only irreversible removal site. Hold and Outbox
 serialize recovery transitions across processes with a bounded recoverable
 exclusive-file lease. Hold journal publication stages and syncs a candidate
 before promotion; startup can promote a valid staged-only journal. Those are
-tested properties, not a claim that every crash point and overlapping
-operation schedule has been exhausted.
+tested properties. The lock proof launches 16 independent Bun processes,
+requires every contender to complete, and uses a separate kernel `O_EXCL`
+sentinel plus Schema-decoded enter/exit evidence to establish maximum
+simultaneous holders of exactly one. This does not claim that every Hold or
+Outbox crash point and overlapping operation schedule has been exhausted.
 
 ```sh
 airlock send https://api.example.com/hook \
