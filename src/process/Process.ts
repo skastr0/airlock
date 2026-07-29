@@ -3,7 +3,7 @@ import { Context, DateTime, Effect, Layer, Schema } from "effect"
 /**
  * A structured, non-shell process boundary for macOS/Bun.
  *
- * `executable` is always an absolute path and `argv` is passed to Bun as
+ * `executable` is always an absolute path and `args` is passed to Bun as
  * individual atoms. This module deliberately has no command-string API.
  */
 
@@ -34,7 +34,7 @@ export type ProcessOutput = typeof ProcessOutput.Type
 /** The stable command contract. `outputLimitBytes` is a combined capture cap. */
 export class ProcessRequest extends Schema.Class<ProcessRequest>("ProcessRequest")({
   executable: Schema.String,
-  argv: Schema.Array(Schema.String),
+  args: Schema.Array(Schema.String),
   cwd: Schema.String,
   env: Schema.Record({ key: Schema.String, value: Schema.String }),
   stdin: Schema.optionalWith(ProcessInput, { default: () => "discard" as const }),
@@ -48,7 +48,7 @@ export class ProcessRequest extends Schema.Class<ProcessRequest>("ProcessRequest
 
 export class ProcessReceipt extends Schema.Class<ProcessReceipt>("ProcessReceipt")({
   executable: Schema.String,
-  argv: Schema.Array(Schema.String),
+  args: Schema.Array(Schema.String),
   cwd: Schema.String,
   pid: Schema.Number,
   exitCode: Schema.NullOr(Schema.Number),
@@ -130,8 +130,8 @@ const assertRequest = (request: ProcessRequest): void => {
   ) {
     throw invalid("timeoutMs", "must be a positive safe integer")
   }
-  for (const [index, argument] of request.argv.entries()) {
-    if (argument.includes("\0")) throw invalid(`argv[${index}]`, "must not contain NUL")
+  for (const [index, argument] of request.args.entries()) {
+    if (argument.includes("\0")) throw invalid(`args[${index}]`, "must not contain NUL")
   }
   for (const [key, value] of Object.entries(request.env)) {
     if (key.length === 0 || key.includes("=") || key.includes("\0")) {
@@ -169,7 +169,7 @@ const runNativeProcess = async (
     const now = DateTime.unsafeMake(new Date())
     const receipt = new ProcessReceipt({
       executable: request.executable,
-      argv: request.argv,
+      args: request.args,
       cwd: request.cwd,
       pid: 0,
       exitCode: null,
@@ -198,7 +198,7 @@ const runNativeProcess = async (
   try {
     // The explicit `cmd` array is the central no-shell guarantee.
     child = Bun.spawn({
-      cmd: [request.executable, ...request.argv],
+      cmd: [request.executable, ...request.args],
       cwd: request.cwd,
       env: request.env,
       stdin: stdin as "ignore",
@@ -286,7 +286,7 @@ const runNativeProcess = async (
 
   const receipt = new ProcessReceipt({
     executable: request.executable,
-    argv: request.argv,
+    args: request.args,
     cwd: request.cwd,
     pid: child.pid,
     exitCode: child.exitCode,

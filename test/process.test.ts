@@ -15,7 +15,7 @@ const decoder = new TextDecoder()
 const request = (overrides: Partial<ProcessRequest>) =>
   new ProcessRequest({
     executable: "/bin/echo",
-    argv: [],
+    args: [],
     cwd: process.cwd(),
     env: {},
     stdout: "capture",
@@ -39,11 +39,11 @@ afterEach(() => controllers.splice(0).forEach((controller) => controller.abort()
 const describeOnBun = typeof Bun === "undefined" ? describe.skip : describe
 
 describeOnBun("process runner", () => {
-  it("passes executable and argv as atoms, never as shell text", async () => {
+  it("passes executable and args as atoms, never as shell text", async () => {
     const target = `${process.cwd()}/process-runner-injection-marker`
     const receipt = await execute(
       request({
-        argv: [`literal; touch ${target}`]
+        args: [`literal; touch ${target}`]
       })
     )
 
@@ -57,7 +57,7 @@ describeOnBun("process runner", () => {
       const receipt = await execute(
         request({
           executable: "/bin/sh",
-          argv: ["-c", "printf '%s|%s' \"$PWD\" \"$AIRLOCK_TEST\""],
+          args: ["-c", "printf '%s|%s' \"$PWD\" \"$AIRLOCK_TEST\""],
           cwd,
           env: { AIRLOCK_TEST: "isolated" }
         })
@@ -72,7 +72,7 @@ describeOnBun("process runner", () => {
     const receipt = await execute(
       request({
         executable: "/bin/sh",
-        argv: ["-c", "cat; printf warning >&2"],
+        args: ["-c", "cat; printf warning >&2"],
         stdin: new ProcessInputText({ _tag: "text", text: "payload" })
       })
     )
@@ -82,7 +82,7 @@ describeOnBun("process runner", () => {
 
   it("returns ordinary non-zero exits in the receipt", async () => {
     const receipt = await execute(
-      request({ executable: "/bin/sh", argv: ["-c", "exit 23"] })
+      request({ executable: "/bin/sh", args: ["-c", "exit 23"] })
     )
     expect(receipt.exitCode).toBe(23)
     expect(receipt.signal).toBeNull()
@@ -92,7 +92,7 @@ describeOnBun("process runner", () => {
     const error = await fail(
       request({
         executable: "/bin/sh",
-        argv: ["-c", "printf 12345; printf 67890 >&2"],
+        args: ["-c", "printf 12345; printf 67890 >&2"],
         outputLimitBytes: 7
       })
     )
@@ -104,7 +104,7 @@ describeOnBun("process runner", () => {
 
   it("terminates a timed-out process and reports a timeout receipt", async () => {
     const error = await fail(
-      request({ executable: "/bin/sleep", argv: ["5"], timeoutMs: 25 })
+      request({ executable: "/bin/sleep", args: ["5"], timeoutMs: 25 })
     )
 
     expect(error).toBeInstanceOf(ProcessTimedOut)
@@ -115,7 +115,7 @@ describeOnBun("process runner", () => {
     const controller = new AbortController()
     controllers.push(controller)
     const running = fail(
-      request({ executable: "/bin/sleep", argv: ["5"] }),
+      request({ executable: "/bin/sleep", args: ["5"] }),
       { signal: controller.signal }
     )
     setTimeout(() => controller.abort(), 25)
@@ -133,7 +133,7 @@ describeOnBun("process runner", () => {
       const running = fail(
         request({
           executable: "/bin/sh",
-          argv: ["-c", `sleep 5 & child=$!; printf %s "$child" > "${pidFile}"; wait`],
+          args: ["-c", `sleep 5 & child=$!; printf %s "$child" > "${pidFile}"; wait`],
           cwd
         }),
         { signal: controller.signal }
@@ -158,7 +158,7 @@ describeOnBun("process runner", () => {
 
   it("rejects paths and arguments that cannot be represented safely", async () => {
     const error = await fail(
-      request({ executable: "echo", argv: ["bad\0atom"] })
+      request({ executable: "echo", args: ["bad\0atom"] })
     )
     expect(error).toBeInstanceOf(ProcessContractViolation)
   })
