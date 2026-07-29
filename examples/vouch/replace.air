@@ -1,0 +1,21 @@
+# State-preserving replacement composes Capture, Invoke, Apply, and a generic
+# brokered remote-plan request. It has no Vouch or sandbox primitive.
+
+let existing = capture({ source: "file", locator: sandbox_inventory })
+
+if existing.present {
+  let snapshot = run({ executable: airlock_program, args: ["run", snapshot_program, "--sandbox", sandbox_name, "--archive", local_archive], stdin: null, stdout: "capture", stderr: "capture", timeout: 300s, cellProfile: "native-contained" })
+  assert snapshot.exit_code == 0, "replacement refused because snapshot failed"
+
+  let saved = apply({ operation: "write", target: durable_backup, source: local_archive })
+  assert saved.recoverable == true, "backup must enter managed state through Hold"
+
+  let replacement = request_external({ method: "POST", endpoint: realm_endpoint, hold: 30s, body: { action: "replace-machine", name: sandbox_name, image: image } })
+  assert replacement.state == "staged", "remote replacement must be staged before dispatch"
+
+  let restore = run({ executable: airlock_program, args: ["run", restore_program, "--sandbox", sandbox_name, "--archive", durable_backup], stdin: null, stdout: "capture", stderr: "capture", timeout: 300s, cellProfile: "native-contained" })
+  assert restore.exit_code == 0, "replacement restore failed"
+} else {
+  let created = request_external({ method: "POST", endpoint: realm_endpoint, hold: 30s, body: { action: "create-machine", name: sandbox_name, image: image } })
+  assert created.state == "staged", "initial create must be staged before dispatch"
+}

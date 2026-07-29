@@ -1,0 +1,15 @@
+# Vouch-derived state snapshot, expressed only as Airlock's generic actions.
+# The helper remains ordinary existing code; Airlock owns its structured
+# invocation, authority, receipt, cancellation, and later local application.
+
+let snapshot = run({ executable: openshell, args: ["sandbox", "exec", "--name", sandbox_name, "--no-tty", "--timeout", "120", "--", "/usr/bin/python3", "-I", "-S", "/opt/airlock-programs/sqlite-safe-snapshot.py", "--state-root", hermes_home, "--output", remote_archive], stdin: null, stdout: "capture", stderr: "capture", timeout: 150s, cellProfile: "native-contained" })
+assert snapshot.exit_code == 0, "snapshot command failed"
+
+let staged = run({ executable: openshell, args: ["sandbox", "exec", "--name", sandbox_name, "--no-tty", "--timeout", "30", "--", "/usr/bin/python3", "-I", "-S", "/opt/airlock-programs/stage-artifact.py", remote_archive, sandbox_archive], stdin: null, stdout: "capture", stderr: "capture", timeout: 45s, cellProfile: "native-contained" })
+assert staged.exit_code == 0, "snapshot staging failed"
+
+let downloaded = run({ executable: openshell, args: ["sandbox", "download", sandbox_name, sandbox_archive, local_archive], stdin: null, stdout: "capture", stderr: "capture", timeout: 180s, cellProfile: "native-contained" })
+assert downloaded.exit_code == 0, "snapshot download failed"
+
+let archive = capture({ source: "file", locator: local_archive })
+assert archive.bytes > 0, "snapshot archive is empty"
