@@ -1,206 +1,501 @@
-import { FileSystem, Path } from "@effect/platform"
 import { Context, DateTime, Effect, Layer, Schema } from "effect"
-import { AirlockHome } from "./AirlockHome.ts"
 import {
-  EmissionFailed,
   EmissionId,
   EmissionNotPending,
   EmissionRequest,
   LedgerEntry,
-  StagedEmission,
   UnknownEmission
 } from "./domain.ts"
-import { Ledger } from "./Ledger.ts"
+import { Ledger, type LedgerError } from "./Ledger.ts"
+import {
+  EmissionDispatchUncertain,
+  ExternalCommandIntent,
+  type ExternalIntent,
+  HttpExternalIntent,
+  HttpIntentSummary,
+  InvalidHoldDuration,
+  InvalidOutboxIntent,
+  OutboxEmission,
+  OutboxOutcome,
+  type OutboxState,
+  OutboxStateCorrupt,
+  OutboxStorageFailed,
+  PersistedOutboxManifest,
+  PersistedOutboxOutcome,
+  PrivateHttpDispatch,
+  RedactedEmissionRequest,
+  UnsupportedExternalIntent
+} from "./outbox/Contract.ts"
+import {
+  makeFileOutboxStore,
+  type StoredEmission
+} from "./outbox/FileOutboxStore.ts"
 
-// Emissions are external effects: once sent there is no undo. So nothing is
-// sent at stage time — the emission is a value in the outbox until its hold
-// expires (flush) or it is affirmatively committed. Cancel deletes a queued
-// value; it never has to reverse anything.
+export {
+  EmissionDispatchUncertain,
+  ExternalCommandIntent,
+  HttpExternalIntent,
+  InvalidHoldDuration,
+  InvalidOutboxIntent,
+  OutboxEmission,
+  OutboxStateCorrupt,
+  OutboxStorageFailed,
+  UnsupportedExternalIntent
+} from "./outbox/Contract.ts"
+
+type StageInput = EmissionRequest | ExternalIntent
+
+type StageError =
+  | InvalidHoldDuration
+  | InvalidOutboxIntent
+  | UnsupportedExternalIntent
+  | OutboxStorageFailed
+  | OutboxStateCorrupt
+  | LedgerError
+
+type ReadError =
+  | UnknownEmission
+  | OutboxStorageFailed
+  | OutboxStateCorrupt
+
+type TransitionError =
+  | UnknownEmission
+  | EmissionNotPending
+  | OutboxStorageFailed
+  | OutboxStateCorrupt
+
+type CommitError =
+  | ReadError
+  | TransitionError
+  | EmissionDispatchUncertain
+  | LedgerError
+
+type CancelError = TransitionError | OutboxStateCorrupt | LedgerError
 
 export class Outbox extends Context.Tag("airlock/Outbox")<
   Outbox,
   {
     readonly stage: (
-      request: EmissionRequest,
+      request: StageInput,
       holdMillis: number
-    ) => Effect.Effect<StagedEmission>
+    ) => Effect.Effect<OutboxEmission, StageError>
+    readonly inspect: (
+      id: EmissionId
+    ) => Effect.Effect<OutboxEmission, ReadError>
     readonly commit: (
       id: EmissionId
-    ) => Effect.Effect<
-      StagedEmission,
-      UnknownEmission | EmissionNotPending | EmissionFailed
-    >
+    ) => Effect.Effect<OutboxEmission, CommitError>
     readonly cancel: (
       id: EmissionId
-    ) => Effect.Effect<StagedEmission, UnknownEmission | EmissionNotPending>
-    readonly pending: Effect.Effect<ReadonlyArray<StagedEmission>>
-    readonly flush: Effect.Effect<{
-      readonly committed: ReadonlyArray<StagedEmission>
-      readonly failed: ReadonlyArray<string>
-      readonly waiting: number
-    }>
+    ) => Effect.Effect<OutboxEmission, CancelError>
+    readonly pending: Effect.Effect<
+      ReadonlyArray<OutboxEmission>,
+      OutboxStorageFailed | OutboxStateCorrupt
+    >
+    readonly flush: Effect.Effect<
+      {
+        readonly committed: ReadonlyArray<OutboxEmission>
+        readonly failed: ReadonlyArray<string>
+        readonly waiting: number
+      },
+      OutboxStorageFailed | OutboxStateCorrupt | LedgerError
+    >
   }
 >() {}
 
-const encodeEmission = Schema.encode(Schema.parseJson(StagedEmission))
-const decodeEmission = Schema.decode(Schema.parseJson(StagedEmission))
+const encodeManifest = Schema.encode(
+  Schema.parseJson(PersistedOutboxManifest)
+)
+const decodeManifest = Schema.decode(
+  Schema.parseJson(PersistedOutboxManifest)
+)
+const encodeDispatch = Schema.encode(Schema.parseJson(PrivateHttpDispatch))
+const decodeDispatch = Schema.decode(Schema.parseJson(PrivateHttpDispatch))
+const encodeOutcome = Schema.encode(
+  Schema.parseJson(PersistedOutboxOutcome)
+)
+const decodeOutcome = Schema.decode(
+  Schema.parseJson(PersistedOutboxOutcome)
+)
+
+const textEncoder = new TextEncoder()
 
 const newEmissionId = () =>
   EmissionId.make(`emi_${crypto.randomUUID().slice(0, 13)}`)
 
+const parseFailure = (
+  id: string,
+  document: string
+): OutboxStateCorrupt =>
+  new OutboxStateCorrupt({ id, document })
+
+const redactUrl = (raw: string) => {
+  const url = new URL(raw)
+  url.username = ""
+  url.password = ""
+  for (const key of new Set(url.searchParams.keys())) {
+    url.searchParams.set(key, "[redacted]")
+  }
+  url.hash = ""
+  return url.toString()
+}
+
+const asHttpIntent = (
+  request: StageInput
+): Effect.Effect<
+  HttpExternalIntent,
+  InvalidOutboxIntent | UnsupportedExternalIntent
+> =>
+  Effect.gen(function* () {
+    if ("_tag" in request) {
+      if (request._tag === "ExternalCommandIntent") {
+        return yield* new UnsupportedExternalIntent({
+          kind: "external-command",
+          reason:
+            "external commands require an admitted Cell execution closure"
+        })
+      }
+      return request
+    }
+    return new HttpExternalIntent({
+      url: request.url,
+      method: request.method,
+      headers: request.headers,
+      ...(request.body === undefined ? {} : { body: request.body })
+    })
+  })
+
+const validateHttpIntent = (intent: HttpExternalIntent) =>
+  Effect.try({
+    try: () => {
+      const url = new URL(intent.url)
+      if (url.protocol !== "http:" && url.protocol !== "https:") {
+        throw new Error("only http and https endpoints are supported")
+      }
+      return intent
+    },
+    catch: () =>
+      new InvalidOutboxIntent({
+        field: "url",
+        reason: "expected an absolute http or https URL"
+      })
+  })
+
+const summarize = (intent: HttpExternalIntent) => {
+  const headerNames = Object.keys(intent.headers).sort((a, b) =>
+    a.localeCompare(b)
+  )
+  const bodyBytes =
+    intent.body === undefined
+      ? 0
+      : textEncoder.encode(intent.body).byteLength
+  const endpoint = redactUrl(intent.url)
+  const redactedHeaders = Object.fromEntries(
+    headerNames.map((name) => [name, "[redacted]"])
+  )
+  return {
+    intent: new HttpIntentSummary({
+      kind: "http",
+      method: intent.method,
+      endpoint,
+      headerNames,
+      bodyBytes
+    }),
+    request: new RedactedEmissionRequest({
+      method: intent.method,
+      url: endpoint,
+      headers: redactedHeaders,
+      ...(intent.body === undefined
+        ? {}
+        : { body: `[redacted:${bodyBytes} bytes]` })
+    }),
+    dispatch: new PrivateHttpDispatch({
+      schemaVersion: "airlock/http-dispatch/v1",
+      url: intent.url,
+      method: intent.method,
+      headers: intent.headers,
+      ...(intent.body === undefined ? {} : { body: intent.body })
+    })
+  }
+}
+
+const toEmission = (
+  manifest: PersistedOutboxManifest,
+  status: OutboxState,
+  outcome?: OutboxOutcome
+) =>
+  new OutboxEmission({
+    id: manifest.id,
+    status,
+    intent: manifest.intent,
+    request: manifest.request,
+    stagedAt: manifest.stagedAt,
+    holdUntil: manifest.holdUntil,
+    ...(outcome === undefined ? {} : { outcome })
+  })
+
 const make = Effect.gen(function* () {
-  const fs = yield* FileSystem.FileSystem
-  const path = yield* Path.Path
-  const home = yield* AirlockHome
+  const store = yield* makeFileOutboxStore
   const ledger = yield* Ledger
 
-  const emissionFile = (id: string) => path.join(home.outboxDir, `${id}.json`)
+  // A durable `committing` directory means dispatch might have begun before a
+  // prior runtime stopped. Recovery can only tell the truth: uncertain.
+  yield* store.recoverCommitting
 
-  const write = (emission: StagedEmission) =>
-    encodeEmission(emission).pipe(
-      Effect.flatMap((json) => fs.writeFileString(emissionFile(emission.id), json)),
-      Effect.orDie
+  const decodeStored = (
+    stored: StoredEmission
+  ): Effect.Effect<OutboxEmission, OutboxStateCorrupt> =>
+    Effect.gen(function* () {
+      const manifest = yield* decodeManifest(stored.manifestJson).pipe(
+        Effect.mapError(() =>
+          parseFailure(stored.id, "manifest.json")
+        )
+      )
+      const outcome =
+        stored.outcomeJson === undefined
+          ? undefined
+          : (yield* decodeOutcome(stored.outcomeJson).pipe(
+              Effect.mapError(() =>
+                parseFailure(stored.id, "outcome.json")
+              )
+            )).outcome
+      return toEmission(manifest, stored.state, outcome)
+    })
+
+  const inspect = Effect.fn("Outbox.inspect")(function* (id: EmissionId) {
+    const state = yield* store.findState(id)
+    if (state === undefined) {
+      return yield* new UnknownEmission({ id })
+    }
+    return yield* store.read(id, state).pipe(Effect.flatMap(decodeStored))
+  })
+
+  const transition = Effect.fn("Outbox.transition")(function* (
+    id: EmissionId,
+    from: OutboxState,
+    to: OutboxState
+  ) {
+    const moved = yield* store.transition(id, from, to).pipe(Effect.either)
+    if (moved._tag === "Right") return
+
+    const state = yield* store.findState(id)
+    if (state === undefined) {
+      return yield* new UnknownEmission({ id })
+    }
+    if (state !== from) {
+      return yield* new EmissionNotPending({ id, status: state })
+    }
+    return yield* moved.left
+  })
+
+  const markUncertainIfCommitting = (id: EmissionId) =>
+    store.findState(id).pipe(
+      Effect.flatMap((state) =>
+        state === "committing"
+          ? store.transition(id, "committing", "uncertain")
+          : Effect.void
+      ),
+      Effect.ignore
     )
 
-  const read = (id: string) =>
-    fs
-      .readFileString(emissionFile(id))
-      .pipe(
-        Effect.flatMap(decodeEmission),
-        Effect.mapError(() => new UnknownEmission({ id }))
-      )
-
   const stage = Effect.fn("Outbox.stage")(function* (
-    request: EmissionRequest,
+    request: StageInput,
     holdMillis: number
   ) {
+    if (
+      !Number.isFinite(holdMillis) ||
+      !Number.isInteger(holdMillis) ||
+      holdMillis < 0
+    ) {
+      return yield* new InvalidHoldDuration({ holdMillis })
+    }
+
+    const http = yield* asHttpIntent(request).pipe(
+      Effect.flatMap(validateHttpIntent)
+    )
     const stagedAt = yield* DateTime.now
-    const emission = new StagedEmission({
-      id: newEmissionId(),
-      request,
-      status: "staged",
+    const id = newEmissionId()
+    const summary = summarize(http)
+    const manifest = new PersistedOutboxManifest({
+      schemaVersion: "airlock/outbox-manifest/v1",
+      id,
+      intent: summary.intent,
+      request: summary.request,
       stagedAt,
       holdUntil: DateTime.add(stagedAt, { millis: holdMillis })
     })
-    yield* write(emission)
+    const manifestJson = yield* encodeManifest(manifest).pipe(
+      Effect.mapError(() => parseFailure(id, "manifest-encode"))
+    )
+    const dispatchJson = yield* encodeDispatch(summary.dispatch).pipe(
+      Effect.mapError(() => parseFailure(id, "dispatch-encode"))
+    )
+    yield* store.create(id, manifestJson, dispatchJson)
     yield* ledger.record(
       new LedgerEntry({
         at: stagedAt,
         effect: "emission",
         act: "stage",
-        ref: emission.id,
-        detail: `${request.method} ${request.url}`
+        ref: id,
+        detail: `${http.method} ${summary.intent.endpoint}`
       })
     )
-    return emission
+    return toEmission(manifest, "staged")
   })
 
-  // the point of no return: the only place in the codebase that talks to the
-  // outside world
-  const perform = (emission: StagedEmission) =>
-    Effect.tryPromise({
-      try: async () => {
-        const response = await fetch(emission.request.url, {
-          method: emission.request.method,
-          headers: emission.request.headers,
-          ...(emission.request.body !== undefined
-            ? { body: emission.request.body }
-            : {})
-        })
-        const body = await response.text()
-        return { status: response.status, body: body.slice(0, 2048) }
-      },
-      catch: (cause) =>
-        new EmissionFailed({ id: emission.id, cause: String(cause) })
-    })
-
+  // The point of no return. This lexical body contains the only wire-capable
+  // call in Outbox; all other methods manipulate inert durable state.
   const commit = Effect.fn("Outbox.commit")(function* (id: EmissionId) {
-    const emission = yield* read(id)
-    if (emission.status !== "staged") {
-      return yield* new EmissionNotPending({ id, status: emission.status })
-    }
-    const outcome = yield* perform(emission)
-    const at = yield* DateTime.now
-    const committed = new StagedEmission({
-      ...emission,
-      status: "committed",
-      outcome
-    })
-    yield* write(committed)
-    yield* ledger.record(
-      new LedgerEntry({
-        at,
-        effect: "emission",
-        act: "commit",
-        ref: id,
-        detail: `${emission.request.method} ${emission.request.url} -> ${outcome.status}`
+    yield* transition(id, "staged", "committing")
+
+    return yield* Effect.gen(function* () {
+      const stored = yield* store.read(id, "committing")
+      const manifest = yield* decodeManifest(stored.manifestJson).pipe(
+        Effect.mapError(() => parseFailure(id, "manifest.json"))
+      )
+      const dispatchJson = yield* store.readDispatch(id, "committing")
+      const dispatch = yield* decodeDispatch(dispatchJson).pipe(
+        Effect.mapError(() => parseFailure(id, "dispatch.json"))
+      )
+
+      const delivered = yield* Effect.tryPromise({
+        try: async (signal) => {
+          const response = await fetch(dispatch.url, {
+            method: dispatch.method,
+            headers: dispatch.headers,
+            redirect: "manual",
+            signal,
+            ...(dispatch.body === undefined
+              ? {}
+              : { body: dispatch.body })
+          })
+          // Response content will become a bounded Capture artifact. Outbox v1
+          // needs only dispatch status, so it cancels rather than buffering an
+          // attacker-controlled body.
+          await response.body?.cancel()
+          return {
+            status: response.status
+          }
+        },
+        catch: () =>
+          new EmissionDispatchUncertain({
+            id,
+            reason: "transport-failed"
+          })
+      }).pipe(Effect.either)
+
+      if (delivered._tag === "Left") {
+        yield* markUncertainIfCommitting(id)
+        return yield* delivered.left
+      }
+
+      const completedAt = yield* DateTime.now
+      const outcome = new OutboxOutcome({
+        ...delivered.right,
+        completedAt
       })
-    )
-    return committed
+      const outcomeJson = yield* encodeOutcome(
+        new PersistedOutboxOutcome({
+          schemaVersion: "airlock/outbox-outcome/v1",
+          outcome
+        })
+      ).pipe(
+        Effect.mapError(
+          () =>
+            new EmissionDispatchUncertain({
+              id,
+              reason: "persistence-failed-after-dispatch"
+            })
+        )
+      )
+
+      const finalized = yield* store
+        .writeOutcome(id, "committing", outcomeJson)
+        .pipe(
+          Effect.zipRight(
+            store.transition(id, "committing", "committed")
+          ),
+          Effect.either
+        )
+      if (finalized._tag === "Left") {
+        yield* markUncertainIfCommitting(id)
+        return yield* new EmissionDispatchUncertain({
+          id,
+          reason: "persistence-failed-after-dispatch"
+        })
+      }
+
+      yield* ledger.record(
+        new LedgerEntry({
+          at: completedAt,
+          effect: "emission",
+          act: "commit",
+          ref: id,
+          detail: `${manifest.intent.method} ${manifest.intent.endpoint} -> ${outcome.status}`
+        })
+      )
+      return toEmission(manifest, "committed", outcome)
+    }).pipe(Effect.ensuring(markUncertainIfCommitting(id)))
   })
 
   const cancel = Effect.fn("Outbox.cancel")(function* (id: EmissionId) {
-    const emission = yield* read(id)
-    if (emission.status !== "staged") {
-      return yield* new EmissionNotPending({ id, status: emission.status })
-    }
+    yield* transition(id, "staged", "cancelled")
+    const cancelled = yield* inspect(id)
     const at = yield* DateTime.now
-    const cancelled = new StagedEmission({ ...emission, status: "cancelled" })
-    yield* write(cancelled)
     yield* ledger.record(
       new LedgerEntry({
         at,
         effect: "emission",
         act: "cancel",
         ref: id,
-        detail: `${emission.request.method} ${emission.request.url}`
+        detail: `${cancelled.intent.method} ${cancelled.intent.endpoint}`
       })
     )
     return cancelled
   })
 
-  const all = fs.readDirectory(home.outboxDir).pipe(
-    Effect.flatMap(
-      Effect.forEach((entry) =>
-        read(entry.replace(/\.json$/, "")).pipe(Effect.option)
-      )
+  const pending = store.list("staged").pipe(
+    Effect.flatMap((stored) =>
+      Effect.forEach(stored, decodeStored, { concurrency: 1 })
     ),
-    Effect.map((options) =>
-      options.flatMap((o) => (o._tag === "Some" ? [o.value] : []))
-    ),
-    Effect.orDie
-  )
-
-  const pending = all.pipe(
     Effect.map((emissions) =>
-      emissions
-        .filter((e) => e.status === "staged")
-        .sort(
-          (a, b) =>
-            DateTime.toEpochMillis(a.stagedAt) -
-            DateTime.toEpochMillis(b.stagedAt)
-        )
+      emissions.sort(
+        (a, b) =>
+          DateTime.toEpochMillis(a.stagedAt) -
+          DateTime.toEpochMillis(b.stagedAt)
+      )
     )
   )
 
   const flush = Effect.gen(function* () {
     const now = yield* DateTime.now
     const staged = yield* pending
-    const due = staged.filter((e) => DateTime.lessThanOrEqualTo(e.holdUntil, now))
-    const committed: Array<StagedEmission> = []
+    const due = staged.filter((emission) =>
+      DateTime.lessThanOrEqualTo(emission.holdUntil, now)
+    )
+    const committed: Array<OutboxEmission> = []
     const failed: Array<string> = []
     for (const emission of due) {
       const result = yield* commit(emission.id).pipe(Effect.either)
       if (result._tag === "Right") {
         committed.push(result.right)
+      } else if (
+        result.left._tag === "LedgerFilesystemError" ||
+        result.left._tag === "LedgerDecodeError"
+      ) {
+        return yield* result.left
       } else {
         failed.push(emission.id)
       }
     }
-    return { committed, failed, waiting: staged.length - due.length }
+    return {
+      committed,
+      failed,
+      waiting: staged.length - due.length
+    }
   })
 
-  return Outbox.of({ stage, commit, cancel, pending, flush })
+  return Outbox.of({ stage, inspect, commit, cancel, pending, flush })
 })
 
 export const OutboxLive = Layer.effect(Outbox, make)
