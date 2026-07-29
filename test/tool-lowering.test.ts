@@ -5,7 +5,7 @@ import {
   ToolExecutableRejected,
   ToolTemplateRejected,
   UnknownToolAction,
-  UnsupportedToolActionLowering,
+  InvalidToolDefinition,
   decodeToolDefinition,
   decodeToolResult,
   lowerToolAction,
@@ -196,7 +196,7 @@ describe("inert tool action lowering", () => {
     })
   )
 
-  it.effect("rejects unknown and unsupported definition actions", () =>
+  it.effect("rejects unknown actions and unsupported lowerings at load time", () =>
     Effect.gen(function* () {
       const enqueue = {
         ...archiveDefinition().actions[0]!,
@@ -204,10 +204,16 @@ describe("inert tool action lowering", () => {
         lowering: "enqueue",
         effectFootprint: ["enqueue"]
       }
-      const loaded = yield* load(archiveDefinition([
+      const unsupported = yield* load(archiveDefinition([
         archiveDefinition().actions[0]!,
         enqueue
-      ]))
+      ])).pipe(Effect.flip)
+      expect(unsupported).toBeInstanceOf(InvalidToolDefinition)
+      expect(unsupported).toMatchObject({
+        field: "actions.publish.lowering"
+      })
+
+      const loaded = yield* load(archiveDefinition())
       const input = {
         archive: "state.tgz",
         destination: "/sandbox/.hermes",
@@ -219,16 +225,10 @@ describe("inert tool action lowering", () => {
         request(loaded, input, { action: "does-not-exist" })
       ).pipe(Effect.flip)
       expect(unknown).toBeInstanceOf(UnknownToolAction)
-
-      const unsupported = yield* lowerToolAction(
-        request(loaded, input, { action: "publish" })
-      ).pipe(Effect.flip)
-      expect(unsupported).toBeInstanceOf(UnsupportedToolActionLowering)
-      expect(unsupported).toMatchObject({ lowering: "enqueue" })
     })
   )
 
-  it.effect("rejects missing, non-scalar, accessor, artifact, and secret templates", () =>
+  it.effect("rejects missing, non-scalar, and accessor inputs at lowering", () =>
     Effect.gen(function* () {
       const base = archiveDefinition().actions[0]!
       const cases: ReadonlyArray<{
@@ -275,36 +275,6 @@ describe("inert tool action lowering", () => {
             attempt: ["one"]
           },
           reason: "non-scalar"
-        },
-        {
-          name: "artifact",
-          action: {
-            ...base,
-            args: [{ _tag: "Artifact", path: ["archive"] }]
-          },
-          input: {
-            archive: "artifact/archive",
-            destination: "/tmp",
-            cwd: "/tmp",
-            attempt: 1
-          },
-          reason: "runtime-binding-required"
-        },
-        {
-          name: "secret",
-          action: {
-            ...base,
-            environment: {
-              TOKEN: { _tag: "Secret", path: ["token"] }
-            }
-          },
-          input: {
-            archive: "state.tgz",
-            destination: "/tmp",
-            cwd: "/tmp",
-            attempt: 1
-          },
-          reason: "runtime-binding-required"
         }
       ]
 
@@ -338,6 +308,48 @@ describe("inert tool action lowering", () => {
       ).pipe(Effect.flip)
       expect(accessor).toBeInstanceOf(ToolTemplateRejected)
       expect(accessor).toMatchObject({ reason: "accessor-not-data" })
+    })
+  )
+
+  it.effect("rejects runtime-bound templates before a definition becomes callable", () =>
+    Effect.gen(function* () {
+      const base = archiveDefinition().actions[0]!
+      const cases = [
+        {
+          field: "actions.artifact.args[0]",
+          action: {
+            ...base,
+            name: "artifact",
+            args: [{ _tag: "Artifact", path: ["archive"] }]
+          }
+        },
+        {
+          field: "actions.secret.environment.TOKEN",
+          action: {
+            ...base,
+            name: "secret",
+            environment: {
+              TOKEN: { _tag: "Secret", path: ["token"] }
+            }
+          }
+        },
+        {
+          field: "actions.artifact_stdin.stdin",
+          action: {
+            ...base,
+            name: "artifact_stdin",
+            stdin: { _tag: "Artifact", path: ["archive"] }
+          }
+        }
+      ] as const
+
+      for (const testCase of cases) {
+        const error = yield* load(
+          archiveDefinition([testCase.action])
+        ).pipe(Effect.flip)
+        expect(error).toBeInstanceOf(InvalidToolDefinition)
+        expect(error).toMatchObject({ field: testCase.field })
+      }
     })
   )
 

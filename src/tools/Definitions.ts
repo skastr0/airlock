@@ -252,6 +252,22 @@ const callableNamespace = (definition: ToolDefinition, field: string, value: str
       reason: "must be dot-separated Airlock identifier segments"
     }))
 
+const validateV1Template = (
+  definition: ToolDefinition,
+  action: ToolActionDefinition,
+  field: string,
+  template: TemplateValue
+) =>
+  template._tag === "Literal" || template._tag === "Input"
+    ? Effect.void
+    : Effect.fail(
+        new InvalidToolDefinition({
+          id: definition.id,
+          field: `actions.${action.name}.${field}`,
+          reason: `${template._tag} templates are reserved until runtime binding is implemented`
+        })
+      )
+
 /**
  * The definition format accepts a deliberately small JSON-Schema-shaped
  * vocabulary. It is a validation format, never a hook for executable code or
@@ -429,6 +445,44 @@ export const validateToolDefinition = (
     for (const action of definition.actions) {
       yield* nonBlank(definition, "actions[].name", action.name)
       yield* callableNamespace(definition, `actions.${action.name}.name`, action.name)
+      if (action.lowering !== "invoke") {
+        return yield* new InvalidToolDefinition({
+          id: definition.id,
+          field: `actions.${action.name}.lowering`,
+          reason: "v1 definitions support only invoke lowering"
+        })
+      }
+      yield* Effect.forEach(
+        action.args,
+        (template, index) =>
+          validateV1Template(definition, action, `args[${index}]`, template),
+        { discard: true }
+      )
+      yield* validateV1Template(definition, action, "cwd", action.cwd)
+      yield* Effect.forEach(
+        Object.entries(action.environment),
+        ([key, template]) =>
+          validateV1Template(definition, action, `environment.${key}`, template),
+        { discard: true }
+      )
+      if (typeof action.stdin !== "string") {
+        return yield* new InvalidToolDefinition({
+          id: definition.id,
+          field: `actions.${action.name}.stdin`,
+          reason: "Artifact stdin is reserved until runtime binding is implemented"
+        })
+      }
+      yield* Effect.forEach(
+        action.resources,
+        (resource, index) =>
+          validateV1Template(
+            definition,
+            action,
+            `resources[${index}].selector`,
+            resource.selector
+          ),
+        { discard: true }
+      )
       yield* parseToolSchema(definition, action, "input", action.inputSchema).pipe(
         Effect.asVoid,
         Effect.mapError((error) => new InvalidToolDefinition({ id: definition.id, field: `actions.${action.name}.inputSchema${error.path.slice(1)}`, reason: error.reason }))
@@ -466,13 +520,6 @@ export const validateToolDefinition = (
           id: definition.id,
           field: `actions.${action.name}.timeoutMs`,
           reason: "must be a positive safe integer when provided"
-        })
-      }
-      if (action.lowering === "enqueue" && !action.effectFootprint.includes("enqueue")) {
-        return yield* new InvalidToolDefinition({
-          id: definition.id,
-          field: `actions.${action.name}.effectFootprint`,
-          reason: "enqueue lowering must declare the enqueue effect"
         })
       }
       for (const resource of action.resources) {
