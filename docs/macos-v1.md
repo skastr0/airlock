@@ -80,6 +80,11 @@ user's existing host authority. Unknown tools remain runnable. Compatibility
 does not claim filesystem, process, network, secret, or configuration
 containment.
 
+Accordingly, writes or sends performed inside a compatibility child are ambient
+subprocess effects. Airlock does not reinterpret them as `Apply` or
+`RequestExternal`; they do not pass through Hold or Outbox and receive no
+recovery, cancellation, or dispatch-uncertainty guarantee.
+
 An Airlock program in compatibility receives a generated broad policy unless
 `AIRLOCK_POLICY_FILE` is supplied. If a supplied policy names another profile,
 execution is refused rather than reinterpreted.
@@ -170,6 +175,8 @@ Established by implementation and tests:
   root/descendant role, and workspace rebasing;
 - separate executable and argv atoms;
 - output capture and limits;
+- persistent run-journal publication plus a kernel-backed, single-use per-Plan
+  execution claim before adapter work;
 - same-process-group descendant ownership until exit, timeout, or cancellation;
 - top-level regular-file/directory delta detection;
 - preflight drift and source checks;
@@ -249,6 +256,9 @@ attribute them to macOS v1.
 ## Failure posture
 
 - Missing enforcement is refusal, never downgrade.
+- Missing persistent run-journal storage, claim acquisition failure, or reuse
+  of a Plan identity is a typed `RuntimeExecutionClaimRejected`; any recovered
+  nonterminal snapshot refuses replay before adapter work.
 - A compatibility result carries no containment claim.
 - A native result applies only to the capability report and resource envelope
   exercised by that run.
@@ -256,6 +266,8 @@ attribute them to macOS v1.
 - Each accepted merge transition is recoverable through Hold; multi-entry
   atomicity is not claimed.
 - HTTP intent remains staged until Outbox commit.
+- Outbox commit claims staged intent before dispatch; supervisor cancellation
+  is legal only before that claim.
 - A recovered `committing` Outbox entry is `uncertain`.
 - Hold and Outbox serialize cross-process recovery transitions with a bounded
   recoverable Airlock-home lease; a direct 16-process Bun campaign proves

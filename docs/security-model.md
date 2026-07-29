@@ -39,6 +39,12 @@ terminal safe. A valid harness removes direct shell and peer effect tools,
 exposes the reduced `airlock-agent` surface, and retains supervisor control of
 profile, policy, commit, undo, and reap authority.
 
+Security gates are profile- and claim-specific. A native profile that advertises
+no contained network must deny it and need not pretend an EndpointBroker exists;
+if a later profile advertises contained endpoints, confidentiality, persistent
+authority safety, or complete execution closure, the corresponding broker,
+label, cross-plan, or closure gates become mandatory for that claim.
+
 ## Current enforceable properties
 
 ### Structured process input
@@ -52,6 +58,20 @@ This does not make an invoked interpreter harmless. A deliberately admitted
 shell, Python program, build system, package script, Git hook, or plugin may
 interpret its own arguments and configuration.
 
+### Single-use Plan execution
+
+Before any node adapter or world operation, Runtime requires a persistent run
+journal and acquires a SHA-256-derived per-Plan claim file under `.claims`. The
+kernel-backed exclusive-file lease is held through the full run lifecycle.
+Runtime durably publishes `running` before node execution and records
+`finalizing` before Cell retention.
+
+Concurrent contenders serialize on the claim. Once any durable snapshot
+exists—including a recovered nonterminal snapshot—concurrent or sequential
+reuse fails closed as `RuntimeExecutionClaimRejected`; the operation identifies
+`persistent-journal-required`, `acquire`, or `replay`. Airlock does not infer
+that a stranded run is safe to resume or repeat.
+
 ### Agent requests versus trusted transitions
 
 The agent can author only the four Plan nodes:
@@ -60,12 +80,13 @@ The agent can author only the four Plan nodes:
 Capture | Invoke | Apply | RequestExternal
 ```
 
-Admission, grant/handle binding, live Hold transitions, Outbox dispatch,
-reconciliation, undo, and reap are trusted runtime or supervisor transitions.
-`RequestExternal` creates inert durable state; only `Outbox.commit` can
-dispatch it. `Apply` describes a managed mutation; it is not raw filesystem
-authority. Keeping these algebras distinct prevents “commit” or “reap” from
-becoming an accidental fifth agent primitive.
+Admission, grant/handle binding, Plan claiming, live Hold transitions, Outbox
+dispatch, pre-claim cancellation, reconciliation, undo, and reap are trusted
+runtime or supervisor transitions. `RequestExternal` creates inert durable
+state; `Outbox.commit` claims it before dispatch, while cancellation is legal
+only before that claim. `Apply` describes a managed mutation; it is not raw
+filesystem authority. Keeping these algebras distinct prevents “commit,”
+“cancel,” or “reap” from becoming an accidental fifth agent primitive.
 
 ### Modeled execution authority
 
@@ -81,6 +102,10 @@ For the fields present in Plan v1, Admission requires:
   `execute`, and explicit cwd `read`;
 - Apply target `write`, copy source `read`, and move source `read + write`; and
 - external endpoint `connect + emit`.
+
+The endpoint Grant admits and binds one `RequestExternal` intent. It is not a
+socket or wire capability exposed to the agent. A later supervisor-authorized
+commit owns the separate claim and dispatch authority.
 
 Unused requirements, duplicate authority identities/rights, unbound modeled
 operands, mutated closure data, and expired Grants are rejected with typed
@@ -103,9 +128,11 @@ credentials, or the semantic behavior of an admitted executable.
 
 ### Recoverable managed changes
 
-Supported local mutation passes through Hold. The live binding is displaced
-by rename, undo checks the current binding before restoration, and
-`Hold.reap` owns the only irreversible removal site.
+Supported Airlock-owned local mutation passes through Hold. The live binding
+is displaced by rename, undo checks the current binding before restoration,
+and `Hold.reap` owns the only irreversible removal site in the runtime.
+Compatibility children retain ambient host writes, so syscalls they perform
+internally are not mediated as Apply and receive no Hold recovery guarantee.
 
 On macOS, installing or restoring live managed bytes uses an Effect capability
 over `renamex_np(RENAME_EXCL)`. A target that appears after preflight is
@@ -133,16 +160,20 @@ schedule.
 
 ### External staging
 
-`RequestExternal` and `http.stage` create durable local Outbox intent. The
-single wire-capable call is inside `Outbox.commit`. Startup recovery converts
-a stranded `committing` entry to `uncertain` rather than inventing an outcome.
-Cancel is meaningful only before dispatch claims the intent. Completed,
+`RequestExternal` and `http.stage` create durable local Outbox intent. For that
+Airlock-owned intent, the single runtime wire-capable call is inside
+`Outbox.commit`. Commit claims the staged entry before dispatch. Startup
+recovery converts a stranded `committing` entry to `uncertain` rather than
+inventing an outcome. Cancel is meaningful only before the claim. Completed,
 failed, and uncertain are dispatch outcomes; enqueue/stage is not itself the
 external effect.
 
 Current dispatch is direct HTTP with manual redirects. It is not a contained
 EndpointBroker and does not prove DNS, proxy, loopback, Unix-socket,
 descriptor-passing, credential, or protocol-idempotency policy.
+Compatibility children may use ambient host network directly; those sends are
+not Outbox dispatches and receive no staging, cancellation, or uncertainty
+guarantee.
 
 ### Native-contained write and network fences
 

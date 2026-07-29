@@ -10,8 +10,10 @@ delta; its adapter must delegate mutations to `Hold`.
 
 The kernel owns typed draft/admitted plans, requirements, grants, handles,
 runtime transitions, artifacts, receipts, tagged errors, deterministic DAG
-ordering, execution closure, and JSON codecs. It contains no filesystem,
-process, network, or policy adapter.
+ordering, closure of a Plan over resolved handles and grants, and JSON codecs.
+That Plan/authority closure is not the architecture's transitive execution
+closure over loaders, configuration, helpers, and in-process code. The kernel
+contains no filesystem, process, network, or policy adapter.
 
 Non-goals: grant issuance and policy evaluation, locator resolution, digest
 calculation, scheduling, persistence, retries, actual execution, and crash

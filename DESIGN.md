@@ -34,29 +34,36 @@ have narrower evidence envelopes described below; none becomes a third law.
 
 ## The four effect classes
 
-Everything an agent asks a Unix machine to do decomposes into four effect
-classes. The classes map one-to-one onto the candidate closed Plan algebra:
+Airlock's falsifiable design hypothesis is that agent-originated Unix work can
+be decomposed into four effect classes. The classes map one-to-one onto the
+candidate closed Plan algebra:
 
 | effect class | Plan node | meaning | physics |
 |---|---|---|---|
-| **observation** | `Capture` | information enters the program | provenance and confidentiality/integrity labels attach at entry |
-| **computation** | `Invoke` | existing code runs | the complete execution closure runs inside a Cell |
+| **observation** | `Capture` | information enters the program | provenance attaches at entry; candidate label flow carries confidentiality/integrity |
+| **computation** | `Invoke` | existing code runs | the selected profile runs it in a Cell; native v1 fences exact executable edges, while a complete closure remains design direction |
 | **mutation** | `Apply` | managed local state changes | displaced state enters Hold; live absence is applied only through Hold |
-| **emission** | `RequestExternal` | agent requests an unmanaged effect | intent is staged in Outbox; endpoint authority appears only at commit |
+| **emission** | `RequestExternal` | agent requests an unmanaged effect | admitted intent is staged in Outbox; only an authorized commit exercises wire-dispatch authority |
 
-`Capture` and `Apply` cross managed boundaries; privileged
-`DispatchExternal`, not `RequestExternal`, crosses the unmanaged boundary.
-`Invoke` encloses computation that may propose or consume the other three.
-This is a refinement of the four classes, not a replacement for them.
+Within the mediated Plan path, `Capture` and `Apply` cross managed boundaries;
+privileged `DispatchExternal`, not `RequestExternal`, crosses the unmanaged
+boundary. `Invoke` runs computation under the selected profile and may propose
+or consume the other three. This is a refinement of the four classes, not a
+replacement for them.
+
+The algebra classifies Airlock-owned effects. A compatibility `Invoke`
+deliberately gives its child the invoking user's ambient host authority. Writes
+or network calls performed inside that child are not mediated as `Apply` or
+`RequestExternal` and receive no Hold, Outbox, or containment guarantee.
 
 ## The two laws
 
 ### 1. Only the reaper unlinks
 
-Every live mutation verb is a rename through Hold. Before a live binding is
-removed or replaced, its prior state is renamed into a same-volume hold. Undo
-is itself recoverable: if undo must clear a target, that target is displaced
-into Hold rather than destroyed.
+Every Airlock-owned managed mutation verb is a rename through Hold. Before a
+managed live binding is removed or replaced, its prior state is renamed into a
+same-volume hold. Undo is itself recoverable: if undo must clear a target, that
+target is displaced into Hold rather than destroyed.
 
 `Hold.reap` is the single irreversible unlink authority in the codebase. A
 construction test rejects a second unlink site.
@@ -67,13 +74,21 @@ The law concerns unique bytes in managed live state:
 
 > damage = irreversible loss of the last copy of unique managed bytes
 
+This is a construction law for Airlock's mutation surface, not a claim that
+Airlock intercepts syscalls made by an ambient compatibility subprocess. Such a
+subprocess is outside the managed recovery envelope by design.
+
 ### 2. The ratchet law
 
-Zero-configuration behavior preserves Bash capability parity. Safety that is
-compatibility-free—planning, staging, recovery material, receipts, and
+Zero-configuration behavior preserves broad Bash-like host capability. Safety
+that is compatibility-free—planning, staging, recovery material, receipts, and
 visibility—may accrue by default. Restrictions on scope, endpoints, execution,
 labels, merge, or retention are enabled only when the user or harness selects
 them.
+
+Capability here means that the compatibility child retains broad host access.
+It does not mean that effects performed inside that child acquire Hold or
+Outbox finality.
 
 The ratchet has one direction: an explicit profile may narrow authority; an
 agent program cannot widen it. Missing enforcement never causes a selected
@@ -93,7 +108,7 @@ completeness obligation.
 |---|---|---|
 | remove or replace | propose an `Apply` delta | Hold installs it; Reaper later discards recovery material |
 | external request | stage an `ExternalIntent` | `Outbox.commit` dispatches the currently supported HTTP intent |
-| arbitrary code | run against a private view | Cell reports a delta; Hold applies it separately |
+| contained arbitrary code | run against a private view | Cell reports a delta; Hold applies it separately |
 | remote machine work | delegate a realm-scoped Plan request | the remote Airlock independently admits and executes it |
 
 An external effect has no undo after the recipient observes it. Delayed
@@ -136,23 +151,35 @@ interpreting admitted plans:
 
 ```text
 RuntimeOp =
-    Observe
+    ClaimPlan
+  | Observe
   | SpawnContained
   | ProposeDelta
   | HoldTransition
   | StageExternal
+  | ClaimExternal
   | DispatchExternal
+  | CancelExternal
   | AppendReceipt
   | Reconcile
   | Reap
 ```
 
+`ClaimPlan` is distinct from the Outbox's `ClaimExternal`. Before any node
+adapter or world operation, Runtime requires a persistent run journal and
+serializes one Plan identity through a kernel-backed claim. Once a `running` or
+later snapshot exists, concurrent or sequential reuse of the same admitted Plan
+fails with the tagged `RuntimeExecutionClaimRejected`; a recovered nonterminal
+snapshot is evidence of prior execution, not permission to replay it.
+
 Definitions, profiles, platform adapters, and project integrations cannot add
 Plan constructors or terminal-authority paths informally. Every Plan node must
-lower totally to runtime operations. `DispatchExternal` is reachable only
-through `Outbox.commit`;
-`HoldTransition` is the only live binding replacement path; `Reap` is the only
-irreversible discard path.
+lower totally to runtime operations. For Airlock-owned external intent,
+`ClaimExternal` and `DispatchExternal` are reachable only through
+`Outbox.commit`; `CancelExternal` is a supervisor transition available only
+before a claim; `HoldTransition` is the only Airlock-owned managed live binding
+replacement path; `Reap` is the only irreversible discard path for retained
+managed bytes.
 
 `Invoke` accepts the structured
 `{ executable, args, stdin, stdout, stderr, timeoutMs }` contract.
@@ -179,12 +206,15 @@ Airlock follows **Pristine Components, Messy Integrations**:
 
 Hold and Outbox are earned nuclei because they already encode real invariants
 and have executable tests. They now serialize recovery transitions across
-processes with a bounded, cancellable, recoverable exclusive-file lease. Hold durably stages
-and promotes its journal, including recovery from a staged-only candidate;
-Outbox serializes stage/claim/recovery through the same Airlock-home lock
-boundary. This is real durability and concurrency evidence, not certification
-of every crash point, filesystem, or overlapping-operation schedule. Ledger is
-a working prototype seam.
+processes with a bounded, cancellable, recoverable exclusive-file lease. Hold
+durably stages and promotes its journal, including recovery from a staged-only
+candidate; Outbox serializes stage/claim/recovery through the same Airlock-home
+lock boundary. Ledger serializes append/recovery, syncs file and directory
+state, and preserves typed quarantine evidence for an invalid tail. This is
+real bounded durability and concurrency evidence, not certification of every
+crash point, filesystem, overlapping-operation schedule, or a complete
+multi-component Journal.
+
 Plan, Cell, EndpointBroker, label flow, VM/native backends, and tool
 definitions remain candidates until real integrations and adversarial tests
 earn narrower component boundaries.
@@ -194,26 +224,31 @@ Vouch integration remain local glue. Policy, authorization, ordering,
 idempotency, retry, uncertainty, and receipt semantics never live only in that
 glue.
 
-## Security contracts for v1
+## Security gates and stronger directions
 
-The macOS release must make these candidates executable:
+The macOS release claims only mechanisms advertised by its selected profile.
+The following contracts become release gates when the corresponding stronger
+capability or claim is advertised; an unadvertised capability may remain future
+direction, but must fail explicitly rather than borrow a stronger description:
 
-- **Execution closure** — an invocation owns its executable, loader/shebang
-  chain, descendants, helpers, hooks, plugins, pagers, editors, credential
-  helpers, lifecycle scripts, and config-selected executors until all exit or
-  are terminated.
-- **No authority laundering** — agent-origin bytes do not become trusted
-  executables, definitions, policy, grants, launch configuration, hooks, or
-  credential sources merely because they persist and are consumed later.
-- **Endpoint brokerage** — design direction for contained networking. The
-  current native profile denies network and current `Outbox.commit` dispatches
-  bounded HTTP itself. A future broker would own DNS, redirects, proxying,
-  loopback decisions, budgets, credential authority, and actual-destination
-  receipts.
-- **Information labels** — observations, artifacts, handles, definitions,
-  executables, streams, and outputs carry conservative confidentiality and
-  integrity labels. Declassification and endorsement are distinct
-  supervisor-granted acts; agent code cannot mint either.
+- **Executable edges and execution closure** — native v1 fences the admitted
+  root and exact descendant executable paths. A stronger complete-closure claim
+  must additionally bind the loader/shebang chain, descendants, helpers, hooks,
+  plugins, pagers, editors, credential helpers, lifecycle scripts, and
+  config-selected executors for their owned lifetime.
+- **Persistent authority safety** — a claim that later stronger work is safe
+  must prevent agent-origin bytes from becoming trusted executables,
+  definitions, policy, grants, launch configuration, hooks, or credential
+  sources merely because they persist and are consumed later.
+- **Endpoint brokerage** — this gate applies only when contained networking is
+  advertised. The current native profile denies network and current
+  `Outbox.commit` dispatches bounded HTTP itself. A future broker would own DNS,
+  redirects, proxying, loopback decisions, budgets, credential authority, and
+  actual-destination receipts.
+- **Information labels** — confidentiality or integrity claims require
+  observations, artifacts, handles, definitions, executables, streams, and
+  outputs to carry conservative labels. Declassification and endorsement are
+  distinct supervisor-granted acts; agent code cannot mint either.
 
 See [the security model](docs/security-model.md).
 

@@ -83,10 +83,11 @@ Hold/Outbox finality, and receipt semantics should not.
 | --- | --- |
 | only the reaper unlinks | **Law**; a test counts one `fs.remove` site in `src/`, inside `Hold.reap` |
 | zero-config Bash capability parity; restrictions are opt-in | **Law**; compatibility is the CLI default and native containment requires explicit profile/policy input |
-| external wire site | **Implemented construction property**; the sole `fetch` site is lexically inside `Outbox.commit` |
+| Airlock-owned external wire site | **Implemented construction property**; the sole runtime `fetch` site is lexically inside `Outbox.commit`; compatibility children retain ambient network and receive no Outbox mediation claim |
 | four Plan nodes | **Implemented candidate seam**; `Capture`, `Invoke`, `Apply`, and `RequestExternal` have Schema models, ordering, admission, and runtime interpretation |
-| agent/runtime algebra split | **Implemented in the integrated program path, candidate as a complete reference monitor**; agents author action calls and Plans, while admission, dispatch, Hold, reconciliation, and reap remain trusted transitions |
+| agent/runtime algebra split | **Implemented in the integrated program path, candidate as a complete reference monitor**; agents author action calls and Plans, while admission, Outbox claim/dispatch/cancel, Hold, reconciliation, and reap remain trusted transitions |
 | execution authority | **Implemented candidate seam**; Runtime accepts only `ExecutionAuthority` (closed Plan plus retained Grants/bindings), rejects malformed authority, and refreshes closure, Grant lifetime, and handles immediately before each runnable node |
+| single-use Plan execution | **Implemented interaction seam**; a persistent run journal plus kernel-backed per-Plan claim precedes adapter work, and any durable prior snapshot rejects concurrent or sequential replay |
 | Airlock program runner | **Implemented**; `airlock run` parses, evaluates, lowers, admits, and executes native actions |
 | agent-only binary | **Implemented product boundary**; `airlock-agent` omits terminal-authority maintenance commands, but the external harness must still prove that it exposed no alternate effect path |
 | compatibility profile | **Implemented**; no containment claim |
@@ -98,7 +99,7 @@ Hold/Outbox finality, and receipt semantics should not.
 | VM-enclosed profile | **Future design direction**; the CLI and runtime refuse it because no backend is installed |
 | Hold | **Implemented domain nucleus**; files/directories, same-volume rename admission, bounded cross-process locking, staged journal promotion, and undo conflict handling |
 | Outbox | **Implemented domain nucleus**; durable HTTP stage/cancel/commit, bounded cross-process locking, and honest `uncertain` recovery |
-| Ledger | **Implemented append-only prototype**; not established as a fully crash-safe Journal |
+| Ledger | **Implemented durable append seam**; cross-process locking, file/directory sync, and typed torn-tail repair/quarantine are established, but a complete compaction/tamper-evident multi-component Journal is not |
 | labels | **Implemented pure candidate**; lattice, sink checks, scoped declassification/endorsement, and tests exist, but the runtime does not yet enforce them end to end |
 | endpoint broker | **Candidate, not implemented**; current native Cells deny network and Outbox dispatches HTTP itself |
 | complete execution closure | **Acceptance condition, not established** |
@@ -153,14 +154,18 @@ vertical slices, not broad shell replacement.
 
 ### Only the reaper unlinks
 
-Every managed live mutation displaces filesystem bindings by rename. Prior
-state enters Hold before removal or replacement. Undo also preserves a
-conflicting current binding rather than destroying it.
+Every Airlock-owned managed live mutation displaces filesystem bindings by
+rename. Prior state enters Hold before removal or replacement. Undo also
+preserves a conflicting current binding rather than destroying it.
 
 `Hold.reap` contains the only irreversible removal site in `src/`. The law
 applies to unique bytes in managed live state. A process may remove disposable
 files inside a private Cell view because that absence cannot reach live state
 until a separate `Apply` transition passes through Hold.
+
+The law governs Airlock's managed mutation surface. A compatibility child runs
+with ambient host authority and may issue filesystem syscalls that Airlock does
+not mediate as `Apply`; those effects are outside Hold's recovery contract.
 
 ### The ratchet law
 
@@ -189,6 +194,11 @@ The candidate closed **agent Plan algebra** is implemented as:
 PlanNode = Capture | Invoke | Apply | RequestExternal
 ```
 
+“Closed” describes the Schema and interpreter surface. Completeness across
+representative Unix work remains a falsifiable hypothesis: a workload that
+cannot lower honestly is evidence to narrow or version the algebra, not a
+reason to declare the counterexample covered by fiat.
+
 | Node | Role | Current interpreter behavior |
 | --- | --- | --- |
 | `Capture` | observation enters the program | captures supported file data/artifacts |
@@ -203,10 +213,24 @@ constructor.
 The **trusted runtime transition algebra** is not agent-authored:
 
 ```text
-Resolve → Admit → Bind/Revalidate → Observe/Spawn/ProposeDelta
-        → HoldTransition/StageExternal/DispatchExternal
-        → AppendReceipt/Reconcile/Reap/Deny
+RuntimeTransition =
+    Resolve | Admit | Bind | Revalidate | ClaimPlan
+  | Observe | Spawn | ProposeDelta | HoldTransition | StageExternal
+  | ClaimExternal | DispatchExternal | CancelExternal
+  | AppendReceipt | Reconcile | Reap | Deny
+
+Outbox.commit = ClaimExternal → DispatchExternal
+Outbox.cancel = CancelExternal  // staged only
 ```
+
+`ClaimPlan` is a different authority boundary from `ClaimExternal`. Runtime
+requires a persistent run journal, acquires a kernel-backed claim for the Plan
+identity before node adapter or world work, and durably publishes `running`
+before executing nodes. Any existing snapshot—including recovered `running`,
+`finalizing`, or terminal state—causes a tagged
+`RuntimeExecutionClaimRejected` instead of replay. The claim serializes
+contenders; the journal makes the Plan identity single-use across later
+processes.
 
 This is not a fifth Plan node. It is the reference monitor's state-transition
 vocabulary. In particular:
@@ -214,9 +238,12 @@ vocabulary. In particular:
 - `Apply` asks for managed mutation; Hold performs the live binding
   transition.
 - `RequestExternal` asks for inert durable intent; `Outbox.commit` performs
-  `DispatchExternal`.
+  `ClaimExternal` and then `DispatchExternal`.
+- `CancelExternal` is a supervisor transition that is legal only before an
+  Outbox claim.
 - undo and reconciliation are supervisor/runtime transitions.
-- only the supervisor-facing surface can commit, undo, reconcile, or reap.
+- only the supervisor-facing surface can commit, cancel, undo, or reap;
+  reconciliation remains runtime-owned and may run during startup.
 
 An agent may construct a request that reaches one of these transitions only
 through a closed, admitted Plan. A tool definition, platform adapter, or
@@ -313,11 +340,12 @@ local:    private work → proposed delta → Hold-backed live transition
 external: request       → staged intent  → privileged dispatch
 ```
 
-For a supported local binding, Airlock can retain the displaced state and make
-a later restoration possible. Recovery material remains until Reaper performs
-the sole irreversible discard. “Recoverable” is bounded by that material,
-filesystem envelope, retention policy, and intervening conflicts; it is not a
-claim that a multi-path operation is ACID.
+For a supported Airlock-managed local binding, Airlock can retain the displaced
+state and make a later restoration possible. Recovery material remains until
+Reaper performs the sole irreversible discard. “Recoverable” is bounded by that
+material, filesystem envelope, retention policy, and intervening conflicts; it
+is not a claim that a multi-path operation is ACID or that compatibility-child
+writes are intercepted.
 
 For an external effect, Airlock can cancel only while the intent remains
 staged. Once dispatch starts, it cannot promise reversal or exactly once. A
@@ -354,6 +382,11 @@ restriction under the ratchet; the invoked process may then use ambient host
 authority that is not modeled by those requirements. Contained profiles
 require their executable, path, and endpoint requirements to fit the policy.
 
+Consequently, writes or network calls made internally by a compatibility child
+are not converted into `Apply` or `RequestExternal`, do not pass through Hold or
+Outbox, and receive no containment, recovery, cancellation, or dispatch-
+uncertainty guarantee from Airlock.
+
 The implemented v1 closure enumerates every authority-bearing operand that the
 current Plan schema models:
 
@@ -363,6 +396,11 @@ current Plan schema models:
 | `Invoke` | root executable `invoke`; each declared descendant executable `execute`; explicit cwd `read` |
 | `Apply` | target `write`; copy source `read`; move source `read + write` |
 | `RequestExternal` | endpoint `connect + emit` |
+
+The endpoint rights on `RequestExternal` admit one inert intent and bind its
+declared destination. They are not a socket or wire capability held by agent
+code. Only a separately authorized Outbox commit may exercise runtime dispatch
+authority.
 
 Admission rejects unused requirements, duplicate identities/rights, missing
 operand requirements, and handles that do not exactly match their retained
@@ -539,7 +577,8 @@ serialize stage, claim, and recovery transitions across processes. A recovered
 `committing` directory remains `uncertain`; the lease does not turn ambiguous
 external delivery into a retryable success/failure result.
 
-`Outbox.commit` performs the only wire-capable call:
+For Airlock-owned `RequestExternal` intents, `Outbox.commit` performs the only
+runtime wire-capable call:
 
 - it claims a staged entry by renaming it to `committing`;
 - reads the private request;
@@ -548,10 +587,13 @@ external delivery into a retryable success/failure result.
 - records completed, failed, or uncertain outcome; and
 - treats a recovered `committing` directory as `uncertain`.
 
-This is an HTTP dispatcher, not the candidate EndpointBroker. It does not yet
-mediate DNS rebinding, proxies, every redirect, host loopback, Unix sockets,
-descriptor passing, protocol idempotency, credential capabilities, or
+The commit first claims staged state; cancellation is legal only before that
+claim. This is an HTTP dispatcher, not the candidate EndpointBroker. It does
+not yet mediate DNS rebinding, proxies, every redirect, host loopback, Unix
+sockets, descriptor passing, protocol idempotency, credential capabilities, or
 contained-process egress. Native Cells currently receive no network at all.
+Compatibility children retain ambient host network, so their own sends are not
+Outbox dispatches and carry none of these staging or uncertainty guarantees.
 
 ## Programs, artifacts, and receipts
 
@@ -575,10 +617,20 @@ not copy artifact bytes into the JSON summary.
 
 Runtime node receipts record sequence, node state, admitted resource
 identities, input digests, and output artifact references. Hold and Outbox also
-append domain entries to Ledger. Ledger is useful evidence but is not yet a
-fully specified fsync, locking, compaction, or tamper-evident Journal.
+append domain entries to Ledger. Ledger now serializes cross-process appends,
+fsyncs the file and parent directory, repairs a valid torn final newline, and
+durably quarantines an invalid tail with typed evidence. It is still not a
+fully specified compaction or tamper-evident multi-component Journal.
 Native Runtime results also carry typed lifecycle receipts for the exact
 private workspace that was held, already absent, or failed retention.
+
+Runtime's separate persistent run journal publishes `running`, `finalizing`,
+and terminal snapshots. A SHA-256-derived per-Plan claim file under its
+`.claims` directory is held through the full lifecycle with the kernel-backed
+exclusive-file lease. Missing persistent storage, claim acquisition failure,
+or a prior snapshot is reported as `RuntimeExecutionClaimRejected` with
+`persistent-journal-required`, `acquire`, or `replay`; no node adapter runs on
+those paths.
 
 Program results have a versioned `succeeded | failed | partial` envelope. If a
 later action or language assertion fails, the CLI exits nonzero while retaining
@@ -715,7 +767,8 @@ Stable meaning belongs in narrow services and pure modules:
 - Plan, Admission, native action lowering, label flow, and tool-definition
   lowering are implemented candidate capabilities whose boundaries still need
   corpus and adversarial evidence.
-- Ledger is an implemented prototype, not yet a certified Journal.
+- Ledger is an implemented durable append seam with bounded recovery evidence,
+  not yet a complete compaction or tamper-evident multi-component Journal.
 
 Pristine status is earned and revocable. A component name is not proof that
 its operational envelope is complete.
