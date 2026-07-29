@@ -323,6 +323,7 @@ const artifactId = (planId: PlanId, index: number) => ArtifactId.make(`${planId}
 const inputArtifactId = (planId: PlanId, name: string) => ArtifactId.make(`${planId}/input/${name}`)
 
 const canonical = (value: unknown): string => {
+  if (value === undefined) return "undefined"
   if (value === null || typeof value !== "object") return JSON.stringify(value)
   if (Array.isArray(value)) return `[${value.map(canonical).join(",")}]`
   const object = value as Readonly<Record<string, unknown>>
@@ -539,7 +540,28 @@ export const draftForAction = (
         }
         break
       }
-      case "http.stage":
+      case "http.stage": {
+        let plannedBody = call.body
+        if (call.bodyArtifact !== undefined) {
+          const matches = availableArtifacts.filter(
+            (artifact) => artifact.id === call.bodyArtifact
+          )
+          if (matches.length !== 1) {
+            return yield* new ProgramActionDecodeFailed({
+              action: call.action,
+              reason: matches.length === 0
+                ? `artifact ${call.bodyArtifact} is unavailable in this program run`
+                : `artifact ${call.bodyArtifact} is ambiguous in this program run`
+            })
+          }
+          plannedBody = yield* Effect.try({
+            try: () => new TextDecoder("utf-8", { fatal: true }).decode(matches[0]!.bytes),
+            catch: () => new ProgramActionDecodeFailed({
+              action: call.action,
+              reason: `artifact ${call.bodyArtifact} is not valid UTF-8 for HTTP Outbox v1`
+            })
+          })
+        }
         nodes.push(new RequestExternalNode({
           id: nodeId(id, 0),
           dependsOn: [],
@@ -547,9 +569,12 @@ export const draftForAction = (
           produces: [],
           method: call.method,
           endpoint: call.endpoint,
+          headers: call.headers,
+          ...(plannedBody === undefined ? {} : { body: plannedBody }),
           holdMillis: call.holdMillis
         }))
         break
+      }
     }
     const referencedIds: ReadonlyArray<ArtifactId> =
       call.action === "file.write" && call.sourceArtifact !== undefined

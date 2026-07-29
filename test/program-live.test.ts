@@ -245,6 +245,14 @@ describe("ProgramExecutionLive", () => {
     expect(nativeWrites).toEqual([{ path: "/work/output.txt", text: "seed:1:2" }])
     expect(staged).toEqual(["https://example.test/collect"])
     expect(result.plans.every((plan) => plan.actionReference.includes("@sha256:"))).toBe(true)
+    expect(
+      result.plans.flatMap((plan) => plan.nodes).find((node) => node._tag === "RequestExternal")
+    ).toMatchObject({
+      _tag: "RequestExternal",
+      endpoint: "https://example.test/collect",
+      body: "seed:1:2",
+      headers: {}
+    })
   })
 
   it("binds referenced artifact bytes into the admitted action reference", async () => {
