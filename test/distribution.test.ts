@@ -6,6 +6,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  symlinkSync,
   writeFileSync
 } from "node:fs"
 import { tmpdir } from "node:os"
@@ -44,13 +45,19 @@ const fixture = (temporary: string) => {
   return { source, agentSource, checksum }
 }
 
-const run = (script: string, args: Array<string>, temporary: string) =>
+const run = (
+  script: string,
+  args: Array<string>,
+  temporary: string,
+  environment: Record<string, string> = {}
+) =>
   spawnSync("/bin/sh", [script, ...args], {
     cwd: repository,
     env: {
       ...process.env,
       AIRLOCK_TRASH_DIR: join(temporary, "trash"),
-      HOME: join(temporary, "home")
+      HOME: join(temporary, "home"),
+      ...environment
     },
     encoding: "utf8"
   })
@@ -130,15 +137,40 @@ describe("macOS distribution scripts", () => {
     expect(existsSync(join(temporary, "trash"))).toBe(true)
   })
 
-  it("rejects root-equivalent prefixes and does not replace either binary before both candidates probe", () => {
+  it("rejects root-equivalent prefixes before any write and does not replace either binary before both candidates probe", () => {
     const temporary = root()
     const { agentSource, checksum, source } = fixture(temporary)
-    const rootPrefix = run(
-      install,
-      ["--source", source, "--checksum", checksum, "--prefix", "/tmp/../"],
-      temporary
-    )
-    expect(rootPrefix.status).not.toBe(0)
+    const shims = join(temporary, "shims")
+    const mkdirLog = join(temporary, "mkdir.log")
+    mkdirSync(shims)
+    const mkdirShim = join(shims, "mkdir")
+    writeFileSync(mkdirShim, "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$AIRLOCK_MKDIR_LOG\"\nexit 99\n")
+    chmodSync(mkdirShim, 0o755)
+    const rootLink = join(temporary, "root-link")
+    symlinkSync("/", rootLink)
+    for (const prefix of ["/", "//", "/./", "/tmp/..", rootLink]) {
+      const rejected = run(
+        install,
+        ["--source", source, "--checksum", checksum, "--prefix", prefix],
+        temporary,
+        {
+          AIRLOCK_MKDIR_LOG: mkdirLog,
+          PATH: `${shims}:${process.env.PATH ?? "/usr/bin:/bin"}`
+        }
+      )
+      expect(rejected.status).toBe(64)
+      const uninstallRejected = run(
+        uninstall,
+        ["--prefix", prefix],
+        temporary,
+        {
+          AIRLOCK_MKDIR_LOG: mkdirLog,
+          PATH: `${shims}:${process.env.PATH ?? "/usr/bin:/bin"}`
+        }
+      )
+      expect(uninstallRejected.status).toBe(64)
+    }
+    expect(existsSync(mkdirLog)).toBe(false)
 
     writeFileSync(agentSource, "#!/bin/sh\nexit 73\n")
     chmodSync(agentSource, 0o755)

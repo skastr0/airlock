@@ -60,11 +60,39 @@ if [ -z "$CHECKSUM" ]; then
   CHECKSUM="$(dirname "$SOURCE")/airlock.sha256"
 fi
 
+validate_prefix() {
+  candidate="$1"
+  case "$candidate" in
+    /*) ;;
+    *) echo "airlock install: an absolute non-root --prefix is required" >&2; exit 64 ;;
+  esac
+  # Do not let lexical traversal, duplicate-root spellings, or a physical
+  # symlink turn an apparently scoped prefix into a system directory. This
+  # check deliberately runs before mkdir/cp/mv or any other filesystem write.
+  case "$candidate" in
+    /|//*|*/./*|*/../*|*/.|*/..)
+      echo "airlock install: unsafe --prefix spelling" >&2
+      exit 64
+      ;;
+  esac
+  ancestor="$candidate"
+  while [ ! -e "$ancestor" ] && [ ! -L "$ancestor" ]; do
+    parent="$(dirname "$ancestor")"
+    if [ "$parent" = "$ancestor" ]; then
+      echo "airlock install: cannot resolve --prefix safely" >&2
+      exit 64
+    fi
+    ancestor="$parent"
+  done
+  physical="$(cd -P "$ancestor" && pwd -P)"
+  if [ "$physical" = "/" ]; then
+    echo "airlock install: an explicit non-root --prefix is required" >&2
+    exit 64
+  fi
+}
+validate_prefix "$PREFIX"
 mkdir -p "$PREFIX"
 PREFIX="$(cd -P "$PREFIX" && pwd -P)"
-case "$PREFIX" in
-  /) echo "airlock install: an explicit non-root --prefix is required" >&2; exit 64 ;;
-esac
 
 for artifact in "$SOURCE" "$AGENT_SOURCE"; do
   if [ ! -f "$artifact" ] || [ ! -x "$artifact" ]; then
