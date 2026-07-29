@@ -1,6 +1,6 @@
 import { FileSystem, Path } from "@effect/platform"
-import { Context, DateTime, Effect, Layer, Option, Schema } from "effect"
-import { lstat } from "node:fs/promises"
+import { Context, DateTime, Effect, Layer, Schema } from "effect"
+import { lstat, open } from "node:fs/promises"
 import { AirlockHome } from "./AirlockHome.ts"
 import {
   ActId,
@@ -88,9 +88,19 @@ export class UnsupportedReplacementSymlink extends Schema.TaggedError<Unsupporte
   }
 ) {}
 
+export class HoldRecoveryRequired extends Schema.TaggedError<HoldRecoveryRequired>()(
+  "HoldRecoveryRequired",
+  {
+    id: ActId,
+    target: Schema.String,
+    phase: Schema.Literal("install", "ledger"),
+    reason: Schema.String
+  }
+) {}
+
 type HoldIoError = HoldFilesystemError | CrossVolumeHold
 type HoldRecoveryError = HoldFilesystemError | HoldRecoveryIndeterminate
-type HoldMutationError = HoldIoError | LedgerError
+type HoldMutationError = HoldIoError | LedgerError | HoldRecoveryRequired
 
 export class ReplaceMetadata extends Schema.Class<ReplaceMetadata>("ReplaceMetadata")({
   device: Schema.Number,
@@ -116,14 +126,14 @@ export class Hold extends Context.Tag("airlock/Hold")<
       target: string
     ) => Effect.Effect<
       RemoveReceipt,
-      TargetNotFound | ProtectedPath | HoldMutationError
+      TargetNotFound | ProtectedPath | UnsupportedReplacementSymlink | HoldMutationError
     >
     readonly overwrite: (
       target: string,
       content: string
     ) => Effect.Effect<
       OverwriteReceipt,
-      ProtectedPath | HoldMutationError | TargetOccupied
+      TargetNotFound | ProtectedPath | UnsupportedReplacementSymlink | HoldMutationError | TargetOccupied
     >
     readonly replaceFrom: (
       target: string,
@@ -131,6 +141,7 @@ export class Hold extends Context.Tag("airlock/Hold")<
     ) => Effect.Effect<
       ReplaceReceipt,
       | ProtectedPath
+      | TargetNotFound
       | SourceNotFound
       | SourceVolumeMismatch
       | SourceEqualsTarget
@@ -143,11 +154,11 @@ export class Hold extends Context.Tag("airlock/Hold")<
       id: ActId
     ) => Effect.Effect<
       UndoReceipt,
-      UnknownAct | NotHeld | UndoConflict | HoldMutationError
+      TargetNotFound | UnknownAct | NotHeld | UndoConflict | UnsupportedReplacementSymlink | HoldMutationError
     >
     readonly undoLast: Effect.Effect<
       UndoReceipt,
-      NothingToUndo | UnknownAct | NotHeld | UndoConflict | HoldMutationError
+      TargetNotFound | NothingToUndo | UnknownAct | NotHeld | UndoConflict | UnsupportedReplacementSymlink | HoldMutationError
     >
     readonly held: Effect.Effect<ReadonlyArray<HeldManifest>, HoldFilesystemError>
     readonly reap: (
@@ -207,6 +218,8 @@ const make = Effect.gen(function* () {
   const manifestFile = (id: string) => path.join(actDir(id), "manifest.json")
   const payloadFile = (id: string) => path.join(actDir(id), "payload")
   const stageFile = (id: string) => path.join(actDir(id), "stage")
+  const lockRoot = path.join(home.home, "hold-locks")
+  const activeLock = path.join(lockRoot, "active")
 
   const fsError = (operation: string, target: string) => (cause: unknown) =>
     new HoldFilesystemError({ operation, target, reason: reasonOf(cause) })
@@ -220,14 +233,119 @@ const make = Effect.gen(function* () {
     }
   })
 
+  yield* fs
+    .makeDirectory(lockRoot, { recursive: true })
+    .pipe(Effect.mapError(fsError("create Hold lock directory", lockRoot)))
+
   const writeJournal = (journal: HoldJournal) =>
     encodeJournal(journal).pipe(
       Effect.mapError(fsError("encode hold journal", manifestFile(journal.manifest.id))),
-      Effect.flatMap((json) =>
-        fs
-          .writeFileString(manifestFile(journal.manifest.id), json)
-          .pipe(Effect.mapError(fsError("write hold journal", manifestFile(journal.manifest.id))))
-      )
+      Effect.flatMap((json) => {
+        const target = manifestFile(journal.manifest.id)
+        const staged = `${target}.next-${crypto.randomUUID()}`
+        return Effect.tryPromise({
+          try: async () => {
+            const handle = await open(staged, "wx", 0o600)
+            try {
+              await handle.writeFile(json, "utf8")
+              await handle.sync()
+            } finally {
+              await handle.close()
+            }
+          },
+          catch: fsError("write staged hold journal", staged)
+        }).pipe(
+          Effect.zipRight(
+            fs.rename(staged, target).pipe(
+              Effect.mapError(fsError("install hold journal", target))
+            )
+          )
+        )
+      })
+    )
+
+  const ownerFile = (directory: string) => path.join(directory, "owner.json")
+  const processExists = (pid: number) => {
+    try {
+      process.kill(pid, 0)
+      return true
+    } catch (cause) {
+      return (cause as NodeJS.ErrnoException).code !== "ESRCH"
+    }
+  }
+  const realDelay = (milliseconds: number) =>
+    Effect.async<void>((resume) => {
+      const timer = setTimeout(() => resume(Effect.void), milliseconds)
+      return Effect.sync(() => clearTimeout(timer))
+    })
+
+  /**
+   * Cross-process serialization uses only create/write/rename. Releasing or
+   * recovering a lease renames it to a unique tombstone; Reaper remains the
+   * only component that can physically unlink state.
+   */
+  const acquireLock = Effect.fnUntraced(function* () {
+    const started = Date.now()
+    while (Date.now() - started < 30_000) {
+      const token = crypto.randomUUID()
+      const candidate = path.join(lockRoot, `candidate-${token}`)
+      yield* fs
+        .makeDirectory(candidate)
+        .pipe(Effect.mapError(fsError("create Hold lock candidate", candidate)))
+      yield* fs
+        .writeFileString(
+          ownerFile(candidate),
+          JSON.stringify({ token, pid: process.pid, createdAt: new Date().toISOString() })
+        )
+        .pipe(Effect.mapError(fsError("write Hold lock owner", ownerFile(candidate))))
+
+      const claimed = yield* fs.rename(candidate, activeLock).pipe(Effect.either)
+      if (claimed._tag === "Right") return token
+
+      yield* fs
+        .rename(candidate, path.join(lockRoot, `released-${token}`))
+        .pipe(Effect.mapError(fsError("retire Hold lock candidate", candidate)))
+
+      const owner = yield* fs.readFileString(ownerFile(activeLock)).pipe(Effect.either)
+      if (owner._tag === "Right") {
+        const decoded = yield* Effect.sync(() => {
+          try {
+            return JSON.parse(owner.right) as { readonly pid?: unknown }
+          } catch {
+            return undefined
+          }
+        })
+        if (
+          decoded !== undefined &&
+          typeof decoded.pid === "number" &&
+          Number.isSafeInteger(decoded.pid) &&
+          decoded.pid > 0 &&
+          !processExists(decoded.pid)
+        ) {
+          const abandoned = path.join(lockRoot, `abandoned-${crypto.randomUUID()}`)
+          yield* fs.rename(activeLock, abandoned).pipe(Effect.either)
+          continue
+        }
+      }
+      yield* realDelay(10)
+    }
+    return yield* new HoldFilesystemError({
+      operation: "acquire Hold lock",
+      target: activeLock,
+      reason: "timed out after 30000ms"
+    })
+  })
+
+  const releaseLock = (token: string) =>
+    fs.rename(activeLock, path.join(lockRoot, `released-${token}`)).pipe(
+      Effect.mapError(fsError("release Hold lock", activeLock))
+    )
+
+  const withLock = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
+    Effect.acquireUseRelease(
+      acquireLock(),
+      () => effect,
+      (token) => releaseLock(token).pipe(Effect.orDie)
     )
 
   const decodeStoredJournal = (raw: string, id: ActId) =>
@@ -256,22 +374,48 @@ const make = Effect.gen(function* () {
       Effect.flatMap((raw) => decodeStoredJournal(raw, id))
     )
 
-  const inspect = (target: string) =>
-    fs.stat(target).pipe(
-      Effect.mapError(fsError("stat", target)),
-      Effect.map((info) => {
-        const inode = Option.getOrUndefined(info.ino)
-        return {
-          kind: info.type === "Directory" ? ("directory" as const) : ("file" as const),
-          retained: new RetainedMetadata({
-            device: info.dev,
-            ...(inode === undefined ? {} : { inode }),
-            mode: info.mode,
-            bytes: Number(info.size)
-          })
-        } satisfies Entry
+  const pathExists = (target: string) =>
+    Effect.tryPromise({
+      try: async () => {
+        try {
+          await lstat(target)
+          return true
+        } catch (cause) {
+          if (isNotFound(cause)) return false
+          throw cause
+        }
+      },
+      catch: fsError("lstat existence", target)
+    })
+
+  const inspect = Effect.fnUntraced(function* (target: string) {
+    const info = yield* Effect.tryPromise({
+      try: () => lstat(target),
+      catch: (cause) =>
+        isNotFound(cause)
+          ? new TargetNotFound({ target })
+          : fsError("lstat held target", target)(cause)
+    })
+    if (info.isSymbolicLink()) {
+      return yield* new UnsupportedReplacementSymlink({ path: target, role: "target" })
+    }
+    if (!info.isFile() && !info.isDirectory()) {
+      return yield* new HoldFilesystemError({
+        operation: "inspect held target",
+        target,
+        reason: "only regular files and directories are supported"
       })
-    )
+    }
+    return {
+      kind: info.isDirectory() ? ("directory" as const) : ("file" as const),
+      retained: new RetainedMetadata({
+        device: info.dev,
+        inode: info.ino,
+        mode: info.mode,
+        bytes: info.size
+      })
+    } satisfies Entry
+  })
 
   // `HeldManifest` intentionally models files and directories only. lstat is
   // therefore a fail-closed preflight: do not let an unrepresentable dangling
@@ -442,9 +586,7 @@ const make = Effect.gen(function* () {
     yield* fs
       .writeFileString(stageFile(manifest.id), content)
       .pipe(Effect.mapError(fsError("write staged replacement", stageFile(manifest.id))))
-    const occupied = yield* fs
-      .exists(manifest.target)
-      .pipe(Effect.mapError(fsError("check replacement target", manifest.target)))
+    const occupied = yield* pathExists(manifest.target)
     if (occupied) return yield* new TargetOccupied({ target: manifest.target })
     yield* fs
       .rename(stageFile(manifest.id), manifest.target)
@@ -461,9 +603,7 @@ const make = Effect.gen(function* () {
     manifest: HeldManifest,
     source: string
   ) {
-    const occupied = yield* fs
-      .exists(manifest.target)
-      .pipe(Effect.mapError(fsError("check replacement target", manifest.target)))
+    const occupied = yield* pathExists(manifest.target)
     if (occupied) return yield* new TargetOccupied({ target: manifest.target })
     yield* fs.rename(source, manifest.target).pipe(
       Effect.mapError((error) =>
@@ -477,15 +617,53 @@ const make = Effect.gen(function* () {
     }
   })
 
+  const recoverFailedInstall = Effect.fnUntraced(function* (manifest: HeldManifest) {
+    if (yield* pathExists(manifest.target)) {
+      return yield* new HoldRecoveryIndeterminate({
+        id: manifest.id,
+        target: manifest.target
+      })
+    }
+    if (manifest.hasPayload) {
+      if (!(yield* pathExists(payloadFile(manifest.id)))) {
+        return yield* new HoldRecoveryIndeterminate({
+          id: manifest.id,
+          target: manifest.target
+        })
+      }
+      yield* fs
+        .rename(payloadFile(manifest.id), manifest.target)
+        .pipe(Effect.mapError(fsError("restore target after failed install", manifest.target)))
+    }
+    yield* writeJournal(
+      new HoldJournal({
+        state: "restored",
+        manifest: new HeldManifest({
+          ...manifest,
+          hasPayload: false,
+          status: "restored"
+        })
+      })
+    )
+  })
+
+  const recoveryRequired = (
+    manifest: HeldManifest,
+    phase: "install" | "ledger",
+    cause: unknown
+  ) =>
+    new HoldRecoveryRequired({
+      id: manifest.id,
+      target: manifest.target,
+      phase,
+      reason: `${cause instanceof Error && "_tag" in cause ? String(cause._tag) : "Error"}: ${reasonOf(cause)}`
+    })
+
   const reconcileJournal = Effect.fnUntraced(function* (journal: HoldJournal) {
     if (journal.state === "restored") return
     const { manifest } = journal
-    const payloadExists = yield* fs
-      .exists(payloadFile(manifest.id))
-      .pipe(Effect.mapError(fsError("inspect held payload", payloadFile(manifest.id))))
-    const targetExists = yield* fs
-      .exists(manifest.target)
-      .pipe(Effect.mapError(fsError("inspect held target", manifest.target)))
+    const payloadExists = yield* pathExists(payloadFile(manifest.id))
+    const targetExists = yield* pathExists(manifest.target)
 
     if (journal.state === "prepared") {
       if (manifest.hasPayload) {
@@ -561,7 +739,7 @@ const make = Effect.gen(function* () {
   const listJournals = fs.readDirectory(home.holdDir).pipe(
     Effect.mapError(fsError("list hold acts", home.holdDir)),
     Effect.flatMap((entries) =>
-      Effect.forEach(entries, (entry) => {
+      Effect.forEach(entries.filter((entry) => entry.startsWith("act_")), (entry) => {
         const id = ActId.make(entry)
         return fs.stat(actDir(id)).pipe(
           Effect.mapError(fsError("stat hold act", actDir(id))),
@@ -586,15 +764,11 @@ const make = Effect.gen(function* () {
   // No act can be served until prepared crash states have become either held,
   // restored, or an explicit recovery error. This is what makes the manifest
   // state machine a construction boundary rather than an advisory log.
-  yield* reconcile
+  yield* withLock(reconcile)
 
   const remove = Effect.fn("Hold.remove")(function* (rawTarget: string) {
     const target = path.resolve(rawTarget)
     yield* guard(target)
-    const exists = yield* fs
-      .exists(target)
-      .pipe(Effect.mapError(fsError("check remove target", target)))
-    if (!exists) return yield* new TargetNotFound({ target })
     const entry = yield* inspect(target)
     const manifest = yield* holdTarget(target, "remove", entry)
     yield* ledger.record(
@@ -605,7 +779,7 @@ const make = Effect.gen(function* () {
         ref: manifest.id,
         detail: target
       })
-    )
+    ).pipe(Effect.mapError((cause) => recoveryRequired(manifest, "ledger", cause)))
     return new RemoveReceipt({
       id: manifest.id,
       target,
@@ -620,15 +794,20 @@ const make = Effect.gen(function* () {
   ) {
     const target = path.resolve(rawTarget)
     yield* guard(target)
-    const exists = yield* fs
-      .exists(target)
-      .pipe(Effect.mapError(fsError("check overwrite target", target)))
+    const exists = yield* pathExists(target)
     const manifest = exists
       ? yield* inspect(target).pipe(
           Effect.flatMap((entry) => holdTarget(target, "overwrite", entry))
         )
       : yield* prepareCreation(target)
-    yield* installStaged(manifest, content)
+    const installed = yield* installStaged(manifest, content).pipe(Effect.either)
+    if (installed._tag === "Left") {
+      const recovered = yield* recoverFailedInstall(manifest).pipe(Effect.either)
+      if (recovered._tag === "Left") {
+        return yield* recoveryRequired(manifest, "install", installed.left)
+      }
+      return yield* installed.left
+    }
     yield* ledger.record(
       new LedgerEntry({
         at: manifest.at,
@@ -637,7 +816,7 @@ const make = Effect.gen(function* () {
         ref: manifest.id,
         detail: target
       })
-    )
+    ).pipe(Effect.mapError((cause) => recoveryRequired(manifest, "ledger", cause)))
     return new OverwriteReceipt({
       id: manifest.id,
       target,
@@ -676,7 +855,14 @@ const make = Effect.gen(function* () {
           target,
           sourceEntry.kind === "directory" ? "directory" : "file"
         )
-    yield* installSource(manifest, source)
+    const installed = yield* installSource(manifest, source).pipe(Effect.either)
+    if (installed._tag === "Left") {
+      const recovered = yield* recoverFailedInstall(manifest).pipe(Effect.either)
+      if (recovered._tag === "Left") {
+        return yield* recoveryRequired(manifest, "install", installed.left)
+      }
+      return yield* installed.left
+    }
     yield* ledger.record(
       new LedgerEntry({
         at: manifest.at,
@@ -685,7 +871,7 @@ const make = Effect.gen(function* () {
         ref: manifest.id,
         detail: `${source} -> ${target}`
       })
-    )
+    ).pipe(Effect.mapError((cause) => recoveryRequired(manifest, "ledger", cause)))
     return new ReplaceReceipt({
       id: manifest.id,
       source,
@@ -704,9 +890,7 @@ const make = Effect.gen(function* () {
     }
     const { manifest } = journal
     const at = yield* DateTime.now
-    const targetExists = yield* fs
-      .exists(manifest.target)
-      .pipe(Effect.mapError(fsError("check undo target", manifest.target)))
+    const targetExists = yield* pathExists(manifest.target)
     let displaced: ActId | undefined
     if (targetExists) {
       if (manifest.act === "overwrite") {
@@ -740,7 +924,7 @@ const make = Effect.gen(function* () {
         ref: id,
         detail: manifest.target
       })
-    )
+    ).pipe(Effect.mapError((cause) => recoveryRequired(manifest, "ledger", cause)))
     return new UndoReceipt({ id, target: manifest.target, displaced, at })
   })
 
@@ -785,7 +969,15 @@ const make = Effect.gen(function* () {
     return new ReapReport({ reaped: expired.map((journal) => journal.manifest.id), at: now })
   })
 
-  return Hold.of({ remove, overwrite, replaceFrom, undo, undoLast, held, reap })
+  return Hold.of({
+    remove: (target) => withLock(remove(target)),
+    overwrite: (target, content) => withLock(overwrite(target, content)),
+    replaceFrom: (target, source) => withLock(replaceFrom(target, source)),
+    undo: (id) => withLock(undo(id)),
+    undoLast: withLock(undoLast),
+    held: withLock(held),
+    reap: (olderThanMillis) => withLock(reap(olderThanMillis))
+  })
 })
 
 export const HoldLive = Layer.effect(Hold, make)

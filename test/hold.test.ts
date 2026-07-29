@@ -293,6 +293,71 @@ describe("Hold — undoable mutations", () => {
       })
     )
   )
+
+  it.effect("fails closed on raw symlink mutation without moving the link", () =>
+    world(({ fs, hold, path, tmp }) =>
+      Effect.gen(function* () {
+        const target = path.join(tmp, "target.txt")
+        const link = path.join(tmp, "link.txt")
+        yield* fs.writeFileString(target, "target")
+        yield* fs.symlink("target.txt", link)
+
+        const removeError = yield* hold.remove(link).pipe(Effect.flip)
+        expect(removeError._tag).toBe("UnsupportedReplacementSymlink")
+        expect(yield* fs.readLink(link)).toBe("target.txt")
+
+        const overwriteError = yield* hold.overwrite(link, "replacement").pipe(Effect.flip)
+        expect(overwriteError._tag).toBe("UnsupportedReplacementSymlink")
+        expect(yield* fs.readFileString(target)).toBe("target")
+      })
+    )
+  )
+
+  it.effect("ignores private native staging directories when reconstructing Hold", () =>
+    world(({ fs, path, tmp }) =>
+      Effect.gen(function* () {
+        const home = path.join(tmp, "airlock-home")
+        const orphan = path.join(home, "hold", "native-stage-orphan")
+        yield* fs.makeDirectory(orphan, { recursive: true })
+        yield* fs.writeFileString(path.join(orphan, "partial"), "private stage")
+
+        const reconstructed = yield* Effect.provide(Hold, layersFor(home))
+        expect(yield* reconstructed.held).toEqual([])
+        expect(yield* fs.readFileString(path.join(orphan, "partial"))).toBe("private stage")
+      })
+    )
+  )
+
+  it.effect("serializes concurrent Hold instances over the same target", () =>
+    world(({ fs, hold: first, path, tmp }) =>
+      Effect.gen(function* () {
+        const home = path.join(tmp, "airlock-home")
+        const second = yield* Effect.provide(Hold, layersFor(home))
+        const target = path.join(tmp, "shared.txt")
+        yield* fs.writeFileString(target, "initial")
+
+        const receipts = yield* Effect.all(
+          [
+            first.overwrite(target, "from-first"),
+            second.overwrite(target, "from-second")
+          ],
+          { concurrency: "unbounded" }
+        )
+        expect(new Set(receipts.map((receipt) => receipt.id)).size).toBe(2)
+        expect(["from-first", "from-second"]).toContain(yield* fs.readFileString(target))
+
+        const reconstructed = yield* Effect.provide(Hold, layersFor(home))
+        const held = yield* reconstructed.held
+        expect(held.map((manifest) => manifest.id)).toEqual(
+          expect.arrayContaining(receipts.map((receipt) => receipt.id))
+        )
+        yield* reconstructed.undoLast
+        expect(["initial", "from-first", "from-second"]).toContain(
+          yield* fs.readFileString(target)
+        )
+      })
+    )
+  )
 })
 
 describe("construction invariant", () => {

@@ -5,6 +5,7 @@ import * as nodePath from "node:path"
 import { AirlockHome } from "../AirlockHome.ts"
 import {
   type HoldFilesystemError,
+  type HoldRecoveryRequired,
   Hold,
   type CrossVolumeHold,
   type ReplaceReceipt,
@@ -171,6 +172,7 @@ export type NativeFilesystemErrorUnion =
   | UnsupportedReplacementSymlink
   | TargetOccupied
   | HoldFilesystemError
+  | HoldRecoveryRequired
   | CrossVolumeHold
   | LedgerError
   | TargetNotFound
