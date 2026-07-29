@@ -2,7 +2,16 @@ import { Schema } from "effect"
 
 // ── identifiers ─────────────────────────────────────────────────────────────
 
-export const ActId = Schema.String.pipe(Schema.brand("ActId"))
+/**
+ * Act ids are persisted as direct children of Airlock's Hold directory.
+ * Keep their wire representation to one bounded POSIX-safe path component so
+ * decoding an externally supplied id cannot turn journal lookup into path
+ * traversal.
+ */
+export const ActId = Schema.String.pipe(
+  Schema.pattern(/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/),
+  Schema.brand("ActId")
+)
 export type ActId = typeof ActId.Type
 
 export const EmissionId = Schema.String.pipe(Schema.brand("EmissionId"))
