@@ -1,11 +1,11 @@
 import { FileSystem, Path } from "@effect/platform"
-import { Context, DateTime, Effect, Layer, Schema } from "effect"
+import { Cause, Context, DateTime, Effect, Exit, Layer, Schema } from "effect"
 import { createHash } from "node:crypto"
 import { lstat, readFile, readdir } from "node:fs/promises"
 import * as nodePath from "node:path"
 import { Cell, CellReceipt, CellRequest, WorkspaceDeltaCandidate } from "../cell/index.ts"
 import { Hold } from "../Hold.ts"
-import { EmissionRequest } from "../domain.ts"
+import { ActId, EmissionRequest } from "../domain.ts"
 import { Outbox } from "../Outbox.ts"
 import {
   ArtifactId,
@@ -19,7 +19,12 @@ import {
   Receipt,
   type ReceiptId
 } from "../plan/index.ts"
-import { ProcessInputBytes, ProcessRequest, ProcessRunner } from "../process/Process.ts"
+import {
+  ProcessInputBytes,
+  ProcessReceipt,
+  ProcessRequest,
+  ProcessRunner
+} from "../process/Process.ts"
 
 /**
  * Candidate Plan interpreter. Plan, receipt, and Cell contracts are the
@@ -60,13 +65,56 @@ export class RuntimeInitialArtifact extends Schema.Class<RuntimeInitialArtifact>
   provenance: Schema.String
 }) {}
 
+export class RuntimeCellWorkspaceHeld extends Schema.TaggedClass<RuntimeCellWorkspaceHeld>()(
+  "RuntimeCellWorkspaceHeld",
+  {
+    state: Schema.Literal("held"),
+    nodeId: Schema.String,
+    privateWorkspace: Schema.String,
+    actId: ActId,
+    at: Schema.DateTimeUtc
+  }
+) {}
+
+export class RuntimeCellWorkspaceAbsent extends Schema.TaggedClass<RuntimeCellWorkspaceAbsent>()(
+  "RuntimeCellWorkspaceAbsent",
+  {
+    state: Schema.Literal("absent"),
+    nodeId: Schema.String,
+    privateWorkspace: Schema.String,
+    at: Schema.DateTimeUtc
+  }
+) {}
+
+export class RuntimeCellWorkspaceRetentionFailed extends Schema.TaggedClass<RuntimeCellWorkspaceRetentionFailed>()(
+  "RuntimeCellWorkspaceRetentionFailed",
+  {
+    state: Schema.Literal("failed"),
+    nodeId: Schema.String,
+    privateWorkspace: Schema.String,
+    errorTag: Schema.String,
+    reason: Schema.String,
+    at: Schema.DateTimeUtc
+  }
+) {}
+
+export const RuntimeLifecycleReceipt = Schema.Union(
+  RuntimeCellWorkspaceHeld,
+  RuntimeCellWorkspaceAbsent,
+  RuntimeCellWorkspaceRetentionFailed
+)
+export type RuntimeLifecycleReceipt = typeof RuntimeLifecycleReceipt.Type
+
 export class RuntimeRun extends Schema.Class<RuntimeRun>("RuntimeRun")({
   planId: Schema.String,
   state: Schema.Literal("succeeded", "failed", "partial"),
   startedAt: Schema.DateTimeUtc,
   finishedAt: Schema.DateTimeUtc,
   receipts: Schema.Array(Receipt),
-  artifacts: Schema.Array(RuntimeArtifact)
+  artifacts: Schema.Array(RuntimeArtifact),
+  lifecycle: Schema.optionalWith(Schema.Array(RuntimeLifecycleReceipt), {
+    default: () => []
+  })
 }) {}
 
 export class RuntimePlanInvalid extends Schema.TaggedError<RuntimePlanInvalid>()(
@@ -99,6 +147,15 @@ export class RuntimeDeltaUnsupported extends Schema.TaggedError<RuntimeDeltaUnsu
   { nodeId: Schema.String, path: Schema.String, reason: Schema.String }
 ) {}
 
+export class RuntimeLifecycleFailure extends Schema.TaggedError<RuntimeLifecycleFailure>()(
+  "RuntimeLifecycleFailure",
+  {
+    planId: Schema.String,
+    privateWorkspaces: Schema.Array(Schema.String),
+    reason: Schema.String
+  }
+) {}
+
 export type RuntimeError =
   | RuntimePlanInvalid
   | RuntimeNodeFailure
@@ -113,7 +170,7 @@ export class Runtime extends Context.Tag("airlock/Runtime")<
     readonly execute: (
       plan: Plan,
       initialArtifacts?: ReadonlyArray<RuntimeInitialArtifact>
-    ) => Effect.Effect<RuntimeRun, RuntimePlanInvalid>
+    ) => Effect.Effect<RuntimeRun, RuntimePlanInvalid | RuntimeLifecycleFailure>
   }
 >() {}
 
@@ -281,6 +338,12 @@ const deltaBytes = (receipt: CellReceipt) => text.encode(JSON.stringify({
   delta: receipt.delta.map((candidate) => ({ path: candidate.path, kind: candidate.kind }))
 }))
 
+type RuntimeCellWorkspace = {
+  readonly nodeId: NodeId
+  readonly requestedWorkspace: string
+  privateWorkspace: string
+}
+
 const make = Effect.gen(function* () {
   const fs = yield* FileSystem.FileSystem
   const path = yield* Path.Path
@@ -383,7 +446,39 @@ const make = Effect.gen(function* () {
       }
     })
 
-  const runInvoke = (node: PlanNode & { readonly _tag: "Invoke" }, artifacts: Map<ArtifactId, RuntimeArtifact>) =>
+  const bindCellWorkspaceIdentity = (
+    nodeId: NodeId,
+    registration: RuntimeCellWorkspace,
+    receipt: CellReceipt
+  ) =>
+    Effect.tryPromise({
+      try: async () => {
+        const [requested, reported] = await Promise.all([
+          lstat(registration.requestedWorkspace),
+          lstat(receipt.privateWorkspace)
+        ])
+        if (
+          !requested.isDirectory() ||
+          !reported.isDirectory() ||
+          requested.dev !== reported.dev ||
+          requested.ino !== reported.ino
+        ) {
+          throw new Error("Cell receipt does not identify the runtime-created private workspace")
+        }
+        registration.privateWorkspace = receipt.privateWorkspace
+      },
+      catch: (cause) => new RuntimeNodeFailure({
+        nodeId,
+        operation: "bind Cell workspace identity",
+        reason: errorReason(cause)
+      })
+    })
+
+  const runInvoke = (
+    node: PlanNode & { readonly _tag: "Invoke" },
+    artifacts: Map<ArtifactId, RuntimeArtifact>,
+    cellWorkspaces: Map<NodeId, RuntimeCellWorkspace>
+  ) =>
     Effect.gen(function* () {
       const stdin = node.stdin === undefined ? undefined : artifacts.get(node.stdin)
       if (node.stdin !== undefined && stdin === undefined) {
@@ -405,14 +500,36 @@ const make = Effect.gen(function* () {
       if (contained && path.resolve(cwd) !== workspace) {
         return yield* new RuntimeCapabilityDenied({ nodeId: node.id, right: "Cell working directory", reason: "native-contained Invoke cwd must be the admitted workspace" })
       }
-      const outcome = contained
-        ? yield* cell.run(new CellRequest({
+      let outcome: {
+        readonly process: ProcessReceipt
+        readonly cell: CellReceipt | undefined
+      }
+      if (contained) {
+        const privateWorkspace = path.resolve(
+          path.join(path.dirname(workspace), `.airlock-cell-${crypto.randomUUID()}`)
+        )
+        const registration: RuntimeCellWorkspace = {
+          nodeId: node.id,
+          requestedWorkspace: privateWorkspace,
+          privateWorkspace
+        }
+        // Register before invoking the Cell: preparation or process failure may
+        // occur after the private workspace has already been created.
+        cellWorkspaces.set(node.id, registration)
+        const receipt = yield* cell.run(new CellRequest({
           sourceWorkspace: workspace,
-          privateWorkspace: path.join(path.dirname(workspace), `.airlock-cell-${crypto.randomUUID()}`),
+          privateWorkspace,
           process: request,
           network: "deny"
-        })).pipe(Effect.map((receipt) => ({ process: receipt.processReceipt, cell: receipt })))
-        : yield* process.run(request).pipe(Effect.map((receipt) => ({ process: receipt, cell: undefined })))
+        }))
+        yield* bindCellWorkspaceIdentity(node.id, registration, receipt)
+        outcome = { process: receipt.processReceipt, cell: receipt }
+      } else {
+        outcome = {
+          process: yield* process.run(request),
+          cell: undefined
+        }
+      }
       if (outcome.process.exitCode !== 0 || outcome.process.signal !== null) {
         return yield* new RuntimeNodeFailure({
           nodeId: node.id, operation: "invoke", reason: `process exited ${outcome.process.exitCode === null ? outcome.process.signal : outcome.process.exitCode}`
@@ -466,7 +583,12 @@ const make = Effect.gen(function* () {
       nodeId: node.id, operation: "invoke", reason: `${error._tag}: ${errorReason(error)}`
     })))
 
-  const runNode = (plan: Plan, node: PlanNode, artifacts: Map<ArtifactId, RuntimeArtifact>): Effect.Effect<ReadonlyArray<ArtifactId>, RuntimeError> =>
+  const runNode = (
+    plan: Plan,
+    node: PlanNode,
+    artifacts: Map<ArtifactId, RuntimeArtifact>,
+    cellWorkspaces: Map<NodeId, RuntimeCellWorkspace>
+  ): Effect.Effect<ReadonlyArray<ArtifactId>, RuntimeError> =>
     Effect.gen(function* () {
       yield* enforce(node)
       switch (node._tag) {
@@ -485,7 +607,7 @@ const make = Effect.gen(function* () {
           for (const id of node.produces) artifacts.set(id, artifact(id, bytes, `${node.source}:${node.locator}`))
           return node.produces
         }
-        case "Invoke": return yield* runInvoke(node, artifacts)
+        case "Invoke": return yield* runInvoke(node, artifacts, cellWorkspaces)
         case "Apply": {
           const target = localPath(node.target)
           if (node.operation === "remove") {
@@ -547,54 +669,196 @@ const make = Effect.gen(function* () {
       }
     })
 
+  const retainCellWorkspaces = (
+    cellWorkspaces: ReadonlyMap<NodeId, RuntimeCellWorkspace>
+  ): Effect.Effect<ReadonlyArray<RuntimeLifecycleReceipt>> =>
+    Effect.forEach(
+      cellWorkspaces.values(),
+      (registration) =>
+        hold.retireRuntimePrivate(registration.privateWorkspace).pipe(
+          Effect.either,
+          Effect.flatMap((result) => {
+            if (result._tag === "Right") {
+              return Effect.succeed(new RuntimeCellWorkspaceHeld({
+                state: "held",
+                nodeId: registration.nodeId,
+                privateWorkspace: registration.privateWorkspace,
+                actId: result.right.id,
+                at: result.right.at
+              }))
+            }
+            return DateTime.now.pipe(
+              Effect.map((at): RuntimeLifecycleReceipt =>
+                result.left._tag === "TargetNotFound"
+                  ? new RuntimeCellWorkspaceAbsent({
+                      state: "absent",
+                      nodeId: registration.nodeId,
+                      privateWorkspace: registration.privateWorkspace,
+                      at
+                    })
+                  : new RuntimeCellWorkspaceRetentionFailed({
+                      state: "failed",
+                      nodeId: registration.nodeId,
+                      privateWorkspace: registration.privateWorkspace,
+                      errorTag: result.left._tag,
+                      reason: errorReason(result.left),
+                      at
+                    })
+              )
+            )
+          })
+        ),
+      { concurrency: 1 }
+    )
+
   const execute = (
     plan: Plan,
     initialArtifacts: ReadonlyArray<RuntimeInitialArtifact> = []
-  ): Effect.Effect<RuntimeRun, RuntimePlanInvalid> => Effect.gen(function* () {
-    const ordered = yield* validatePlan(plan)
-    const startedAt = yield* DateTime.now
-    const producedIds = new Set(ordered.flatMap((node) => node.produces))
-    const inputIds = initialArtifacts.map((input) => input.id)
-    const duplicateInput = inputIds.find((id, index) => inputIds.indexOf(id) !== index)
-    if (duplicateInput !== undefined) {
-      return yield* new RuntimePlanInvalid({
+  ): Effect.Effect<RuntimeRun, RuntimePlanInvalid | RuntimeLifecycleFailure> => {
+    const cellWorkspaces = new Map<NodeId, RuntimeCellWorkspace>()
+    const runPlan = Effect.gen(function* () {
+      const ordered = yield* validatePlan(plan)
+      const startedAt = yield* DateTime.now
+      const producedIds = new Set(ordered.flatMap((node) => node.produces))
+      const inputIds = initialArtifacts.map((input) => input.id)
+      const duplicateInput = inputIds.find((id, index) => inputIds.indexOf(id) !== index)
+      if (duplicateInput !== undefined) {
+        return yield* new RuntimePlanInvalid({
+          planId: plan.id,
+          reason: `duplicate initial artifact id: ${duplicateInput}`
+        })
+      }
+      const collidingInput = inputIds.find((id) => producedIds.has(id))
+      if (collidingInput !== undefined) {
+        return yield* new RuntimePlanInvalid({
+          planId: plan.id,
+          reason: `initial artifact is also produced by a node: ${collidingInput}`
+        })
+      }
+      const artifacts = new Map<ArtifactId, RuntimeArtifact>(
+        initialArtifacts.map((input) => [input.id, materializeInitialArtifact(input)])
+      )
+      const receipts: Receipt[] = []
+      const stateByNode = new Map<NodeId, NodeState>()
+      let failed = false
+      for (const node of ordered) {
+        const handles = handlesFor(plan, node)
+        const dependenciesSucceeded = node.dependsOn.every(
+          (dependency) => stateByNode.get(dependency) === "succeeded"
+        )
+        if (!dependenciesSucceeded) {
+          receipts.push(yield* nodeReceipt(
+            plan,
+            node,
+            receipts.length + 1,
+            "cancelled",
+            artifacts,
+            [],
+            handles.map((handle) => handle.resourceIdentity),
+            "RuntimeDependencyFailed"
+          ))
+          stateByNode.set(node.id, "cancelled")
+          failed = true
+          continue
+        }
+        const result = yield* runNode(
+          plan,
+          node,
+          artifacts,
+          cellWorkspaces
+        ).pipe(Effect.either)
+        if (result._tag === "Left") {
+          receipts.push(yield* nodeReceipt(
+            plan,
+            node,
+            receipts.length + 1,
+            "failed",
+            artifacts,
+            [],
+            handles.map((handle) => handle.resourceIdentity),
+            result.left._tag
+          ))
+          stateByNode.set(node.id, "failed")
+          failed = true
+        } else {
+          receipts.push(yield* nodeReceipt(
+            plan,
+            node,
+            receipts.length + 1,
+            "succeeded",
+            artifacts,
+            result.right,
+            handles.map((handle) => handle.resourceIdentity)
+          ))
+          stateByNode.set(node.id, "succeeded")
+        }
+      }
+      const finishedAt = yield* DateTime.now
+      const succeeded = receipts.filter(
+        (receipt) => receipt.state === "succeeded"
+      ).length
+      return new RuntimeRun({
         planId: plan.id,
-        reason: `duplicate initial artifact id: ${duplicateInput}`
+        state: failed
+          ? succeeded > 0
+            ? "partial"
+            : "failed"
+          : "succeeded",
+        startedAt,
+        finishedAt,
+        receipts,
+        artifacts: [...artifacts.values()]
       })
-    }
-    const collidingInput = inputIds.find((id) => producedIds.has(id))
-    if (collidingInput !== undefined) {
-      return yield* new RuntimePlanInvalid({
-        planId: plan.id,
-        reason: `initial artifact is also produced by a node: ${collidingInput}`
+    })
+
+    /*
+     * Cancellation remains enabled while Plan nodes execute. Once that phase
+     * exits (success, typed failure, defect, or interruption), finalization is
+     * uninterruptible so a second cancellation cannot strand a known Cell
+     * workspace before Hold either accepts it or records why it could not.
+     */
+    return Effect.uninterruptibleMask((restore) =>
+      Effect.gen(function* () {
+        const runExit = yield* restore(runPlan).pipe(Effect.exit)
+        const lifecycle = yield* retainCellWorkspaces(cellWorkspaces)
+        const retentionFailures = lifecycle.filter(
+          (receipt): receipt is RuntimeCellWorkspaceRetentionFailed =>
+            receipt.state === "failed"
+        )
+        if (Exit.isFailure(runExit)) {
+          if (retentionFailures.length === 0) {
+            return yield* Effect.failCause(runExit.cause)
+          }
+          return yield* Effect.failCause(Cause.sequential(
+            runExit.cause,
+            Cause.fail(new RuntimeLifecycleFailure({
+              planId: plan.id,
+              privateWorkspaces: retentionFailures.map(
+                (receipt) => receipt.privateWorkspace
+              ),
+              reason: retentionFailures.map(
+                (receipt) => `${receipt.errorTag}: ${receipt.reason}`
+              ).join("; ")
+            }))
+          ))
+        }
+        const run = runExit.value
+        const finishedAt = yield* DateTime.now
+        const succeeded = run.receipts.some((receipt) => receipt.state === "succeeded")
+        const state = retentionFailures.length === 0
+          ? run.state
+          : succeeded
+            ? "partial" as const
+            : "failed" as const
+        return new RuntimeRun({
+          ...run,
+          state,
+          finishedAt,
+          lifecycle
+        })
       })
-    }
-    const artifacts = new Map<ArtifactId, RuntimeArtifact>(
-      initialArtifacts.map((input) => [input.id, materializeInitialArtifact(input)])
     )
-    const receipts: Receipt[] = []
-    const stateByNode = new Map<NodeId, NodeState>()
-    let failed = false
-    for (const node of ordered) {
-      const handles = handlesFor(plan, node)
-      const dependenciesSucceeded = node.dependsOn.every((dependency) => stateByNode.get(dependency) === "succeeded")
-      if (!dependenciesSucceeded) {
-        receipts.push(yield* nodeReceipt(plan, node, receipts.length + 1, "cancelled", artifacts, [], handles.map((handle) => handle.resourceIdentity), "RuntimeDependencyFailed"))
-        stateByNode.set(node.id, "cancelled"); failed = true; continue
-      }
-      const result = yield* runNode(plan, node, artifacts).pipe(Effect.either)
-      if (result._tag === "Left") {
-        receipts.push(yield* nodeReceipt(plan, node, receipts.length + 1, "failed", artifacts, [], handles.map((handle) => handle.resourceIdentity), result.left._tag))
-        stateByNode.set(node.id, "failed"); failed = true
-      } else {
-        receipts.push(yield* nodeReceipt(plan, node, receipts.length + 1, "succeeded", artifacts, result.right, handles.map((handle) => handle.resourceIdentity)))
-        stateByNode.set(node.id, "succeeded")
-      }
-    }
-    const finishedAt = yield* DateTime.now
-    const succeeded = receipts.filter((receipt) => receipt.state === "succeeded").length
-    return new RuntimeRun({ planId: plan.id, state: failed ? (succeeded > 0 ? "partial" : "failed") : "succeeded", startedAt, finishedAt, receipts, artifacts: [...artifacts.values()] })
-  })
+  }
 
   return Runtime.of({ execute })
 })

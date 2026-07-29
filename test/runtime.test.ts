@@ -1,20 +1,30 @@
 import { BunContext } from "@effect/platform-bun"
 import { describe, expect, it } from "@effect/vitest"
-import { DateTime, Effect, Layer } from "effect"
+import { DateTime, Deferred, Effect, Fiber, Layer } from "effect"
 import { createHash } from "node:crypto"
 import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import * as AirlockHome from "../src/AirlockHome.ts"
-import { Cell, CellLive, CellReceipt, WorkspaceDeltaCandidate, WorkspaceDrift, WorkspaceEntryFingerprint, WorkspaceFingerprint } from "../src/cell/index.ts"
-import { Hold, HoldLive } from "../src/Hold.ts"
+import {
+  Cell,
+  CellLive,
+  CellReceipt,
+  CellRequest,
+  CellUnavailable,
+  WorkspaceDeltaCandidate,
+  WorkspaceDrift,
+  WorkspaceEntryFingerprint,
+  WorkspaceFingerprint
+} from "../src/cell/index.ts"
+import { Hold, HoldFilesystemError, HoldLive } from "../src/Hold.ts"
 import { LedgerLive } from "../src/Ledger.ts"
 import { OutboxLive } from "../src/Outbox.ts"
 import {
   ArtifactId, AuthorityAdmission, CaptureNode, Digest, NodeId, Plan, PlanId, RequestExternalNode, ApplyNode, InvokeNode
 } from "../src/plan/index.ts"
 import { MacosPlatformLive } from "../src/platform/macos/index.ts"
-import { ProcessReceipt, ProcessRequest, ProcessRunner, ProcessRunnerLive } from "../src/process/Process.ts"
+import { ProcessReceipt, ProcessRunner, ProcessRunnerLive } from "../src/process/Process.ts"
 import {
   Runtime,
   RuntimeConfig,
@@ -56,9 +66,14 @@ const compatibilityLayer = (workspace: string, home: string) => RuntimeLive.pipe
   Layer.provideMerge(BunContext.layer)
 )
 
-const nativeLayer = (workspace: string, home: string, cell: Layer.Layer<Cell, any, any>) => RuntimeLive.pipe(
+const nativeLayer = (
+  workspace: string,
+  home: string,
+  cell: Layer.Layer<Cell, any, any>,
+  hold: Layer.Layer<Hold, any, any> = HoldLive
+) => RuntimeLive.pipe(
   Layer.provideMerge(cell), Layer.provideMerge(ProcessRunnerLive), Layer.provideMerge(MacosPlatformLive),
-  Layer.provideMerge(HoldLive), Layer.provideMerge(OutboxLive), Layer.provideMerge(LedgerLive),
+  Layer.provideMerge(hold), Layer.provideMerge(OutboxLive), Layer.provideMerge(LedgerLive),
   Layer.provideMerge(AirlockHome.layer(home)),
   Layer.provideMerge(RuntimeConfigLive(new RuntimeConfig({ workspace, profile: "native-contained" }))),
   Layer.provideMerge(BunContext.layer)
@@ -87,9 +102,38 @@ const fingerprint = (absolute: string, display: string): WorkspaceEntryFingerpri
   })
 }
 
-const processReceipt = (workspace: string) => new ProcessReceipt({
-  executable: "/bin/true", args: [], cwd: workspace, pid: 1, exitCode: 0, signal: null,
+const processReceipt = (workspace: string, exitCode = 0) => new ProcessReceipt({
+  executable: "/bin/true", args: [], cwd: workspace, pid: 1, exitCode, signal: null,
   stdout: new Uint8Array(), stderr: new Uint8Array(), startedAt: now(), finishedAt: now()
+})
+
+const workspaceFingerprint = (root: string) => {
+  const entries = readdirSync(root).sort().map((entry) => fingerprint(join(root, entry), entry))
+  return new WorkspaceFingerprint({
+    root,
+    entries,
+    digest: createHash("sha256")
+      .update(entries.map((entry) => `${entry.path}\0${entry.digest}\0`).join(""))
+      .digest("hex")
+  })
+}
+
+const noDeltaReceipt = (
+  request: CellRequest,
+  workspace: string,
+  exitCode = 0
+) => new CellReceipt({
+  sourceWorkspace: workspace,
+  privateWorkspace: request.privateWorkspace,
+  network: "deny",
+  readAuthority: "ambient-host-read",
+  process: request.process,
+  processReceipt: processReceipt(workspace, exitCode),
+  baseline: workspaceFingerprint(workspace),
+  live: workspaceFingerprint(workspace),
+  private: workspaceFingerprint(request.privateWorkspace),
+  delta: [],
+  drift: []
 })
 
 describe("runtime Plan interpreter", () => {
@@ -241,25 +285,42 @@ describe("native-contained runtime", () => {
     Effect.sync(() => {
       const root = mkdtempSync(join(tmpdir(), "airlock-runtime-merge-"))
       const workspace = join(root, "workspace")
-      const privateWorkspace = join(root, "private")
       mkdirSync(join(workspace, "bundle"), { recursive: true })
-      mkdirSync(join(privateWorkspace, "bundle"), { recursive: true })
       writeFileSync(join(workspace, "bundle", "state.txt"), "live-before")
-      writeFileSync(join(privateWorkspace, "bundle", "state.txt"), "private-after")
-      return { workspace, privateWorkspace, home: join(root, ".airlock-home") }
-    }).pipe(Effect.flatMap(({ workspace, privateWorkspace, home }) => Effect.gen(function* () {
+      return { workspace, home: join(root, ".airlock-home") }
+    }).pipe(Effect.flatMap(({ workspace, home }) => Effect.gen(function* () {
       const baselineEntry = fingerprint(join(workspace, "bundle"), "bundle")
-      const privateEntry = fingerprint(join(privateWorkspace, "bundle"), "bundle")
       const baseline = new WorkspaceFingerprint({ root: workspace, entries: [baselineEntry], digest: "baseline" })
-      const privateView = new WorkspaceFingerprint({ root: privateWorkspace, entries: [privateEntry], digest: "private" })
-      const receipt = new CellReceipt({
-        sourceWorkspace: workspace, privateWorkspace, network: "deny", readAuthority: "ambient-host-read",
-        process: new ProcessRequest({ executable: "/bin/true", args: [], cwd: workspace, env: {} }),
-        processReceipt: processReceipt(workspace), baseline, live: baseline, private: privateView,
-        delta: [new WorkspaceDeltaCandidate({ path: "bundle", kind: "modified", baseline: baselineEntry, private: privateEntry })], drift: []
-      })
       const fakeCell = Layer.succeed(Cell, Cell.of({
-        run: () => Effect.succeed(receipt), revalidate: () => Effect.succeed([])
+        run: (request) => Effect.sync(() => {
+          mkdirSync(join(request.privateWorkspace, "bundle"), { recursive: true })
+          writeFileSync(join(request.privateWorkspace, "bundle", "state.txt"), "private-after")
+          const privateEntry = fingerprint(join(request.privateWorkspace, "bundle"), "bundle")
+          const privateView = new WorkspaceFingerprint({
+            root: request.privateWorkspace,
+            entries: [privateEntry],
+            digest: "private"
+          })
+          return new CellReceipt({
+            sourceWorkspace: workspace,
+            privateWorkspace: request.privateWorkspace,
+            network: "deny",
+            readAuthority: "ambient-host-read",
+            process: request.process,
+            processReceipt: processReceipt(workspace),
+            baseline,
+            live: baseline,
+            private: privateView,
+            delta: [new WorkspaceDeltaCandidate({
+              path: "bundle",
+              kind: "modified",
+              baseline: baselineEntry,
+              private: privateEntry
+            })],
+            drift: []
+          })
+        }),
+        revalidate: () => Effect.succeed([])
       }))
       const layer = nativeLayer(workspace, home, fakeCell)
       const result = yield* Effect.gen(function* () {
@@ -281,6 +342,13 @@ describe("native-contained runtime", () => {
         return { run, afterMerge, undo }
       }).pipe(Effect.provide(layer))
       expect(result.run.state).toBe("succeeded")
+      expect(result.run.lifecycle).toEqual([
+        expect.objectContaining({
+          _tag: "RuntimeCellWorkspaceHeld",
+          state: "held",
+          nodeId: node("private-directory")
+        })
+      ])
       expect(result.afterMerge).toBe("private-after")
       expect(result.undo.target).toBe(join(workspace, "bundle"))
       expect(readFileSync(join(workspace, "bundle", "state.txt"), "utf8")).toBe("live-before")
@@ -292,16 +360,39 @@ describe("native-contained runtime", () => {
       Effect.flatMap((workspace) => Effect.gen(function* () {
         writeFileSync(join(workspace, "changed.txt"), "live")
         const entry = new WorkspaceEntryFingerprint({ path: "changed.txt", kind: "file", bytes: 4, mode: 0o100644, digest: "baseline" })
-        const fingerprint = new WorkspaceFingerprint({ root: workspace, entries: [entry], digest: "workspace" })
-        const receipt = new CellReceipt({
-          sourceWorkspace: workspace, privateWorkspace: join(workspace, "private"), network: "deny", readAuthority: "ambient-host-read",
-          process: new ProcessRequest({ executable: "/bin/true", args: [], cwd: workspace, env: {} }),
-          processReceipt: new ProcessReceipt({ executable: "/bin/true", args: [], cwd: workspace, pid: 1, exitCode: 0, signal: null, stdout: new Uint8Array(), stderr: new Uint8Array(), startedAt: now(), finishedAt: now() }),
-          baseline: fingerprint, live: fingerprint, private: fingerprint,
-          delta: [new WorkspaceDeltaCandidate({ path: "changed.txt", kind: "modified", baseline: entry, private: entry })], drift: []
-        })
+        const baselineFingerprint = new WorkspaceFingerprint({ root: workspace, entries: [entry], digest: "workspace" })
         const driftCell = Layer.succeed(Cell, Cell.of({
-          run: () => Effect.succeed(receipt),
+          run: (request) => Effect.sync(() => {
+            mkdirSync(request.privateWorkspace, { recursive: true })
+            writeFileSync(join(request.privateWorkspace, "changed.txt"), "live")
+            const privateEntry = fingerprint(
+              join(request.privateWorkspace, "changed.txt"),
+              "changed.txt"
+            )
+            const privateView = new WorkspaceFingerprint({
+              root: request.privateWorkspace,
+              entries: [privateEntry],
+              digest: "private"
+            })
+            return new CellReceipt({
+              sourceWorkspace: workspace,
+              privateWorkspace: request.privateWorkspace,
+              network: "deny",
+              readAuthority: "ambient-host-read",
+              process: request.process,
+              processReceipt: processReceipt(workspace),
+              baseline: baselineFingerprint,
+              live: baselineFingerprint,
+              private: privateView,
+              delta: [new WorkspaceDeltaCandidate({
+                path: "changed.txt",
+                kind: "modified",
+                baseline: entry,
+                private: privateEntry
+              })],
+              drift: []
+            })
+          }),
           revalidate: () => Effect.succeed([new WorkspaceDrift({ path: "changed.txt", baseline: entry, live: entry })])
         }))
         const result = yield* execute(plan([
@@ -310,7 +401,253 @@ describe("native-contained runtime", () => {
         ]), nativeLayer(workspace, join(workspace, ".airlock-home"), driftCell))
         expect(result.state).toBe("partial")
         expect(result.receipts.at(-1)?.errorTag).toBe("RuntimeMergeDrift")
+        expect(result.lifecycle).toEqual([
+          expect.objectContaining({
+            _tag: "RuntimeCellWorkspaceHeld",
+            state: "held",
+            nodeId: node("invoke")
+          })
+        ])
         expect(readFileSync(join(workspace, "changed.txt"), "utf8")).toBe("live")
+      }))
+    )
+  )
+
+  it.effect("retains the exact private workspace after Invoke failure without sweeping a foreign Cell", () =>
+    Effect.sync(() => {
+      const root = mkdtempSync(join(tmpdir(), "airlock-runtime-invoke-failure-"))
+      const workspace = join(root, "workspace")
+      const foreign = join(root, ".airlock-cell-foreign")
+      mkdirSync(workspace)
+      mkdirSync(foreign)
+      writeFileSync(join(foreign, "owned-by-someone-else"), "preserve")
+      return { root, workspace, foreign, home: join(root, ".airlock-home") }
+    }).pipe(
+      Effect.flatMap(({ workspace, foreign, home }) => {
+        let registered = ""
+        const failedCell = Layer.succeed(Cell, Cell.of({
+          run: (request) => Effect.sync(() => {
+            registered = request.privateWorkspace
+            mkdirSync(request.privateWorkspace)
+            writeFileSync(join(request.privateWorkspace, "retained-evidence"), "private")
+            return noDeltaReceipt(request, workspace, 17)
+          }),
+          revalidate: () => Effect.succeed([])
+        }))
+        const layer = nativeLayer(workspace, home, failedCell)
+        return Effect.gen(function* () {
+          const runtime = yield* Runtime
+          const run = yield* runtime.execute(plan([
+            new InvokeNode({
+              id: node("failed-invoke"),
+              dependsOn: [],
+              requires: [],
+              produces: [artifact("unused-delta")],
+              executable: "/bin/false",
+              args: [],
+              cwd: workspace,
+              env: {},
+              deltaArtifact: artifact("unused-delta"),
+              stdout: "discard",
+              stderr: "discard",
+              cellProfile: "native-contained"
+            })
+          ]))
+          const hold = yield* Hold
+          const held = yield* hold.held
+          const lifecycle = run.lifecycle[0]
+
+          expect(run.state).toBe("failed")
+          expect(run.receipts[0]?.errorTag).toBe("RuntimeNodeFailure")
+          expect(lifecycle).toMatchObject({
+            _tag: "RuntimeCellWorkspaceHeld",
+            state: "held",
+            nodeId: node("failed-invoke"),
+            privateWorkspace: registered
+          })
+          expect(existsSync(registered)).toBe(false)
+          expect(readFileSync(join(foreign, "owned-by-someone-else"), "utf8")).toBe("preserve")
+          expect(held).toEqual([
+            expect.objectContaining({
+              target: registered,
+              purpose: "runtime-private",
+              status: "held"
+            })
+          ])
+        }).pipe(Effect.provide(layer))
+      })
+    )
+  )
+
+  it.effect("records absent retention when Cell preparation fails before creating a workspace", () =>
+    Effect.sync(() => {
+      const root = mkdtempSync(join(tmpdir(), "airlock-runtime-cell-absent-"))
+      const workspace = join(root, "workspace")
+      mkdirSync(workspace)
+      return { workspace, home: join(root, ".airlock-home") }
+    }).pipe(
+      Effect.flatMap(({ workspace, home }) => {
+        const unavailableCell = Layer.succeed(Cell, Cell.of({
+          run: () => Effect.fail(new CellUnavailable({
+            capability: "test Cell",
+            reason: "failed before private workspace preparation"
+          })),
+          revalidate: () => Effect.succeed([])
+        }))
+        return execute(plan([
+          new InvokeNode({
+            id: node("unprepared"),
+            dependsOn: [],
+            requires: [],
+            produces: [artifact("unused-delta")],
+            executable: "/bin/true",
+            args: [],
+            cwd: workspace,
+            env: {},
+            deltaArtifact: artifact("unused-delta"),
+            stdout: "discard",
+            stderr: "discard",
+            cellProfile: "native-contained"
+          })
+        ]), nativeLayer(workspace, home, unavailableCell)).pipe(
+          Effect.tap((run) => Effect.sync(() => {
+            expect(run.state).toBe("failed")
+            expect(run.lifecycle).toEqual([
+              expect.objectContaining({
+                _tag: "RuntimeCellWorkspaceAbsent",
+                state: "absent",
+                nodeId: node("unprepared")
+              })
+            ])
+          }))
+        )
+      })
+    )
+  )
+
+  it.effect("marks a successful Plan partial when private-workspace retention fails", () =>
+    Effect.sync(() => {
+      const root = mkdtempSync(join(tmpdir(), "airlock-runtime-retention-failure-"))
+      const workspace = join(root, "workspace")
+      mkdirSync(workspace)
+      return { workspace, home: join(root, ".airlock-home") }
+    }).pipe(
+      Effect.flatMap(({ workspace, home }) => {
+        let registered = ""
+        const successfulCell = Layer.succeed(Cell, Cell.of({
+          run: (request) => Effect.sync(() => {
+            registered = request.privateWorkspace
+            mkdirSync(request.privateWorkspace)
+            writeFileSync(join(request.privateWorkspace, "private"), "retain me")
+            return noDeltaReceipt(request, workspace)
+          }),
+          revalidate: () => Effect.succeed([])
+        }))
+        const unused = () => Effect.die("unused Hold operation")
+        const retentionFailure = Layer.succeed(Hold, Hold.of({
+          remove: unused,
+          overwrite: unused,
+          retireRuntimePrivate: (target) => Effect.fail(new HoldFilesystemError({
+            operation: "retain runtime-private workspace",
+            target,
+            reason: "injected retention failure"
+          })),
+          replaceFrom: unused,
+          undo: unused,
+          undoLast: Effect.die("unused Hold operation"),
+          held: Effect.die("unused Hold operation"),
+          reap: unused
+        }))
+        return execute(plan([
+          new InvokeNode({
+            id: node("successful-invoke"),
+            dependsOn: [],
+            requires: [],
+            produces: [artifact("delta")],
+            executable: "/bin/true",
+            args: [],
+            cwd: workspace,
+            env: {},
+            deltaArtifact: artifact("delta"),
+            stdout: "discard",
+            stderr: "discard",
+            cellProfile: "native-contained"
+          })
+        ]), nativeLayer(workspace, home, successfulCell, retentionFailure)).pipe(
+          Effect.tap((run) => Effect.sync(() => {
+            expect(run.receipts[0]?.state).toBe("succeeded")
+            expect(run.state).toBe("partial")
+            expect(run.lifecycle).toEqual([
+              expect.objectContaining({
+                _tag: "RuntimeCellWorkspaceRetentionFailed",
+                state: "failed",
+                nodeId: node("successful-invoke"),
+                privateWorkspace: registered,
+                errorTag: "HoldFilesystemError",
+                reason: expect.stringContaining("injected retention failure")
+              })
+            ])
+            expect(existsSync(registered)).toBe(true)
+          }))
+        )
+      })
+    )
+  )
+
+  it.effect("retains an in-flight private workspace before cancellation completes", () =>
+    Effect.sync(() => {
+      const root = mkdtempSync(join(tmpdir(), "airlock-runtime-cancel-"))
+      const workspace = join(root, "workspace")
+      mkdirSync(workspace)
+      return { workspace, home: join(root, ".airlock-home") }
+    }).pipe(
+      Effect.flatMap(({ workspace, home }) => Effect.gen(function* () {
+        const ready = yield* Deferred.make<string>()
+        const interruptedCell = Layer.succeed(Cell, Cell.of({
+          run: (request) => Effect.gen(function* () {
+            yield* Effect.sync(() => {
+              mkdirSync(request.privateWorkspace)
+              writeFileSync(join(request.privateWorkspace, "in-flight"), "retain on cancel")
+            })
+            yield* Deferred.succeed(ready, request.privateWorkspace)
+            return yield* Effect.never
+          }),
+          revalidate: () => Effect.succeed([])
+        }))
+        const layer = nativeLayer(workspace, home, interruptedCell)
+        yield* Effect.gen(function* () {
+          const runtime = yield* Runtime
+          const fiber = yield* runtime.execute(plan([
+            new InvokeNode({
+              id: node("cancelled-invoke"),
+              dependsOn: [],
+              requires: [],
+              produces: [artifact("unused-delta")],
+              executable: "/bin/sleep",
+              args: ["60"],
+              cwd: workspace,
+              env: {},
+              deltaArtifact: artifact("unused-delta"),
+              stdout: "discard",
+              stderr: "discard",
+              cellProfile: "native-contained"
+            })
+          ])).pipe(Effect.fork)
+          const privateWorkspace = yield* Deferred.await(ready)
+          const exit = yield* Fiber.interrupt(fiber)
+          const hold = yield* Hold
+          const held = yield* hold.held
+
+          expect(exit._tag).toBe("Failure")
+          expect(existsSync(privateWorkspace)).toBe(false)
+          expect(held).toEqual([
+            expect.objectContaining({
+              target: privateWorkspace,
+              purpose: "runtime-private",
+              status: "held"
+            })
+          ])
+        }).pipe(Effect.provide(layer))
       }))
     )
   )
