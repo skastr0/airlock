@@ -12,12 +12,29 @@ import { describe, expect, it } from "vitest"
 
 const repository = resolve(import.meta.dirname, "..")
 const fixture = join(repository, "examples", "parity", "bounded-control.air")
+const finiteListFixture = join(
+  repository,
+  "examples",
+  "parity",
+  "finite-list-control.air"
+)
 
 const run = (
   args: ReadonlyArray<string>,
   home: string
 ) =>
   spawnSync("bun", ["src/cli.ts", ...args], {
+    cwd: repository,
+    env: { ...process.env, AIRLOCK_HOME: home },
+    encoding: "utf8",
+    timeout: 30_000
+  })
+
+const runAgent = (
+  args: ReadonlyArray<string>,
+  home: string
+) =>
+  spawnSync("bun", ["src/agent-cli.ts", ...args], {
     cwd: repository,
     env: { ...process.env, AIRLOCK_HOME: home },
     encoding: "utf8",
@@ -78,6 +95,57 @@ describe("shell parity — bounded Airlock control", () => {
       JSON.stringify(recoverable)
     )
       .toHaveLength(3)
+  })
+
+  it("executes a supervisor-supplied finite list through the agent-only program surface", () => {
+    const root = mkdtempSync(join(tmpdir(), "airlock-parity-list-control-"))
+    const workspace = join(root, "workspace")
+    const home = join(root, "home")
+    mkdirSync(workspace)
+
+    const executed = runAgent([
+      "run",
+      finiteListFixture,
+      "--workspace",
+      workspace,
+      "--bindings",
+      JSON.stringify({
+        enabled: true,
+        writes: [
+          { path: "first.txt", content: "first\n" },
+          { path: "second.txt", content: "second\n" },
+          { path: "final.txt", content: "final\n" }
+        ],
+        observed_path: "final.txt",
+        expected: 3
+      })
+    ], home)
+
+    expect(executed.status, `${executed.stderr}\n${executed.stdout}`).toBe(0)
+    expect(readFileSync(join(workspace, "first.txt"), "utf8")).toBe("first\n")
+    expect(readFileSync(join(workspace, "second.txt"), "utf8")).toBe("second\n")
+    expect(readFileSync(join(workspace, "final.txt"), "utf8")).toBe("final\n")
+
+    const report = JSON.parse(executed.stdout) as {
+      readonly result: {
+        readonly result: {
+          readonly state: string
+          readonly iterations: number
+          readonly observed: string
+        }
+        readonly plans: ReadonlyArray<{
+          readonly nodes: ReadonlyArray<{ readonly kind: string }>
+        }>
+      }
+    }
+    expect(report.result.result).toEqual({
+      state: "complete",
+      iterations: 3,
+      observed: "final\n"
+    })
+    expect(
+      report.result.plans.flatMap(({ nodes }) => nodes.map(({ kind }) => kind))
+    ).toEqual(["Apply", "Apply", "Apply", "Capture"])
   })
 
   it("rejects a loop over the runtime budget before any action is resolved", () => {

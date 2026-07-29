@@ -38,12 +38,12 @@ export class Parser {
       return { kind: "IfStatement", test, consequent, alternate, span: joined(start, end) }
     }
     if (this.match("for")) {
-      const variable = this.expectIdentifier(); this.expect("in"); const from = this.expression()
-      if (!this.match("..")) this.error("for requires a bounded integer literal range", from.span)
-      const to = this.expression()
-      if (from.kind !== "LiteralExpression" || typeof from.value !== "number" || to.kind !== "LiteralExpression" || typeof to.value !== "number" || !Number.isInteger(from.value) || !Number.isInteger(to.value)) this.error("for bounds must be integer literals", from.span)
+      const variable = this.expectIdentifier(); this.expect("in"); const source = this.expression()
+      const to = this.match("..") ? this.expression() : undefined
       this.expect("{"); const body = this.statements("}")
-      return { kind: "ForStatement", variable: variable.text, from, to, body, span: joined(start, this.previous().span) }
+      return to === undefined
+        ? { kind: "ForStatement", iteration: "list", variable: variable.text, source, body, span: joined(start, this.previous().span) }
+        : { kind: "ForStatement", iteration: "range", variable: variable.text, from: source, to, body, span: joined(start, this.previous().span) }
     }
     if (this.match("return")) { if (this.isSeparator() || this.peek().text === "}") return { kind: "ReturnStatement", value: undefined, span: start }; const value = this.expression(); return { kind: "ReturnStatement", value, span: joined(start, value.span) } }
     if (this.match("assert")) { const test = this.expression(); let message: Expression | undefined; if (this.match(",")) message = this.expression(); const result: AssertStatement = { kind: "AssertStatement", test, message, span: joined(start, (message ?? test).span) }; return result }

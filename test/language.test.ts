@@ -31,11 +31,28 @@ for member in 0..3 {
     expect(error.detail).toContain("expected identifier")
   })
 
-  it("rejects shell interpolation and unbounded loops before lowering", () => {
+  it("rejects shell interpolation and distinguishes finite-list from range iteration", () => {
     const interpolation = Effect.runSync(parse("run($HOME)").pipe(Effect.flip))
     expect(interpolation.detail).toContain("shell interpolation")
-    const loop = Effect.runSync(parse("for item in members { run(item) }").pipe(Effect.flip))
-    expect(loop.detail).toContain("bounded integer literal range")
+
+    const program = parseSync(`
+for item in members { inspect(item) }
+for index in lower..upper { inspect(index) }
+`)
+    const [list, range] = program.body
+    expect(list).toMatchObject({
+      kind: "ForStatement",
+      iteration: "list",
+      variable: "item",
+      source: { kind: "IdentifierExpression", name: "members" }
+    })
+    expect(range).toMatchObject({
+      kind: "ForStatement",
+      iteration: "range",
+      variable: "index",
+      from: { kind: "IdentifierExpression", name: "lower" },
+      to: { kind: "IdentifierExpression", name: "upper" }
+    })
   })
 
   it("prints canonical, parseable source", () => {
@@ -49,6 +66,22 @@ for member in 0..3 {
     const printed = format(parseSync('if ok { run({ "not-a-name": 1 }) }\nelse { return }'))
     expect(printed).toContain('"not-a-name": 1')
     expect(parseSync(printed).body[0]!.kind).toBe("IfStatement")
+  })
+
+  it("prints finite-list and dynamic-range loops canonically and round-trips them", () => {
+    const printed = format(parseSync(`
+for member in capture_members() { inspect(member) }
+for index in lower..upper { inspect(index) }
+`))
+    expect(printed).toBe(
+      "for member in capture_members() {\n" +
+      "  inspect(member)\n" +
+      "}\n" +
+      "for index in lower..upper {\n" +
+      "  inspect(index)\n" +
+      "}\n"
+    )
+    expect(format(parseSync(printed))).toBe(printed)
   })
 
   it("keeps a lowering-neutral restore orchestration corpus parseable", () => {

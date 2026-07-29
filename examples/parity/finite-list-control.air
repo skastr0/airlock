@@ -1,0 +1,9 @@
+assert enabled, "the supervisor must enable this workload"
+
+for entry in writes {
+  let written = file.write({ path: entry.path, content: entry.content })
+  assert written.state == "applied", "finite-list write failed"
+}
+
+let observed = file.read({ path: observed_path, format: "text" })
+return { state: "complete", iterations: expected, observed: observed }

@@ -18,7 +18,24 @@ export type Statement = LetStatement | IfStatement | ForStatement | ReturnStatem
 
 export interface LetStatement { readonly kind: "LetStatement"; readonly name: string; readonly value: Expression; readonly span: Span }
 export interface IfStatement { readonly kind: "IfStatement"; readonly test: Expression; readonly consequent: readonly Statement[]; readonly alternate: readonly Statement[] | undefined; readonly span: Span }
-export interface ForStatement { readonly kind: "ForStatement"; readonly variable: string; readonly from: Expression; readonly to: Expression; readonly body: readonly Statement[]; readonly span: Span }
+export type ForStatement = ForListStatement | ForRangeStatement
+export interface ForListStatement {
+  readonly kind: "ForStatement"
+  readonly iteration: "list"
+  readonly variable: string
+  readonly source: Expression
+  readonly body: readonly Statement[]
+  readonly span: Span
+}
+export interface ForRangeStatement {
+  readonly kind: "ForStatement"
+  readonly iteration: "range"
+  readonly variable: string
+  readonly from: Expression
+  readonly to: Expression
+  readonly body: readonly Statement[]
+  readonly span: Span
+}
 export interface ReturnStatement { readonly kind: "ReturnStatement"; readonly value: Expression | undefined; readonly span: Span }
 export interface AssertStatement { readonly kind: "AssertStatement"; readonly test: Expression; readonly message: Expression | undefined; readonly span: Span }
 export interface ExpressionStatement { readonly kind: "ExpressionStatement"; readonly expression: Expression; readonly span: Span }

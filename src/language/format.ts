@@ -21,7 +21,12 @@ const formatStatement = (statement: Statement, level: number): string => {
     case "ExpressionStatement": return expression(statement.expression)
     case "ReturnStatement": return statement.value ? `return ${expression(statement.value)}` : "return"
     case "AssertStatement": return `assert ${expression(statement.test)}${statement.message ? `, ${expression(statement.message)}` : ""}`
-    case "ForStatement": return `for ${statement.variable} in ${expression(statement.from)}..${expression(statement.to)} {${statement.body.length ? `\n${block(statement.body, level + 1)}\n${"  ".repeat(level)}` : ""}}`
+    case "ForStatement": {
+      const source = statement.iteration === "list"
+        ? expression(statement.source)
+        : `${expression(statement.from)}..${expression(statement.to)}`
+      return `for ${statement.variable} in ${source} {${statement.body.length ? `\n${block(statement.body, level + 1)}\n${"  ".repeat(level)}` : ""}}`
+    }
     case "IfStatement": return `if ${expression(statement.test)} {${statement.consequent.length ? `\n${block(statement.consequent, level + 1)}\n${"  ".repeat(level)}` : ""}}${statement.alternate ? ` else {${statement.alternate.length ? `\n${block(statement.alternate, level + 1)}\n${"  ".repeat(level)}` : ""}}` : ""}`
   }
 }

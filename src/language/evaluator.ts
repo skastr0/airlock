@@ -89,7 +89,7 @@ export interface ActionResolver<R = never, E = never> {
 }
 
 export interface EvaluateOptions {
-  /** A safety bound even though source syntax requires literal loop bounds. */
+  /** One shared safety budget consumed by every visited list or range item. */
   readonly maxLoopIterations?: number
   /** Explicit non-privileged values made available to the program. */
   readonly bindings?: Readonly<Record<string, LanguageValue>>
@@ -97,6 +97,10 @@ export interface EvaluateOptions {
 
 type Scope = ReadonlyMap<string, LanguageValue>
 type Control = { readonly returned: boolean; readonly value: LanguageValue }
+interface LoopBudget {
+  readonly limit: number
+  used: number
+}
 const normal = (value: LanguageValue = null): Control => ({ returned: false, value })
 const returned = (value: LanguageValue): Control => ({ returned: true, value })
 const defaultLoopLimit = 10_000
@@ -157,6 +161,50 @@ const truthy = (value: LanguageValue, span: Span): Effect.Effect<boolean, Invali
     ? Effect.succeed(value)
     : Effect.fail(invalid("condition", "requires a boolean", span))
 
+const ensureLoopCapacity = (
+  iterations: number,
+  budget: LoopBudget,
+  span: Span
+): Effect.Effect<void, LoopLimitExceeded> =>
+  Number.isSafeInteger(iterations) &&
+    iterations >= 0 &&
+    iterations <= budget.limit - budget.used
+    ? Effect.void
+    : Effect.fail(new LoopLimitExceeded({ limit: budget.limit, span }))
+
+const consumeLoopIteration = (
+  budget: LoopBudget,
+  span: Span
+): Effect.Effect<void, LoopLimitExceeded> =>
+  budget.used < budget.limit
+    ? Effect.sync(() => {
+        budget.used += 1
+      })
+    : Effect.fail(new LoopLimitExceeded({ limit: budget.limit, span }))
+
+const snapshotList = (
+  value: LanguageValue,
+  sourceSpan: Span,
+  loopSpan: Span,
+  budget: LoopBudget
+): Effect.Effect<LanguageList, InvalidLanguageOperation | LoopLimitExceeded> =>
+  Effect.gen(function* () {
+    if (!Array.isArray(value)) {
+      return yield* Effect.fail(
+        invalid("for", "source must evaluate to a finite list", sourceSpan)
+      )
+    }
+    yield* ensureLoopCapacity(value.length, budget, loopSpan)
+    for (let index = 0; index < value.length; index += 1) {
+      if (!Object.hasOwn(value, index)) {
+        return yield* Effect.fail(
+          invalid("for", "source must be a dense finite list", sourceSpan)
+        )
+      }
+    }
+    return Object.freeze(value.map(freezeValue))
+  })
+
 const actionName = (expression: Expression): string | undefined =>
   expression.kind === "IdentifierExpression" ? expression.name : undefined
 
@@ -164,12 +212,12 @@ const evaluateStatements = <R, E>(
   statements: readonly Statement[],
   scope: Scope,
   resolver: ActionResolver<R, E>,
-  loopLimit: number
+  budget: LoopBudget
 ): Effect.Effect<Control, EvaluationError | E, R> => Effect.gen(function* () {
   let local = scope
   let result = normal()
   for (const statement of statements) {
-    const next = yield* evaluateStatement(statement, local, resolver, loopLimit)
+    const next = yield* evaluateStatement(statement, local, resolver, budget)
     local = next.scope
     result = next.control
     if (result.returned) break
@@ -181,42 +229,78 @@ const evaluateStatement = <R, E>(
   statement: Statement,
   scope: Scope,
   resolver: ActionResolver<R, E>,
-  loopLimit: number
+  budget: LoopBudget
 ): Effect.Effect<{ readonly scope: Scope; readonly control: Control }, EvaluationError | E, R> => Effect.gen(function* () {
   switch (statement.kind) {
     case "LetStatement": {
-      const value = yield* evaluateExpression(statement.value, scope, resolver, loopLimit)
+      const value = yield* evaluateExpression(statement.value, scope, resolver, budget)
       const next = new Map(scope); next.set(statement.name, value)
       return { scope: next, control: normal(value) }
     }
     case "ExpressionStatement":
-      return { scope, control: normal(yield* evaluateExpression(statement.expression, scope, resolver, loopLimit)) }
+      return { scope, control: normal(yield* evaluateExpression(statement.expression, scope, resolver, budget)) }
     case "ReturnStatement":
-      return { scope, control: returned(statement.value === undefined ? null : yield* evaluateExpression(statement.value, scope, resolver, loopLimit)) }
+      return { scope, control: returned(statement.value === undefined ? null : yield* evaluateExpression(statement.value, scope, resolver, budget)) }
     case "AssertStatement": {
-      const condition = yield* evaluateExpression(statement.test, scope, resolver, loopLimit)
+      const condition = yield* evaluateExpression(statement.test, scope, resolver, budget)
       if (yield* truthy(condition, statement.test.span)) return { scope, control: normal(condition) }
-      const message = statement.message === undefined ? "assertion failed" : yield* evaluateExpression(statement.message, scope, resolver, loopLimit)
+      const message = statement.message === undefined ? "assertion failed" : yield* evaluateExpression(statement.message, scope, resolver, budget)
       return yield* Effect.fail(new AssertionFailed({ message: typeof message === "string" ? message : "assertion failed", span: statement.span }))
     }
     case "IfStatement": {
-      const condition = yield* evaluateExpression(statement.test, scope, resolver, loopLimit)
+      const condition = yield* evaluateExpression(statement.test, scope, resolver, budget)
       const branch = (yield* truthy(condition, statement.test.span)) ? statement.consequent : (statement.alternate ?? [])
-      const control = yield* evaluateStatements(branch, scope, resolver, loopLimit)
+      const control = yield* evaluateStatements(branch, scope, resolver, budget)
       return { scope, control }
     }
     case "ForStatement": {
-      const from = yield* evaluateExpression(statement.from, scope, resolver, loopLimit)
-      const to = yield* evaluateExpression(statement.to, scope, resolver, loopLimit)
-      if (typeof from !== "number" || typeof to !== "number" || !Number.isInteger(from) || !Number.isInteger(to)) {
-        return yield* Effect.fail(invalid("for", "bounds must evaluate to integers", statement.span))
+      if (statement.iteration === "list") {
+        const evaluated = yield* evaluateExpression(
+          statement.source,
+          scope,
+          resolver,
+          budget
+        )
+        const items = yield* snapshotList(
+          evaluated,
+          statement.source.span,
+          statement.span,
+          budget
+        )
+        let control = normal()
+        for (const item of items) {
+          yield* consumeLoopIteration(budget, statement.span)
+          const scoped = new Map(scope)
+          scoped.set(statement.variable, item)
+          control = yield* evaluateStatements(
+            statement.body,
+            scoped,
+            resolver,
+            budget
+          )
+          if (control.returned) break
+        }
+        return { scope, control }
+      }
+      const from = yield* evaluateExpression(statement.from, scope, resolver, budget)
+      const to = yield* evaluateExpression(statement.to, scope, resolver, budget)
+      if (
+        typeof from !== "number" ||
+        typeof to !== "number" ||
+        !Number.isSafeInteger(from) ||
+        !Number.isSafeInteger(to)
+      ) {
+        return yield* Effect.fail(
+          invalid("for", "bounds must evaluate to safe integers", statement.span)
+        )
       }
       const iterations = Math.max(0, to - from)
-      if (iterations > loopLimit) return yield* Effect.fail(new LoopLimitExceeded({ limit: loopLimit, span: statement.span }))
+      yield* ensureLoopCapacity(iterations, budget, statement.span)
       let control = normal()
       for (let value = from; value < to; value++) {
+        yield* consumeLoopIteration(budget, statement.span)
         const scoped = new Map(scope); scoped.set(statement.variable, value)
-        control = yield* evaluateStatements(statement.body, scoped, resolver, loopLimit)
+        control = yield* evaluateStatements(statement.body, scoped, resolver, budget)
         if (control.returned) break
       }
       return { scope, control }
@@ -228,7 +312,7 @@ const evaluateExpression = <R, E>(
   expression: Expression,
   scope: Scope,
   resolver: ActionResolver<R, E>,
-  loopLimit: number
+  budget: LoopBudget
 ): Effect.Effect<LanguageValue, EvaluationError | E, R> => Effect.gen(function* () {
   switch (expression.kind) {
     case "LiteralExpression":
@@ -241,26 +325,26 @@ const evaluateExpression = <R, E>(
         : value
     }
     case "ListExpression":
-      return Object.freeze(yield* Effect.forEach(expression.items, (item) => evaluateExpression(item, scope, resolver, loopLimit)))
+      return Object.freeze(yield* Effect.forEach(expression.items, (item) => evaluateExpression(item, scope, resolver, budget)))
     case "RecordExpression": {
       const record: Record<string, LanguageValue> = Object.create(null)
       for (const entry of expression.entries) {
         if (Object.hasOwn(record, entry.key)) return yield* Effect.fail(new DuplicateRecordField({ field: entry.key, span: entry.span }))
-        record[entry.key] = yield* evaluateExpression(entry.value, scope, resolver, loopLimit)
+        record[entry.key] = yield* evaluateExpression(entry.value, scope, resolver, budget)
       }
       return Object.freeze(record)
     }
     case "UnaryExpression": {
-      const value = yield* evaluateExpression(expression.operand, scope, resolver, loopLimit)
+      const value = yield* evaluateExpression(expression.operand, scope, resolver, budget)
       if (expression.operator === "!") return !(yield* truthy(value, expression.span))
       if (typeof value !== "number") return yield* Effect.fail(invalid("-", "requires a number", expression.span))
       return yield* finiteNumber(-value, "-", expression.span)
     }
     case "BinaryExpression": {
-      const left = yield* evaluateExpression(expression.left, scope, resolver, loopLimit)
-      if (expression.operator === "&&") return (yield* truthy(left, expression.left.span)) ? yield* truthy(yield* evaluateExpression(expression.right, scope, resolver, loopLimit), expression.right.span) : false
-      if (expression.operator === "||") return (yield* truthy(left, expression.left.span)) ? true : yield* truthy(yield* evaluateExpression(expression.right, scope, resolver, loopLimit), expression.right.span)
-      const right = yield* evaluateExpression(expression.right, scope, resolver, loopLimit)
+      const left = yield* evaluateExpression(expression.left, scope, resolver, budget)
+      if (expression.operator === "&&") return (yield* truthy(left, expression.left.span)) ? yield* truthy(yield* evaluateExpression(expression.right, scope, resolver, budget), expression.right.span) : false
+      if (expression.operator === "||") return (yield* truthy(left, expression.left.span)) ? true : yield* truthy(yield* evaluateExpression(expression.right, scope, resolver, budget), expression.right.span)
+      const right = yield* evaluateExpression(expression.right, scope, resolver, budget)
       if (expression.operator === "==") return equal(left, right)
       if (expression.operator === "!=") return !equal(left, right)
       if (["<", "<=", ">", ">="].includes(expression.operator)) {
@@ -276,15 +360,15 @@ const evaluateExpression = <R, E>(
       return yield* finiteNumber(value, expression.operator, expression.span)
     }
     case "FieldExpression": {
-      const object = yield* evaluateExpression(expression.object, scope, resolver, loopLimit)
+      const object = yield* evaluateExpression(expression.object, scope, resolver, budget)
       if (!isRecord(object)) return yield* Effect.fail(invalid(".", "requires a record", expression.span))
       return Object.hasOwn(object, expression.field)
         ? object[expression.field]!
         : yield* Effect.fail(new MissingRecordField({ field: expression.field, span: expression.span }))
     }
     case "IndexExpression": {
-      const object = yield* evaluateExpression(expression.object, scope, resolver, loopLimit)
-      const index = yield* evaluateExpression(expression.index, scope, resolver, loopLimit)
+      const object = yield* evaluateExpression(expression.object, scope, resolver, budget)
+      const index = yield* evaluateExpression(expression.index, scope, resolver, budget)
       if (!Array.isArray(object)) return yield* Effect.fail(invalid("[]", "requires a list", expression.span))
       if (typeof index !== "number" || !Number.isInteger(index) || index < 0 || index >= object.length) {
         return yield* Effect.fail(new InvalidIndex({ detail: "requires an in-range integer list index", span: expression.span }))
@@ -294,7 +378,7 @@ const evaluateExpression = <R, E>(
     case "CallExpression": {
       const action = actionName(expression.callee)
       if (action === undefined) return yield* Effect.fail(new InvalidCallTarget({ detail: "only identifier action calls are supported", span: expression.callee.span }))
-      const args = yield* Effect.forEach(expression.arguments, (argument) => evaluateExpression(argument, scope, resolver, loopLimit))
+      const args = yield* Effect.forEach(expression.arguments, (argument) => evaluateExpression(argument, scope, resolver, budget))
       return freezeValue(yield* resolver.resolve(action, Object.freeze(args)))
     }
   }
@@ -310,8 +394,9 @@ export const evaluate = <R = never, E = never>(
   if (!Number.isSafeInteger(loopLimit) || loopLimit < 0) {
     return yield* Effect.fail(invalid("maxLoopIterations", "must be a non-negative safe integer", program.span))
   }
+  const budget: LoopBudget = { limit: loopLimit, used: 0 }
   const scope = new Map<string, LanguageValue>()
   for (const [name, value] of Object.entries(options.bindings ?? {})) scope.set(name, freezeValue(value))
-  const result = yield* evaluateStatements(program.body, scope, resolver, loopLimit)
+  const result = yield* evaluateStatements(program.body, scope, resolver, budget)
   return new EvaluationResult({ returned: result.returned, value: result.value })
 })
