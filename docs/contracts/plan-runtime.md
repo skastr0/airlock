@@ -35,6 +35,7 @@ The canonical structured execution payload is:
 ```text
 run {
   executable
+  descendantExecutables
   args
   stdin
   stdout
@@ -46,14 +47,17 @@ run {
 `executable` is distinct from `args`; the argument array never embeds or
 duplicates the executable as element zero. Working directory, environment,
 Cell profile, resource handles, labels, and budgets are explicit surrounding
-fields on the admitted Invoke contract. No command-string form exists.
+fields on the admitted Invoke contract. `descendantExecutables` is the exact
+set of additional exec paths requested for this root in native-contained
+execution. It is not the architecture's full execution closure. No
+command-string form exists.
 
 ## Closed Plan algebra
 
 ```text
 PlanNode =
     Capture<CaptureSpec>
-  | Invoke<ExecutionClosure>
+  | Invoke<InvokeSpec>
   | Apply<LocalDelta>
   | RequestExternal<ExternalIntent>
 ```
@@ -65,6 +69,19 @@ PlanNode =
 
 Pure control and data transformations compose these nodes but cannot add
 effect constructors.
+
+The implemented `InvokeSpec` distinguishes root authority from descendant
+authority:
+
+```text
+root executable       → invoke
+declared descendants  → execute, scoped by policy to that root
+```
+
+Admission retains those roles in Grants and Handles. Native Cell receipts
+record the requested, launch, and allowed paths for each binding. These are
+executable-edge facts, not evidence that loaders, dynamic libraries,
+configuration, plugins, or code interpreted in-process are fully modeled.
 
 ## Runtime-operation vocabulary
 
@@ -86,8 +103,10 @@ belong to the trusted authority plane. They decide whether a draft becomes an
 admitted Plan; they are not agent-held effects.
 
 Lifecycle operations such as dispatch, undo, reconciliation, and reaping may
-be requested by a program or supervisor, but only the corresponding trusted
-runtime authority performs them. Undo is another recoverable Apply.
+be requested only through their authorized supervisor/runtime surfaces; they
+are not ordinary agent Plan constructors. Only the corresponding trusted
+authority performs them. Undo is another recoverable Apply transition, not
+ambient restoration authority held by the agent.
 
 ## Total lowering
 
@@ -133,6 +152,9 @@ seam obligations; they must not be promoted into additional laws by wording.
 6. `uncertain` is preserved when an external result cannot be known; it is
    never collapsed into success/failure or automatically retried without
    idempotency evidence.
+7. In native-contained execution, root `invoke` and root-scoped descendant
+   `execute` are distinct modeled rights. This is an implemented contract
+   property, not a claim of complete execution closure.
 
 ## Schema-first seam
 

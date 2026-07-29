@@ -39,6 +39,11 @@ Evidence present today:
 - native-contained write and network fences are tested on macOS;
 - native-contained proof covers a private Invoke temp workspace and keeps its
   bytes out of the live merge delta;
+- Schema-decoded Bun proofs establish exact root/descendant executable-path
+  fencing, declared shebang-chain behavior, and executable binding receipts;
+- a separate Bun boundary proof shows that root-only `/bin/bash` can source
+  agent-owned `BASH_ENV` in-process while live writes and loopback remain
+  denied and the private write remains the sole delta;
 - the CLI runs an admitted native effectful program, applies its delta through
   Hold, and undoes it;
 - one Vouch-derived native proof captures an archive, invokes `/usr/bin/tar`,
@@ -70,7 +75,9 @@ Evidence absent today:
 - repeated runs across every supported macOS build/architecture;
 - exhaustive crash injection and overlapping mutation/commit campaigns beyond
   the bounded recovery/locking evidence already present;
-- hostile execution-closure, path-race, descriptor, daemonization, and
+- the hostile corpus needed to move from bounded executable-edge evidence to a
+  complete execution-closure claim, including dylib/config/plugin,
+  executable-identity-race, descriptor, daemonization, and
   resource-exhaustion campaigns;
 - end-to-end label and persistent-authority enforcement;
 - contained endpoint brokerage; and
@@ -194,12 +201,18 @@ The native claim additionally requires evidence that:
 - the live workspace cannot be written during Invoke;
 - network is denied for a no-network Cell;
 - missing Seatbelt or private-view enforcement refuses execution;
+- root `invoke` and root-scoped descendant `execute` authority cannot be
+  exchanged, and undeclared descendant execs fail closed;
+- executable receipts identify the requested/launch/allowed paths and
+  root/descendant role at the precision the current resolver enforces;
 - baseline drift blocks Apply;
 - every advertised delta kind is revalidated and applied through Hold;
 - unsupported topology and resource kinds fail closed;
 - the owned process lifetime matches the published descendant limitations;
 - ambient host reads are disclosed and no confidentiality claim is made;
 - temp paths and inherited descriptors stay within the published envelope;
+- admitted interpreters may execute agent-owned bytes in-process, but that
+  behavior does not widen the Cell's write or network fence;
 - output, process, disk, and retention budgets fail safely; and
 - recovery after interruption never invents success.
 
@@ -240,6 +253,8 @@ Test at least:
 
 - shells/interpreters, shebangs, loaders, hooks, helpers, plugins, lifecycle
   scripts, pagers, editors, and ambient config;
+- dynamic-library and mutable-executable identity races that do not reduce to
+  a new pathname-level exec;
 - background jobs, daemonization, signals, inherited descriptors, PTYs, and
   output/resource floods;
 - symlink, hardlink, mount, metadata, open-writer, live-WAL, and expected-state
@@ -253,7 +268,10 @@ Test at least:
 
 The current native profile intentionally permits ambient host reads. A test
 showing that read is not a failure; a documentation claim of confidentiality
-would be.
+would be. Likewise, the successful `BASH_ENV` proof documents code interpreted
+inside an admitted root process. It becomes a failure only if that code escapes
+the published write/network/authority envelope or the result is mislabeled as
+a complete execution closure.
 
 ## Evidence bundle
 
@@ -265,6 +283,7 @@ macOS build and hardware architecture
 profile and capability-report digest
 model/harness identity and task inputs
 policy, Plan, definition, and artifact identities
+executable root/descendant declarations and resolved binding evidence
 per-task completion, escape, failure class, latency, and resources
 Hold/Outbox/receipt evidence
 fault-injection and concurrency schedule

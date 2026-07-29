@@ -77,7 +77,8 @@ policy/profile identity, and a closure digest.
 For the fields present in Plan v1, Admission requires:
 
 - file Capture locator `read`;
-- Invoke executable `execute` and explicit cwd `read`;
+- Invoke root executable `invoke`, each declared descendant executable
+  `execute`, and explicit cwd `read`;
 - Apply target `write`, copy source `read`, and move source `read + write`; and
 - external endpoint `connect + emit`.
 
@@ -90,9 +91,15 @@ Tampering or expiry becomes a failed `RuntimeAuthorityInvalid` node receipt and
 no effect adapter is called. Definitions may request requirements but cannot
 issue a Grant.
 
-This is operand-complete only relative to the current Plan schema. It does not
-mean argv paths, environment-selected loaders, inherited configuration,
-plugins, hooks, descendants, descriptors, or credentials are fully modeled.
+For native-contained work, policy binds each declared descendant to one
+separately admitted root. The descendant's `execute` Grant cannot be reused to
+select it as a later root Invoke. Compatibility does not enforce these edges,
+because that profile deliberately preserves ambient host capability.
+
+This is operand-complete only relative to the current Plan schema. Exact
+executable edges model new exec transitions, not dynamic libraries, code
+interpreted in-process, inherited configuration, plugins, descriptors,
+credentials, or the semantic behavior of an admitted executable.
 
 ### Recoverable managed changes
 
@@ -163,13 +170,35 @@ resource under symlink, rename, hardlink, or mount races.
 
 The Seatbelt profile also permits:
 
-- ambient `file-read*`; and
-- `process*`, so loaders and descendant programs can run.
+- ambient `file-read*`;
+- process fork; and
+- `process-exec` only for the resolved paths of the admitted root and its
+  root-scoped declared descendants.
+
+The Cell records each executable binding's root/descendant role, requested
+path, launch path, allowed paths, and whether a workspace-local executable was
+rebased into the private view. Runtime carries that evidence in its process
+receipt. A private per-Invoke temp directory is exported through `TMPDIR`,
+`TMP`, and `TEMP`, excluded from the proposed delta, and retained with the
+private workspace lifecycle.
+
+This is an **exact executable-edge fence**, not a complete execution closure.
+Dynamic libraries load through file reads. An admitted interpreter can execute
+agent-owned data in-process. Configuration and plugins can affect behavior
+without a new exec. External executable paths are resolved for the Seatbelt
+profile but are not yet bound to immutable code bytes across replacement
+races.
 
 Therefore the implemented native profile supports a local-state integrity
 claim only within its advertised delta envelope. It does **not** support a
 confidentiality claim, complete execution-closure claim, or proof against all
 daemonization and descendant-escape techniques.
+
+The Schema-decoded Bun proof makes the distinction observable: `/bin/bash` is
+the only bound executable and still sources an agent-owned `BASH_ENV` without
+a second exec. Seatbelt denies the sourced code's live-workspace write and
+loopback connection, while its private write becomes the sole delta. This is a
+successful boundary proof, not a vulnerability-test failure.
 
 The process runner owns a process group and now waits for same-group
 descendants before reporting completion; timeout and cancellation terminate
@@ -238,9 +267,10 @@ root/image identity
 ```
 
 That is an acceptance condition, not a current native guarantee. The present
-Seatbelt profile allows process execution and ambient reads, while admission
-binds the requested executable rather than mediating every later `exec` or
-config lookup.
+Seatbelt profile fences declared root/descendant exec paths and permits
+ambient reads. It does not mediate dynamic-library or config reads, code
+interpreted within an admitted process, every plugin callback, mutable
+executable bytes, or every descendant-lifetime escape.
 
 Airlock intentionally does not replace or semantically verify the program:
 `tar`, `git`, compilers, package managers, and interpreters retain their
@@ -371,9 +401,10 @@ Airlock does not currently protect against:
 - deliberate broad authority in compatibility;
 - confidential host reads by native-contained code;
 - malicious semantics inside an admitted executable;
-- every descendant, loader, config, hook, plugin, or helper path;
+- dynamic libraries, in-process interpretation, config/plugin behavior, and
+  every descendant-lifetime escape beyond the exact executable-edge fence;
 - general resource identity races beyond the canonical native workspace
-  binding;
+  binding, including mutable external executable bytes;
 - native Cell trees stranded by an uncatchable crash before lifecycle
   finalization;
 - resource exhaustion beyond the published limits;
@@ -393,7 +424,8 @@ strong security claim.
 Before claiming more than the current narrow envelope, the project needs:
 
 - complete shell-free harness mediation evidence;
-- hostile interpreter/descendant/config/descriptor tests;
+- hostile interpreter/descendant/config/descriptor tests, including cases
+  that succeed in-process but must remain inside the published resource fence;
 - path, symlink, hardlink, mount, liveness, and metadata race tests;
 - exhaustive crash and concurrency tests across Hold, Apply, Outbox, and
   Journal beyond the bounded lease/journal evidence already present;

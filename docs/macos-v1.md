@@ -104,6 +104,7 @@ Minimal policy shape:
   "admittedBy": "operator:example",
   "pathAllowlist": ["/absolute/workspace/**"],
   "executableAllowlist": ["/usr/bin/touch"],
+  "executableEdges": [],
   "endpointAllowlist": []
 }
 ```
@@ -126,6 +127,10 @@ AIRLOCK_POLICY_FILE=/absolute/policy.json \
 
 The program lowers to an admitted `Invoke` followed by `Apply`. The Apply is
 part of the effectful program path; it is not a direct post-process copy.
+The root executable receives `invoke`; any additional executable that the root
+may spawn must be listed by `process.run.descendantExecutables`, requested
+with `execute`, and bound to that root by a matching `executableEdges` policy
+entry. A descendant-only Grant cannot select that helper as another root.
 
 ### Native mechanism
 
@@ -134,15 +139,17 @@ For each contained Invoke, the current runtime:
 1. fingerprints the live workspace;
 2. creates a fresh same-volume private workspace by APFS clone or copy;
 3. generates a Seatbelt profile using JSON-escaped path literals;
-4. permits process execution and ambient file reads;
-5. provisions a private temp workspace for the Invoke, exports `TMPDIR`,
+4. permits process fork and exact `process-exec` paths for the admitted root
+   and its root-scoped declared descendants;
+5. permits ambient file reads;
+6. provisions a private temp workspace for the Invoke, exports `TMPDIR`,
    `TMP`, and `TEMP` into it, and permits writes in the private workspace,
    declared temp paths, and `/dev/null`;
-6. denies network;
-7. runs the requested executable in the private workspace;
-8. fingerprints the live and private views;
-9. emits a delta plus drift evidence; and
-10. applies an admitted delta only through Hold.
+7. denies network;
+8. runs the requested executable in the private workspace;
+9. fingerprints the live and private views;
+10. emits a delta plus drift and executable-binding evidence; and
+11. applies an admitted delta only through Hold.
 
 Before Apply, the runtime fingerprints the live workspace again. It refuses
 drift, unsupported types, overlapping paths, stale private output, or a target
@@ -156,6 +163,11 @@ Established by implementation and tests:
 - live source-workspace write denial during Invoke;
 - network denial during Invoke;
 - private Invoke temp isolation with temp-path exclusion from the merge delta;
+- separate root `invoke` and root-scoped descendant `execute` authority;
+- exact Seatbelt executable-path fencing for declared roots, descendants, and
+  demonstrated shebang chains;
+- Cell/Runtime evidence for requested, launch, allowed executable paths,
+  root/descendant role, and workspace rebasing;
 - separate executable and argv atoms;
 - output capture and limits;
 - same-process-group descendant ownership until exit, timeout, or cancellation;
@@ -167,7 +179,9 @@ Established by implementation and tests:
 Not established:
 
 - confidentiality or secret isolation, because `file-read*` is ambient;
-- complete loader/helper/hook/plugin/config execution closure;
+- complete loader/dynamic-library/helper/hook/plugin/config execution closure;
+- prevention of code interpreted in-process by an admitted interpreter;
+- immutable external executable-byte identity across path replacement races;
 - daemonization/session-escape-proof descendant ownership;
 - endpoint leases or contained network access;
 - symlink, special-file, hardlink, ACL, xattr, sparse-file, device, mount, or
@@ -193,6 +207,27 @@ material performance costs; changed clone pages or copy fallback consume real
 storage until reap.
 
 Unsupported work returns a typed error. It does not fall back to compatibility.
+
+### Executable-edge boundary
+
+The implemented executable edge set is deliberately narrower than the
+architecture's candidate full execution closure:
+
+```text
+root executable (`invoke`)
+  → exact descendant executable paths for that root (`execute`)
+```
+
+Seatbelt checks a new exec against those resolved paths. It does not treat
+dynamic-library loading or interpreter input as another exec. The required
+Bun proof runs `/bin/bash` with no declared descendants and shows it sourcing
+an agent-owned `BASH_ENV` in-process. The sourced code can write the private
+view, but its live-workspace write and loopback connection receive
+`Operation not permitted`; the private write is the sole delta.
+
+This is the intended documented boundary: executable-edge fencing plus
+resource confinement succeeded. It does not establish loader/config/plugin
+semantics, immutable code identity, or persistent-authority safety.
 
 ## VM-enclosed: future backend
 
@@ -237,6 +272,8 @@ published envelopes. Today the accurate judgment is:
 The current Vouch evidence includes a restore/apply/stage/undo fixture and a
 12-action host-operation program. Ten parity workloads additionally cover
 common control/file/process shapes, repository search/pipelines, native edit,
-tar, local Git, and build descendants. These do not replace the missing representative corpus,
-repeated macOS runs, exhaustive fault/overlap matrix, or hostile containment
-tests.
+tar, local Git, and build descendants. Required Bun integration proofs cover
+the Cell write/network/temp fence, exact executable descendants and shebang
+chains, and the admitted interpreter/in-process boundary. These do not replace
+the missing representative corpus, repeated macOS runs, exhaustive
+fault/overlap matrix, or hostile containment tests.

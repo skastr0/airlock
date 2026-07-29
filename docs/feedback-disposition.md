@@ -29,6 +29,13 @@ No review elevated another design preference to the same status.
 - compatibility execution;
 - a narrow native-contained macOS Cell with private writes, live-write denial,
   network denial, delta generation, drift checks, and Hold-backed Apply;
+- separate root `invoke` and root-scoped descendant `execute` requirements,
+  exact Seatbelt executable-path fencing, and executable binding evidence;
+- private per-Invoke temp isolation with the runtime-owned temp path excluded
+  from the proposed delta;
+- a Schema-decoded boundary proof in which root-only `/bin/bash` sources
+  agent-owned `BASH_ENV` in-process while live write and loopback remain
+  denied;
 - durable HTTP Outbox staging with the wire site inside commit;
 - bounded recoverable cross-process Hold/Outbox leases and staged Hold-journal
   promotion;
@@ -83,6 +90,14 @@ Agent-authored `RequestExternal` stages local intent. Only Outbox commit may
 touch the wire. Agent-authored Apply requests a managed transition; Hold owns
 the live replacement. Reaping remains a separate irreversible authority.
 
+This adopts the “two algebras” feedback explicitly: `Capture`, `Invoke`,
+`Apply`, and `RequestExternal` are agent Plan constructors; resolve, admit,
+dispatch, reconcile, undo, and reap are trusted lifecycle transitions.
+Staging an external request is not the external effect. Dispatch is.
+Earlier reviews used `Enqueue` for this agent operation; the canonical current
+Plan name is `RequestExternal` precisely to avoid implying that staging has
+already crossed the unmanaged boundary.
+
 ### Treat computation as enclosure
 
 `Invoke` is computation inside a selected execution profile, not a fifth
@@ -99,15 +114,26 @@ containment are reported separately:
   matrix; and
 - unsupported native work must fail without fallback.
 
-### Make execution a closure
+### Distinguish executable edges from execution closure
 
 Executable identity alone is not enough for a strong security claim. Loaders,
 shebangs, descendants, helpers, hooks, plugins, configuration, lifecycle
 scripts, pagers, editors, credentials, environment, and descriptors belong in
 the acceptance model.
 
-The current native backend has not yet earned that complete-closure claim. It
-allows `process*` and ambient file reads, so this remains an explicit gate.
+The current native backend now implements a useful narrower mechanism:
+Admission separates root `invoke` from root-scoped descendant `execute`, and
+Seatbelt permits fork while fencing `process-exec` to the resolved paths in
+that executable edge set. Cell/Runtime receipts retain the binding roles and
+paths.
+
+That mechanism has not earned the complete-closure claim. Ambient reads still
+permit dynamic-library and configuration input, an admitted interpreter can
+execute agent-owned bytes in-process, plugins may run without a new exec,
+external executable bytes can race their paths, and process-group ownership
+does not prove every daemonization path. The passing `BASH_ENV` proof documents
+this boundary while also proving that write/network confinement remains in
+force.
 
 ### Keep information flow distinct
 
@@ -123,6 +149,10 @@ Current native Cells deny network. Current Outbox dispatches HTTP itself. No
 general EndpointBroker exists. DNS, redirect, proxy, loopback, Unix-socket,
 descriptor-passing, budget, credential, and actual-destination guarantees
 cannot be claimed until a broker is implemented and tested.
+
+The companion credential direction is non-extractable authority—sign or
+attach a credential to one admitted request/destination—rather than projecting
+raw secret bytes into an opaque executable. It remains candidate design.
 
 ### Treat liveness and granularity as resource semantics
 
@@ -142,6 +172,9 @@ while the VM backend is explicitly unavailable.
 Decision:
 
 - macOS v1 documents and evaluates compatibility and native-contained;
+- macOS is the first contract-driving platform because colocated developer
+  credentials and state make its agent boundary a primary product need, not a
+  Linux implementation fallback;
 - native-contained claims are bounded by its capability matrix;
 - VM-enclosed is a future stronger backend; and
 - absence of a VM does not block an honest native v1, nor may a nonexistent VM
@@ -158,12 +191,19 @@ or red-team result. The correct current judgment is:
 usable developer preview — broad claim not yet earned
 ```
 
-### Airlock remains the agent language
+### Language expansion follows kernel and task evidence
 
 The checked-in parser, evaluator, native action resolver, and `airlock run`
-path now establish a real language surface. Its current pure/control forms are
-implemented; broader expressiveness is still evidence-led. The language
-cannot add authority outside Plan, Admission, and Runtime.
+path establish a real agent-oriented language surface. The Plan IR, Admission,
+Runtime, Hold, Outbox, and receipts remain the security and product kernel.
+Structured RPC or another frontend may target the same inert PlanDraft.
+
+The existing language is not removed or deferred, but syntax growth comes
+after task evidence: model generation success, token cost, correction rate,
+and corpus completion decide which composition forms are justified. The
+language cannot add authority outside Plan, Admission, and Runtime. This is
+the adopted “language last” discipline: prove the runtime/IR contract and the
+need for a form before expanding syntax.
 
 ### The rename/Reaper law remains
 

@@ -40,8 +40,9 @@ The current implementation has two usable execution profiles:
 - `compatibility` runs structured executable-plus-argument requests with the
   invoking user's host authority and makes no containment claim.
 - `native-contained` runs supported work in a private macOS workspace under a
-  Seatbelt profile, denies live-workspace writes and network, computes a delta,
-  and applies admitted top-level file/directory changes through Hold.
+  Seatbelt profile, fences declared executable edges, denies live-workspace
+  writes and network, computes a delta, and applies admitted top-level
+  file/directory changes through Hold.
 
 The native profile is deliberately narrower than a VM. It permits ambient host
 reads so existing loaders and Unix programs work; it therefore does not provide
@@ -62,7 +63,7 @@ canonical path aliases, APFS clone/copy behavior, Seatbelt's actual limits,
 codesigning, local installation, and ordinary developer tooling. The result is
 not assumed to be stronger than Linux. Native macOS containment is explicitly
 weaker in several dimensions, especially confidential reads and complete
-descendant mediation. Platform adapters may differ later; Plan, authority,
+execution closure. Platform adapters may differ later; Plan, authority,
 Hold/Outbox finality, and receipt semantics should not.
 
 ## Status vocabulary
@@ -90,6 +91,8 @@ Hold/Outbox finality, and receipt semantics should not.
 | agent-only binary | **Implemented product boundary**; `airlock-agent` omits terminal-authority maintenance commands, but the external harness must still prove that it exposed no alternate effect path |
 | compatibility profile | **Implemented**; no containment claim |
 | native-contained profile | **Implemented narrow subset**; private view, source-write fence, network denial, delta/Apply path |
+| native executable-edge fence | **Implemented bounded mechanism**; root `invoke` and root-scoped descendant `execute` requirements lower to exact Seatbelt `process-exec` paths, with resolved binding evidence in Cell/Runtime receipts |
+| in-process interpretation boundary | **Implemented and proved as a limitation**; an admitted `/bin/bash` can source agent-owned `BASH_ENV` without another exec, while its live-write and network attempts remain denied and private writes remain a delta |
 | native workspace identity | **Implemented at the trusted CLI boundary**; native execution canonicalizes the workspace and existing absolute policy scopes before admission, while general path-race-safe resource identity remains incomplete |
 | private Cell lifecycle | **Implemented normal path**; exact Cell workspace identity is transferred to a non-undoable runtime-private Hold act on completion, failure, or cancellation, then only Reaper may discard it |
 | VM-enclosed profile | **Future design direction**; the CLI and runtime refuse it because no backend is installed |
@@ -249,6 +252,7 @@ interpolation, word splitting, command substitution, or implicit shell.
 | **Grant** | Time-bounded or policy-lifetime authority issued by Admission for one principal, realm, selector, rights set, and constraints. |
 | **Handle** | Runtime reference that binds one admitted requirement to one Grant and public provenance. |
 | **ExecutionAuthority** | The only Runtime input for execution: closed Plan, retained Grants, exact handle resolutions, per-node bindings, policy/profile identity, and closure digest carried together. |
+| **Executable edge set** | The implemented root executable plus exact descendant executable paths admitted for that root. It is narrower than a full execution closure. |
 | **Cell** | Owned computation environment. It may produce artifacts and a private delta; it does not install that delta into managed live state. |
 | **Artifact** | Explicit bytes plus digest, media type, and provenance used for Plan dataflow. |
 | **Hold act** | Recovery material and transition record for a managed binding or runtime-private workspace. |
@@ -341,6 +345,7 @@ admittedBy
 grantTtlMillis?
 pathAllowlist
 executableAllowlist
+executableEdges?
 endpointAllowlist
 ```
 
@@ -355,7 +360,7 @@ current Plan schema models:
 | Node | Modeled authority operands |
 | --- | --- |
 | `Capture(file)` | locator `read` |
-| `Invoke` | executable `execute`; explicit cwd `read` |
+| `Invoke` | root executable `invoke`; each declared descendant executable `execute`; explicit cwd `read` |
 | `Apply` | target `write`; copy source `read`; move source `read + write` |
 | `RequestExternal` | endpoint `connect + emit` |
 
@@ -368,11 +373,17 @@ and optional Grant lifetime and refreshes the node's handles. Tampering or
 expiry produces a failed `RuntimeAuthorityInvalid` node receipt without calling
 the filesystem, process, Hold, or Outbox adapter; dependents then cancel.
 
+For native-contained work, `executableEdges` binds each descendant selector to
+one separately admitted root. A descendant-only `execute` Grant cannot select
+that helper as a later root Invoke. Compatibility accepts declared
+requirements without applying this restriction, preserving the ratchet.
+
 “Every modeled operand” is deliberately narrower than “every resource the
-executable may use.” Argv may name paths, environment can select loaders,
-configuration can select helpers, and an executable can discover plugins,
-hooks, descendants, descriptors, or credentials. Transitive execution closure
-and general identity-safe binding remain acceptance work.
+executable may use.” The edge set fences new exec transitions, but argv may
+name paths, dynamic libraries load through file reads, an admitted interpreter
+may execute data in-process, environment and configuration can select behavior,
+and descriptors or credentials may introduce other authority. Full execution
+closure and general identity-safe binding remain acceptance work.
 
 For native program execution, the trusted CLI now canonicalizes the selected
 workspace and existing absolute policy scopes before admission, replaces the
@@ -409,15 +420,19 @@ The current native Cell:
 3. creates a fresh same-volume private workspace using clone or copy;
 4. registers that exact path for lifecycle retention;
 5. runs `/usr/bin/sandbox-exec` with a generated Seatbelt profile;
-6. permits `process*` and ambient `file-read*`;
-7. permits writes only in the private workspace, declared temporary
+6. permits process fork and exact `process-exec` paths for the admitted root
+   and its root-scoped declared descendants;
+7. permits ambient `file-read*`;
+8. creates a private per-Invoke temp directory, exports it through `TMPDIR`,
+   `TMP`, and `TEMP`, and excludes it from the proposed delta;
+9. permits writes only in the private workspace, declared temporary
    directories, and `/dev/null`;
-8. denies `network*`;
-9. runs the requested executable in the private workspace;
-10. fingerprints the live and private trees;
-11. reports private delta candidates and any live drift;
-12. leaves live mutation to a later `Apply.merge`; and
-13. on completion, typed failure, or cancellation, verifies the Cell-reported
+10. denies `network*`;
+11. runs the requested executable in the private workspace;
+12. fingerprints the live and private trees;
+13. reports private delta candidates and any live drift;
+14. leaves live mutation to a later `Apply.merge`; and
+15. on completion, typed failure, or cancellation, verifies the Cell-reported
     private directory identity and transfers it into Hold as
     `purpose: runtime-private`.
 
@@ -432,8 +447,11 @@ The profile's precise limitations matter:
 - ambient host reads are allowed, so confidentiality is not provided;
 - process-group cancellation is bounded but not proven against every
   daemonization or descendant-escape technique;
-- the Seatbelt policy allows process execution and does not pre-bind every
-  loader, helper, hook, plugin, or config-selected executable;
+- exact executable-edge fencing does not mediate dynamic-library loads,
+  agent-owned code interpreted in-process, configuration, plugins, or other
+  behavior that occurs without a new exec;
+- external executable binding records requested, launch, and allowed paths but
+  does not yet bind immutable code bytes across path replacement races;
 - network is denied rather than brokered;
 - a multi-entry merge performs individually recoverable Hold transitions but
   is not claimed as one atomic transaction;
@@ -579,8 +597,22 @@ that an external harness supplied no alternate machine-effect tool.
 
 ## Execution closure and cross-plan flow
 
+The implemented native mechanism is an **executable edge set**:
+
+```text
+root executable (`invoke`)
+  → exact descendant executable paths for that root (`execute`)
+```
+
+Admission prevents a descendant-only Grant from becoming root authority.
+Seatbelt permits fork but grants `process-exec` only to the resolved paths in
+that set. Workspace-local executables are rebased into the private view;
+receipts retain requested, launch, allowed-path, role, and rebase evidence.
+This blocks an undeclared helper exec and is useful containment. It is not a
+semantic description of all code that runs.
+
 An executable path or binary digest is not a complete description of what
-runs. The stronger candidate contract is an **execution closure**:
+runs. The stronger candidate contract is a full **execution closure**:
 
 ```text
 root/image identity
@@ -592,11 +624,20 @@ root/image identity
 + budgets, expiry, cancellation, and receipt obligations
 ```
 
-The current native Cell contains many consequences of an admitted process, but
-it does not bind this full closure. Seatbelt permits `process*` and ambient
-reads; current Admission binds the requested executable and modeled operands.
+The current native Cell does not bind this full closure. Dynamic libraries and
+configuration arrive through allowed file reads; an admitted interpreter can
+execute agent-owned bytes in-process; plugins may execute within an already
+admitted process; external executable paths may race with mutable code bytes;
+and process-group ownership does not prove every daemonization path.
 Definitions describe invoke contracts but do not attest the opaque program or
 its transitive dependencies.
+
+The checked-in Bun proof makes this boundary concrete: `/bin/bash`, admitted
+as the only executable, sources an agent-owned `BASH_ENV` without a second
+exec. Seatbelt still denies the sourced code's live-workspace write and
+loopback connection, while its private write appears as the sole delta. That
+successful proof is evidence for executable-edge fencing plus resource
+confinement, not evidence of a full execution closure.
 
 Authority also composes across time. A low-network/no-network Plan can write a
 Git hook, package lifecycle script, build file, rc file, executable, trust
@@ -705,9 +746,15 @@ Implemented, bounded properties:
 - structured executable and argv data avoid shell-text construction;
 - the integrated program seam retains and validates the exact
   Plan/Grant/Handle closure as `ExecutionAuthority`;
+- native Admission separates root `invoke` from root-scoped descendant
+  `execute`, and Seatbelt fences new execs to the resolved executable edge set;
+- Cell and Runtime receipts retain executable binding roles and resolved path
+  evidence;
 - native workspace aliases are canonicalized before admission and the
   conventional workspace binding is supervisor-owned;
 - the native Cell separates private process writes from later live Apply;
+- each native Invoke receives a private temp directory whose runtime-owned
+  path is excluded from the proposed merge delta;
 - native Cell network is denied;
 - exact private Cell directories enter runtime-private Hold lifecycle on the
   normal completion/failure/cancellation path;
@@ -723,8 +770,8 @@ Acceptance conditions, not current guarantees:
 
 - complete mediation by an agent harness with no alternate effect tool;
 - complete transitive execution closure;
-- identity-safe resolution for every path, executable, mount, and descriptor
-  under races;
+- immutable identity-safe resolution for every path, executable byte
+  sequence, mount, and descriptor under races;
 - end-to-end confidentiality and integrity enforcement;
 - persistent authority-laundering prevention across runs;
 - endpoint brokerage for contained work;
@@ -792,6 +839,9 @@ collapsed:
    build-descendant work.
 3. Two **Vouch-derived local proofs** exercise the generic restore and host
    workflow decomposition without running real Vouch/OpenShell remote work.
+4. Bun/macOS boundary proofs exercise the private write/network/temp fence,
+   exact executable descendants and shebang chains, and the admitted
+   interpreter/in-process-code boundary.
 
 The published native exclusions include unstructured command strings, symlink
 Apply, special files/devices, mount mutation, interactive PTY/job control,
@@ -825,6 +875,8 @@ The following remain unresolved:
 - selector, issuance, revocation, and persistence semantics for labels and
   supervisor capabilities;
 - execution-adjacent resource classification across runs;
+- immutable executable identity and full loader/config/plugin interpretation
+  policy beyond the current exact executable-edge set;
 - protocol-aware endpoint brokerage and non-extractable credentials;
 - tool-definition signing, precedence, distribution, and decoder power;
 - remote-realm authentication and ambiguous-result reconciliation;
