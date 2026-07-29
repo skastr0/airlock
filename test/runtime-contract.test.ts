@@ -115,6 +115,7 @@ const impossibleHold = Layer.succeed(Hold, Hold.of({
   overwrite: () => Effect.die("Runtime must use NativeFileSystem for Apply.write"),
   retireRuntimePrivate: () => Effect.die("compatibility execution has no Cell workspace"),
   replaceFrom: () => Effect.die("compatibility execution has no Cell delta"),
+  replaceByStaging: () => Effect.die("compatibility execution has no staged replacement"),
   undo: () => Effect.die("unused"),
   undoLast: Effect.die("unused"),
   held: Effect.succeed([]),

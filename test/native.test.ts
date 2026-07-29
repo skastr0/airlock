@@ -74,8 +74,8 @@ describe("NativeFileSystem — scoped native actions", () => {
     )
   )
 
-  it.effect("copies binary bytes through a private stage without a shell", () =>
-    world(({ fs, native, path, workspace }) =>
+  it.effect("copies binary bytes through a journaled private stage without a shell", () =>
+    world(({ fs, native, hold, path, workspace }) =>
       Effect.gen(function* () {
         const input = new Uint8Array([0, 255, 17, 128, 64, 10])
         yield* fs.writeFile(path.join(workspace, "input.bin"), input)
@@ -83,6 +83,11 @@ describe("NativeFileSystem — scoped native actions", () => {
         const receipt = yield* native.copy("input.bin", "output.bin")
         expect(receipt.bytes).toBe(input.byteLength)
         expect([...yield* fs.readFile(path.join(workspace, "output.bin"))]).toEqual([...input])
+        expect(
+          (yield* hold.held).filter(
+            (manifest) => manifest.purpose === "runtime-private"
+          )
+        ).toEqual([])
       })
     )
   )

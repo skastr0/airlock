@@ -1,8 +1,7 @@
-import { FileSystem, Path } from "@effect/platform"
+import { FileSystem } from "@effect/platform"
 import { Context, Effect, Either, Layer, Schema } from "effect"
 import { lstat } from "node:fs/promises"
 import * as nodePath from "node:path"
-import { AirlockHome } from "../AirlockHome.ts"
 import {
   type HoldFilesystemError,
   type HoldRecoveryRequired,
@@ -222,9 +221,7 @@ const simpleSegment = (segment: string) => {
 const make = (config: NativeFilesystemConfig) =>
   Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem
-    const path = yield* Path.Path
     const hold = yield* Hold
-    const home = yield* AirlockHome
     const requestedWorkspace = nodePath.resolve(config.workspace)
 
     const rootInfo = yield* Effect.tryPromise({
@@ -361,19 +358,15 @@ const make = (config: NativeFilesystemConfig) =>
         )
       )
 
-    // Staging is private Airlock state. `replaceFrom` then moves the staged
-    // object into managed state and holds any displaced live binding.
-    const stagePath = () => path.join(home.holdDir, `native-stage-${crypto.randomUUID()}`)
-    const stageBytes = (bytes: Uint8Array) => {
-      const stage = stagePath()
-      return fs.writeFile(stage, bytes).pipe(
-        Effect.mapError(error("write private stage", stage)),
-        Effect.as(stage)
+    const install = <E>(
+      target: string,
+      kind: "file" | "directory",
+      bytes: number,
+      populate: (stage: string) => Effect.Effect<void, E>
+    ) =>
+      hold.replaceByStaging(target, kind, populate).pipe(
+        Effect.map((receipt) => toReceipt(receipt, bytes))
       )
-    }
-
-    const install = (target: string, stage: string, bytes: number) =>
-      hold.replaceFrom(target, stage).pipe(Effect.map((receipt) => toReceipt(receipt, bytes)))
 
     const inspect = (raw: string) => checked(raw)
     const stat = inspect
@@ -500,7 +493,17 @@ const make = (config: NativeFilesystemConfig) =>
 
     const writeBytes = (raw: string, bytes: Uint8Array) =>
       mutationPath(raw).pipe(
-        Effect.flatMap((target) => stageBytes(bytes).pipe(Effect.flatMap((stage) => install(target, stage, bytes.byteLength))))
+        Effect.flatMap((target) =>
+          install(
+            target,
+            "file",
+            bytes.byteLength,
+            (stage) =>
+              fs.writeFile(stage, bytes).pipe(
+                Effect.mapError(error("write private stage", stage))
+              )
+          )
+        )
       )
 
     const writeText = (raw: string, content: string) => writeBytes(raw, new TextEncoder().encode(content))
@@ -514,14 +517,18 @@ const make = (config: NativeFilesystemConfig) =>
     const copy = (rawSource: string, rawDestination: string) =>
       Effect.all([checked(rawSource), mutationPath(rawDestination)]).pipe(
         Effect.flatMap(([source, destination]) => {
-          const stage = stagePath()
           return rejectOverlap(source.path, destination).pipe(
             Effect.zipRight(admitDestinationParent(destination)),
             Effect.zipRight(verifyTree(source)),
             Effect.flatMap((bytes) =>
-              fs.copy(source.path, stage, { overwrite: false }).pipe(
-                Effect.mapError(error("copy to private stage", stage)),
-                Effect.zipRight(install(destination, stage, bytes))
+              install(
+                destination,
+                source.kind,
+                bytes,
+                (stage) =>
+                  fs.copy(source.path, stage, { overwrite: false }).pipe(
+                    Effect.mapError(error("copy to private stage", stage))
+                  )
               )
             )
           )
@@ -531,14 +538,18 @@ const make = (config: NativeFilesystemConfig) =>
     const move = (rawSource: string, rawDestination: string) =>
       Effect.all([checked(rawSource), mutationPath(rawDestination)]).pipe(
         Effect.flatMap(([source, destination]) => {
-          const stage = stagePath()
           return rejectOverlap(source.path, destination).pipe(
             Effect.zipRight(admitDestinationParent(destination)),
             Effect.zipRight(verifyTree(source)),
             Effect.flatMap((bytes) =>
-              fs.copy(source.path, stage, { overwrite: false }).pipe(
-                Effect.mapError(error("copy move source to private stage", stage)),
-                Effect.zipRight(install(destination, stage, bytes))
+              install(
+                destination,
+                source.kind,
+                bytes,
+                (stage) =>
+                  fs.copy(source.path, stage, { overwrite: false }).pipe(
+                    Effect.mapError(error("copy move source to private stage", stage))
+                  )
               )
             ),
             Effect.flatMap((installReceipt) => hold.remove(source.path).pipe(
@@ -581,9 +592,15 @@ const make = (config: NativeFilesystemConfig) =>
           }
           const installs: Array<NativeWriteReceipt> = []
           for (const directory of missing) {
-            const stage = stagePath()
-            yield* fs.makeDirectory(stage).pipe(Effect.mapError(error("make private staged directory", stage)))
-            const installed = yield* install(directory, stage, 0).pipe(Effect.either)
+            const installed = yield* install(
+              directory,
+              "directory",
+              0,
+              (stage) =>
+                fs.makeDirectory(stage).pipe(
+                  Effect.mapError(error("make private staged directory", stage))
+                )
+            ).pipe(Effect.either)
             if (Either.isLeft(installed)) {
               return yield* new NativeMkdirPartiallyApplied({
                 path: target,

@@ -573,17 +573,33 @@ describe("Hold — undoable mutations", () => {
     )
   )
 
-  it.effect("ignores private native staging directories when reconstructing Hold", () =>
-    world(({ fs, path, tmp }) =>
+  it.effect("journals failed private staging before adapter bytes are produced", () =>
+    world(({ fs, hold, path, tmp }) =>
       Effect.gen(function* () {
         const home = path.join(tmp, "airlock-home")
-        const orphan = path.join(home, "hold", "native-stage-orphan")
-        yield* fs.makeDirectory(orphan, { recursive: true })
-        yield* fs.writeFileString(path.join(orphan, "partial"), "private stage")
+        const target = path.join(tmp, "never-installed.txt")
+        const failed = yield* hold.replaceByStaging(
+          target,
+          "file",
+          (stage) =>
+            fs.writeFileString(stage, "partial private stage").pipe(
+              Effect.zipRight(Effect.fail("populate failed" as const))
+            )
+        ).pipe(Effect.flip)
+        expect(failed).toBe("populate failed")
 
         const reconstructed = yield* Effect.provide(Hold, layersFor(home))
-        expect(yield* reconstructed.held).toEqual([])
-        expect(yield* fs.readFileString(path.join(orphan, "partial"))).toBe("private stage")
+        const privateStages = (yield* reconstructed.held).filter(
+          (manifest) => manifest.purpose === "runtime-private"
+        )
+        expect(privateStages).toHaveLength(1)
+        expect(yield* fs.readFileString(privateStages[0]!.target)).toBe(
+          "partial private stage"
+        )
+
+        const report = yield* reconstructed.reap(0)
+        expect(report.reaped).toContain(privateStages[0]!.id)
+        expect(yield* fs.exists(privateStages[0]!.target)).toBe(false)
       })
     )
   )

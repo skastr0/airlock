@@ -564,6 +564,7 @@ describe("native-contained runtime", () => {
             reason: "injected retention failure"
           })),
           replaceFrom: unused,
+          replaceByStaging: unused,
           undo: unused,
           undoLast: Effect.die("unused Hold operation"),
           held: Effect.die("unused Hold operation"),

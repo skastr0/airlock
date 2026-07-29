@@ -175,6 +175,30 @@ export class Hold extends Context.Tag("airlock/Hold")<
       | HoldMutationError
       | TargetOccupied
     >
+    /**
+     * Reserve a journaled private stage before an adapter writes candidate
+     * bytes, then install that candidate through the ordinary replacement
+     * transition. The stage remains inside its prepared Hold act until Reaper
+     * collects it; interruption can therefore leave recovery material, never
+     * an untracked private object.
+     */
+    readonly replaceByStaging: <E>(
+      target: string,
+      kind: "file" | "directory",
+      populate: (stage: string) => Effect.Effect<void, E>
+    ) => Effect.Effect<
+      ReplaceReceipt,
+      | E
+      | ProtectedPath
+      | TargetNotFound
+      | SourceNotFound
+      | SourceVolumeMismatch
+      | SourceEqualsTarget
+      | OverlappingReplacementPaths
+      | UnsupportedReplacementSymlink
+      | HoldMutationError
+      | TargetOccupied
+    >
     readonly undo: (
       id: ActId
     ) => Effect.Effect<
@@ -758,6 +782,33 @@ const make = Effect.gen(function* () {
     return manifest
   })
 
+  /**
+   * Candidate production is private, but its lifetime is still owned by
+   * Hold. Reserving the act before invoking adapter glue means a failed copy,
+   * interrupted write, or process crash leaves a journal that Reaper can
+   * enumerate. The outer Hold lease remains held until replacement finishes,
+   * so Reaper cannot collect an in-flight stage.
+   */
+  const reserveRuntimePrivateStage = Effect.fnUntraced(function* (
+    kind: "file" | "directory"
+  ) {
+    const id = newActId()
+    const at = yield* DateTime.now
+    const stage = stageFile(id)
+    const manifest = new HeldManifest({
+      id,
+      act: "remove",
+      target: stage,
+      kind,
+      hasPayload: false,
+      purpose: "runtime-private",
+      status: "held",
+      at
+    })
+    yield* reserveAct(manifest)
+    return stage
+  })
+
   // New content never writes through the live target. The stage file shares
   // the target's device (admitted above), so installing it is another rename.
   const installStaged = Effect.fnUntraced(function* (
@@ -1143,6 +1194,17 @@ const make = Effect.gen(function* () {
     })
   })
 
+  const replaceByStaging = <E>(
+    rawTarget: string,
+    kind: "file" | "directory",
+    populate: (stage: string) => Effect.Effect<void, E>
+  ) =>
+    Effect.gen(function* () {
+      const stage = yield* reserveRuntimePrivateStage(kind)
+      yield* populate(stage)
+      return yield* replaceFrom(rawTarget, stage)
+    }).pipe(Effect.withSpan("Hold.replaceByStaging"))
+
   const undo = Effect.fn("Hold.undo")(function* (id: ActId) {
     const journal = yield* readJournal(id)
     if (journal.state !== "held") {
@@ -1287,6 +1349,8 @@ const make = Effect.gen(function* () {
     overwrite: (target, content) => withLock(overwrite(target, content)),
     retireRuntimePrivate: (target) => withLock(retireRuntimePrivate(target)),
     replaceFrom: (target, source) => withLock(replaceFrom(target, source)),
+    replaceByStaging: (target, kind, populate) =>
+      withLock(replaceByStaging(target, kind, populate)),
     undo: (id) => withLock(undo(id)),
     undoLast: withLock(undoLast),
     held: withLock(held),
