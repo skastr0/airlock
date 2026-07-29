@@ -61,10 +61,13 @@ regular-file capability envelope. There is no fallback to compatibility.
 ## Evidence record
 
 `scripts/prove-parity-50.ts` emits
-`airlock/parity-50-proof/v1`, including:
+`airlock/parity-50-proof/v2`, including:
 
-- the exact repository `HEAD` observed before the run and whether the worktree
-  was dirty;
+- explicit source provenance: a repository-local Git checkout reports its
+  validated `HEAD` and dirty bit; a source archive or other tree without
+  repository-local `.git` metadata reports both commit identity and worktree
+  state as unavailable, without searching an ancestor repository or inventing
+  a SHA;
 - macOS version and build, architecture, Bun version, and agent entrypoint;
 - all fifty invocation outcomes and their case, repetition, profile, counts,
   latency, and assertions;

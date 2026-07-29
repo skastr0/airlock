@@ -36,8 +36,23 @@ describe.skipIf(process.platform !== "darwin")(
         const evidence = Schema.decodeUnknownSync(Parity50Evidence)(
           JSON.parse(executed.stdout)
         )
-        expect(evidence.schemaVersion).toBe("airlock/parity-50-proof/v1")
-        expect(evidence.testedStartSha).toMatch(/^[0-9a-f]{40}$/)
+        expect(evidence.schemaVersion).toBe("airlock/parity-50-proof/v2")
+        if (evidence.source.kind === "git-checkout") {
+          expect(evidence.source).toMatchObject({
+            root: repository,
+            headSha: expect.stringMatching(/^[0-9a-f]{40}$/),
+            workingTreeDirty: expect.any(Boolean)
+          })
+        } else {
+          expect(evidence.source).toEqual({
+            kind: "unversioned-source-tree",
+            root: repository,
+            commitIdentity: "unavailable",
+            workingTreeState: "unavailable",
+            reason:
+              "repository-local .git metadata is absent; no commit identity or worktree state is claimed"
+          })
+        }
         expect(evidence.environment).toMatchObject({
           platform: "darwin",
           architecture: process.arch,

@@ -34,6 +34,29 @@ export type ParityCaseId = typeof ParityCaseId.Type
 const AgentProfile = Schema.Literal("compatibility", "native-contained")
 type AgentProfile = typeof AgentProfile.Type
 
+const GitCommitSha = Schema.String.pipe(
+  Schema.pattern(/^[0-9a-f]{40}$/)
+)
+
+export const ParitySourceProvenance = Schema.Union(
+  Schema.Struct({
+    kind: Schema.Literal("git-checkout"),
+    root: Schema.String,
+    headSha: GitCommitSha,
+    workingTreeDirty: Schema.Boolean
+  }),
+  Schema.Struct({
+    kind: Schema.Literal("unversioned-source-tree"),
+    root: Schema.String,
+    commitIdentity: Schema.Literal("unavailable"),
+    workingTreeState: Schema.Literal("unavailable"),
+    reason: Schema.Literal(
+      "repository-local .git metadata is absent; no commit identity or worktree state is claimed"
+    )
+  })
+)
+export type ParitySourceProvenance = typeof ParitySourceProvenance.Type
+
 const CompactArtifact = Schema.Struct({
   id: Schema.String,
   mediaType: Schema.String,
@@ -100,9 +123,8 @@ export class ParityExecutionOutcome extends Schema.Class<ParityExecutionOutcome>
 export class Parity50Evidence extends Schema.Class<Parity50Evidence>(
   "Parity50Evidence"
 )({
-  schemaVersion: Schema.Literal("airlock/parity-50-proof/v1"),
-  testedStartSha: Schema.String,
-  workingTreeDirty: Schema.Boolean,
+  schemaVersion: Schema.Literal("airlock/parity-50-proof/v2"),
+  source: ParitySourceProvenance,
   startedAt: Schema.String,
   finishedAt: Schema.String,
   environment: Schema.Struct({
@@ -729,10 +751,36 @@ const preflight = () => {
     "case matrix must contain at least two native-contained cases"
   )
 
+  const source: ParitySourceProvenance = existsSync(join(repository, ".git"))
+    ? (() => {
+        const gitRoot = realpathSync(
+          commandText("/usr/bin/git", ["rev-parse", "--show-toplevel"])
+        )
+        assert(
+          gitRoot === repository,
+          `repository-local .git resolved to a different worktree root: ${gitRoot}`
+        )
+        return {
+          kind: "git-checkout" as const,
+          root: repository,
+          headSha: Schema.decodeUnknownSync(GitCommitSha)(
+            commandText("/usr/bin/git", ["rev-parse", "HEAD"])
+          ),
+          workingTreeDirty:
+            commandText("/usr/bin/git", ["status", "--short"]).length > 0
+        }
+      })()
+    : {
+        kind: "unversioned-source-tree",
+        root: repository,
+        commitIdentity: "unavailable",
+        workingTreeState: "unavailable",
+        reason:
+          "repository-local .git metadata is absent; no commit identity or worktree state is claimed"
+      }
+
   return {
-    testedStartSha: commandText("/usr/bin/git", ["rev-parse", "HEAD"]),
-    workingTreeDirty:
-      commandText("/usr/bin/git", ["status", "--short"]).length > 0,
+    source,
     macosVersion: commandText("/usr/bin/sw_vers", ["-productVersion"]),
     macosBuild: commandText("/usr/bin/sw_vers", ["-buildVersion"])
   }
@@ -764,9 +812,8 @@ export const runParity50Proof = (): Promise<Parity50Evidence> =>
       assert(successCount === 50, `expected 50 successes, got ${successCount}`)
 
       const evidence = new Parity50Evidence({
-        schemaVersion: "airlock/parity-50-proof/v1",
-        testedStartSha: metadata.testedStartSha,
-        workingTreeDirty: metadata.workingTreeDirty,
+        schemaVersion: "airlock/parity-50-proof/v2",
+        source: metadata.source,
         startedAt: startedAt.toISOString(),
         finishedAt: finishedAt.toISOString(),
         environment: {
