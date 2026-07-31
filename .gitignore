@@ -1,4 +1,9 @@
 node_modules/
 out/
 dist/
+tmp/
 *.log
+*.tgz
+.DS_Store
+.atlas/
+.groundwork/
