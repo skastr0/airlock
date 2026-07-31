@@ -20,6 +20,8 @@ Airlock's documentation separates implemented proof from release contracts:
   Vouch-derived evidence and remaining boundary.
 - [`feedback-disposition.md`](feedback-disposition.md) — what the collected
   architecture reviews changed, rejected, or left open.
+- [`infographics/`](infographics/) — source-backed Airlock architecture
+  infographic, editable Typst composition, alt text, and visual provenance.
 
 The current implementation and proof level are stated in the repository
 [`README.md`](../README.md). A v1 contract is not evidence that the code already

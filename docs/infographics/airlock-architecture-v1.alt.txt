@@ -1,0 +1,22 @@
+Portrait technical infographic titled “Airlock.” A restrained amber instrument
+glows over a warm near-black graphite field. The top explains that Airlock is
+the chamber between agents and the world: an agent submits a typed ActionCall,
+which becomes a PlanDraft. Admission binds the admitted Plan, grants, and
+resource bindings into ExecutionAuthority, which Runtime receives. Four
+labeled Plan nodes follow. Capture brings information in with provenance.
+Invoke runs an existing executable and explicit arguments under a selected
+profile. Apply changes managed local state only after prior state enters Hold.
+RequestExternal stages durable intent in Outbox without dispatching it.
+
+Two panels distinguish local and external finality. Hold retains displaced
+state as recovery material for bounded undo; restoration remains subject to
+the managed filesystem envelope and conflict checks, and Reaper discards that
+material later. Outbox stages an external request for a separate commit, and
+an ambiguous dispatch remains uncertain. A receipt rail lists admitted,
+attempted, observed, staged, and changed evidence. The only two laws are
+shown: only the Reaper unlinks, and explicit profiles may narrow authority
+while agent code cannot widen it.
+
+The footer qualifies the current macOS v1 profiles. Compatibility retains
+ambient host authority and makes no containment claim. Native-contained uses a
+private workspace and denies network, but is not confidential or VM-equivalent.
