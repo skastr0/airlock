@@ -68,6 +68,46 @@ for index in lower..upper { inspect(index) }
     expect(parseSync(printed).body[0]!.kind).toBe("IfStatement")
   })
 
+  it("treats newlines inside calls, records, and lists as layout whitespace", () => {
+    const program = parseSync(`
+let result = process.run(
+  {
+    executable:
+      "/usr/bin/printf",
+    args: [
+      "%s",
+      "hello",
+    ],
+    env: {
+      LANG: "C",
+    },
+  },
+)
+let first = (
+  result.items[
+    0
+  ]
+)
+return result
+`)
+    const statement = program.body[0]!
+    expect(statement.kind).toBe("LetStatement")
+    if (statement.kind !== "LetStatement") return
+    expect(statement.value).toMatchObject({
+      kind: "CallExpression",
+      arguments: [{
+        kind: "RecordExpression",
+        entries: [
+          { key: "executable" },
+          { key: "args", value: { kind: "ListExpression" } },
+          { key: "env", value: { kind: "RecordExpression" } }
+        ]
+      }]
+    })
+    expect(format(program)).toContain('args: ["%s", "hello"]')
+    expect(parseSync(format(program)).body).toHaveLength(3)
+  })
+
   it("prints finite-list and dynamic-range loops canonically and round-trips them", () => {
     const printed = format(parseSync(`
 for member in capture_members() { inspect(member) }

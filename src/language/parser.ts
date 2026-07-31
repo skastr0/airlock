@@ -64,22 +64,53 @@ export class Parser {
     else if (token.text === "null") expression = { kind: "LiteralExpression", value: null, span: token.span }
     else if (token.kind === "identifier") expression = { kind: "IdentifierExpression", name: token.text, span: token.span }
     else if (token.text === "!" || token.text === "-") { const operand = this.expression(7); expression = { kind: "UnaryExpression", operator: token.text, operand, span: joined(token.span, operand.span) } }
-    else if (token.text === "(") { expression = this.expression(); this.expect(")") }
+    else if (token.text === "(") {
+      this.newlines()
+      expression = this.expression()
+      this.newlines()
+      this.expect(")")
+    }
     else if (token.text === "[") { const items = this.delimitedExpressions("]"); expression = { kind: "ListExpression", items, span: joined(token.span, this.previous().span) } }
-    else if (token.text === "{") { const entries: { key: string; value: Expression; span: Span }[] = []; if (this.peek().text !== "}") do { const key = this.advance(); if (key.kind !== "identifier" && key.kind !== "string") this.error("record keys must be identifiers or strings", key.span); this.expect(":"); const value = this.expression(); entries.push({ key: key.text, value, span: joined(key.span, value.span) }) } while (this.match(",")); this.expect("}"); expression = { kind: "RecordExpression", entries, span: joined(token.span, this.previous().span) } }
+    else if (token.text === "{") {
+      const entries: { key: string; value: Expression; span: Span }[] = []
+      this.newlines()
+      while (this.peek().text !== "}") {
+        const key = this.advance()
+        if (key.kind !== "identifier" && key.kind !== "string") {
+          this.error("record keys must be identifiers or strings", key.span)
+        }
+        this.expect(":")
+        this.newlines()
+        const value = this.expression()
+        entries.push({ key: key.text, value, span: joined(key.span, value.span) })
+        this.newlines()
+        if (!this.match(",")) break
+        this.newlines()
+      }
+      this.expect("}")
+      expression = {
+        kind: "RecordExpression",
+        entries,
+        span: joined(token.span, this.previous().span)
+      }
+    }
     else this.error(`expected an expression, found '${token.text || "end of input"}'`, token.span)
-    while (true) { if (this.match("(")) { const args = this.delimitedExpressions(")"); expression = { kind: "CallExpression", callee: expression, arguments: args, span: joined(expression.span, this.previous().span) } } else if (this.match(".")) { const field = this.expectIdentifier(); expression = { kind: "FieldExpression", object: expression, field: field.text, span: joined(expression.span, field.span) } } else if (this.match("[")) { const index = this.expression(); const closing = this.expect("]"); expression = { kind: "IndexExpression", object: expression, index, span: joined(expression.span, closing.span) } } else break }
+    while (true) { if (this.match("(")) { const args = this.delimitedExpressions(")"); expression = { kind: "CallExpression", callee: expression, arguments: args, span: joined(expression.span, this.previous().span) } } else if (this.match(".")) { const field = this.expectIdentifier(); expression = { kind: "FieldExpression", object: expression, field: field.text, span: joined(expression.span, field.span) } } else if (this.match("[")) { this.newlines(); const index = this.expression(); this.newlines(); const closing = this.expect("]"); expression = { kind: "IndexExpression", object: expression, index, span: joined(expression.span, closing.span) } } else break }
     return expression
   }
   private delimitedExpressions(close: string): Expression[] {
     const result: Expression[] = []
-    if (this.peek().text !== close) {
-      do result.push(this.expression())
-      while (this.match(","))
+    this.newlines()
+    while (this.peek().text !== close) {
+      result.push(this.expression())
+      this.newlines()
+      if (!this.match(",")) break
+      this.newlines()
     }
     this.expect(close)
     return result
   }
+  private newlines() { while (this.peek().kind === "newline") this.advance() }
   private separators() { while (this.peek().kind === "newline" || this.peek().text === ";") this.advance() }
   private isSeparator() { return this.peek().kind === "newline" || this.peek().text === ";" }
   private match(text: string) { if (this.peek().text !== text) return false; this.advance(); return true }
