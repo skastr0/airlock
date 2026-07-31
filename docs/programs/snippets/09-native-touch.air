@@ -1,0 +1,13 @@
+let created = process.run({
+  executable: "/usr/bin/touch",
+  args: ["created.txt"],
+  cwd: workspace,
+  stdin: "discard",
+  stdout: "capture",
+  stderr: "capture",
+  timeoutMs: 30000,
+  cellProfile: "native-contained"
+})
+
+assert created.state == "succeeded", "contained create failed"
+return created

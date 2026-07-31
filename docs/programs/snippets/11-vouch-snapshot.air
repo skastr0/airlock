@@ -1,0 +1,40 @@
+let snapshot = process.run({
+  executable: openshell,
+  args: [
+    "sandbox", "exec",
+    "--name", sandbox_name,
+    "--no-tty",
+    "--timeout", "120",
+    "--",
+    "/usr/bin/python3", "-I", "-S",
+    "/opt/airlock-programs/sqlite-safe-snapshot.py",
+    "--state-root", hermes_home,
+    "--output", remote_archive
+  ],
+  cwd: workspace,
+  stdin: "discard",
+  stdout: "capture",
+  stderr: "capture",
+  timeoutMs: 150000,
+  cellProfile: "compatibility"
+})
+assert snapshot.exit_code == 0, "snapshot failed"
+
+let downloaded = process.run({
+  executable: openshell,
+  args: [
+    "sandbox", "download",
+    sandbox_name,
+    remote_archive,
+    local_archive
+  ],
+  cwd: workspace,
+  stdin: "discard",
+  stdout: "capture",
+  stderr: "capture",
+  timeoutMs: 180000,
+  cellProfile: "compatibility"
+})
+assert downloaded.exit_code == 0, "download failed"
+
+return file.inspect({ path: local_archive })

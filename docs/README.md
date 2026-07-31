@@ -22,6 +22,8 @@ Airlock's documentation separates implemented proof from release contracts:
   architecture reviews changed, rejected, or left open.
 - [`infographics/`](infographics/) — source-backed Airlock architecture
   infographic, editable Typst composition, alt text, and visual provenance.
+- [`programs/`](programs/) — the 24-page *Airlock Programs* executable field
+  guide, its runnable snippets, editable Typst source, and publication evidence.
 
 The current implementation and proof level are stated in the repository
 [`README.md`](../README.md). A v1 contract is not evidence that the code already

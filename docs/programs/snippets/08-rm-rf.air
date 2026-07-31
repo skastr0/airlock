@@ -1,0 +1,13 @@
+let removed = process.run({
+  executable: "/bin/rm",
+  args: ["-rf", "protected"],
+  cwd: workspace,
+  stdin: "discard",
+  stdout: "capture",
+  stderr: "capture",
+  timeoutMs: 30000,
+  cellProfile: "native-contained"
+})
+
+assert removed.state == "succeeded", "contained removal failed"
+return removed

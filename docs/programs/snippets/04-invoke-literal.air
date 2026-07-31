@@ -1,0 +1,16 @@
+let result = process.run({
+  executable: "/usr/bin/printf",
+  args: [
+    "%s",
+    "literal; touch should-not-exist"
+  ],
+  cwd: workspace,
+  stdin: "discard",
+  stdout: "capture",
+  stderr: "capture",
+  outputLimitBytes: 65536,
+  cellProfile: "compatibility"
+})
+
+assert result.state == "succeeded", "printf failed"
+return result

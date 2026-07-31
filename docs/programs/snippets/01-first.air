@@ -1,0 +1,13 @@
+let result = process.run({
+  executable: "/usr/bin/printf",
+  args: ["%s\n", "hello from Airlock"],
+  cwd: workspace,
+  stdin: "discard",
+  stdout: "capture",
+  stderr: "capture",
+  timeoutMs: 5000,
+  cellProfile: "compatibility"
+})
+
+assert result.state == "succeeded", "printf failed"
+return result

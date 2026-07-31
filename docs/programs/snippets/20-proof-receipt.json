@@ -1,0 +1,23 @@
+{
+  "schemaVersion": "airlock/program-run/v1",
+  "profile": "compatibility",
+  "workspace": "/tmp/airlock-proof/process/workspace",
+  "result": {
+    "state": "succeeded",
+    "result": {
+      "selected": "2:needle second\n",
+      "transformed": "2:NEEDLE SECOND\n",
+      "literal": "literal; touch should-not-exist",
+      "states": [
+        "succeeded",
+        "succeeded",
+        "succeeded"
+      ]
+    },
+    "counts": {
+      "plans": 3,
+      "actions": 3,
+      "artifacts": 6
+    }
+  }
+}

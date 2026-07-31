@@ -1,0 +1,21 @@
+let packed = process.run({
+  executable: "/usr/bin/tar",
+  args: ["-czf", "package.tgz", "package"],
+  cwd: workspace,
+  env: {
+    COPYFILE_DISABLE: "1",
+    LANG: "C"
+  },
+  stdin: "discard",
+  stdout: "capture",
+  stderr: "capture",
+  timeoutMs: 30000,
+  cellProfile: "native-contained"
+})
+assert packed.state == "succeeded", "archive creation failed"
+
+let archive = file.inspect({
+  path: workspace + "/package.tgz"
+})
+
+return { packed: packed, archive: archive }

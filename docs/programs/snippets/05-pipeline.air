@@ -1,0 +1,29 @@
+let selected = process.run({
+  executable: "/usr/bin/grep",
+  args: ["-n", "needle", "input.txt"],
+  cwd: workspace,
+  stdin: "discard",
+  stdout: "capture",
+  stderr: "capture",
+  cellProfile: "compatibility"
+})
+assert selected.state == "succeeded", "grep failed"
+
+let upper = process.run({
+  executable: "/usr/bin/tr",
+  args: ["a-z", "A-Z"],
+  cwd: workspace,
+  stdin: {
+    kind: "artifact",
+    id: selected.stdout_artifact.id
+  },
+  stdout: "capture",
+  stderr: "capture",
+  cellProfile: "compatibility"
+})
+assert upper.state == "succeeded", "tr failed"
+
+return {
+  selected: selected.stdout,
+  transformed: upper.stdout
+}

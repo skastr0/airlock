@@ -1,0 +1,35 @@
+let snapshot = process.run({
+  executable: airlock_program,
+  args: [
+    "run", snapshot_program,
+    "--sandbox", sandbox_name,
+    "--archive", local_archive
+  ],
+  cwd: workspace,
+  stdin: "discard",
+  stdout: "capture",
+  stderr: "capture",
+  timeoutMs: 300000,
+  cellProfile: "compatibility"
+})
+assert snapshot.exit_code == 0, "snapshot failed"
+
+let saved = file.copy({
+  source: local_archive,
+  destination: durable_backup
+})
+assert saved.state == "applied", "backup was not retained"
+
+let replacement = http.stage({
+  method: "POST",
+  endpoint: realm_endpoint,
+  holdMillis: 30000,
+  body: "{\"action\":\"replace-machine\"}"
+})
+assert replacement.state == "staged"
+
+return {
+  snapshot: snapshot,
+  saved: saved,
+  replacement: replacement
+}

@@ -1,0 +1,31 @@
+let directory = file.mkdir({
+  path: "generated",
+  parents: true
+})
+
+let written = file.write({
+  path: "generated/report.txt",
+  content: "ready\n"
+})
+
+let copied = file.copy({
+  source: "generated/report.txt",
+  destination: "generated/report.backup.txt"
+})
+
+let moved = file.move({
+  source: "generated/report.txt",
+  destination: "report.txt"
+})
+
+let removed = file.remove({
+  path: "generated/report.backup.txt"
+})
+
+return {
+  directory: directory,
+  written: written,
+  copied: copied,
+  moved: moved,
+  removed: removed
+}

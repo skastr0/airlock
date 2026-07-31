@@ -1,0 +1,11 @@
+{
+  "schemaVersion": "airlock/admission-policy/v1",
+  "profile": "native-contained",
+  "principal": "agent:example",
+  "realm": "local",
+  "admittedBy": "operator:example",
+  "pathAllowlist": ["/absolute/workspace/**"],
+  "executableAllowlist": ["/usr/bin/touch"],
+  "executableEdges": [],
+  "endpointAllowlist": []
+}

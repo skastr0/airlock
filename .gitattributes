@@ -1,0 +1,2 @@
+# Generated publication artifacts are binary.
+output/pdf/*.pdf binary

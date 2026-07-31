@@ -1,0 +1,44 @@
+let archive = file.inspect({ path: local_archive })
+assert archive.bytes > 0, "restore archive is empty"
+
+let uploaded = process.run({
+  executable: openshell,
+  args: [
+    "sandbox", "upload",
+    sandbox_name,
+    local_archive,
+    remote_archive,
+    "--no-git-ignore"
+  ],
+  cwd: workspace,
+  stdin: "discard",
+  stdout: "capture",
+  stderr: "capture",
+  timeoutMs: 120000,
+  cellProfile: "compatibility"
+})
+assert uploaded.exit_code == 0, "upload failed"
+
+let restored = process.run({
+  executable: openshell,
+  args: [
+    "sandbox", "exec",
+    "--name", sandbox_name,
+    "--no-tty",
+    "--timeout", "180",
+    "--",
+    "/usr/bin/python3", "-I", "-S",
+    "/opt/airlock-programs/safe-restore.py",
+    "--archive", remote_archive,
+    "--destination", state_home
+  ],
+  cwd: workspace,
+  stdin: "discard",
+  stdout: "capture",
+  stderr: "capture",
+  timeoutMs: 210000,
+  cellProfile: "compatibility"
+})
+
+assert restored.exit_code == 0, "restore failed"
+return restored

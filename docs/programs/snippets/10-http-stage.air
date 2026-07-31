@@ -1,0 +1,12 @@
+let staged = http.stage({
+  endpoint: endpoint,
+  method: "POST",
+  headers: {
+    "content-type": "application/json"
+  },
+  body: "{\"operation\":\"snapshot-ready\"}",
+  holdMillis: 300000
+})
+
+assert staged.state == "staged"
+return staged

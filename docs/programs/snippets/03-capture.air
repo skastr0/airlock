@@ -1,0 +1,19 @@
+let readme = file.read({
+  path: "README.md",
+  format: "text"
+})
+
+let sources = file.glob({
+  root: ".",
+  pattern: "**/*.ts"
+})
+
+let metadata = file.stat({
+  path: "README.md"
+})
+
+return {
+  readme: readme,
+  sources: sources,
+  metadata: metadata
+}
