@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto"
 import { posix } from "node:path"
-import { DateTime, Effect, Schema } from "effect"
+import { DateTime, Effect, Either, Schema } from "effect"
 import {
   type Digest,
   Grant,
@@ -21,6 +21,18 @@ import {
   closeExecution,
   orderPlan
 } from "../plan/index.ts"
+import {
+  type DispatchDecision,
+  EndpointGrantPolicy,
+  type StagedIntentFacts,
+  canonicalizeEndpoint,
+  dispatchDecision,
+  endpointGrantBodyFits,
+  endpointGrantHoldFits,
+  endpointGrantMethodFits,
+  fittingEndpointGrants,
+  validateEndpointGrants
+} from "./DispatchPolicy.ts"
 
 /**
  * Admission is the only candidate that turns inert ResourceRequirements into
@@ -70,6 +82,66 @@ export class AdmissionPolicy extends Schema.Class<AdmissionPolicy>("AdmissionPol
   // VM backend discovery belongs to the privileged runtime, not agent-provided
   // policy. This build therefore refuses vm-enclosed unconditionally below.
 }) {}
+
+/**
+ * Admission policy v2. Every v1 field carries over unchanged except the flat
+ * `endpointAllowlist`, which is superseded (not aliased) by structured
+ * endpoint grants carrying a supervisor dispatch class and commit mode.
+ *
+ * A grant that names neither behaves exactly as a v1 allowlist entry does: an
+ * irreversible-send floor that stays staged until an explicit supervisor
+ * commit. The one deliberate difference is matching — v2 selectors and intents
+ * are canonicalized (§ `canonicalizeEndpoint`) because a raw string prefix
+ * cannot be the sole load-bearing check once auto-commit removes the human.
+ */
+export class AdmissionPolicyV2 extends Schema.Class<AdmissionPolicyV2>("AdmissionPolicyV2")({
+  schemaVersion: Schema.Literal("airlock/admission-policy/v2"),
+  profile: AdmissionProfile,
+  principal: Schema.String,
+  realm: Schema.String,
+  admittedBy: Schema.String,
+  grantTtlMillis: Schema.optional(Schema.Positive),
+  pathAllowlist: Schema.Array(Schema.String),
+  executableAllowlist: Schema.Array(Schema.String),
+  executableEdges: Schema.optionalWith(
+    Schema.Array(ExecutableEdgePolicy),
+    { default: () => [] }
+  ),
+  /** Structured endpoint grants. Classes live here and nowhere else. */
+  endpointGrants: Schema.Array(EndpointGrantPolicy)
+}) {}
+
+/**
+ * Either supervisor policy version. v1 documents keep decoding unchanged; the
+ * union discriminates on the `schemaVersion` literal.
+ */
+export const AdmissionPolicyDocument = Schema.Union(AdmissionPolicy, AdmissionPolicyV2)
+export type AdmissionPolicyDocument = typeof AdmissionPolicyDocument.Type
+
+export const isAdmissionPolicyV2 = (
+  policy: AdmissionPolicyDocument
+): policy is AdmissionPolicyV2 =>
+  policy.schemaVersion === "airlock/admission-policy/v2"
+
+/**
+ * The endpoint grants a policy carries. A v1 document carries none: it has no
+ * class vocabulary, so every one of its staged intents awaits a supervisor
+ * commit exactly as today.
+ */
+export const endpointGrantsOf = (
+  policy: AdmissionPolicyDocument
+): ReadonlyArray<EndpointGrantPolicy> =>
+  isAdmissionPolicyV2(policy) ? policy.endpointGrants : []
+
+/**
+ * Whether a durably staged intent is eligible for a supervisor-policy
+ * auto-commit under this policy. The caller acting on `AutoCommit` calls the
+ * ordinary `Outbox.commit`; this decision adds no dispatch path of its own.
+ */
+export const policyDispatchDecision = (
+  policy: AdmissionPolicyDocument,
+  intent: StagedIntentFacts
+): DispatchDecision => dispatchDecision(endpointGrantsOf(policy), intent)
 
 export class AdmissionResult extends Schema.Class<AdmissionResult>("AdmissionResult")({
   plan: Plan,
@@ -178,7 +250,21 @@ const pathContains = (scope: string, selector: string) => {
 const endpointAllows = (scope: string, selector: string) =>
   scope.endsWith("*") ? selector.startsWith(scope.slice(0, -1)) : scope === selector
 
-const allowedBy = (policy: AdmissionPolicy, requirement: ResourceRequirement) => {
+/**
+ * v1 keeps its raw string prefix verbatim. v2 matches on the canonical
+ * `scheme://host/path`, so a selector can never be satisfied by a URL that
+ * `fetch` would normalize to a different resource.
+ */
+const endpointAdmitted = (policy: AdmissionPolicyDocument, selector: string) => {
+  if (!isAdmissionPolicyV2(policy)) {
+    return policy.endpointAllowlist.some((scope) => endpointAllows(scope, selector))
+  }
+  const canonical = canonicalizeEndpoint(selector)
+  if (Either.isLeft(canonical)) return false
+  return fittingEndpointGrants(policy.endpointGrants, canonical.right).length > 0
+}
+
+const allowedBy = (policy: AdmissionPolicyDocument, requirement: ResourceRequirement) => {
   if (policy.profile === "compatibility") return true
   switch (requirement.kind) {
     case "path":
@@ -201,7 +287,7 @@ const allowedBy = (policy: AdmissionPolicy, requirement: ResourceRequirement) =>
       // Endpoint realms name the remote system, not the local Cell. The
       // explicit endpoint allowlist—not a misleading local-realm check—is
       // the native-contained gate.
-      return policy.endpointAllowlist.some((scope) => endpointAllows(scope, requirement.selector))
+      return endpointAdmitted(policy, requirement.selector)
     default:
       return false
   }
@@ -384,6 +470,72 @@ const validateNodeRequirements = (
     }
   })
 
+const endpointRequirementId = (draft: PlanDraft, node: PlanNode, selector: string) =>
+  draft.requirements.find(
+    (candidate) =>
+      node.requires.includes(candidate.id) &&
+      candidate.kind === "endpoint" &&
+      candidate.selector === selector
+  )?.id ?? `${node.id}/endpoint`
+
+/**
+ * Method, hold window, and inline body bytes are node-level facts, so grant
+ * fit for them is checked here rather than in the requirement loop. Every
+ * failure is a denial: a class or budget mismatch is never a
+ * downgrade-and-proceed.
+ */
+const validateEndpointGrantFit = (
+  draft: PlanDraft,
+  grants: ReadonlyArray<EndpointGrantPolicy>
+): Effect.Effect<void, AdmissionDenied> =>
+  Effect.gen(function* () {
+    for (const node of draft.nodes) {
+      if (node._tag !== "RequestExternal") continue
+      const requirementId = endpointRequirementId(draft, node, node.endpoint)
+      const canonical = canonicalizeEndpoint(node.endpoint)
+      if (Either.isLeft(canonical)) {
+        return yield* new AdmissionDenied({
+          requirementId,
+          reason: `endpoint ${node.endpoint} is not canonical (${canonical.left.reason}) and fits no endpoint grant`
+        })
+      }
+      const fitting = fittingEndpointGrants(grants, canonical.right)
+      if (fitting.length === 0) {
+        return yield* new AdmissionDenied({
+          requirementId,
+          reason: `endpoint ${canonical.right.target} fits no endpoint grant`
+        })
+      }
+      const withMethod = fitting.filter((grant) =>
+        endpointGrantMethodFits(grant, node.method)
+      )
+      if (withMethod.length === 0) {
+        return yield* new AdmissionDenied({
+          requirementId,
+          reason: `method ${node.method} is not granted for endpoint ${canonical.right.target}`
+        })
+      }
+      const withHold = withMethod.filter((grant) =>
+        endpointGrantHoldFits(grant, node.holdMillis)
+      )
+      if (withHold.length === 0) {
+        return yield* new AdmissionDenied({
+          requirementId,
+          reason: `hold ${node.holdMillis}ms is outside the granted hold policy for ${canonical.right.target}`
+        })
+      }
+      const bodyBytes = node.body === undefined
+        ? undefined
+        : new TextEncoder().encode(node.body).byteLength
+      if (!withHold.some((grant) => endpointGrantBodyFits(grant, bodyBytes))) {
+        return yield* new AdmissionDenied({
+          requirementId,
+          reason: `inline body of ${bodyBytes ?? 0} bytes exceeds the granted budget for ${canonical.right.target}`
+        })
+      }
+    }
+  })
+
 const makeIdentity = (requirement: ResourceRequirement) =>
   `lexical:${requirement.kind}:${requirement.realm}:${
     requirement.kind === "path" || requirement.kind === "executable"
@@ -398,7 +550,7 @@ const makeIdentity = (requirement: ResourceRequirement) =>
  */
 export const admit = (
   draft: PlanDraft,
-  policy: AdmissionPolicy,
+  policy: AdmissionPolicyDocument,
   now: Date = new Date()
 ): Effect.Effect<AdmissionResult, AdmissionError> =>
   Effect.gen(function* () {
@@ -409,6 +561,12 @@ export const admit = (
       })
     }
     yield* validateNodeRequirements(draft)
+    if (isAdmissionPolicyV2(policy)) {
+      const rejection = validateEndpointGrants(policy.endpointGrants)
+      if (rejection !== undefined) {
+        return yield* contractInvalid(draft.id, rejection.field, rejection.reason)
+      }
+    }
     if (policy.profile !== "compatibility") {
       const duplicateRoot = duplicates(
         policy.executableEdges.map((edge) => edge.root)
@@ -475,7 +633,11 @@ export const admit = (
       pathAllowlist: policy.pathAllowlist,
       executableAllowlist: policy.executableAllowlist,
       executableEdges: policy.executableEdges,
-      endpointAllowlist: policy.endpointAllowlist
+      // v1 digests stay byte-identical: the endpoint field a policy actually
+      // carries is the one that enters its digest.
+      ...(isAdmissionPolicyV2(policy)
+        ? { endpointGrants: policy.endpointGrants }
+        : { endpointAllowlist: policy.endpointAllowlist })
     })
     const validUntil = policy.grantTtlMillis === undefined
       ? undefined
@@ -493,6 +655,9 @@ export const admit = (
           reason: "executable selectors must be absolute paths"
         })
       }
+    }
+    if (policy.profile !== "compatibility" && isAdmissionPolicyV2(policy)) {
+      yield* validateEndpointGrantFit(draft, policy.endpointGrants)
     }
     if (policy.profile !== "compatibility") {
       for (const node of draft.nodes) {
