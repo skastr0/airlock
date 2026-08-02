@@ -1,7 +1,18 @@
 # RFC: Dispatch classes and the EndpointProvider contract
 
-> Status: **candidate**. Nothing in this document is implemented, an invariant,
-> or a v1 contract unless it explicitly cites current source or a named test.
+> Status: **candidate design, partially implemented**. This RFC was authored at
+> commit `ffd3733`, and all `src/`/`test/` line citations below are pinned to
+> that commit's tree unless a citation says otherwise. Since then, three of its
+> candidate seams have been implemented in this tree: admission-policy v2 with
+> dispatch-class endpoint grants (§1.3; `src/admission/Admission.ts`,
+> `AdmissionPolicyV2`), tool-definition v2 (§2.2, §2.4;
+> `src/tools/Definitions.ts`), and the `RequestExternal` read slice with
+> supervisor-policy auto-commit through `Outbox.commit`
+> (`SupervisorDispatch`/`DispatchPolicy`) — see
+> [`docs/evidence/external-read-slice.md`](../evidence/external-read-slice.md)
+> for exactly what ran and its claim boundary. Everything else remains
+> unimplemented design direction: nothing here is an invariant or a v1
+> contract unless it explicitly cites source or a named test.
 > The two laws in [`DESIGN.md`](../../DESIGN.md) (Hold.reap sole unlink; the
 > ratchet) are untouched. Every schema change proposed here is a contract
 > change under the checklist in
@@ -40,16 +51,18 @@ wire-capable call site.
 
 ### 1.1 The problem
 
-The implemented `AdmissionPolicy` (`src/admission/Admission.ts:47–71`) admits
-`RequestExternal` endpoints through a flat `endpointAllowlist`
-(`src/admission/Admission.ts:69`), and every admitted intent then waits for a
-manual supervisor `Outbox.commit`. That is correct for irreversible sends, but
-it makes a plain external *read* (a `GET` against an idempotent endpoint) pay
+At authoring time, the v1 `AdmissionPolicy` (`src/admission/Admission.ts:47–71`
+at `ffd3733`) admitted `RequestExternal` endpoints through a flat
+`endpointAllowlist` (`src/admission/Admission.ts:69` at `ffd3733`), and every
+admitted intent then waited for a manual supervisor `Outbox.commit`. That is
+correct for irreversible sends, but
+it made a plain external *read* (a `GET` against an idempotent endpoint) pay
 the same interactive latency as an irreversible mutation. The counterexample
 required by the contract-change checklist: an agent program that polls a
-read-only status endpoint cannot complete unattended even when the supervisor
-would grant that read unconditionally — the current policy schema has no
-vocabulary to say so.
+read-only status endpoint could not complete unattended even when the
+supervisor would grant that read unconditionally — the v1 policy schema has
+no vocabulary to say so. This is the counterexample the implemented
+`AdmissionPolicyV2` (§1.3) discharges.
 
 ### 1.2 Design direction: classes are grant-side facts
 
@@ -81,7 +94,12 @@ add Plan constructors, dispatch, or bypass runtime result validation"
 (ARCHITECTURE.md, tool-definition paragraph; enforced at
 `src/tools/Definitions.ts:481–485` for lowering kinds).
 
-### 1.3 Candidate: admission policy v2 schema
+### 1.3 Admission policy v2 schema (implemented candidate seam)
+
+> Implemented since authoring as `AdmissionPolicyV2`
+> (`src/admission/Admission.ts`); evidence:
+> [`docs/evidence/external-read-slice.md`](../evidence/external-read-slice.md).
+> The text below is the design as proposed.
 
 Versioned, not aliased: `schemaVersion: "airlock/admission-policy/v2"`
 supersedes `"airlock/admission-policy/v1"`
@@ -220,7 +238,12 @@ RFC's earlier working placeholder "request-external" is dropped in its favor.
 `StageExternal → AppendReceipt` (`docs/contracts/plan-runtime.md:151`), i.e.
 it enqueues durable Outbox state and nothing else.
 
-### 2.2 Candidate: v2 action shape
+### 2.2 v2 action shape (implemented candidate seam)
+
+> Implemented since authoring (`src/tools/Definitions.ts`, `v2` schema
+> literal); evidence:
+> [`docs/evidence/external-read-slice.md`](../evidence/external-read-slice.md).
+> The text below is the design as proposed.
 
 `schemaVersion: "airlock/tool-definition/v2"` (supersedes the `v1` literal at
 `src/tools/Definitions.ts:149`). An `enqueue`-lowered action maps
@@ -331,7 +354,7 @@ New tagged errors, following the house pattern
 (`Schema.TaggedError`, e.g. `src/tools/Definitions.ts:186–199`):
 
 ```text
-ToolDispatchClassAssertionRejected   // definition/program text tried to name or widen a class
+ToolGrantAssertionRejected           // definition/program text tried to name or widen a class or commit mode (implemented: src/tools/Definitions.ts, `ToolGrantAssertionRejected`)
 ToolSecretPlacementRejected          // Secret template targeted an agent-visible position
 ToolEnqueueContractRejected          // request template cannot map totally onto RequestExternalNode
 ```
