@@ -1,0 +1,29 @@
+let made = file.mkdir({
+  path: "released/v1",
+  parents: true
+})
+assert made.state == "applied", "mkdir released/v1 failed"
+
+let copied = file.copy({
+  source: "staging/app.txt",
+  destination: "released/v1/app.txt"
+})
+assert copied.state == "applied", "copy app.txt failed"
+
+let moved = file.move({
+  source: "staging/notes.txt",
+  destination: "released/v1/notes.txt"
+})
+assert moved.state == "applied", "move notes.txt failed"
+
+let removed = file.remove({
+  path: "staging/app.txt"
+})
+assert removed.state == "applied", "remove staging/app.txt failed"
+
+return {
+  made: made.state,
+  copied: copied.state,
+  moved: moved.state,
+  removed: removed.state
+}

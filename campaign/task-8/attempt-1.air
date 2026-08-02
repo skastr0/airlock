@@ -1,0 +1,38 @@
+let sorted = process.run({
+  executable: "/usr/bin/sort",
+  args: ["index/raw.txt"],
+  cwd: workspace,
+  env: {
+    LANG: "C"
+  },
+  stdin: "discard",
+  stdout: "capture",
+  stderr: "capture",
+  cellProfile: "compatibility"
+})
+assert sorted.state == "succeeded", "sort failed"
+
+let deduped = process.run({
+  executable: "/usr/bin/uniq",
+  args: [],
+  cwd: workspace,
+  env: {
+    LANG: "C"
+  },
+  stdin: {
+    kind: "artifact",
+    id: sorted.stdout_artifact.id
+  },
+  stdout: "capture",
+  stderr: "capture",
+  cellProfile: "compatibility"
+})
+assert deduped.state == "succeeded", "uniq failed"
+
+let written = file.write({
+  path: "out/index.txt",
+  content: deduped.stdout
+})
+assert written.state == "applied", "write failed"
+
+return { index: deduped.stdout }

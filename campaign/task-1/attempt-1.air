@@ -1,0 +1,30 @@
+let notes = file.glob({
+  root: workspace,
+  pattern: "notes/*.md"
+})
+
+let collated = process.run({
+  executable: "/bin/cat",
+  args: notes,
+  cwd: workspace,
+  stdin: "discard",
+  stdout: "capture",
+  stderr: "capture",
+  cellProfile: "compatibility"
+})
+assert collated.state == "succeeded", "cat failed"
+
+let written = file.write({
+  path: "out/collation.md",
+  sourceArtifact: collated.stdout_artifact.id
+})
+assert written.state == "applied", "write failed"
+
+let meta = file.stat({
+  path: "out/collation.md"
+})
+
+return {
+  collated: notes,
+  bytes: meta.size
+}

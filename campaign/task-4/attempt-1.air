@@ -1,0 +1,35 @@
+let selected = process.run({
+  executable: "/usr/bin/grep",
+  args: ["ERROR", "logs/service.log"],
+  cwd: workspace,
+  stdin: "discard",
+  stdout: "capture",
+  stderr: "capture",
+  cellProfile: "compatibility"
+})
+assert selected.state == "succeeded", "grep failed to select ERROR lines"
+
+let upper = process.run({
+  executable: "/usr/bin/tr",
+  args: ["a-z", "A-Z"],
+  cwd: workspace,
+  stdin: {
+    kind: "artifact",
+    id: selected.stdout_artifact.id
+  },
+  stdout: "capture",
+  stderr: "capture",
+  cellProfile: "compatibility"
+})
+assert upper.state == "succeeded", "tr failed to upper-case the selected lines"
+
+let written = file.write({
+  path: "out/errors.txt",
+  content: upper.stdout
+})
+assert written.state == "applied", "write of out/errors.txt failed"
+
+return {
+  selected: selected.stdout,
+  transformed: upper.stdout
+}

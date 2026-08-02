@@ -1,0 +1,18 @@
+let counted = process.run({
+  executable: "/usr/bin/grep",
+  args: ["-c", "^## ", "source/input.md"],
+  cwd: workspace,
+  stdin: "discard",
+  stdout: "capture",
+  stderr: "capture",
+  cellProfile: "compatibility"
+})
+assert counted.state == "succeeded", "grep heading count failed"
+
+let written = file.write({
+  path: "out/report.md",
+  content: "headings=" + counted.stdout + "source=source/input.md"
+})
+assert written.state == "applied", "report write failed"
+
+return { headings: counted.stdout }

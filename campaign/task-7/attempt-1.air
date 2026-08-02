@@ -1,0 +1,26 @@
+let documents = file.glob({
+  root: "corpus",
+  pattern: "*.txt"
+})
+
+let counted = process.run({
+  executable: "/usr/bin/wc",
+  args: ["-w"] + documents,
+  cwd: workspace,
+  stdin: "discard",
+  stdout: "capture",
+  stderr: "capture",
+  cellProfile: "compatibility"
+})
+assert counted.state == "succeeded", "wc failed"
+
+let written = file.write({
+  path: "out/summary.txt",
+  content: counted.stdout
+})
+assert written.state == "applied", "write failed"
+
+return {
+  documents: documents,
+  summary: counted.stdout
+}

@@ -1,0 +1,34 @@
+let entries = file.list({ path: "assets" })
+
+let found = process.run({
+  executable: "/usr/bin/find",
+  args: ["assets", "-type", "f"],
+  cwd: workspace,
+  stdin: "discard",
+  stdout: "capture",
+  stderr: "capture",
+  cellProfile: "compatibility"
+})
+assert found.state == "succeeded", "find failed"
+
+let sorted = process.run({
+  executable: "/usr/bin/sort",
+  args: [],
+  cwd: workspace,
+  stdin: {
+    kind: "artifact",
+    id: found.stdout_artifact.id
+  },
+  stdout: "capture",
+  stderr: "capture",
+  cellProfile: "compatibility"
+})
+assert sorted.state == "succeeded", "sort failed"
+
+let written = file.write({
+  path: "out/manifest.txt",
+  content: sorted.stdout
+})
+assert written.state == "applied", "write failed"
+
+return { entries: entries, manifest: sorted.stdout }

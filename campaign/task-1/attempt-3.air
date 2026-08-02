@@ -1,0 +1,54 @@
+let notes = file.glob({
+  root: workspace,
+  pattern: "notes/*.md"
+})
+
+let collated = process.run({
+  executable: "/bin/cat",
+  args: notes,
+  cwd: workspace,
+  stdin: "discard",
+  stdout: "capture",
+  stderr: "capture",
+  cellProfile: "compatibility"
+})
+assert collated.state == "succeeded", "cat failed"
+
+let written = file.write({
+  path: "out/collation.md",
+  sourceArtifact: collated.stdout_artifact.id
+})
+assert written.state == "applied", "write failed"
+
+let counted = process.run({
+  executable: "/usr/bin/wc",
+  args: ["-c"],
+  cwd: workspace,
+  stdin: {
+    kind: "artifact",
+    id: collated.stdout_artifact.id
+  },
+  stdout: "capture",
+  stderr: "capture",
+  cellProfile: "compatibility"
+})
+assert counted.state == "succeeded", "wc failed"
+
+let cleaned = process.run({
+  executable: "/usr/bin/tr",
+  args: ["-d", " \n"],
+  cwd: workspace,
+  stdin: {
+    kind: "artifact",
+    id: counted.stdout_artifact.id
+  },
+  stdout: "capture",
+  stderr: "capture",
+  cellProfile: "compatibility"
+})
+assert cleaned.state == "succeeded", "tr failed"
+
+return {
+  collated: notes,
+  bytes: cleaned.stdout
+}
