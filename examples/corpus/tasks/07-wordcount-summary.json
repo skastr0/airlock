@@ -1,0 +1,30 @@
+{
+  "schemaVersion": "airlock/corpus-task/v1",
+  "id": "wordcount-summary",
+  "goal": "Glob every corpus/*.txt document, run /usr/bin/wc -w over the globbed list in one invocation, and write the captured stdout to out/summary.txt. Assert the invocation succeeded. Return a record { documents: <the globbed list>, summary: <wc stdout> }.",
+  "workspaceFixture": {
+    "directories": ["out"],
+    "files": [
+      { "path": "corpus/doc1.txt", "content": "one two three four five\n" },
+      { "path": "corpus/doc2.txt", "content": "six seven eight\n" }
+    ]
+  },
+  "notes": [
+    "A captured list value may be supplied directly as process.run args.",
+    "/usr/bin/wc -w prints one line per input plus a total line when given more than one path."
+  ],
+  "successPredicate": {
+    "programState": "succeeded",
+    "files": [
+      {
+        "path": "out/summary.txt",
+        "minBytes": 10,
+        "contains": ["doc1.txt", "doc2.txt", "total"]
+      }
+    ],
+    "result": [
+      { "path": "documents", "minLength": 2 },
+      { "path": "summary", "contains": "total" }
+    ]
+  }
+}

@@ -1,0 +1,30 @@
+{
+  "schemaVersion": "airlock/corpus-task/v1",
+  "id": "promote-staged-build",
+  "goal": "Promote a staged build: create released/v1, copy staging/app.txt to released/v1/app.txt, move staging/notes.txt to released/v1/notes.txt, then remove staging/app.txt so only the released copy survives. Return a record { made: <mkdir state>, copied: <copy state>, moved: <move state>, removed: <remove state> }.",
+  "workspaceFixture": {
+    "directories": ["released"],
+    "files": [
+      { "path": "staging/app.txt", "content": "APP-BUILD-42\n" },
+      { "path": "staging/notes.txt", "content": "NOTES-BUILD-42\n" }
+    ]
+  },
+  "notes": [
+    "Every mutation verb is a rename: file.remove and file.move retain the previous bytes in Hold, so the attempt records at least one held act."
+  ],
+  "successPredicate": {
+    "programState": "succeeded",
+    "files": [
+      { "path": "released/v1/app.txt", "equals": "APP-BUILD-42\n" },
+      { "path": "released/v1/notes.txt", "equals": "NOTES-BUILD-42\n" }
+    ],
+    "absent": ["staging/app.txt", "staging/notes.txt"],
+    "result": [
+      { "path": "made", "equals": "applied" },
+      { "path": "copied", "equals": "applied" },
+      { "path": "moved", "equals": "applied" },
+      { "path": "removed", "equals": "applied" }
+    ],
+    "heldCountAtLeast": 1
+  }
+}

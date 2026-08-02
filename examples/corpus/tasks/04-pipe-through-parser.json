@@ -1,0 +1,31 @@
+{
+  "schemaVersion": "airlock/corpus-task/v1",
+  "id": "pipe-through-parser",
+  "goal": "Select every ERROR line from logs/service.log with /usr/bin/grep, pipe that captured stdout artifact into /usr/bin/tr as stdin to upper-case it, and write the transformed bytes to out/errors.txt. Return a record { selected: <grep stdout>, transformed: <tr stdout> }.",
+  "workspaceFixture": {
+    "directories": ["out"],
+    "files": [
+      {
+        "path": "logs/service.log",
+        "content": "INFO boot ok\nERROR disk full\nWARN retrying\nERROR socket closed\nINFO shutdown\n"
+      }
+    ]
+  },
+  "notes": [
+    "process.run stdin accepts { kind: \"artifact\", id: <previous>.stdout_artifact.id } to connect two processes without a shell pipe."
+  ],
+  "successPredicate": {
+    "programState": "succeeded",
+    "files": [
+      {
+        "path": "out/errors.txt",
+        "contains": ["ERROR DISK FULL", "ERROR SOCKET CLOSED"],
+        "notContains": ["WARN", "INFO"]
+      }
+    ],
+    "result": [
+      { "path": "selected", "contains": "ERROR disk full" },
+      { "path": "transformed", "contains": "ERROR SOCKET CLOSED" }
+    ]
+  }
+}

@@ -1,0 +1,29 @@
+{
+  "schemaVersion": "airlock/corpus-task/v1",
+  "id": "heading-report",
+  "goal": "Read source/input.md, count how many lines begin with \"## \" using /usr/bin/grep -c, and write out/report.md whose first line is \"headings=<count>\" followed by the literal line \"source=source/input.md\". Return a record { headings: <the grep stdout string> }.",
+  "workspaceFixture": {
+    "directories": ["out"],
+    "files": [
+      {
+        "path": "source/input.md",
+        "content": "# Title\n\n## Alpha\nbody alpha\n\n## Beta\nbody beta\n\n## Gamma\nbody gamma\n\ntrailing note\n"
+      }
+    ]
+  },
+  "notes": [
+    "String concatenation with + is available; captured process stdout is a string.",
+    "file.write takes either content: <string> or sourceArtifact: <artifact id>."
+  ],
+  "successPredicate": {
+    "programState": "succeeded",
+    "files": [
+      {
+        "path": "out/report.md",
+        "minBytes": 12,
+        "contains": ["headings=3", "source=source/input.md"]
+      }
+    ],
+    "result": [{ "path": "headings", "contains": "3" }]
+  }
+}

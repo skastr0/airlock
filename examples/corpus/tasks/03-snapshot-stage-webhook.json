@@ -1,0 +1,28 @@
+{
+  "schemaVersion": "airlock/corpus-task/v1",
+  "id": "snapshot-stage-webhook",
+  "goal": "Snapshot the state/ directory into out/state.tgz with /usr/bin/tar (gzip, COPYFILE_DISABLE=1, LANG=C), confirm the archive is non-empty with file.inspect, then stage exactly one POST intent to the supplied endpoint binding with a JSON body announcing the snapshot. Do not attempt to dispatch. Return a record { bytes: <archive byte count>, staged: <the http.stage state> }.",
+  "workspaceFixture": {
+    "directories": ["out"],
+    "files": [
+      { "path": "state/db.txt", "content": "row-1\nrow-2\nrow-3\n" },
+      { "path": "state/config.json", "content": "{\"realm\":\"local\",\"retain\":7}\n" }
+    ]
+  },
+  "bindings": {
+    "endpoint": "http://127.0.0.1:8787/airlock-fixture/webhook"
+  },
+  "notes": [
+    "The endpoint binding names a local fixture HTTP server. http.stage never crosses the wire; only a supervisor Outbox commit dispatches.",
+    "http.stage returns { state, action, emission_id, method, endpoint, hold_millis }."
+  ],
+  "successPredicate": {
+    "programState": "succeeded",
+    "files": [{ "path": "out/state.tgz", "minBytes": 100 }],
+    "result": [
+      { "path": "bytes", "minimum": 100 },
+      { "path": "staged", "equals": "staged" }
+    ],
+    "outboxStagedCount": 1
+  }
+}

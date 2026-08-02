@@ -1,0 +1,33 @@
+{
+  "schemaVersion": "airlock/corpus-task/v1",
+  "id": "collate-documents",
+  "goal": "Collate every markdown note under notes/ into a single out/collation.md, in the order file.glob returns them. Return a record { collated: <the globbed note list>, bytes: <byte length of out/collation.md> }.",
+  "workspaceFixture": {
+    "directories": ["out"],
+    "files": [
+      { "path": "notes/01-intro.md", "content": "# Intro\nMARKER-INTRO\n" },
+      { "path": "notes/02-method.md", "content": "# Method\nMARKER-METHOD\n" },
+      { "path": "notes/03-result.md", "content": "# Result\nMARKER-RESULT\n" },
+      { "path": "notes/ignore.txt", "content": "MARKER-EXCLUDED\n" }
+    ]
+  },
+  "notes": [
+    "file.glob returns absolute paths in sorted order; a captured list may be passed directly as process.run args.",
+    "file.write accepts sourceArtifact: <process result>.stdout_artifact.id."
+  ],
+  "successPredicate": {
+    "programState": "succeeded",
+    "files": [
+      {
+        "path": "out/collation.md",
+        "minBytes": 40,
+        "contains": ["MARKER-INTRO", "MARKER-METHOD", "MARKER-RESULT"],
+        "notContains": ["MARKER-EXCLUDED"]
+      }
+    ],
+    "result": [
+      { "path": "collated", "minLength": 3 },
+      { "path": "bytes", "minimum": 40 }
+    ]
+  }
+}

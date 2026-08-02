@@ -1,0 +1,31 @@
+{
+  "schemaVersion": "airlock/corpus-task/v1",
+  "id": "inventory-manifest",
+  "goal": "Inventory the assets/ tree: capture a file.list of assets/, then run /usr/bin/find over assets for regular files and pipe its captured stdout into /usr/bin/sort so the manifest is deterministic, and write the sorted listing to out/manifest.txt. Return a record { entries: <the file.list result>, manifest: <sorted stdout> }.",
+  "workspaceFixture": {
+    "directories": ["out"],
+    "files": [
+      { "path": "assets/gamma.bin", "content": "gamma payload\n" },
+      { "path": "assets/alpha.bin", "content": "alpha payload\n" },
+      { "path": "assets/beta.bin", "content": "beta payload\n" }
+    ]
+  },
+  "notes": [
+    "file.list returns [{ name, stat: { path, kind, bytes, mode, device, inode } }].",
+    "Run /usr/bin/find with cwd: workspace and a relative root so the manifest stays workspace-relative."
+  ],
+  "successPredicate": {
+    "programState": "succeeded",
+    "files": [
+      {
+        "path": "out/manifest.txt",
+        "contains": ["assets/alpha.bin", "assets/beta.bin", "assets/gamma.bin"]
+      }
+    ],
+    "result": [
+      { "path": "entries", "minLength": 3 },
+      { "path": "entries.0.stat.kind", "equals": "file" },
+      { "path": "manifest", "contains": "assets/alpha.bin" }
+    ]
+  }
+}

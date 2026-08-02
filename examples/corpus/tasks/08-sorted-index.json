@@ -1,0 +1,28 @@
+{
+  "schemaVersion": "airlock/corpus-task/v1",
+  "id": "sorted-index",
+  "goal": "Build a deterministic index: run /usr/bin/sort over index/raw.txt, pipe the captured stdout artifact into /usr/bin/uniq as stdin, and write the de-duplicated sorted lines to out/index.txt. Return a record { index: <uniq stdout> }.",
+  "workspaceFixture": {
+    "directories": ["out"],
+    "files": [
+      {
+        "path": "index/raw.txt",
+        "content": "delta\nalpha\ncharlie\nalpha\nbravo\ncharlie\nalpha\n"
+      }
+    ]
+  },
+  "notes": [
+    "Set env LANG=C on both invocations so the collation order is byte order.",
+    "/usr/bin/uniq only collapses adjacent duplicates, so it must consume sorted input."
+  ],
+  "successPredicate": {
+    "programState": "succeeded",
+    "files": [
+      {
+        "path": "out/index.txt",
+        "equals": "alpha\nbravo\ncharlie\ndelta\n"
+      }
+    ],
+    "result": [{ "path": "index", "equals": "alpha\nbravo\ncharlie\ndelta\n" }]
+  }
+}
