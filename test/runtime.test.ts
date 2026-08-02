@@ -37,11 +37,11 @@ import {
   RuntimeInitialArtifact,
   RuntimeLive
 } from "../src/runtime/index.ts"
-import { MacosExclusiveRenameTestLive } from "./support/ExclusiveRenameTestLive.ts"
+import { ExclusiveRenameTestLive } from "./support/ExclusiveRenameTestLive.ts"
 import { runtimeAuthority as plan } from "./support/RuntimeAuthority.ts"
 
 const HoldTestLive = HoldLayer.pipe(
-  Layer.provide(MacosExclusiveRenameTestLive)
+  Layer.provide(ExclusiveRenameTestLive)
 )
 
 const node = (id: string) => NodeId.make(id)

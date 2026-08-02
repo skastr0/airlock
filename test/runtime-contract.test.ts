@@ -242,8 +242,11 @@ const outboxLayer = (requests: Array<string>) =>
       }))
     },
     inspect: () => Effect.die("unused"),
-    commit: () => Effect.die("Runtime stages but never commits"),
+    // These plans carry no dispatch authorization, so staging is the whole
+    // lowering: a commit here would be an unauthorized second effect.
+    commit: () => Effect.die("Runtime stages but never commits unauthorized"),
     cancel: () => Effect.die("unused"),
+    response: () => Effect.die("unused"),
     pending: Effect.succeed([]),
     flush: Effect.die("Runtime never flushes Outbox")
   }))

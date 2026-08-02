@@ -36,7 +36,7 @@ import {
   RuntimeRunSnapshot,
   makeFileRuntimeRunJournal
 } from "../src/runtime/index.ts"
-import { MacosExclusiveRenameTestLive } from "./support/ExclusiveRenameTestLive.ts"
+import { ExclusiveRenameTestLive } from "./support/ExclusiveRenameTestLive.ts"
 import { runtimeAuthority } from "./support/RuntimeAuthority.ts"
 
 const realDelay = (milliseconds: number) =>
@@ -51,7 +51,7 @@ const impossibleCell = Layer.succeed(Cell, Cell.of({
 }))
 
 const holdLive = HoldLayer.pipe(
-  Layer.provide(MacosExclusiveRenameTestLive)
+  Layer.provide(ExclusiveRenameTestLive)
 )
 
 const processReceipt = (

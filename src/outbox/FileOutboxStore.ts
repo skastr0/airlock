@@ -71,6 +71,20 @@ export interface FileOutboxStore {
     state: OutboxState,
     outcomeJson: string
   ) => Effect.Effect<void, OutboxStorageFailed>
+  /**
+   * The bounded response capture. It shares the owner-only emission directory
+   * with dispatch.json because a response body is attacker-controlled content
+   * that no listing, manifest, or receipt may serialize.
+   */
+  readonly writeResponse: (
+    id: EmissionId,
+    state: OutboxState,
+    bytes: Uint8Array
+  ) => Effect.Effect<void, OutboxStorageFailed>
+  readonly readResponse: (
+    id: EmissionId,
+    state: OutboxState
+  ) => Effect.Effect<Uint8Array | undefined, OutboxStorageFailed>
   readonly list: (
     state?: OutboxState
   ) => Effect.Effect<
@@ -121,17 +135,22 @@ export const makeFileOutboxStore = Effect.gen(function* () {
 
   const writeNewDurable = (
     target: string,
-    content: string,
+    content: string | Uint8Array,
     operation: string,
     id?: string
   ) =>
     Effect.scoped(
       fs.open(target, { flag: "wx", mode: 0o600 }).pipe(
-        Effect.flatMap((file) =>
-          file.writeAll(encoder.encode(content)).pipe(
-            Effect.zipRight(file.sync)
-          )
-        ),
+        Effect.flatMap((file) => {
+          const bytes =
+            typeof content === "string" ? encoder.encode(content) : content
+          // An empty capture is a real outcome (a 204, a bodiless redirect).
+          // `writeAll` refuses a zero-length write, so the durable empty file
+          // is created and synced without one.
+          return (bytes.byteLength === 0
+            ? Effect.void
+            : file.writeAll(bytes)).pipe(Effect.zipRight(file.sync))
+        }),
         Effect.mapError((cause) => fail(operation, cause, id))
       )
     )
@@ -139,7 +158,7 @@ export const makeFileOutboxStore = Effect.gen(function* () {
   const writeReplaceDurable = (
     directory: string,
     targetName: string,
-    content: string,
+    content: string | Uint8Array,
     operation: string,
     id: EmissionId
   ) =>
@@ -335,6 +354,36 @@ export const makeFileOutboxStore = Effect.gen(function* () {
       )
     )
 
+  const writeResponse = (
+    id: EmissionId,
+    state: OutboxState,
+    bytes: Uint8Array
+  ) =>
+    validateId(id).pipe(
+      Effect.zipRight(
+        writeReplaceDurable(
+          statePath(id, state),
+          "response.bin",
+          bytes,
+          "write-response",
+          id
+        )
+      )
+    )
+
+  const readResponse = (id: EmissionId, state: OutboxState) =>
+    Effect.gen(function* () {
+      yield* validateId(id)
+      const target = path.join(statePath(id, state), "response.bin")
+      const present = yield* fs
+        .exists(target)
+        .pipe(Effect.mapError((cause) => fail("inspect-response", cause, id)))
+      if (!present) return undefined
+      return yield* fs
+        .readFile(target)
+        .pipe(Effect.mapError((cause) => fail("read-response", cause, id)))
+    })
+
   const list = (wanted?: OutboxState) =>
     entries.pipe(
       Effect.flatMap((items) => {
@@ -385,9 +434,9 @@ export const makeFileOutboxStore = Effect.gen(function* () {
     )
   )
 
-  // V1 retains owner-only dispatch.json in terminal state directories. Its
-  // expiry must be implemented by the single authorized reaper, not by adding
-  // an Outbox-local unlink path.
+  // V1 retains owner-only dispatch.json and response.bin in terminal state
+  // directories. Their expiry must be implemented by the single authorized
+  // reaper, not by adding an Outbox-local unlink path.
   return {
     withExclusive,
     create,
@@ -396,6 +445,8 @@ export const makeFileOutboxStore = Effect.gen(function* () {
     readDispatch,
     transition,
     writeOutcome,
+    writeResponse,
+    readResponse,
     list,
     recoverCommitting
   } satisfies FileOutboxStore

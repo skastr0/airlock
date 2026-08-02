@@ -35,6 +35,7 @@ import {
   NativeWriteReceipt
 } from "../native/index.ts"
 import {
+  DispatchProvenance,
   Outbox,
   OutboxEmission,
   OutboxRecoveryRequired
@@ -44,7 +45,7 @@ import {
   Artifact,
   type Digest,
   type Handle,
-  type NodeId,
+  NodeId,
   type NodeState,
   type Plan,
   type PlanNode,
@@ -100,6 +101,29 @@ export class RuntimeInitialArtifact extends Schema.Class<RuntimeInitialArtifact>
   bytes: Schema.Uint8Array,
   mediaType: Schema.String,
   provenance: Schema.String
+}) {}
+
+/**
+ * One supervisor pre-authorization to commit a staged intent without a further
+ * human act. Only `auto` is expressible: a `supervisor` commit mode has no
+ * spelling here at all, so an absent authorization is the fail-closed default
+ * and an empty list reproduces the v1 posture exactly.
+ *
+ * Runtime does not compute this value and holds no policy. It is produced by
+ * the supervisor plane that owns the policy file, and it names the grant whose
+ * class permitted the pre-authorization so the receipt can carry it.
+ */
+export class RuntimeDispatchAuthorization extends Schema.Class<RuntimeDispatchAuthorization>(
+  "RuntimeDispatchAuthorization"
+)({
+  nodeId: NodeId,
+  commit: Schema.Literal("auto"),
+  grantId: Schema.String,
+  grantSelector: Schema.String,
+  /** The effective class the supervisor computed. Recorded, never re-derived here. */
+  dispatchClass: Schema.Literal("read"),
+  /** Canonical `scheme://host/path` the grant matched. */
+  endpoint: Schema.String
 }) {}
 
 export class RuntimeCellWorkspaceHeld extends Schema.TaggedClass<RuntimeCellWorkspaceHeld>()(
@@ -413,7 +437,12 @@ export class Runtime extends Context.Tag("airlock/Runtime")<
   {
     readonly execute: (
       authority: ExecutionAuthority,
-      initialArtifacts?: ReadonlyArray<RuntimeInitialArtifact>
+      initialArtifacts?: ReadonlyArray<RuntimeInitialArtifact>,
+      /**
+       * Supervisor pre-authorizations for policy auto-commit. Omitted means
+       * none: every staged intent then waits for an explicit supervisor act.
+       */
+      dispatchAuthorizations?: ReadonlyArray<RuntimeDispatchAuthorization>
     ) => Effect.Effect<
       RuntimeRun,
       RuntimePlanInvalid | RuntimeLifecycleFailure | RuntimeExecutionClaimRejected
@@ -1067,10 +1096,12 @@ const runtimeNodeContractFailure = (
       return undefined
     }
     case "RequestExternal": {
-      if (node.produces.length > 1) {
+      // Slot 0 is the staged-intent receipt; slot 1 is the bounded response
+      // capture, materialized only when a supervisor pre-authorized the commit.
+      if (node.produces.length > 2) {
         return planInvalid(
           plan,
-          `RequestExternal ${node.id} may produce at most one staged-intent artifact`
+          `RequestExternal ${node.id} may produce at most a staged-intent artifact and a bounded response artifact`
         )
       }
       if (node.endpoint.length === 0 || node.endpoint.includes("\0")) {
@@ -1246,9 +1277,11 @@ const materializeNodeArtifact = (
   artifacts: Map<ArtifactId, RuntimeArtifact>,
   bytes: Uint8Array,
   provenance: string,
-  mediaType: string
+  mediaType: string,
+  /** Slot in the node's declared outputs. A node that declared fewer slots produces nothing here. */
+  slot = 0
 ): ReadonlyArray<ArtifactId> => {
-  const id = node.produces[0]
+  const id = node.produces[slot]
   if (id === undefined) return []
   artifacts.set(id, artifact(id, bytes, provenance, { mediaType }))
   return [id]
@@ -1739,7 +1772,8 @@ const make = Effect.gen(function* () {
     cellWorkspaces: Map<NodeId, RuntimeCellWorkspace>,
     processes: Map<NodeId, RuntimeProcessEvidence>,
     recovery: Array<RuntimeRecoveryEvidence>,
-    handles: ReadonlyArray<Handle>
+    handles: ReadonlyArray<Handle>,
+    dispatch?: RuntimeDispatchAuthorization
   ): Effect.Effect<ReadonlyArray<ArtifactId>, RuntimeError> =>
     Effect.gen(function* () {
       yield* enforce(node)
@@ -2006,13 +2040,80 @@ const make = Effect.gen(function* () {
             })
           }
           const staged = stagedResult.right
-          return yield* materializeStructuredResult(
+
+          // Staging has durably completed. Everything below is the ordinary
+          // administrative commit path, entered only because the supervisor
+          // plane pre-authorized it for this node; there is no second wire
+          // site and no way to reach dispatch without the staged state above.
+          if (dispatch === undefined) {
+            return yield* materializeStructuredResult(
+              node,
+              artifacts,
+              OutboxEmission,
+              staged,
+              `request-external:${node.endpoint}`
+            )
+          }
+          const committedResult = yield* outbox.commit(
+            staged.id,
+            new DispatchProvenance({
+              committedBy: "policy-auto",
+              grantId: dispatch.grantId,
+              grantSelector: dispatch.grantSelector,
+              dispatchClass: dispatch.dispatchClass,
+              endpoint: dispatch.endpoint
+            })
+          ).pipe(Effect.either)
+          if (committedResult._tag === "Left") {
+            if (committedResult.left._tag === "OutboxRecoveryRequired") {
+              recovery.push(new RuntimeOutboxRecoveryEvidence({
+                nodeId: node.id,
+                operation: "policy auto-commit",
+                recovery: committedResult.left
+              }))
+              return yield* new RuntimeRecoveryRequired({
+                nodeId: node.id,
+                operation: "policy auto-commit",
+                causeTag: committedResult.left._tag,
+                reason: committedResult.left.reason
+              })
+            }
+            return yield* new RuntimeNodeFailure({
+              nodeId: node.id,
+              operation: "policy auto-commit",
+              reason: `${committedResult.left._tag}: ${errorReason(committedResult.left)}`
+            })
+          }
+          const committed = committedResult.right
+          const emitted = yield* materializeStructuredResult(
             node,
             artifacts,
             OutboxEmission,
-            staged,
+            committed,
             `request-external:${node.endpoint}`
           )
+          if (node.produces[1] === undefined) return emitted
+          // The response body reaches the program only here, as a bounded
+          // artifact whose size the Outbox already capped and recorded.
+          const responseBytes = yield* outbox.response(committed.id).pipe(
+            Effect.mapError((error) => new RuntimeNodeFailure({
+              nodeId: node.id,
+              operation: "read external response",
+              reason: `${error._tag}: ${errorReason(error)}`
+            }))
+          )
+          const captured = committed.outcome?.response
+          return [
+            ...emitted,
+            ...materializeNodeArtifact(
+              node,
+              artifacts,
+              responseBytes ?? new Uint8Array(0),
+              `request-external-response:${dispatch.endpoint}`,
+              captured?.contentType ?? "application/octet-stream",
+              1
+            )
+          ]
         }
       }
     })
@@ -2061,12 +2162,16 @@ const make = Effect.gen(function* () {
 
   const execute = (
     authority: ExecutionAuthority,
-    initialArtifacts: ReadonlyArray<RuntimeInitialArtifact> = []
+    initialArtifacts: ReadonlyArray<RuntimeInitialArtifact> = [],
+    dispatchAuthorizations: ReadonlyArray<RuntimeDispatchAuthorization> = []
   ): Effect.Effect<
     RuntimeRun,
     RuntimePlanInvalid | RuntimeLifecycleFailure | RuntimeExecutionClaimRejected
   > => {
     const plan = authority.admission.plan
+    const dispatchByNode = new Map(
+      dispatchAuthorizations.map((entry) => [entry.nodeId, entry] as const)
+    )
     const cellWorkspaces = new Map<NodeId, RuntimeCellWorkspace>()
     let ordered: ReadonlyArray<PlanNode> = []
     let startedAt: DateTime.Utc | undefined
@@ -2236,7 +2341,8 @@ const make = Effect.gen(function* () {
             cellWorkspaces,
             processes,
             recovery,
-            handles
+            handles,
+            dispatchByNode.get(node.id)
           ).pipe(Effect.either)
         const materialized = [...artifacts.keys()].filter(
           (id) => !artifactsBefore.has(id)

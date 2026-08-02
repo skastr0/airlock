@@ -72,9 +72,67 @@ export class RedactedEmissionRequest extends Schema.Class<RedactedEmissionReques
   body: Schema.optional(Schema.String)
 }) {}
 
+/**
+ * Who turned a durably staged intent into a dispatch. `policy-auto` is not a
+ * second dispatcher: it records that the trusted supervisor plane, not a human
+ * act, called the ordinary `Outbox.commit`.
+ */
+export const CommitAuthority = Schema.Literal("supervisor", "policy-auto")
+export type CommitAuthority = typeof CommitAuthority.Type
+
+/**
+ * The provenance a commit is asked to record. Outbox never computes a dispatch
+ * class and never reads a policy: the caller that already holds the supervisor
+ * grant supplies these facts, and Outbox writes them into the durable outcome
+ * and the Ledger so the receipt names the grant that authorized the wire.
+ *
+ * `endpoint` is the canonical `scheme://host/path` the grant matched — the
+ * endpoint actually dispatched to, with query and fragment excluded rather
+ * than redacted, because they never participate in a grant match.
+ */
+export class DispatchProvenance extends Schema.Class<DispatchProvenance>(
+  "DispatchProvenance"
+)({
+  committedBy: CommitAuthority,
+  /** Grant identity from the admitted authority; absent for a bare manual commit. */
+  grantId: Schema.optional(Schema.String),
+  /** The policy selector that matched, as written in the supervisor policy file. */
+  grantSelector: Schema.optional(Schema.String),
+  /**
+   * The supervisor's effective class, recorded and never decided here. The
+   * type is deliberately the single class a pre-authorized commit can carry:
+   * the whole class vocabulary lives in the supervisor policy module, and an
+   * Outbox receipt that could spell a wider class would be a second place to
+   * read one from. A manual supervisor commit records none.
+   */
+  dispatchClass: Schema.optional(Schema.Literal("read")),
+  endpoint: Schema.optional(Schema.String)
+}) {}
+
+/**
+ * Response metadata that is safe to keep in a receipt. The bytes themselves
+ * live in the owner-only emission directory and reach a program only as a
+ * bounded artifact; this record carries shape, never content.
+ */
+export class RedactedDispatchResponse extends Schema.Class<RedactedDispatchResponse>(
+  "RedactedDispatchResponse"
+)({
+  status: Schema.Number,
+  contentType: Schema.optional(Schema.String),
+  /** Bytes actually retained; never larger than `limitBytes`. */
+  retainedBytes: Schema.Number,
+  /** True when the endpoint sent more than the bound allowed. */
+  truncated: Schema.Boolean,
+  limitBytes: Schema.Number
+}) {}
+
 export class OutboxOutcome extends Schema.Class<OutboxOutcome>("OutboxOutcome")({
   status: Schema.Number,
   responseBytes: Schema.optional(Schema.Number),
+  /** Present once a dispatch completed; describes the bounded capture. */
+  response: Schema.optional(RedactedDispatchResponse),
+  /** Present once a dispatch completed; names the authority that committed. */
+  provenance: Schema.optional(DispatchProvenance),
   completedAt: Schema.DateTimeUtc
 }) {}
 

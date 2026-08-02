@@ -26,7 +26,7 @@ import {
   OutboxLive,
   OutboxRecoveryRequired
 } from "../src/Outbox.ts"
-import { MacosExclusiveRenameTestLive } from "./support/ExclusiveRenameTestLive.ts"
+import { ExclusiveRenameTestLive } from "./support/ExclusiveRenameTestLive.ts"
 
 type LedgerAct = "remove" | "reap" | "stage" | "commit"
 
@@ -87,7 +87,7 @@ describe("durable cancellation receipts", () => {
           })
         )
         const initialLayer = HoldLayer.pipe(
-          Layer.provideMerge(MacosExclusiveRenameTestLive),
+          Layer.provideMerge(ExclusiveRenameTestLive),
           Layer.provideMerge(noOpLedger),
           Layer.provideMerge(AirlockHome.layer(home)),
           Layer.provideMerge(BunContext.layer)
@@ -99,7 +99,7 @@ describe("durable cancellation receipts", () => {
 
         const ownerInLedger = yield* Deferred.make<void>()
         const contendedLayer = HoldLayer.pipe(
-          Layer.provideMerge(MacosExclusiveRenameTestLive),
+          Layer.provideMerge(ExclusiveRenameTestLive),
           Layer.provideMerge(
             blockingLedger("remove", ownerInLedger)
           ),
@@ -150,7 +150,7 @@ describe("durable cancellation receipts", () => {
           })
         )
         const initialLayer = HoldLayer.pipe(
-          Layer.provideMerge(MacosExclusiveRenameTestLive),
+          Layer.provideMerge(ExclusiveRenameTestLive),
           Layer.provideMerge(noOpLedger),
           Layer.provideMerge(AirlockHome.layer(home)),
           Layer.provideMerge(BunContext.layer)
@@ -162,7 +162,7 @@ describe("durable cancellation receipts", () => {
 
         const ledgerStarted = yield* Deferred.make<void>()
         const reaperLayer = HoldLayer.pipe(
-          Layer.provideMerge(MacosExclusiveRenameTestLive),
+          Layer.provideMerge(ExclusiveRenameTestLive),
           Layer.provideMerge(blockingLedger("reap", ledgerStarted)),
           Layer.provideMerge(AirlockHome.layer(home)),
           Layer.provideMerge(BunContext.layer)
@@ -205,7 +205,7 @@ describe("durable cancellation receipts", () => {
         yield* fs.writeFileString(target, "precious")
         const started = yield* Deferred.make<void>()
         const layer = HoldLayer.pipe(
-          Layer.provideMerge(MacosExclusiveRenameTestLive),
+          Layer.provideMerge(ExclusiveRenameTestLive),
           Layer.provideMerge(blockingLedger("remove", started)),
           Layer.provideMerge(AirlockHome.layer(home)),
           Layer.provideMerge(BunContext.layer)

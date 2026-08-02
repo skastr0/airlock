@@ -8,6 +8,7 @@ import {
 } from "./domain.ts"
 import { Ledger, type LedgerError } from "./Ledger.ts"
 import {
+  DispatchProvenance,
   EmissionDispatchUncertain,
   ExternalCommandIntent,
   type ExternalIntent,
@@ -23,6 +24,7 @@ import {
   PersistedOutboxManifest,
   PersistedOutboxOutcome,
   PrivateHttpDispatch,
+  RedactedDispatchResponse,
   RedactedEmissionRequest,
   UnsupportedExternalIntent
 } from "./outbox/Contract.ts"
@@ -32,16 +34,27 @@ import {
 } from "./outbox/FileOutboxStore.ts"
 
 export {
+  CommitAuthority,
+  DispatchProvenance,
   EmissionDispatchUncertain,
   ExternalCommandIntent,
   HttpExternalIntent,
   InvalidHoldDuration,
   InvalidOutboxIntent,
   OutboxEmission,
+  OutboxOutcome,
   OutboxStateCorrupt,
   OutboxStorageFailed,
+  RedactedDispatchResponse,
   UnsupportedExternalIntent
 } from "./outbox/Contract.ts"
+
+/**
+ * The bound on a captured response body. It is a construction constant, not a
+ * policy knob: an endpoint cannot enlarge it, and a program cannot request
+ * more. Anything beyond the bound is discarded and the receipt says so.
+ */
+export const DISPATCH_RESPONSE_LIMIT_BYTES = 65_536
 
 type StageInput = EmissionRequest | ExternalIntent
 
@@ -100,12 +113,27 @@ export class Outbox extends Context.Tag("airlock/Outbox")<
     readonly inspect: (
       id: EmissionId
     ) => Effect.Effect<OutboxEmission, ReadError>
+    /**
+     * The only wire-capable operation. `provenance` is recorded, never
+     * interpreted: a caller acting on a supervisor grant supplies the grant
+     * identity and effective class, and omitting it records a bare manual
+     * supervisor commit exactly as before.
+     */
     readonly commit: (
-      id: EmissionId
+      id: EmissionId,
+      provenance?: DispatchProvenance
     ) => Effect.Effect<OutboxEmission, CommitError>
     readonly cancel: (
       id: EmissionId
     ) => Effect.Effect<OutboxEmission, CancelError>
+    /**
+     * The bounded response capture for a completed dispatch. Bytes never enter
+     * a manifest, listing, or receipt; this is the single owner-side read that
+     * lets the trusted runtime turn them into an artifact.
+     */
+    readonly response: (
+      id: EmissionId
+    ) => Effect.Effect<Uint8Array | undefined, ReadError>
     readonly pending: Effect.Effect<
       ReadonlyArray<OutboxEmission>,
       OutboxStorageFailed | OutboxStateCorrupt
@@ -149,6 +177,46 @@ const parseFailure = (
   document: string
 ): OutboxStateCorrupt =>
   new OutboxStateCorrupt({ id, document })
+
+/**
+ * Read at most `DISPATCH_RESPONSE_LIMIT_BYTES` from a response stream, then
+ * cancel it. Reaching the bound is reported, never hidden: a truncated capture
+ * is a fact the receipt carries rather than a silently shortened body.
+ */
+const readBounded = async (
+  body: ReadableStream<Uint8Array> | null
+): Promise<{ readonly bytes: Uint8Array; readonly truncated: boolean }> => {
+  if (body === null) return { bytes: new Uint8Array(0), truncated: false }
+  const reader = body.getReader()
+  const chunks: Array<Uint8Array> = []
+  let total = 0
+  let truncated = false
+  try {
+    while (total <= DISPATCH_RESPONSE_LIMIT_BYTES) {
+      const { done, value } = await reader.read()
+      if (done) break
+      if (value === undefined) continue
+      chunks.push(value)
+      total += value.byteLength
+      if (total > DISPATCH_RESPONSE_LIMIT_BYTES) {
+        truncated = true
+        break
+      }
+    }
+  } finally {
+    await reader.cancel().catch(() => undefined)
+  }
+  const retained = Math.min(total, DISPATCH_RESPONSE_LIMIT_BYTES)
+  const bytes = new Uint8Array(retained)
+  let offset = 0
+  for (const chunk of chunks) {
+    if (offset >= retained) break
+    const take = Math.min(chunk.byteLength, retained - offset)
+    bytes.set(chunk.subarray(0, take), offset)
+    offset += take
+  }
+  return { bytes, truncated }
+}
 
 const redactUrl = (raw: string) => {
   const url = new URL(raw)
@@ -393,7 +461,12 @@ const make = Effect.gen(function* () {
 
   // The point of no return. This lexical body contains the only wire-capable
   // call in Outbox; all other methods manipulate inert durable state.
-  const commit = Effect.fn("Outbox.commit")(function* (id: EmissionId) {
+  const commit = Effect.fn("Outbox.commit")(function* (
+    id: EmissionId,
+    provenance: DispatchProvenance = new DispatchProvenance({
+      committedBy: "supervisor"
+    })
+  ) {
     return yield* store.withExclusive(Effect.uninterruptibleMask((restore) =>
       Effect.gen(function* () {
       yield* transition(id, "staged", "committing")
@@ -421,12 +494,17 @@ const make = Effect.gen(function* () {
                 ? {}
                 : { body: dispatch.body })
             })
-            // Response content will become a bounded Capture artifact. Outbox
-            // v1 needs only dispatch status, so it cancels rather than buffering
-            // an attacker-controlled body.
-            await response.body?.cancel()
+            // The response body is attacker-controlled content, so it is read
+            // under a construction bound and then cancelled: the reader stops
+            // at the first chunk that crosses the limit and never buffers an
+            // unbounded stream. Bytes leave here only for the owner-only
+            // emission directory.
+            const captured = await readBounded(response.body)
             return {
-              status: response.status
+              status: response.status,
+              contentType: response.headers.get("content-type") ?? undefined,
+              bytes: captured.bytes,
+              truncated: captured.truncated
             }
           },
           catch: () =>
@@ -455,7 +533,18 @@ const make = Effect.gen(function* () {
 
       const completedAt = yield* DateTime.now
       const outcome = new OutboxOutcome({
-        ...delivered.right,
+        status: delivered.right.status,
+        responseBytes: delivered.right.bytes.byteLength,
+        response: new RedactedDispatchResponse({
+          status: delivered.right.status,
+          ...(delivered.right.contentType === undefined
+            ? {}
+            : { contentType: delivered.right.contentType }),
+          retainedBytes: delivered.right.bytes.byteLength,
+          truncated: delivered.right.truncated,
+          limitBytes: DISPATCH_RESPONSE_LIMIT_BYTES
+        }),
+        provenance,
         completedAt
       })
       const outcomeJson = yield* encodeOutcome(
@@ -474,8 +563,9 @@ const make = Effect.gen(function* () {
       )
 
       const finalized = yield* store
-        .writeOutcome(id, "committing", outcomeJson)
+        .writeResponse(id, "committing", delivered.right.bytes)
         .pipe(
+          Effect.zipRight(store.writeOutcome(id, "committing", outcomeJson)),
           Effect.zipRight(
             store.transition(id, "committing", "committed")
           ),
@@ -505,7 +595,15 @@ const make = Effect.gen(function* () {
             effect: "emission",
             act: "commit",
             ref: id,
-            detail: `${manifest.intent.method} ${manifest.intent.endpoint} -> ${outcome.status}`
+            // The Ledger line is the human-readable receipt: it names the
+            // committing authority and the grant that authorized the wire, not
+            // just the transport result.
+            detail:
+              `${manifest.intent.method} ${manifest.intent.endpoint} -> ${outcome.status}` +
+              ` [by=${provenance.committedBy}` +
+              `${provenance.dispatchClass === undefined ? "" : ` class=${provenance.dispatchClass}`}` +
+              `${provenance.grantId === undefined ? "" : ` grant=${provenance.grantId}`}` +
+              `${provenance.grantSelector === undefined ? "" : ` selector=${provenance.grantSelector}`}]`
           })
         ).pipe(
           Effect.mapError((error) =>
@@ -562,6 +660,14 @@ const make = Effect.gen(function* () {
     )
   })
 
+  const response = Effect.fn("Outbox.response")(function* (id: EmissionId) {
+    const state = yield* store.findState(id)
+    if (state === undefined) {
+      return yield* new UnknownEmission({ id })
+    }
+    return yield* store.readResponse(id, state)
+  })
+
   const pending = store.list("staged").pipe(
     Effect.flatMap((stored) =>
       Effect.forEach(stored, decodeStored, { concurrency: 1 })
@@ -600,7 +706,7 @@ const make = Effect.gen(function* () {
     }
   })
 
-  return Outbox.of({ stage, inspect, commit, cancel, pending, flush })
+  return Outbox.of({ stage, inspect, commit, cancel, response, pending, flush })
 })
 
 export const OutboxLive = Layer.effect(Outbox, make)

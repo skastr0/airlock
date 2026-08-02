@@ -2,9 +2,10 @@ import { Context, Effect, Layer, Schema } from "effect"
 import { createHash } from "node:crypto"
 import {
   admit,
-  AdmissionPolicy,
+  type AdmissionPolicyDocument,
   bindAdmissionForUse,
-  type ExecutionAuthority
+  type ExecutionAuthority,
+  supervisorAutoCommits
 } from "../admission/index.ts"
 import { parse, type Program, type Statement, type Expression } from "../language/index.ts"
 import { LanguageDiagnostic } from "../language/lexer.ts"
@@ -51,6 +52,7 @@ import {
 } from "../plan/index.ts"
 import {
   Runtime,
+  RuntimeDispatchAuthorization,
   RuntimeInitialArtifact,
   type RuntimeArtifact,
   RuntimeRecoveryEvidence,
@@ -61,6 +63,7 @@ import {
   ToolActionLoweringRequest,
   decodeToolResult,
   exportedToolActionName,
+  isEnqueueAction,
   lowerToolAction
 } from "../tools/index.ts"
 
@@ -82,6 +85,12 @@ export class ProgramToolBinding extends Schema.Class<ProgramToolBinding>("Progra
   definitionId: Schema.String,
   definitionDigest: Digest,
   resultDecoder: Schema.Literal("exit-status", "json-stdout", "json-stderr", "none"),
+  /**
+   * The definition author's declared consequence, carried forward so the
+   * supervisor plane can take the stricter of it and the grant's class. A
+   * definition can only narrow with it; it never selects or widens anything.
+   */
+  emissionEffect: Schema.optional(Schema.Literal("read", "mutate")),
   outputSchema: Schema.optional(Schema.Unknown)
 }) {}
 
@@ -255,7 +264,7 @@ const runtimeExecutionFailure = (
  * Admission remains its own typed seam. This layer only adapts the richer
  * Admission error vocabulary to the language-facing execution boundary.
  */
-export const ProgramAdmissionLive = (policy: AdmissionPolicy) =>
+export const ProgramAdmissionLive = (policy: AdmissionPolicyDocument) =>
   Layer.succeed(ProgramAdmission, ProgramAdmission.of({
     admit: (draft) => admit(draft, policy).pipe(
       Effect.flatMap((result) => bindAdmissionForUse(result)),
@@ -785,7 +794,11 @@ export const draftForAction = (
           id: nodeId(id, 0),
           dependsOn: [],
           requires: baseRequirementIds,
-          produces: [artifactId(id, 0)],
+          // Slot 0 is the staged-intent receipt, slot 1 the bounded response
+          // capture. Slot 1 stays unmaterialized unless the supervisor plane
+          // pre-authorized a commit for this node, so declaring it grants
+          // nothing: it only reserves the name a committed read would fill.
+          produces: [artifactId(id, 0), artifactId(id, 1)],
           method: call.method,
           endpoint: call.endpoint,
           headers: call.headers,
@@ -866,7 +879,11 @@ const draftForToolAction = (
       return yield* new ProgramActionDecodeFailed({ action: name, reason: "expects exactly one record argument" })
     }
     const input = yield* record(args[0], name)
-    const executable = yield* oneDeclaredExecutable(exported)
+    // An enqueue action binds no executable at all: it stages an intent. Only
+    // invoke lowering needs the caller-selected executable identity.
+    const executable = isEnqueueAction(exported.action)
+      ? ""
+      : yield* oneDeclaredExecutable(exported)
     const lowered = yield* lowerToolAction(new ToolActionLoweringRequest({
       loaded: exported.loaded,
       action: exported.action.name,
@@ -880,6 +897,9 @@ const draftForToolAction = (
       definitionId: lowered.definitionId,
       definitionDigest: lowered.definitionDigest,
       resultDecoder: lowered.resultDecoder,
+      ...(lowered.emissionEffect === undefined
+        ? {}
+        : { emissionEffect: lowered.emissionEffect }),
       ...(exported.action.outputSchema === undefined ? {} : { outputSchema: exported.action.outputSchema })
     })
     const callDigest = digestAction(lowered.call, base.inlineArtifacts, tool)
@@ -1009,6 +1029,52 @@ const runtimeArtifact = (
           : `runtime materialized ${id} more than once`,
         "ProgramRuntimeArtifactUnavailable"
       ))
+}
+
+/**
+ * A `RequestExternal` node declares two slots: the staged-intent receipt and
+ * the bounded response capture. Slot 0 must always be materialized; slot 1
+ * exists only when a supervisor pre-authorized the commit, so its absence is a
+ * legal outcome rather than a runtime defect.
+ */
+const externalArtifactSlot = (
+  run: RuntimeRun,
+  node: RequestExternalNode,
+  action: string,
+  slot: 0 | 1
+): Effect.Effect<RuntimeArtifact | undefined, ProgramActionExecutionFailed> => {
+  if (node.produces.length !== 2) {
+    return Effect.fail(runtimeExecutionFailure(
+      action,
+      run,
+      "contract",
+      `${node._tag} ${node.id} must declare a staged-intent slot and a response slot`,
+      "ProgramPlanShapeMismatch"
+    ))
+  }
+  const id = node.produces[slot]!
+  const matches = run.artifacts.filter((candidate) => candidate.artifact.id === id)
+  if (matches.length > 1) {
+    return Effect.fail(runtimeExecutionFailure(
+      action,
+      run,
+      "runtime",
+      `runtime materialized ${id} more than once`,
+      "ProgramRuntimeArtifactUnavailable"
+    ))
+  }
+  if (matches.length === 0) {
+    return slot === 1
+      ? Effect.succeed(undefined)
+      : Effect.fail(runtimeExecutionFailure(
+        action,
+        run,
+        "runtime",
+        `runtime did not materialize ${id}`,
+        "ProgramRuntimeArtifactUnavailable"
+      ))
+  }
+  return Effect.succeed(matches[0]!)
 }
 
 const decodeRuntimeJson = <A, I>(
@@ -1199,12 +1265,46 @@ const externalFor = (
 }
 
 /**
+ * How this interpreter learns which staged nodes the supervisor already
+ * authorized to commit. It never decides: the decision is made where the policy
+ * lives, and this seam only carries the answer to the runtime. A program
+ * without a policy gets an empty list — the v1 posture, where everything waits
+ * for an explicit supervisor act.
+ */
+export type ProgramDispatchAuthority = (
+  authority: ExecutionAuthority,
+  declaredEmissionEffect?: "read" | "mutate"
+) => ReadonlyArray<RuntimeDispatchAuthorization>
+
+const stagedOnlyDispatchAuthority: ProgramDispatchAuthority = () => []
+
+/**
+ * Adapt the supervisor plane's answer to the runtime's shape. This is a
+ * translation and nothing else: no gate, no class arithmetic, no policy read.
+ */
+export const supervisorDispatchAuthority = (
+  policy: AdmissionPolicyDocument
+): ProgramDispatchAuthority =>
+(authority, declaredEmissionEffect) =>
+  supervisorAutoCommits(policy, authority, declaredEmissionEffect).map(
+    (authorized) =>
+      new RuntimeDispatchAuthorization({
+        nodeId: authorized.nodeId,
+        commit: "auto",
+        grantId: authorized.grantId,
+        grantSelector: authorized.grantSelector,
+        dispatchClass: authorized.effectiveClass,
+        endpoint: authorized.endpoint
+      })
+  )
+
+/**
  * Trusted Plan adapter. Every native operation and operand is taken from the
  * admitted Plan; the bound ActionCall is used only to select result decoding.
  * Runtime is the sole Plan interpreter and terminal-authority path. This layer
  * has no filesystem, process, Hold, Outbox, or network service.
  */
-export const ProgramPlanRuntimeLive = Layer.effect(
+const makeProgramPlanRuntimeLive = (dispatch: ProgramDispatchAuthority) => Layer.effect(
   ProgramPlanRuntime,
   Effect.gen(function* () {
     const runtime = yield* Runtime
@@ -1221,7 +1321,8 @@ export const ProgramPlanRuntimeLive = Layer.effect(
             mediaType: input.mediaType,
             provenance: input.provenance
           }))
-          const run = yield* runtime.execute(authority, inputs).pipe(
+          const authorizations = dispatch(authority, request.tool?.emissionEffect)
+          const run = yield* runtime.execute(authority, inputs, authorizations).pipe(
             Effect.mapError(executionFailure(call.action, "runtime"))
           )
           const outputs = runtimeInlineArtifacts(run)
@@ -1460,13 +1561,23 @@ export const ProgramPlanRuntimeLive = Layer.effect(
                   "ProgramPlanShapeMismatch"
                 )
               }
-              const result = yield* runtimeArtifact(run, external, call.action)
+              const result = yield* externalArtifactSlot(run, external, call.action, 0)
               const staged = yield* decodeRuntimeJson(
                 run,
-                result,
+                result!,
                 OutboxEmission,
                 call.action
               )
+              // A committed read carries its bounded response as the node's
+              // second artifact. A staged intent has no second artifact at
+              // all, so the program can tell the two apart without guessing.
+              const responseArtifact = yield* externalArtifactSlot(
+                run,
+                external,
+                call.action,
+                1
+              )
+              const captured = staged.outcome?.response
               return actionResult({
                 state: staged.status,
                 action: call.action,
@@ -1474,7 +1585,35 @@ export const ProgramPlanRuntimeLive = Layer.effect(
                 method: external.method,
                 endpoint: external.endpoint,
                 hold_millis: external.holdMillis,
-              })
+                ...(staged.outcome?.provenance === undefined ? {} : {
+                  committed_by: staged.outcome.provenance.committedBy,
+                  ...(staged.outcome.provenance.dispatchClass === undefined
+                    ? {}
+                    : { dispatch_class: staged.outcome.provenance.dispatchClass }),
+                  ...(staged.outcome.provenance.grantId === undefined
+                    ? {}
+                    : { grant_id: staged.outcome.provenance.grantId }),
+                  ...(staged.outcome.provenance.grantSelector === undefined
+                    ? {}
+                    : { grant_selector: staged.outcome.provenance.grantSelector }),
+                  ...(staged.outcome.provenance.endpoint === undefined
+                    ? {}
+                    : { dispatched_endpoint: staged.outcome.provenance.endpoint })
+                }),
+                ...(captured === undefined ? {} : {
+                  status: captured.status,
+                  response_bytes: captured.retainedBytes,
+                  response_truncated: captured.truncated,
+                  response_limit_bytes: captured.limitBytes,
+                  ...(captured.contentType === undefined
+                    ? {}
+                    : { response_content_type: captured.contentType })
+                }),
+                ...(responseArtifact === undefined ? {} : {
+                  response_artifact: responseArtifact.artifact.id,
+                  response_body: decodedText.decode(responseArtifact.bytes)
+                })
+              }, outputs)
             }
           }
         })
@@ -1483,26 +1622,39 @@ export const ProgramPlanRuntimeLive = Layer.effect(
 )
 
 /**
+ * Staged-only interpreter: no policy, so no pre-authorization and no
+ * auto-commit. This is the v1 posture and remains the default export.
+ */
+export const ProgramPlanRuntimeLive = makeProgramPlanRuntimeLive(
+  stagedOnlyDispatchAuthority
+)
+
+/** The same interpreter, told which auto-commits the supervisor already granted. */
+export const ProgramPlanRuntimeWithPolicyLive = (
+  policy: AdmissionPolicyDocument
+) => makeProgramPlanRuntimeLive(supervisorDispatchAuthority(policy))
+
+/**
  * Convenience composition for one managed application runtime. Platform
  * dependencies remain requirements of Runtime; Program receives exactly one
  * interpreter and cannot acquire a second native authority path.
  */
-export const ProgramExecutionLive = (policy: AdmissionPolicy) => {
+export const ProgramExecutionLive = (policy: AdmissionPolicyDocument) => {
   const executor = ProgramPlanExecutorLive.pipe(
     Layer.provideMerge(ProgramAdmissionLive(policy)),
-    Layer.provideMerge(ProgramPlanRuntimeLive)
+    Layer.provideMerge(ProgramPlanRuntimeWithPolicyLive(policy))
   )
   return ProgramRunnerLive.pipe(Layer.provide(executor))
 }
 
 export const ProgramExecutionWithToolsLive = (
-  policy: AdmissionPolicy,
+  policy: AdmissionPolicyDocument,
   actions: ReadonlyMap<string, ExportedToolAction>,
   cellProfile: CellProfile
 ) => {
   const executor = ProgramPlanExecutorLive.pipe(
     Layer.provideMerge(ProgramAdmissionLive(policy)),
-    Layer.provideMerge(ProgramPlanRuntimeLive)
+    Layer.provideMerge(ProgramPlanRuntimeWithPolicyLive(policy))
   )
   return ProgramRunnerWithToolsLive(actions, cellProfile).pipe(Layer.provide(executor))
 }
