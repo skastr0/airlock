@@ -2,6 +2,7 @@ import { describe, expect, it } from "@effect/vitest"
 import { Effect } from "effect"
 import {
   ToolActionLoweringRequest,
+  type ToolActionLoweringResult,
   ToolExecutableRejected,
   ToolTemplateRejected,
   UnknownToolAction,
@@ -75,6 +76,14 @@ const load = (definition: unknown) =>
     })
   )
 
+/** `call` is now a union; invoke assertions narrow explicitly rather than cast. */
+const processCall = (call: ToolActionLoweringResult["call"]) => {
+  if (call.action !== "process.run") {
+    throw new Error(`expected a process.run call, received ${call.action}`)
+  }
+  return call
+}
+
 const request = (
   loaded: Effect.Effect.Success<ReturnType<typeof load>>,
   input: Readonly<Record<string, unknown>>,
@@ -118,7 +127,7 @@ describe("inert tool action lowering", () => {
         cellProfile: "native-contained",
         realm: "machine"
       })
-      expect(lowered.call.args[1]).toBe(hostileArchive)
+      expect(processCall(lowered.call).args[1]).toBe(hostileArchive)
       expect(lowered.lowering.nodes[0]).toMatchObject({
         _tag: "Invoke",
         executable: "/usr/bin/tar",
@@ -237,7 +246,7 @@ describe("inert tool action lowering", () => {
       }
 
       const lowered = yield* lowerToolAction(request(loaded, input))
-      expect(lowered.call.descendantExecutables).toEqual([
+      expect(processCall(lowered.call).descendantExecutables).toEqual([
         "/usr/bin/python3"
       ])
       expect(lowered.lowering.nodes[0]).toMatchObject({
@@ -259,12 +268,12 @@ describe("inert tool action lowering", () => {
           })
         ])
       )
-      expect(lowered.call.readable).not.toEqual(
+      expect(processCall(lowered.call).readable).not.toEqual(
         expect.arrayContaining([
           expect.objectContaining({ kind: "executable" })
         ])
       )
-      expect(lowered.call.writable).not.toEqual(
+      expect(processCall(lowered.call).writable).not.toEqual(
         expect.arrayContaining([
           expect.objectContaining({ kind: "executable" })
         ])

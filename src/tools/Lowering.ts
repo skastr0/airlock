@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto"
 import { Effect, Schema } from "effect"
 import {
+  HttpStageAction,
   NativeActionLowering,
   ProcessRunAction,
   ResourceNeed,
@@ -8,18 +9,22 @@ import {
 } from "../actions/index.ts"
 import { CellProfile, Digest } from "../plan/index.ts"
 import {
+  AnyToolDefinition,
   LoadedToolDefinition,
-  ToolDefinition,
   ToolDefinitionId,
   ToolLoweringKind,
   ToolResultDecoder,
   ToolInputRejected,
+  endpointRejection,
+  isEnqueueAction,
   validateToolValue,
   validateToolSchemaValue,
   type TemplateValue,
   type ToolActionDefinition,
+  type ToolEnqueueActionDefinition,
   type ToolExecutableConstraint,
-  type ToolResourceRequirement
+  type ToolResourceRequirement,
+  type ToolV2ActionDefinition
 } from "./Definitions.ts"
 
 /**
@@ -39,11 +44,18 @@ export class ToolActionLoweringRequest extends Schema.Class<ToolActionLoweringRe
    * Template resolution reads only explicit own data properties.
    */
   input: Schema.Unknown,
-  executable: Schema.String,
+  /** Required by invoke lowering only; an enqueue action binds no executable. */
+  executable: Schema.optionalWith(Schema.String, { default: () => "" }),
   cellProfile: CellProfile
 }) {}
 
-/** The canonical native call is still inert; admission must bind every need. */
+/**
+ * The canonical native call is still inert; admission must bind every need.
+ * `call` widened from `process.run` alone to the two native calls a definition
+ * can lower to: an enqueue action produces `http.stage`, whose only Plan node
+ * is `RequestExternal` and whose only runtime lowering is
+ * `StageExternal -> AppendReceipt`. It gains no dispatch.
+ */
 export class ToolActionLoweringResult extends Schema.Class<ToolActionLoweringResult>(
   "ToolActionLoweringResult"
 )({
@@ -52,7 +64,14 @@ export class ToolActionLoweringResult extends Schema.Class<ToolActionLoweringRes
   definitionDigest: Digest,
   actionName: Schema.String,
   resultDecoder: ToolResultDecoder,
-  call: ProcessRunAction,
+  /**
+   * The definition author's declared consequence for an enqueue action. It is
+   * an untrusted description that travels forward for one purpose only: the
+   * supervisor plane takes the stricter of it and the grant's class. It can
+   * never widen anything, and it never names a grant-side class or commit mode.
+   */
+  emissionEffect: Schema.optional(Schema.Literal("read", "mutate")),
+  call: Schema.Union(ProcessRunAction, HttpStageAction),
   lowering: NativeActionLowering
 }) {}
 
@@ -140,6 +159,16 @@ export class ToolResultDecodeFailed extends Schema.TaggedError<ToolResultDecodeF
   }
 ) {}
 
+export class ToolRequestLoweringRejected extends Schema.TaggedError<ToolRequestLoweringRejected>()(
+  "ToolRequestLoweringRejected",
+  {
+    definitionId: Schema.String,
+    action: Schema.String,
+    field: Schema.String,
+    reason: Schema.String
+  }
+) {}
+
 export type ToolActionLoweringError =
   | UnknownToolAction
   | UnsupportedToolActionLowering
@@ -147,7 +176,20 @@ export type ToolActionLoweringError =
   | ToolTemplateRejected
   | ToolDefinitionDigestFailed
   | ToolNativeLoweringRejected
+  | ToolRequestLoweringRejected
   | ToolInputRejected
+
+/**
+ * The opaque carrier a `Secret` template lowers to. It names the credential
+ * reference and carries no bytes: the Plan node, the redacted public manifest,
+ * receipts, logs, and errors see only this placeholder. Resolution happens
+ * once, inside trusted staging, when the owner-only private dispatch document
+ * is constructed.
+ */
+export const SECRET_REFERENCE_PREFIX = "airlock-secret-ref:"
+
+const secretReference = (path: ReadonlyArray<string>) =>
+  `${SECRET_REFERENCE_PREFIX}${path.join(".")}`
 
 type JsonScalar = string | number | boolean
 
@@ -273,6 +315,29 @@ const resolveTemplate = (
         )
       )
   }
+}
+
+/**
+ * Request-position resolution. It differs from argv resolution in exactly one
+ * way: a `Secret` lowers to an opaque reference instead of being refused,
+ * because the placement check at definition load already proved this position
+ * is carried into the private dispatch document. No bytes are read here — this
+ * component holds no credential store and cannot resolve one.
+ */
+const resolveRequestTemplate = (
+  context: TemplateContext,
+  field: string,
+  template: TemplateValue,
+  secretCarrier: boolean
+): Effect.Effect<string, ToolTemplateRejected> => {
+  if (template._tag === "Secret") {
+    return secretCarrier
+      ? Effect.succeed(secretReference(template.path))
+      : Effect.fail(
+        rejectedTemplate(context, field, "Secret", template.path, "runtime-binding-required")
+      )
+  }
+  return resolveTemplate(context, field, template)
 }
 
 const resolveResource = (
@@ -407,7 +472,7 @@ const canonicalJson = (value: unknown): string => {
 const digestDefinition = (
   loaded: LoadedToolDefinition
 ): Effect.Effect<Digest, ToolDefinitionDigestFailed> =>
-  Schema.encode(ToolDefinition)(loaded.definition).pipe(
+  Schema.encode(AnyToolDefinition)(loaded.definition).pipe(
     Effect.mapError(
       () =>
         new ToolDefinitionDigestFailed({
@@ -433,7 +498,7 @@ const digestDefinition = (
 const actionNamed = (
   loaded: LoadedToolDefinition,
   action: string
-): Effect.Effect<ToolActionDefinition, UnknownToolAction> => {
+): Effect.Effect<ToolV2ActionDefinition, UnknownToolAction> => {
   const found = loaded.definition.actions.find((candidate) => candidate.name === action)
   return found === undefined
     ? Effect.fail(
@@ -444,6 +509,103 @@ const actionNamed = (
       )
     : Effect.succeed(found)
 }
+
+/**
+ * Lower one validated, inert `enqueue` action onto the `http.stage` seam.
+ *
+ * Total or refused: the request template maps entirely onto the fields of a
+ * `RequestExternalNode` or a typed rejection is returned. Nothing here
+ * dispatches, resolves a credential, selects a dispatch class, or reads the
+ * supervisor policy — the only thing produced is durable-staging intent.
+ */
+const lowerEnqueueAction = (
+  request: ToolActionLoweringRequest,
+  definition: AnyToolDefinition,
+  action: ToolEnqueueActionDefinition
+): Effect.Effect<ToolActionLoweringResult, ToolActionLoweringError> =>
+  Effect.gen(function* () {
+    const template = action.request
+    if (template === undefined) {
+      return yield* new ToolRequestLoweringRejected({
+        definitionId: definition.id,
+        action: action.name,
+        field: "request",
+        reason: "enqueue lowering requires a request template"
+      })
+    }
+    const context: TemplateContext = {
+      definitionId: definition.id,
+      action: action.name,
+      input: request.input
+    }
+    const endpoint = yield* resolveRequestTemplate(
+      context,
+      "request.endpoint",
+      template.endpoint,
+      false
+    )
+    const headerEntries = yield* Effect.forEach(
+      Object.entries(template.headers),
+      ([key, value]) =>
+        resolveRequestTemplate(context, `request.headers.${key}`, value, true).pipe(
+          Effect.map((resolved) => [key, resolved] as const)
+        ),
+      { concurrency: 1 }
+    )
+    const body = template.body === undefined
+      ? undefined
+      : yield* resolveRequestTemplate(context, "request.body", template.body, true)
+
+    // Resolved atoms first, then the full finite input shape: a template
+    // failure names the offending field, a schema failure names the contract.
+    yield* validateToolValue(definition, action, action.inputSchema, request.input)
+
+    // A resolved Input template must not be able to relocate the request. The
+    // check is the definition-load predicate, re-run on the resolved value.
+    const endpointReason = endpointRejection(endpoint)
+    if (endpointReason !== undefined) {
+      return yield* new ToolRequestLoweringRejected({
+        definitionId: definition.id,
+        action: action.name,
+        field: "request.endpoint",
+        reason: endpointReason
+      })
+    }
+
+    const call: typeof HttpStageAction.Type = {
+      action: "http.stage",
+      endpoint,
+      method: template.method,
+      headers: Object.fromEntries(headerEntries),
+      ...(body === undefined ? {} : { body }),
+      holdMillis: template.holdMillis,
+      realm: "external"
+    }
+    const lowering = yield* lowerNativeAction(call).pipe(
+      Effect.mapError(
+        (error) =>
+          new ToolNativeLoweringRejected({
+            definitionId: definition.id,
+            action: action.name,
+            field: error.field,
+            reason: error.reason
+          })
+      )
+    )
+    const definitionDigest = yield* digestDefinition(request.loaded)
+    return new ToolActionLoweringResult({
+      definitionId: definition.id,
+      definitionVersion: definition.version,
+      definitionDigest,
+      actionName: action.name,
+      resultDecoder: action.resultDecoder,
+      ...(action.emissionEffect === undefined
+        ? {}
+        : { emissionEffect: action.emissionEffect }),
+      call,
+      lowering
+    })
+  })
 
 /**
  * Lower one validated, inert definition action into the native process seam.
@@ -458,6 +620,9 @@ export const lowerToolAction = (
   Effect.gen(function* () {
     const definition = request.loaded.definition
     const action = yield* actionNamed(request.loaded, request.action)
+    if (isEnqueueAction(action)) {
+      return yield* lowerEnqueueAction(request, definition, action)
+    }
     if (action.lowering !== "invoke") {
       return yield* new UnsupportedToolActionLowering({
         definitionId: definition.id,

@@ -1,0 +1,54 @@
+{
+  "schemaVersion": "airlock/tool-definition/v2",
+  "id": "fixture_status",
+  "version": "1.0.0",
+  "executables": [],
+  "actions": [
+    {
+      "name": "read",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "endpoint": { "type": "string" }
+        },
+        "required": ["endpoint"],
+        "additionalProperties": false
+      },
+      "lowering": "enqueue",
+      "effectFootprint": ["enqueue"],
+      "emissionEffect": "read",
+      "request": {
+        "method": "GET",
+        "endpoint": { "_tag": "Input", "path": ["endpoint"] },
+        "headers": {
+          "accept": { "_tag": "Literal", "value": "application/json" }
+        },
+        "holdMillis": 0
+      },
+      "resultDecoder": "none"
+    },
+    {
+      "name": "reconcile",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "endpoint": { "type": "string" }
+        },
+        "required": ["endpoint"],
+        "additionalProperties": false
+      },
+      "lowering": "enqueue",
+      "effectFootprint": ["enqueue"],
+      "emissionEffect": "mutate",
+      "request": {
+        "method": "GET",
+        "endpoint": { "_tag": "Input", "path": ["endpoint"] },
+        "headers": {
+          "accept": { "_tag": "Literal", "value": "application/json" }
+        },
+        "holdMillis": 0
+      },
+      "resultDecoder": "none"
+    }
+  ]
+}
