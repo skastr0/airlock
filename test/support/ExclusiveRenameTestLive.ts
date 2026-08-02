@@ -10,11 +10,15 @@ import {
 
 /**
  * Vitest runs on Node, which cannot import `bun:ffi`. This test adapter still
- * exercises the real macOS primitive: a fixed, argv-only Bun helper invokes
- * renamex_np(RENAME_EXCL) and returns errno as its status. It is never part of
- * the product composition.
+ * exercises the real platform primitive: a fixed, argv-only Bun helper invokes
+ * it and returns errno as its status. It is never part of the product
+ * composition, and it deliberately does not call the product adapters, so the
+ * tests remain an independent check of the same syscall contract.
+ *
+ * macOS uses `renamex_np(RENAME_EXCL)`; Linux uses
+ * `renameat2(RENAME_NOREPLACE)`. Both report a live target as EEXIST (17).
  */
-const helper = String.raw`
+const macosHelper = String.raw`
 import { FFIType, dlopen, read } from "bun:ffi"
 const [source, target] = process.argv.slice(1)
 if (source === undefined || target === undefined) process.exit(64)
@@ -36,6 +40,39 @@ const errno = pointer === null ? 125 : read.i32(pointer, 0)
 console.error(String(errno))
 process.exit(errno > 0 && errno < 126 ? errno : 125)
 `
+
+const linuxHelper = String.raw`
+import { FFIType, dlopen, read } from "bun:ffi"
+const [source, target] = process.argv.slice(1)
+if (source === undefined || target === undefined) process.exit(64)
+const library = dlopen("libc.so.6", {
+  renameat2: {
+    args: [
+      FFIType.i32,
+      FFIType.cstring,
+      FFIType.i32,
+      FFIType.cstring,
+      FFIType.u32
+    ],
+    returns: FFIType.i32
+  },
+  __errno_location: { args: [], returns: FFIType.ptr }
+})
+const result = library.symbols.renameat2(
+  -100,
+  Buffer.from(source + "\0"),
+  -100,
+  Buffer.from(target + "\0"),
+  1
+)
+if (result === 0) process.exit(0)
+const pointer = library.symbols.__errno_location()
+const errno = pointer === null ? 125 : read.i32(pointer, 0)
+console.error(String(errno))
+process.exit(errno > 0 && errno < 126 ? errno : 125)
+`
+
+const helper = process.platform === "linux" ? linuxHelper : macosHelper
 
 const moveNoReplace = (
   source: string,
@@ -67,13 +104,15 @@ const moveNoReplace = (
           source,
           target,
           errno: result.status ?? -1,
-          reason: result.stderr.trim() || "renamex_np test helper failed"
+          reason:
+            result.stderr.trim() ||
+            "atomic no-replace rename test helper failed"
         })
       )
     })
   )
 
-export const MacosExclusiveRenameTestLive = Layer.succeed(
+export const ExclusiveRenameTestLive = Layer.succeed(
   ExclusiveRename,
   ExclusiveRename.of({ moveNoReplace })
 )

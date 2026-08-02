@@ -1,0 +1,44 @@
+# The Linux beachhead gate.
+#
+# It runs exactly what `scripts/prove-linux-boundary.sh` runs in a container, on
+# a real ubuntu host: one boundary proof for renameat2(RENAME_NOREPLACE) and
+# flock(2), then the portable suites. Nothing here claims containment — Linux
+# has no native contained profile, and the enclosure is the operator's own.
+name: linux
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  beachhead:
+    name: linux beachhead (ubuntu)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.13
+
+      - name: install
+        run: bun install --frozen-lockfile
+
+      - name: report host
+        run: |
+          uname -srm
+          bun --version
+          getconf GNU_LIBC_VERSION || true
+          stat -f -c '%T' "${TMPDIR:-/tmp}"
+
+      - name: typecheck
+        run: bun run typecheck
+
+      - name: linux boundary proof and portable suites
+        run: sh scripts/run-linux-suites.sh

@@ -12,10 +12,10 @@ import {
   NativeFileSystemLive,
   NativeFilesystemConfig
 } from "../src/native/index.ts"
-import { MacosExclusiveRenameTestLive } from "./support/ExclusiveRenameTestLive.ts"
+import { ExclusiveRenameTestLive } from "./support/ExclusiveRenameTestLive.ts"
 
 const HoldTestLive = HoldLayer.pipe(
-  Layer.provide(MacosExclusiveRenameTestLive)
+  Layer.provide(ExclusiveRenameTestLive)
 )
 
 const layersFor = (home: string, workspace: string) =>

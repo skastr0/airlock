@@ -15,7 +15,7 @@ import * as AirlockHome from "../src/AirlockHome.ts"
 import { Hold, HoldLayer } from "../src/Hold.ts"
 import { LedgerLive } from "../src/Ledger.ts"
 import { ExclusiveRename } from "../src/platform/ExclusiveRename.ts"
-import { MacosExclusiveRenameTestLive } from "./support/ExclusiveRenameTestLive.ts"
+import { ExclusiveRenameTestLive } from "./support/ExclusiveRenameTestLive.ts"
 
 const holdLayer = (
   home: string,
@@ -101,7 +101,7 @@ const world = <A, E>(
       const home = path.join(root, "airlock-home")
       const base = yield* Effect.provide(
         ExclusiveRename,
-        MacosExclusiveRenameTestLive
+        ExclusiveRenameTestLive
       )
       return yield* body({ fs, path, root, home, base })
     })
@@ -162,7 +162,7 @@ describe("ExclusiveRename — macOS Hold boundary", () => {
 
         const reconstructed = yield* Effect.provide(
           Hold,
-          holdLayer(home, MacosExclusiveRenameTestLive)
+          holdLayer(home, ExclusiveRenameTestLive)
         )
         expect((yield* reconstructed.held).map((entry) => entry.id)).toContain(
           error.id
@@ -283,7 +283,7 @@ describe("ExclusiveRename — macOS Hold boundary", () => {
         expect(made.status).toBe(0)
         const hold = yield* Effect.provide(
           Hold,
-          holdLayer(home, MacosExclusiveRenameTestLive)
+          holdLayer(home, ExclusiveRenameTestLive)
         )
 
         const error = yield* hold.replaceFrom(target, fifo).pipe(Effect.flip)

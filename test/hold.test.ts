@@ -16,11 +16,11 @@ import {
   LedgerFilesystemError,
   LedgerLive
 } from "../src/Ledger.ts"
-import { MacosExclusiveRenameTestLive } from "./support/ExclusiveRenameTestLive.ts"
+import { ExclusiveRenameTestLive } from "./support/ExclusiveRenameTestLive.ts"
 
 const layersFor = (home: string) =>
   HoldLayer.pipe(
-    Layer.provideMerge(MacosExclusiveRenameTestLive),
+    Layer.provideMerge(ExclusiveRenameTestLive),
     Layer.provideMerge(LedgerLive),
     Layer.provideMerge(AirlockHome.layer(home)),
     Layer.provideMerge(BunContext.layer)
@@ -238,7 +238,7 @@ describe("Hold — undoable mutations", () => {
         const failingHold = yield* Effect.provide(
           Hold,
           HoldLayer.pipe(
-            Layer.provideMerge(MacosExclusiveRenameTestLive),
+            Layer.provideMerge(ExclusiveRenameTestLive),
             Layer.provideMerge(failingLedger),
             Layer.provideMerge(AirlockHome.layer(home)),
             Layer.provideMerge(BunContext.layer)

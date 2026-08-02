@@ -1,6 +1,10 @@
 import { Cause, Effect, Exit } from "effect"
 import { constants } from "node:fs"
 import { open, readFile } from "node:fs/promises"
+import {
+  acquireLinuxFileLease,
+  linuxLeaseUnavailability
+} from "./linux/LinuxExclusiveFileLock.ts"
 
 type LockOwner = Readonly<{
   readonly token: string
@@ -84,14 +88,59 @@ const contended = (cause: unknown) => {
 }
 
 /**
- * A bounded, cross-process macOS lease over one stable inode.
+ * Opens the stable lock inode already holding the kernel lease, or resolves
+ * `undefined` when another live open file description holds it.
  *
- * Authority is the open file description protected by O_EXLOCK, not the owner
- * JSON or a reusable pathname. The kernel releases the lock when the descriptor
- * closes or its process dies. Stale/malformed owner bytes are therefore inert
- * diagnostics that the next successful holder replaces; there is no stale
- * read-then-rename step and consequently no ABA window that can revoke a newer
- * live owner.
+ * macOS takes the lease inside `open(2)` through `O_EXLOCK` — the same single
+ * call it has always made, unchanged by Linux support.
+ * Linux has no `O_EXLOCK`, so it opens first and takes the same kind of
+ * whole-file kernel lease with `flock(2)`, closing the descriptor again when
+ * the lease belongs to somebody else. Both platforms end in the same state: a
+ * descriptor whose lease the kernel releases on close or process death.
+ */
+const openLeasedDescriptor = async (
+  active: string
+): Promise<FileHandle | undefined> => {
+  if (process.platform === "darwin") {
+    try {
+      return await open(
+        active,
+        constants.O_RDWR |
+          constants.O_CREAT |
+          constants.O_NONBLOCK |
+          DARWIN_O_EXLOCK,
+        0o600
+      )
+    } catch (cause) {
+      if (contended(cause)) return undefined
+      throw cause
+    }
+  }
+
+  const handle = await open(
+    active,
+    constants.O_RDWR | constants.O_CREAT,
+    0o600
+  )
+  try {
+    if (await acquireLinuxFileLease(handle.fd)) return handle
+  } catch (cause) {
+    await handle.close()
+    throw cause
+  }
+  await handle.close()
+  return undefined
+}
+
+/**
+ * A bounded, cross-process lease over one stable inode.
+ *
+ * Authority is the open file description holding the kernel lease — `O_EXLOCK`
+ * on macOS, `flock(2)` on Linux — not the owner JSON or a reusable pathname.
+ * The kernel releases the lock when the descriptor closes or its process dies.
+ * Stale/malformed owner bytes are therefore inert diagnostics that the next
+ * successful holder replaces; there is no stale read-then-rename step and
+ * consequently no ABA window that can revoke a newer live owner.
  */
 export const makeExclusiveFileLock = <E>(
   options: ExclusiveFileLockOptions<E>
@@ -115,14 +164,24 @@ export const makeExclusiveFileLock = <E>(
     })
 
   const attempt = Effect.fnUntraced(function* () {
-    if (process.platform !== "darwin") {
+    if (process.platform !== "darwin" && process.platform !== "linux") {
       return yield* Effect.fail(
         fail(
           "acquire-lock",
           options.active,
-          `O_EXLOCK lease is unavailable on ${process.platform}`
+          `a kernel-owned exclusive lease is unavailable on ${process.platform}`
         )
       )
+    }
+    if (process.platform === "linux") {
+      // Report an absent Linux primitive as a failed acquisition rather than as
+      // a failed publication: no descriptor was ever leased.
+      const unavailable = yield* Effect.promise(linuxLeaseUnavailability)
+      if (unavailable !== undefined) {
+        return yield* Effect.fail(
+          fail("acquire-lock", options.active, unavailable)
+        )
+      }
     }
 
     const owner: LockOwner = {
@@ -132,31 +191,20 @@ export const makeExclusiveFileLock = <E>(
     }
     const claimed = yield* Effect.tryPromise({
       try: async (): Promise<Lease | undefined> => {
-        let handle: FileHandle | undefined
+        const handle = await openLeasedDescriptor(options.active)
+        if (handle === undefined) return undefined
         try {
-          handle = await open(
-            options.active,
-            constants.O_RDWR |
-              constants.O_CREAT |
-              constants.O_NONBLOCK |
-              DARWIN_O_EXLOCK,
-            0o600
-          )
           await handle.truncate(0)
           await handle.writeFile(JSON.stringify(owner), "utf8")
           await handle.sync()
           return { owner, handle }
         } catch (cause) {
-          const opened = handle !== undefined
-          if (handle !== undefined) {
-            try {
-              await handle.close()
-            } catch {
-              // Preserve the publication failure. Closing is best effort here;
-              // the kernel also releases the lease when this process exits.
-            }
+          try {
+            await handle.close()
+          } catch {
+            // Preserve the publication failure. Closing is best effort here;
+            // the kernel also releases the lease when this process exits.
           }
-          if (!opened && contended(cause)) return undefined
           throw cause
         }
       },
