@@ -101,9 +101,9 @@ Hold/Outbox finality, and receipt semantics should not.
 | Outbox | **Implemented domain nucleus**; durable HTTP stage/cancel/commit, bounded cross-process locking, and honest `uncertain` recovery |
 | Ledger | **Implemented durable append seam**; cross-process locking, file/directory sync, and typed torn-tail repair/quarantine are established, but a complete compaction/tamper-evident multi-component Journal is not |
 | labels | **Implemented pure candidate**; lattice, sink checks, scoped declassification/endorsement, and tests exist, but the runtime does not yet enforce them end to end |
-| endpoint broker | **Candidate, not implemented**; current native Cells deny network and Outbox dispatches HTTP itself |
+| endpoint broker | **Dispatch-class slice implemented and fixture-proven; general broker remains candidate**; supervisor-side v2 endpoint grants class dispatch consequence, and a `read`-class `commit: "auto"` grant auto-commits a staged intent through the existing `Outbox.commit` (single dispatch site preserved), while DNS, redirects, proxying, loopback, budgets, credential authority, and actual-destination receipts remain unimplemented; native Cells still deny network and Outbox dispatches HTTP itself |
 | complete execution closure | **Acceptance condition, not established** |
-| inert tool definitions | **Implemented v1 integration**; accepted JSON definitions lower invoke-only actions totally through the same Plan/admission/runtime path and cannot mint authority |
+| inert tool definitions | **Implemented v1 + v2 integration**; accepted JSON definitions lower totally through the same Plan/admission/runtime path and cannot mint authority — v1 actions are invoke-only, and v2 adds `enqueue` actions that lower onto the staged `RequestExternal` seam without gaining dispatch |
 | agent discovery and compact output | **Implemented agent UX seam**; native action JSON Schemas derive from the decoding Schemas, `run`/`eval --compact` projects evidence, and recent-run listing is bounded to 1–100 entries |
 | Vouch evidence | **Implemented local proofs**; one restore/apply/stage/undo fixture plus a 12-action host-operation workflow, not a real OpenShell or remote replacement |
 | Unix contract corpus | **Implemented contract-shape evidence**; 72 accepted shapes across 10 families parse, decode, lower, validate, and compatibility-admit, with 8 explicit unsupported classes; they are not executed tasks or model-success evidence |
@@ -314,12 +314,18 @@ RequestExternal
 
 Definitions may add typed names over existing executables, but they are JSON
 data. The v1 schema requires exactly one absolute executable selector per
-definition and accepts only `invoke` lowering. The loader validates known
+definition and accepts only `invoke` lowering. The v2 schema adds exactly one
+thing: `enqueue` actions whose request templates lower onto the existing
+`http.stage`/`RequestExternal` staging seam. A v2 action declares an
+`emissionEffect` that can only narrow a supervisor grant's dispatch class, and
+any definition text naming grant-side class or commit vocabulary is a typed
+`ToolGrantAssertionRejected`. The loader validates known
 locations, callable names, duplicate identities, schemas, templates, limits,
-result decoders, and the declared footprint. For every accepted v1 action,
-lowering is total: it produces an existing structured Invoke action and
-PlanDraft or returns a typed rejection. Definition and Plan digests bind the
-selected data into the execution report.
+result decoders, and the declared footprint. For every accepted action,
+lowering is total: a v1 `invoke` action produces an existing structured Invoke
+action and PlanDraft, a v2 `enqueue` action produces the staged-intent
+`http.stage` call, or a typed rejection is returned. Definition and Plan
+digests bind the selected data into the execution report.
 
 Definitions cannot execute while loading, contain callbacks, discover an
 executable, mint grants, add Plan constructors, dispatch, or bypass runtime
@@ -432,6 +438,14 @@ executableAllowlist
 executableEdges?
 endpointAllowlist
 ```
+
+Policy documents decode as this v1 shape or as `airlock/admission-policy/v2`,
+which replaces the flat `endpointAllowlist` with structured `endpointGrants`
+(selector, methods, supervisor-side dispatch class, commit mode, hold and
+budget bounds). A grant that omits class and commit reproduces the v1
+posture: an irreversible-send floor that stays staged until an explicit
+supervisor commit. No program, definition, or agent-side document can name or
+widen a class.
 
 Compatibility admits the Plan's declared requirements without an allowlist
 restriction under the ratchet; the invoked process may then use ambient host
@@ -809,6 +823,19 @@ budgets, revocation, and receipts for the actual destination. It would grant a
 bounded dispatch lease, not ambient sockets. Current native Cells instead deny
 network, and current Outbox dispatches a bounded HTTP intent itself.
 
+One bounded slice of this direction is implemented and fixture-proven: the v2
+admission policy's supervisor-side endpoint grants carry a dispatch class
+(`read | mutate | irreversible-send`) and a commit mode, and a `read`-class
+`commit: "auto"` grant lets the trusted runtime auto-commit an admitted,
+durably staged intent by calling the existing `Outbox.commit` — staging is
+never skipped, the receipt names `policy-auto` provenance, and the single
+wire-capable dispatch site is preserved. Programs and definitions cannot name
+or widen a class; a definition's declared `emissionEffect` can only narrow the
+decision. The evidence is a local fixture provider
+([`docs/evidence/external-read-slice.md`](docs/evidence/external-read-slice.md));
+it says nothing about real vendor endpoints, and the general EndpointBroker
+scope above remains candidate.
+
 For credentials, the preferred stronger shape is a non-extractable capability:
 “sign this admitted request” or “attach this credential only to this admitted
 destination,” rather than handing raw secret bytes to an opaque executable.
@@ -856,6 +883,14 @@ definition file reader, Vouch harness, and future VM/broker implementations are
 plastic adapters. They may be local and repetitive. They must remain tested
 and observable, but they do not need generic integration frameworks.
 
+The Linux platform adapters sit in this stratum: a
+`renameat2(RENAME_NOREPLACE)` rename and a `flock(2)` exclusive lease in
+`src/platform/linux/`, selected by host platform only and container-proven for
+the portable Hold/Outbox/Ledger/lease physics
+([`docs/evidence/linux-beachhead.md`](docs/evidence/linux-beachhead.md)). No
+Linux containment profile exists — `native-contained` refuses there — and
+macOS remains the release platform.
+
 The current CLI composes services through one application Layer graph and
 runtime. It does not yet run a persistent daemon or expose the future local RPC
 surface.
@@ -882,8 +917,9 @@ Implemented, bounded properties:
 - Hold owns supported managed replacements;
 - Outbox owns HTTP dispatch;
 - profile mismatch and missing enforcement fail closed;
-- accepted v1 tool definitions are inert invoke-only data with total lowering
-  into the existing Plan path; and
+- accepted tool definitions are inert data with total lowering into the
+  existing Plan path — v1 invoke-only, v2 adding `enqueue` staging actions
+  that cannot name a dispatch class or commit mode; and
 - the pure label module prevents ordinary derivation from lowering
   confidentiality or raising integrity.
 
@@ -973,12 +1009,15 @@ collapsed:
    automated gate enforces a five-minute cold-campaign ceiling. It is not 50
    unique/model-generated tasks, a direct-shell A/B, or a held-out corpus.
 
-The final integrated `bun run verify` gate passes 52 test files plus one
-skipped file and 254 tests plus 16 skipped tests. Its explicit Bun/macOS
+The final integrated `bun run verify` gate passes 54 test files plus one
+skipped file and 283 tests plus 16 skipped tests. Its explicit Bun/macOS
 boundary suites pass 11 ProcessRunner, eight native Cell, seven
 executable-edge, and nine in-process-boundary cases. These counts establish the
 revision's tested baseline; they do not transform fixtures into representative
-agent-task evidence.
+agent-task evidence. Newer bounded evidence documents — the external-read
+fixture slice, the Linux beachhead, and the model-generated corpus campaign
+v0 — are recorded under `docs/evidence/` with their own claim boundaries and
+do not change this classification.
 
 The published native exclusions include unstructured command strings, symlink
 Apply, special files/devices, mount mutation, interactive PTY/job control,

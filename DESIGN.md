@@ -107,7 +107,7 @@ completeness obligation.
 | operation | agent-visible phase | terminal authority |
 |---|---|---|
 | remove or replace | propose an `Apply` delta | Hold installs it; Reaper later discards recovery material |
-| external request | stage an `ExternalIntent` | `Outbox.commit` dispatches the currently supported HTTP intent |
+| external request | stage an `ExternalIntent` | `Outbox.commit` dispatches the currently supported HTTP intent; a supervisor policy may pre-authorize that commit for endpoint grants it classed `read` — the program cannot select this — and the auto-commit routes through the same `Outbox.commit` authority |
 | contained arbitrary code | run against a private view | Cell reports a delta; Hold applies it separately |
 | remote machine work | delegate a realm-scoped Plan request | the remote Airlock independently admits and executes it |
 
@@ -242,9 +242,15 @@ direction, but must fail explicitly rather than borrow a stronger description:
   sources merely because they persist and are consumed later.
 - **Endpoint brokerage** — this gate applies only when contained networking is
   advertised. The current native profile denies network and current
-  `Outbox.commit` dispatches bounded HTTP itself. A future broker would own DNS,
-  redirects, proxying, loopback decisions, budgets, credential authority, and
-  actual-destination receipts.
+  `Outbox.commit` dispatches bounded HTTP itself. A dispatch-class slice now
+  exists with fixture evidence: supervisor-side endpoint grants whose
+  `read`-class `commit: "auto"` entries auto-commit staged intents through the
+  same `Outbox.commit`
+  ([`docs/evidence/external-read-slice.md`](docs/evidence/external-read-slice.md)).
+  The gate still applies unchanged before advertised contained networking or
+  real vendor brokerage: a future broker would own DNS, redirects, proxying,
+  loopback decisions, budgets, credential authority, and actual-destination
+  receipts.
 - **Information labels** — confidentiality or integrity claims require
   observations, artifacts, handles, definitions, executables, streams, and
   outputs to carry conservative labels. Declassification and endorsement are
@@ -265,7 +271,10 @@ cancellation, and output-limit paths. They do not form a representative
 shell-replacement corpus and do not run a real OpenShell or remote replacement.
 The corpus also includes agent-only repository search/pipeline, native editing,
 archive, local Git, build/descendant, and recoverable recursive-removal
-workloads. Inert definitions execute through the same generic Plan path.
+workloads. Inert definitions execute through the same generic Plan path; the
+v2 definition schema also lowers `enqueue` actions onto the staged
+`RequestExternal` seam with local fixture evidence, which concretizes the
+definition contract while distribution and trust remain open.
 
 Airlock may say that macOS v1 “replaces most shell usage for agents” only after
 the published acceptance corpus clears all applicable construction,
@@ -295,7 +304,8 @@ Airlock does not:
 ## Open questions
 
 The smallest useful language beyond the syntax already implemented, metadata
-and hardlink semantics, tool-definition distribution, native network
-enforcement, complete Journal protocol, and remote-realm transport remain
-open. They may be resolved only by implementation evidence without weakening
+and hardlink semantics, tool-definition distribution and trust (the v2 schema
+concretizes the definition document itself; signing, precedence, and
+distribution do not follow from it), native network enforcement, complete
+Journal protocol, and remote-realm transport remain open. They may be resolved only by implementation evidence without weakening
 the two laws or creating a new effect or terminal-authority path accidentally.

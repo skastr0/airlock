@@ -154,7 +154,12 @@ native end to end.
 2. Exercise the real SQLite-safe snapshot and collision-skipping restore
    semantics in the existing helpers.
 3. Keep the replacement request staged until its endpoint/credential authority
-   has an honest broker or remote-realm contract.
+   has an honest broker or remote-realm contract. The dispatch-class and
+   provider RFC
+   ([`rfc/dispatch-classes-and-provider-contract.md`](rfc/dispatch-classes-and-provider-contract.md))
+   is now the contract governing that endpoint/credential authority; a
+   replacement send is `irreversible-send`-class work, which the implemented
+   read-class auto-commit slice never covers.
 4. Run snapshot, upload, restore, receipt decoding, validation, replacement,
    and post-replacement health as one shell-free Airlock program.
 5. Inject crashes and concurrent conflicts at every Hold/Apply/Outbox boundary.

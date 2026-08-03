@@ -36,8 +36,8 @@ usable developer preview — broad claim not yet earned
 
 Evidence present today:
 
-- the final integrated `bun run verify` gate passes 52 test files plus one
-  skipped file and 254 tests plus 16 skipped tests;
+- the final integrated `bun run verify` gate passes 54 test files plus one
+  skipped file and 283 tests plus 16 skipped tests;
 - the four explicit Bun/macOS boundary gates pass: 11 ProcessRunner cases,
   eight native Cell cases, seven executable-edge cases, and nine in-process
   boundary cases;
@@ -99,7 +99,18 @@ Evidence present today:
   evidence projection while process output and program values retain their
   configured limits, and `runs --limit` is bounded to 1–100 snapshots; and
 - inert tool definitions execute end to end through existing generic actions,
-  Admission, Plans, Runtime, and Schema-decoded results.
+  Admission, Plans, Runtime, and Schema-decoded results;
+- an [external-read fixture slice](evidence/external-read-slice.md) proves one
+  vertical path — a staged `RequestExternal` auto-committed through the
+  existing `Outbox.commit` under a supervisor `read`-class `commit: "auto"`
+  grant — across 26 cases against a local fixture provider on one macOS host;
+  it preserves the single wire site and is bounded evidence only, not a passed
+  brokerage gate, real-provider evidence, or corpus evidence; and
+- a [Linux beachhead container run](evidence/linux-beachhead.md) proves the
+  portable Hold/Outbox/Ledger/lease physics on Linux
+  (`renameat2(RENAME_NOREPLACE)` and `flock` adapters, a 16-process boundary
+  proof, and the portable suites); it carries no Linux containment profile and
+  no release claim, and every gate in this contract remains macOS-scoped.
 
 Evidence absent today:
 

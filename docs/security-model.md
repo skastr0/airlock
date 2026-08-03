@@ -168,6 +168,13 @@ inventing an outcome. Cancel is meaningful only before the claim. Completed,
 failed, and uncertain are dispatch outcomes; enqueue/stage is not itself the
 external effect.
 
+A v2 supervisor policy may pre-authorize the commit for endpoint grants it
+classed `read` (`commit: "auto"`). That auto-commit is a caller of the same
+`Outbox.commit` after durable staging — no second wire site, and no program or
+definition can select a class. It is implemented with local fixture evidence
+([`evidence/external-read-slice.md`](evidence/external-read-slice.md)), which
+is not vendor or brokerage evidence.
+
 Current dispatch is direct HTTP with manual redirects. It is not a contained
 EndpointBroker and does not prove DNS, proxy, loopback, Unix-socket,
 descriptor-passing, credential, or protocol-idempotency policy.
@@ -265,14 +272,20 @@ Tool definitions are decoded from JSON into a finite Schema:
 
 - no code executes while loading;
 - v1 accepts exactly one absolute executable and only `invoke` lowering;
+- v2 adds `enqueue` actions that lower onto the staged
+  `RequestExternal`/`http.stage` seam, must declare an `emissionEffect` that
+  can only narrow a grant's supervisor-side dispatch class, and are refused
+  with a typed `ToolGrantAssertionRejected` if any definition text names
+  grant-side class or commit vocabulary;
 - argument/environment/resource templates and result decoders are
   declarative;
 - unsupported artifact/secret template forms are rejected rather than
   partially interpreted;
 - executable constraints match explicit absolute identities;
 - definitions request requirements but do not grant them; and
-- every accepted action lowers totally to the existing structured Invoke
-  action and Plan constructors or returns a typed error.
+- every accepted action lowers totally to the existing Plan constructors — a
+  structured Invoke action for v1 `invoke`, a staged `http.stage` intent for
+  v2 `enqueue` — or returns a typed error.
 
 Accepted definitions execute end to end through the same program, Admission,
 ExecutionAuthority, Runtime, and output Schema validation as native actions.
@@ -402,9 +415,14 @@ Cell. Raw projection cannot provide a non-leakage guarantee after an opaque
 executable receives the bytes.
 
 No such broker is installed. Native Cells deny network; compatibility
-processes retain ambient host network; Outbox itself can dispatch HTTP. A
-future VM may route guest egress through a broker, but endpoint and credential
-brokerage are design direction only.
+processes retain ambient host network; Outbox itself can dispatch HTTP. The
+implemented dispatch-class slice — supervisor-classed endpoint grants whose
+`read`-class `commit: "auto"` entries auto-commit staged intents through the
+existing `Outbox.commit`, with local fixture evidence — preserves the single
+dispatch site and is not a broker: DNS, redirect, proxy, loopback, budget, and
+credential authority remain unowned. A future VM may route guest egress
+through a broker, but endpoint and credential brokerage are design direction
+only.
 
 ## Two-phase local and external work
 

@@ -114,6 +114,16 @@ Minimal policy shape:
 }
 ```
 
+Policy documents also decode as `airlock/admission-policy/v2`, which replaces
+`endpointAllowlist` with structured, supervisor-side `endpointGrants` carrying
+a dispatch class and commit mode; a grant that omits both reproduces the v1
+staged-until-supervisor-commit posture, and no program or definition can
+select a class. A `read`-class `commit: "auto"` grant lets the trusted runtime
+auto-commit a staged intent through the same `Outbox.commit` — implemented
+with local fixture evidence
+([`evidence/external-read-slice.md`](evidence/external-read-slice.md)); real
+vendor brokerage remains future work.
+
 Minimal effectful program:
 
 ```text
@@ -265,7 +275,9 @@ attribute them to macOS v1.
 - A live-workspace drift blocks Apply.
 - Each accepted merge transition is recoverable through Hold; multi-entry
   atomicity is not claimed.
-- HTTP intent remains staged until Outbox commit.
+- HTTP intent remains staged until Outbox commit; a v2 policy may
+  pre-authorize that commit for grants it classed `read` (fixture-proven), and
+  the auto-commit routes through the same `Outbox.commit`.
 - Outbox commit claims staged intent before dispatch; supervisor cancellation
   is legal only before that claim.
 - A recovered `committing` Outbox entry is `uncertain`.
