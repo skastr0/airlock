@@ -46,8 +46,11 @@ mutation, dispatch/cancel, undo/reap, and flush while retaining program,
 schema/capability, and read-only state commands. Agent program commands do not
 accept `--profile`; the supervisor may pin `AIRLOCK_AGENT_PROFILE`, otherwise
 compatibility remains the default. A program may request structured
-Invoke/Apply nodes, but an attempted node downgrade is returned as a failed
-`RuntimeCapabilityDenied` receipt without performing the effect.
+Invoke/Apply nodes, but an attempted profile downgrade is refused at Plan
+validation as a failed `RuntimePlanInvalid` receipt ("cannot widen
+native-contained runtime authority") without performing the effect; the
+node-level `RuntimeCapabilityDenied` tag covers authority denials that reach a
+node.
 
 `airlock doctor` and `airlock capabilities` return the same machine-readable
 report. It distinguishes an enforced mechanism from something merely present

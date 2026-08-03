@@ -155,7 +155,9 @@ undo/reap, and flush. Agent `run`/`eval` has no `--profile` option; the
 supervisor may pin it with `AIRLOCK_AGENT_PROFILE` (otherwise compatibility
 remains the ratchet default). A program can still request structured Invoke or
 Apply work, but a node that attempts to weaken the selected profile returns a
-failed `RuntimeCapabilityDenied` receipt and does not perform the effect.
+failed `RuntimePlanInvalid` receipt ("cannot widen native-contained runtime
+authority") and does not perform the effect; Plan validation fires before the
+node-level `RuntimeCapabilityDenied` check.
 
 Action discovery is generated from the same Effect Schemas used to decode
 native actions, so `airlock-agent schema process.run` reports the executable

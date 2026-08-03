@@ -5,7 +5,7 @@ import { FileSystem } from "@effect/platform"
 import { Console, Effect, JSONSchema, Layer, ManagedRuntime, Option, Schema } from "effect"
 import * as nodePath from "node:path"
 import * as nodeOs from "node:os"
-import { AdmissionPolicy } from "./admission/index.ts"
+import { AdmissionPolicy, AdmissionPolicyDocument, AdmissionPolicyV2, isAdmissionPolicyV2 } from "./admission/index.ts"
 import {
   NativeActionCatalog,
   nativeActionSchema
@@ -336,8 +336,8 @@ const discoveredTools = (workspace: string) =>
   )
 
 const bindPolicyPathScopes = (
-  policy: AdmissionPolicy
-): Effect.Effect<AdmissionPolicy, never, FileSystem.FileSystem> => {
+  policy: AdmissionPolicyDocument
+): Effect.Effect<AdmissionPolicyDocument, never, FileSystem.FileSystem> => {
   if (policy.profile !== "native-contained") return Effect.succeed(policy)
 
   return Effect.gen(function* () {
@@ -365,7 +365,9 @@ const bindPolicyPathScopes = (
       },
       { concurrency: 1 }
     )
-    return new AdmissionPolicy({ ...policy, pathAllowlist })
+    return isAdmissionPolicyV2(policy)
+      ? new AdmissionPolicyV2({ ...policy, pathAllowlist })
+      : new AdmissionPolicy({ ...policy, pathAllowlist })
   })
 }
 
@@ -377,7 +379,7 @@ const bindPolicyPathScopes = (
 const supervisorPolicy = (
   profile: "compatibility" | "native-contained" | "vm-enclosed",
   workspace: string
-): Effect.Effect<AdmissionPolicy, CliInputError, FileSystem.FileSystem> => {
+): Effect.Effect<AdmissionPolicyDocument, CliInputError, FileSystem.FileSystem> => {
   if (profile === "vm-enclosed") {
     return failInput("profile", "vm-enclosed has no bundled VM Cell backend; refusing fallback")
   }
@@ -389,7 +391,7 @@ const supervisorPolicy = (
   }
   return Effect.flatMap(FileSystem.FileSystem, (fs) => fs.readFileString(policyFile).pipe(
     Effect.mapError((error) => new CliInputError({ field: "AIRLOCK_POLICY_FILE", reason: String(error) })),
-    Effect.flatMap(Schema.decodeUnknown(Schema.parseJson(AdmissionPolicy))),
+    Effect.flatMap(Schema.decodeUnknown(Schema.parseJson(AdmissionPolicyDocument))),
     Effect.mapError((error) => new CliInputError({ field: "AIRLOCK_POLICY_FILE", reason: error.message })),
     Effect.flatMap((policy) => policy.profile === profile
       ? Effect.succeed(policy)

@@ -669,9 +669,9 @@ program asking for a `compatibility` Cell is refused and performs no effect:
 ```
 
 > Observed tag: `RuntimePlanInvalid`, from Plan validation, which precedes the
-> node-level `RuntimeCapabilityDenied` check. [`README.md`](../README.md) and
-> [`macos-v1.md`](macos-v1.md) name this refusal `RuntimeCapabilityDenied`;
-> trust the executed tag.
+> node-level `RuntimeCapabilityDenied` check. The node-level tag still exists
+> for authority denials that reach a node; profile widening is caught earlier,
+> at the Plan.
 
 ### `vm-enclosed` — fails closed
 
@@ -755,20 +755,11 @@ canonicalization** — query and fragment never participate), optional `methods`
 inline bodies; `maxDispatchesPerRun` owned by the dispatch engine). Omitting
 `class` and `commit` reproduces the v1 posture exactly.
 
-> **Not reachable through the CLI today.** `src/cli.ts:392` decodes
-> `Schema.parseJson(AdmissionPolicy)` — the v1 class, not the
-> `AdmissionPolicyDocument` union. A v2 document handed to
-> `AIRLOCK_POLICY_FILE` is rejected:
->
-> ```json
-> {"field":"AIRLOCK_POLICY_FILE","reason":"… [\"schemaVersion\"] └─ Expected \"airlock/admission-policy/v1\", actual \"airlock/admission-policy/v2\"","_tag":"CliInputError"}
-> ```
->
-> Executed. `Admission`, `SupervisorDispatch`, and the CLI's own program layer
-> (`ProgramExecutionWithToolsLive` → `ProgramPlanRuntimeWithPolicyLive`) all
-> accept the union, so this is a decoder gap at the CLI edge, not a missing
-> capability. Until it is closed, dispatch-class grants are reachable only by
-> composing the stack in-process, which is exactly what the proof below does.
+A v2 document loads through `AIRLOCK_POLICY_FILE` on both surfaces: the CLI
+decodes the `AdmissionPolicyDocument` union (v1 or v2, discriminated on
+`schemaVersion`), and a v1 file keeps decoding unchanged. Executed on both
+`airlock` and `airlock-agent` with a v2 compatibility-profile policy:
+the program ran and reported `succeeded`.
 
 ### Walking the proof end to end
 
