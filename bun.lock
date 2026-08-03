@@ -4,13 +4,15 @@
   "workspaces": {
     "": {
       "name": "@skastr0/airlock",
-      "devDependencies": {
+      "dependencies": {
         "@effect/cli": "^0.75.0",
         "@effect/platform": "^0.96.0",
         "@effect/platform-bun": "^0.89.0",
+        "effect": "^3.21.0",
+      },
+      "devDependencies": {
         "@effect/vitest": "^0.29.0",
         "@types/bun": "^1.3.11",
-        "effect": "^3.21.0",
         "typescript": "^6.0.3",
         "vitest": "^4.1.2",
       },
