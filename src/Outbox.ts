@@ -61,6 +61,8 @@ export {
  * more. Anything beyond the bound is discarded and the receipt says so.
  */
 export const DISPATCH_RESPONSE_LIMIT_BYTES = 65_536
+/** Construction bound for connection plus bounded response capture. */
+export const OUTBOX_DISPATCH_TIMEOUT_MILLIS = 30_000
 
 type StageInput = EmissionRequest | ExternalIntent
 
@@ -618,7 +620,16 @@ const make = Effect.gen(function* () {
               id,
               reason: "transport-failed"
             })
-        }).pipe(Effect.either)
+        }).pipe(
+          Effect.timeoutFail({
+            duration: OUTBOX_DISPATCH_TIMEOUT_MILLIS,
+            onTimeout: () => new EmissionDispatchUncertain({
+              id,
+              reason: "transport-failed"
+            })
+          }),
+          Effect.either
+        )
       ).pipe(Effect.exit)
 
       if (Exit.isFailure(deliveredExit)) {
