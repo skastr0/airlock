@@ -1,6 +1,7 @@
 import { mkdir, mkdtemp, readFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
+import { createServer } from "node:net"
 import { describe, expect, it } from "vitest"
 import { Effect } from "effect"
 import {
@@ -66,6 +67,34 @@ describe("daemon Unix health transport", () => {
       expect(rejected).toMatchObject({ direction: "response" })
     })))
   )
+
+
+  it("bounds a peer that accepts but never returns a frame", async () => {
+    const root = await mkdtemp(join(tmpdir(), "airlock-daemon-stall-"))
+    const socketPath = join(root, "daemon.sock")
+    const peers = new Set<import("node:net").Socket>()
+    const server = createServer((socket) => {
+      peers.add(socket)
+      socket.once("close", () => peers.delete(socket))
+    })
+    await new Promise<void>((done, reject) => {
+      server.once("error", reject)
+      server.listen(socketPath, done)
+    })
+    const started = Date.now()
+    try {
+      const failure = await Effect.runPromise(
+        unixDaemonHealthTransport(socketPath, 50)
+          .request({ request: "health" })
+          .pipe(Effect.flip)
+      )
+      expect(failure).toMatchObject({ operation: "read", reason: "response timed out" })
+      expect(Date.now() - started).toBeLessThan(1_000)
+    } finally {
+      for (const peer of peers) peer.destroy()
+      await new Promise<void>((done) => server.close(() => done()))
+    }
+  })
 
   it("contains no unlink, fetch, or terminal effect site", async () => {
     const source = await readFile(
