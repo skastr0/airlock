@@ -26,6 +26,8 @@ import {
   PrivateHttpDispatch,
   RedactedDispatchResponse,
   RedactedEmissionRequest,
+  StagedDispatchAuthorization,
+  type StagedDispatchSealDigest,
   UnsupportedExternalIntent
 } from "./outbox/Contract.ts"
 import {
@@ -34,6 +36,7 @@ import {
 } from "./outbox/FileOutboxStore.ts"
 
 export {
+  CanonicalDispatchEndpoint,
   CommitAuthority,
   DispatchProvenance,
   EmissionDispatchUncertain,
@@ -46,6 +49,8 @@ export {
   OutboxStateCorrupt,
   OutboxStorageFailed,
   RedactedDispatchResponse,
+  StagedDispatchAuthorization,
+  StagedDispatchSealDigest,
   UnsupportedExternalIntent
 } from "./outbox/Contract.ts"
 
@@ -108,7 +113,8 @@ export class Outbox extends Context.Tag("airlock/Outbox")<
   {
     readonly stage: (
       request: StageInput,
-      holdMillis: number
+      holdMillis: number,
+      authorization?: StagedDispatchAuthorization
     ) => Effect.Effect<OutboxEmission, StageError>
     readonly inspect: (
       id: EmissionId
@@ -138,6 +144,16 @@ export class Outbox extends Context.Tag("airlock/Outbox")<
       ReadonlyArray<OutboxEmission>,
       OutboxStorageFailed | OutboxStateCorrupt
     >
+    /**
+     * Discover only inert staged evidence bound to the current supervisor
+     * seal. This reads redacted manifests and neither dispatches nor commits.
+     */
+    readonly pendingAuthorized: (
+      sealDigest: StagedDispatchSealDigest
+    ) => Effect.Effect<
+      ReadonlyArray<OutboxEmission>,
+      OutboxStorageFailed | OutboxStateCorrupt
+    >
     readonly flush: Effect.Effect<
       {
         readonly committed: ReadonlyArray<OutboxEmission>
@@ -147,13 +163,43 @@ export class Outbox extends Context.Tag("airlock/Outbox")<
       OutboxStorageFailed | OutboxStateCorrupt | OutboxRecoveryRequired
     >
   }
->() {}
+>() {
+  /** Keep handwritten pre-authorization service fixtures source-compatible. */
+  static of(
+    service: Omit<typeof Outbox.Service, "pendingAuthorized"> & {
+      readonly pendingAuthorized?:
+        typeof Outbox.Service["pendingAuthorized"]
+    }
+  ): typeof Outbox.Service
+  static of(service: typeof Outbox.Service): typeof Outbox.Service
+  static of(
+    service: Omit<typeof Outbox.Service, "pendingAuthorized"> & {
+      readonly pendingAuthorized?:
+        typeof Outbox.Service["pendingAuthorized"]
+    }
+  ): typeof Outbox.Service {
+    return {
+      ...service,
+      pendingAuthorized: service.pendingAuthorized ?? ((sealDigest) =>
+        service.pending.pipe(
+          Effect.map((emissions) =>
+            emissions.filter(
+              (emission) =>
+                emission.authorization?.dispatchClass === "read" &&
+                emission.authorization.sealDigest === sealDigest
+            )
+          )
+        ))
+    }
+  }
+}
 
 const encodeManifest = Schema.encode(
   Schema.parseJson(PersistedOutboxManifest)
 )
 const decodeManifest = Schema.decode(
-  Schema.parseJson(PersistedOutboxManifest)
+  Schema.parseJson(PersistedOutboxManifest),
+  { onExcessProperty: "error" }
 )
 const encodeDispatch = Schema.encode(Schema.parseJson(PrivateHttpDispatch))
 const decodeDispatch = Schema.decode(Schema.parseJson(PrivateHttpDispatch))
@@ -227,6 +273,24 @@ const redactUrl = (raw: string) => {
   }
   url.hash = ""
   return url.toString()
+}
+
+/** The actual normalized scheme/host/path fetch will address. */
+const canonicalDispatchEndpoint = (raw: string) => {
+  const url = new URL(raw)
+  return `${url.protocol}//${url.host}${url.pathname}`
+}
+
+const manifestAuthorizationMatches = (
+  manifest: PersistedOutboxManifest
+): boolean => {
+  if (manifest.authorization === undefined) return true
+  try {
+    return manifest.authorization.endpoint ===
+      canonicalDispatchEndpoint(manifest.intent.endpoint)
+  } catch {
+    return false
+  }
 }
 
 const asHttpIntent = (
@@ -320,6 +384,9 @@ const toEmission = (
     request: manifest.request,
     stagedAt: manifest.stagedAt,
     holdUntil: manifest.holdUntil,
+    ...(manifest.authorization === undefined
+      ? {}
+      : { authorization: manifest.authorization }),
     ...(outcome === undefined ? {} : { outcome })
   })
 
@@ -331,14 +398,27 @@ const make = Effect.gen(function* () {
   // prior runtime stopped. Recovery can only tell the truth: uncertain.
   yield* store.withExclusive(store.recoverCommitting)
 
+  const decodeStoredManifest = (
+    id: string,
+    manifestJson: string
+  ): Effect.Effect<PersistedOutboxManifest, OutboxStateCorrupt> =>
+    Effect.gen(function* () {
+      const manifest = yield* decodeManifest(manifestJson).pipe(
+        Effect.mapError(() => parseFailure(id, "manifest.json"))
+      )
+      if (!manifestAuthorizationMatches(manifest)) {
+        return yield* parseFailure(id, "manifest.json")
+      }
+      return manifest
+    })
+
   const decodeStored = (
     stored: StoredEmission
   ): Effect.Effect<OutboxEmission, OutboxStateCorrupt> =>
     Effect.gen(function* () {
-      const manifest = yield* decodeManifest(stored.manifestJson).pipe(
-        Effect.mapError(() =>
-          parseFailure(stored.id, "manifest.json")
-        )
+      const manifest = yield* decodeStoredManifest(
+        stored.id,
+        stored.manifestJson
       )
       const outcome =
         stored.outcomeJson === undefined
@@ -389,7 +469,8 @@ const make = Effect.gen(function* () {
 
   const stage = Effect.fn("Outbox.stage")(function* (
     request: StageInput,
-    holdMillis: number
+    holdMillis: number,
+    authorization?: StagedDispatchAuthorization
   ) {
     if (
       !Number.isFinite(holdMillis) ||
@@ -402,16 +483,26 @@ const make = Effect.gen(function* () {
     const http = yield* asHttpIntent(request).pipe(
       Effect.flatMap(validateHttpIntent)
     )
+    const summary = summarize(http)
+    if (
+      authorization !== undefined &&
+      authorization.endpoint !== canonicalDispatchEndpoint(http.url)
+    ) {
+      return yield* new InvalidOutboxIntent({
+        field: "authorization.endpoint",
+        reason: "must equal the staged request's canonical endpoint"
+      })
+    }
     const stagedAt = yield* DateTime.now
     const id = newEmissionId()
-    const summary = summarize(http)
     const manifest = new PersistedOutboxManifest({
       schemaVersion: "airlock/outbox-manifest/v1",
       id,
       intent: summary.intent,
       request: summary.request,
       stagedAt,
-      holdUntil: DateTime.add(stagedAt, { millis: holdMillis })
+      holdUntil: DateTime.add(stagedAt, { millis: holdMillis }),
+      ...(authorization === undefined ? {} : { authorization })
     })
     const manifestJson = yield* encodeManifest(manifest).pipe(
       Effect.mapError(() => parseFailure(id, "manifest-encode"))
@@ -471,9 +562,7 @@ const make = Effect.gen(function* () {
       Effect.gen(function* () {
       yield* transition(id, "staged", "committing")
       const stored = yield* store.read(id, "committing")
-      const manifest = yield* decodeManifest(stored.manifestJson).pipe(
-        Effect.mapError(() => parseFailure(id, "manifest.json"))
-      )
+      const manifest = yield* decodeStoredManifest(id, stored.manifestJson)
       const dispatchJson = yield* store.readDispatch(id, "committing")
       const dispatch = yield* decodeDispatch(dispatchJson).pipe(
         Effect.mapError(() => parseFailure(id, "dispatch.json"))
@@ -681,6 +770,18 @@ const make = Effect.gen(function* () {
     )
   )
 
+  const pendingAuthorized = (
+    sealDigest: StagedDispatchSealDigest
+  ) => pending.pipe(
+    Effect.map((emissions) =>
+      emissions.filter(
+        (emission) =>
+          emission.authorization?.dispatchClass === "read" &&
+          emission.authorization.sealDigest === sealDigest
+      )
+    )
+  )
+
   const flush = Effect.gen(function* () {
     const now = yield* DateTime.now
     const staged = yield* pending
@@ -706,7 +807,16 @@ const make = Effect.gen(function* () {
     }
   })
 
-  return Outbox.of({ stage, inspect, commit, cancel, response, pending, flush })
+  return Outbox.of({
+    stage,
+    inspect,
+    commit,
+    cancel,
+    response,
+    pending,
+    pendingAuthorized,
+    flush
+  })
 })
 
 export const OutboxLive = Layer.effect(Outbox, make)

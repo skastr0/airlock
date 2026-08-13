@@ -72,6 +72,58 @@ export class RedactedEmissionRequest extends Schema.Class<RedactedEmissionReques
   body: Schema.optional(Schema.String)
 }) {}
 
+/** A supervisor seal identity, persisted verbatim rather than computed here. */
+export const StagedDispatchSealDigest = Schema.String.pipe(
+  Schema.pattern(/^sha256:[0-9a-f]{64}$/, {
+    message: () => "must be sha256:<64 lowercase hex>"
+  })
+)
+export type StagedDispatchSealDigest =
+  typeof StagedDispatchSealDigest.Type
+
+/**
+ * The canonical endpoint form used by supervisor dispatch evidence. Queries,
+ * fragments, and userinfo are deliberately absent: they are not part of an
+ * endpoint grant match.
+ */
+export const CanonicalDispatchEndpoint = Schema.String.pipe(
+  Schema.filter((value) => {
+    try {
+      const endpoint = new URL(value)
+      const canonical =
+        `${endpoint.protocol}//${endpoint.host}${endpoint.pathname}`
+      return (
+        (endpoint.protocol === "http:" || endpoint.protocol === "https:") &&
+        endpoint.username === "" &&
+        endpoint.password === "" &&
+        endpoint.search === "" &&
+        endpoint.hash === "" &&
+        value === canonical
+      ) || "must be a canonical http(s) scheme://host/path endpoint"
+    } catch {
+      return "must be a canonical http(s) scheme://host/path endpoint"
+    }
+  })
+)
+export type CanonicalDispatchEndpoint =
+  typeof CanonicalDispatchEndpoint.Type
+
+/**
+ * Supervisor-authored evidence that one staged intent may later be discovered
+ * for read-only dispatch under the named seal. Outbox records this value but
+ * never computes it, widens its single dispatch class, or interprets a policy.
+ */
+export class StagedDispatchAuthorization
+  extends Schema.Class<StagedDispatchAuthorization>(
+    "StagedDispatchAuthorization"
+  )({
+    sealDigest: StagedDispatchSealDigest,
+    grantId: Schema.String,
+    grantSelector: Schema.String,
+    dispatchClass: Schema.Literal("read"),
+    endpoint: CanonicalDispatchEndpoint
+  }) {}
+
 /**
  * Who turned a durably staged intent into a dispatch. `policy-auto` is not a
  * second dispatcher: it records that the trusted supervisor plane, not a human
@@ -147,6 +199,7 @@ export class OutboxEmission extends Schema.Class<OutboxEmission>(
   request: RedactedEmissionRequest,
   stagedAt: Schema.DateTimeUtc,
   holdUntil: Schema.DateTimeUtc,
+  authorization: Schema.optional(StagedDispatchAuthorization),
   outcome: Schema.optional(OutboxOutcome)
 }) {}
 
@@ -158,7 +211,8 @@ export class PersistedOutboxManifest extends Schema.Class<PersistedOutboxManifes
   intent: HttpIntentSummary,
   request: RedactedEmissionRequest,
   stagedAt: Schema.DateTimeUtc,
-  holdUntil: Schema.DateTimeUtc
+  holdUntil: Schema.DateTimeUtc,
+  authorization: Schema.optional(StagedDispatchAuthorization)
 }) {}
 
 // Dispatch material is stored separately from the redacted manifest with
