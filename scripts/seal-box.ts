@@ -730,6 +730,8 @@ const launchdPlist = (fields: {
     <string>${plistEscape(fields.workspace)}</string>
     <key>AIRLOCK_IPC_DIRECTORY</key>
     <string>${plistEscape(fields.ipcDirectory)}</string>
+    <key>AIRLOCK_DAEMON_SOCKET</key>
+    <string>${plistEscape(`${fields.ipcDirectory}/daemon.sock`)}</string>
     <key>AIRLOCK_AGENT_USER</key>
     <string>${plistEscape(fields.agentUser)}</string>
     <key>AIRLOCK_AGENT_GROUP</key>
