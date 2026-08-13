@@ -599,6 +599,18 @@ const create = async (): Promise<void> => {
   if (!samePublicKey(createPublicKey(privateKey), suppliedPublic.key)) {
     fail("supplied public key does not match private key", 65)
   }
+  const expectedOperatorDigest = `sha256:${createHash("sha256")
+    .update(suppliedPublic.key.export({ format: "der", type: "spki" }))
+    .digest("hex")}`
+  const anchorPath = `${binaryPath}.operator-key.sha256`
+  const anchorBytes = await readRegularNoSymlink(
+    "binary operator-key anchor",
+    anchorPath,
+    { maxBytes: 128 }
+  )
+  if (decodeUtf8("binary operator-key anchor", anchorBytes).trim() !== expectedOperatorDigest) {
+    fail("binary operator-key anchor does not match supplied public key", 65)
+  }
 
   const grantInput = {
     schemaVersion: "airlock/box-grant/v1" as const,

@@ -262,7 +262,11 @@ export const unixDaemonHealthTransport = (
           })
         }),
         (socket) => writeFrame(socket, request).pipe(
-          Effect.zipRight(readFrame(socket))
+          Effect.zipRight(readFrame(socket)),
+          Effect.timeoutFail({
+            duration: timeoutMillis,
+            onTimeout: () => socketFailure("read", "response timed out")
+          })
         ),
         (socket) => Effect.sync(() => socket.destroy())
       ))

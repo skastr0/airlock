@@ -133,6 +133,7 @@ export const SealVerificationReason = Schema.Literal(
   "signature-size",
   "invalid-public-key",
   "public-key-not-ed25519",
+  "operator-key-mismatch",
   "signature-invalid",
   "signature-verification-failed",
   "digest-mismatch",
@@ -141,7 +142,8 @@ export const SealVerificationReason = Schema.Literal(
   "catalog-changed",
   "invalid-tool-definition",
   "tool-id-mismatch",
-  "snapshot-mismatch"
+  "snapshot-mismatch",
+  "installation-not-ready"
 )
 export type SealVerificationReason = typeof SealVerificationReason.Type
 
@@ -162,6 +164,8 @@ export type BinarySnapshotProvider = () => Effect.Effect<
 
 export interface SealVerificationOptions {
   readonly binarySnapshotProvider?: BinarySnapshotProvider
+  /** Compiled tenant trust anchor: SHA-256 of the operator Ed25519 SPKI DER. */
+  readonly expectedOperatorKeyDigest?: BoxGrantSha256
 }
 
 export interface LoadStartupSealOptions extends SealVerificationOptions {
@@ -339,7 +343,8 @@ const readOperatorPublicKey = (sealPath: string) => {
 
 const verifyGrantSignature = (
   sealPath: string,
-  grant: BoxGrant
+  grant: BoxGrant,
+  expectedOperatorKeyDigest?: BoxGrantSha256
 ): Effect.Effect<void, SealVerificationFailed> => {
   const path = join(sealPath, BOX_GRANT_SIGNATURE_FILE)
   return Effect.all({
@@ -347,6 +352,12 @@ const verifyGrantSignature = (
     signature: readRegularFile(path, "signature", signatureMaxBytes)
   }, { concurrency: 1 }).pipe(
     Effect.flatMap(({ key, signature }) => {
+      if (expectedOperatorKeyDigest !== undefined) {
+        const der = key.export({ format: "der", type: "spki" })
+        if (sha256(new Uint8Array(der)) !== expectedOperatorKeyDigest) {
+          return Effect.fail(failure("key", join(sealPath, OPERATOR_PUBLIC_KEY_FILE), "operator-key-mismatch"))
+        }
+      }
       if (signature.byteLength !== 64) {
         return Effect.fail(failure("signature", path, "signature-size"))
       }
@@ -558,7 +569,11 @@ export const verifySealAtPath = (
 
     yield* inspectDirectory(sealPath, "seal")
     const { grant, grantDigest } = yield* readGrant(sealPath)
-    yield* verifyGrantSignature(sealPath, grant)
+    yield* verifyGrantSignature(
+      sealPath,
+      grant,
+      options.expectedOperatorKeyDigest
+    )
 
     const binary = yield* acquireBinarySnapshot(
       options.binarySnapshotProvider ?? currentBinarySnapshot
@@ -599,6 +614,36 @@ export const loadStartupSeal = (
     }
     return yield* verifySealAtPath(sealPath, options)
   })
+
+
+/** Required tenant entrypoints accept only a fully published runnable generation. */
+export const verifyInstalledReadiness = (
+  seal: VerifiedSeal,
+  readinessPath: string
+): Effect.Effect<void, SealVerificationFailed> =>
+  readRegularFile(readinessPath, "seal", 4_096).pipe(
+    Effect.flatMap((bytes) => decodeUtf8(bytes, "seal", readinessPath)),
+    Effect.flatMap((json) => Effect.try({
+      try: () => JSON.parse(json) as unknown,
+      catch: () => failure("seal", readinessPath, "installation-not-ready")
+    })),
+    Effect.flatMap((document) => {
+      if (
+        typeof document !== "object" || document === null ||
+        (document as Record<string, unknown>)["schemaVersion"] !== "airlock/installed-generation/v1" ||
+        (document as Record<string, unknown>)["grantDigest"] !== seal.grantDigest ||
+        (document as Record<string, unknown>)["binaryDigest"] !== seal.binaryDigest ||
+        (document as Record<string, unknown>)["ownershipApplied"] !== true ||
+        (document as Record<string, unknown>)["runnable"] !== true
+      ) {
+        return Effect.fail(failure("seal", readinessPath, "installation-not-ready"))
+      }
+      return Effect.void
+    }),
+    Effect.mapError((error) => error.reason === "installation-not-ready"
+      ? error
+      : failure("seal", readinessPath, "installation-not-ready"))
+  )
 
 const sameBytes = (left: Uint8Array, right: Uint8Array) => {
   if (left.byteLength !== right.byteLength) return false

@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto"
+import { createHash, createPublicKey } from "node:crypto"
 import { spawnSync } from "node:child_process"
 import {
   chmodSync,
@@ -88,6 +88,14 @@ const fixture = (profile: "native-contained" | "compatibility" = "native-contain
     "keygen", "--private-key", privateKey, "--public-key", publicKey
   ])
   expect(generated.status, generated.stderr).toBe(0)
+  const operatorDer = createPublicKey(readFileSync(publicKey)).export({
+    format: "der",
+    type: "spki"
+  })
+  writeFileSync(
+    `${binary}.operator-key.sha256`,
+    `sha256:${createHash("sha256").update(operatorDer).digest("hex")}\n`
+  )
   return {
     root,
     workspace,

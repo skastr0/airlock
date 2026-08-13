@@ -1,10 +1,10 @@
 import { createHash, generateKeyPairSync, sign } from "node:crypto"
 import { spawnSync } from "node:child_process"
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs"
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
 import { beforeAll, describe, expect, it } from "vitest"
-import { AdmissionPolicy, BoxGrant } from "../src/admission/index.ts"
+import { AdmissionPolicy, BoxGrant, hashBoxGrant } from "../src/admission/index.ts"
 import {
   BOX_GRANT_FILE,
   BOX_GRANT_SIGNATURE_FILE,
@@ -18,11 +18,22 @@ const root = mkdtempSync(join(tmpdir(), "airlock-required-seal-"))
 const generation = join(root, "generation")
 const binary = join(generation, "bin", "airlock")
 const seal = join(generation, "seal")
+const operator = generateKeyPairSync("ed25519")
+const operatorKeyDigest = `sha256:${createHash("sha256")
+  .update(operator.publicKey.export({ format: "der", type: "spki" }))
+  .digest("hex")}`
+const operatorPublicPath = join(root, "operator.pub.pem")
 
 beforeAll(() => {
   mkdirSync(join(generation, "bin"), { recursive: true })
+  writeFileSync(
+    operatorPublicPath,
+    operator.publicKey.export({ format: "pem", type: "spki" })
+  )
   const built = spawnSync("bun", [
-    "build", "--compile", "--outfile", binary, "src/box-cli.ts"
+    "scripts/build-box.ts",
+    "--public-key", operatorPublicPath,
+    "--out", binary
   ], {
     cwd: repository,
     encoding: "utf8",
@@ -36,7 +47,7 @@ const digest = (bytes: Uint8Array) =>
 
 const writeGoodSeal = () => {
   mkdirSync(join(seal, SEAL_CATALOG_DIRECTORY), { recursive: true })
-  const { privateKey, publicKey } = generateKeyPairSync("ed25519")
+  const { privateKey, publicKey } = operator
   const grant = new BoxGrant({
     schemaVersion: "airlock/box-grant/v1",
     admission: new AdmissionPolicy({
@@ -64,6 +75,14 @@ const writeGoodSeal = () => {
     join(seal, BOX_GRANT_SIGNATURE_FILE),
     sign(null, boxGrantSigningPayload(grant), privateKey)
   )
+  writeFileSync(join(generation, "SEALED"), `${JSON.stringify({
+    schemaVersion: "airlock/installed-generation/v1",
+    grantDigest: hashBoxGrant(grant),
+    binaryDigest: grant.binaryDigest,
+    ownershipApplied: true,
+    runnable: true,
+    activated: false
+  })}\n`)
 }
 
 const invoke = (args: ReadonlyArray<string>, env: Record<string, string> = {}) =>
@@ -108,4 +127,53 @@ describe("required-seal tenant entrypoint", () => {
     expect(existsSync(join(generation, "home"))).toBe(true)
     expect(existsSync(join(root, "attacker-home"))).toBe(false)
   })
+
+  it("rejects a copied binary beside an attacker self-signed seal", () => {
+    const clone = join(root, "attacker-clone")
+    const cloneBinary = join(clone, "bin", "airlock")
+    const cloneSeal = join(clone, "seal")
+    mkdirSync(join(clone, "bin"), { recursive: true })
+    mkdirSync(join(cloneSeal, SEAL_CATALOG_DIRECTORY), { recursive: true })
+    cpSync(binary, cloneBinary)
+    const attacker = generateKeyPairSync("ed25519")
+    const grant = new BoxGrant({
+      schemaVersion: "airlock/box-grant/v1",
+      admission: new AdmissionPolicy({
+        schemaVersion: "airlock/admission-policy/v1",
+        profile: "compatibility",
+        principal: "agent:attacker",
+        realm: "local",
+        admittedBy: "attacker",
+        pathAllowlist: ["/"],
+        executableAllowlist: ["/bin/sh"],
+        endpointAllowlist: ["https://"]
+      }),
+      verbs: ["exec", "serve"],
+      nativeActions: ["process.run"],
+      catalog: [],
+      daemonOps: ["commit"],
+      binaryDigest: digest(readFileSync(cloneBinary))
+    })
+    writeFileSync(join(cloneSeal, BOX_GRANT_FILE), `${JSON.stringify(grant)}\n`)
+    writeFileSync(
+      join(cloneSeal, OPERATOR_PUBLIC_KEY_FILE),
+      attacker.publicKey.export({ format: "pem", type: "spki" })
+    )
+    writeFileSync(
+      join(cloneSeal, BOX_GRANT_SIGNATURE_FILE),
+      sign(null, boxGrantSigningPayload(grant), attacker.privateKey)
+    )
+    const refused = spawnSync(cloneBinary, ["exec", "--help"], {
+      cwd: repository,
+      encoding: "utf8",
+      env: { ...process.env, FORCE_COLOR: undefined, NO_COLOR: "1" }
+    })
+    expect(refused.status).toBe(78)
+    expect(JSON.parse(refused.stderr)).toMatchObject({
+      _tag: "SealVerificationFailed",
+      phase: "key",
+      reason: "operator-key-mismatch"
+    })
+  })
+
 })

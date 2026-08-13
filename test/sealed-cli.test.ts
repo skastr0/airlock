@@ -315,6 +315,32 @@ describe("sealed CLI grant graph", () => {
     expect(existsSync(marker)).toBe(false)
     const runDirectory = join(home, "runs")
     expect(existsSync(runDirectory) ? readdirSync(runDirectory) : []).toEqual([])
+
+    const scoped = makeSeal("exec-scoped-cwd", {
+      verbs: ["exec"],
+      nativeActions: ["process.run"],
+      admission: new AdmissionPolicy({
+        schemaVersion: "airlock/admission-policy/v1",
+        profile: "native-contained",
+        principal: "agent:exec-scope-test",
+        realm: "local",
+        admittedBy: "operator:exec-scope-test",
+        pathAllowlist: [`${workspace}/**`],
+        executableAllowlist: ["/bin/sh"],
+        endpointAllowlist: []
+      })
+    })
+    const outside = join(root, "outside-exec-workspace")
+    mkdirSync(outside)
+    const outOfScope = invoke([
+      "exec", "--executable", "/bin/sh", "--arg", "-c", "--arg", "true",
+      "--cwd", outside, "--private-workspace", join(root, "private-exec")
+    ], { seal: scoped, home, cwd: workspace })
+    expect(outOfScope.status).toBe(1)
+    expect(parseJson(outOfScope.stderr)).toMatchObject({
+      _tag: "CliInputError",
+      field: "admission"
+    })
   })
 
   it("admits sealed raw mutation and staging aliases against the signed policy", () => {

@@ -2,7 +2,7 @@
 import { Args, Command, HelpDoc, Options, ValidationError } from "@effect/cli"
 import { BunContext } from "@effect/platform-bun"
 import { FileSystem } from "@effect/platform"
-import { Console, Effect, JSONSchema, Layer, ManagedRuntime, Option, Schema } from "effect"
+import { Cause, Console, Effect, Exit, JSONSchema, Layer, ManagedRuntime, Option, Schema } from "effect"
 import * as nodePath from "node:path"
 import * as nodeOs from "node:os"
 import {
@@ -62,7 +62,8 @@ import {
   type SealContext,
   SealVerificationFailed,
   loadStartupSeal,
-  sealedTools
+  sealedTools,
+  verifyInstalledReadiness
 } from "./seal/index.ts"
 
 /**
@@ -1058,6 +1059,18 @@ const makeSealedExec = (seal: SealContext) => Command.make(
       input.executable,
       input.descendantExecutable
     )
+    yield* admitSealedNativeAction(seal, "process.run", {
+      action: "process.run",
+      executable: input.executable,
+      args: input.arg,
+      descendantExecutables: input.descendantExecutable,
+      cwd: input.cwd,
+      env: {},
+      cellProfile: seal.grant.admission.profile,
+      stdout: "capture",
+      stderr: "capture",
+      outputLimitBytes: input.outputLimitBytes
+    })
     return yield* executeRawProcess(input, seal.grant.admission.profile)
   }))
 ).pipe(Command.withDescription("Run an admitted absolute executable with argv atoms; no command-string form exists"))
@@ -1358,22 +1371,29 @@ const makeServe = (seal: SealContext) => Command.make(
     if (seal._tag !== "VerifiedSeal") {
       return yield* failInput("seal", "airlock serve requires a verified seal")
     }
+    const requiredDaemonUid = process.env["AIRLOCK_DAEMON_UID_INTERNAL"]
+    if (requiredDaemonUid !== undefined && (
+      typeof process.getuid !== "function" ||
+      String(process.getuid()) !== requiredDaemonUid
+    )) {
+      return yield* failInput("principal", "airlock serve requires the installed daemon UID")
+    }
     const intervalMillis = yield* parseDuration("interval", interval)
     const reapOlderThanMillis = Option.isSome(reapOlderThan)
       ? yield* parseDuration("reap-older-than", reapOlderThan.value)
       : undefined
     const socketPath = yield* daemonSocketPath()
-    return yield* Effect.scoped(Effect.gen(function* () {
-      yield* Effect.forkScoped(runDaemon({
+    return yield* Effect.raceFirst(
+      runDaemon({
         seal,
         intervalMillis,
         ...(reapOlderThanMillis === undefined ? {} : { reapOlderThanMillis })
-      }))
-      return yield* runDaemonHealthServer({
+      }),
+      runDaemonHealthServer({
         socketPath,
         state: { grantDigest: seal.grantDigest, ready: true }
       })
-    }))
+    )
   }))
 ).pipe(Command.withDescription(
   "Run the sealed supervisor loop and health-only local socket"
@@ -1502,20 +1522,35 @@ const makeSealedRoot = (seal: SealContext, name: string) => makeRoot(
  * unchanged compatibility path.
  */
 const startupSeal = async (): Promise<SealContext | undefined> => {
-  try {
-    return await Effect.runPromise(loadStartupSeal())
-  } catch (cause) {
-    const failure = cause instanceof SealVerificationFailed
-      ? cause
-      : new SealVerificationFailed({
-          phase: "seal",
-          path: process.env["AIRLOCK_SEAL"] ?? "AIRLOCK_SEAL",
-          reason: "read-failed"
-        })
-    console.error(JSON.stringify(failure))
-    process.exitCode = 78
-    return undefined
-  }
+  const expectedOperatorKeyDigest = process.env[
+    "AIRLOCK_OPERATOR_KEY_SHA256_INTERNAL"
+  ]
+  const readinessPath = process.env["AIRLOCK_GENERATION_READINESS_INTERNAL"]
+  const startup = loadStartupSeal(
+    expectedOperatorKeyDigest === undefined
+      ? {}
+      : { expectedOperatorKeyDigest: expectedOperatorKeyDigest as `sha256:${string}` }
+  ).pipe(
+    Effect.flatMap((seal) =>
+      readinessPath !== undefined && seal._tag === "VerifiedSeal"
+        ? verifyInstalledReadiness(seal, readinessPath).pipe(Effect.as(seal))
+        : Effect.succeed(seal)
+    )
+  )
+  const result = await Effect.runPromiseExit(startup)
+  if (Exit.isSuccess(result)) return result.value
+  const failureOption = Cause.failureOption(result.cause)
+  const failure = Option.isSome(failureOption) &&
+      failureOption.value instanceof SealVerificationFailed
+    ? failureOption.value
+    : new SealVerificationFailed({
+        phase: "seal",
+        path: process.env["AIRLOCK_SEAL"] ?? "AIRLOCK_SEAL",
+        reason: "read-failed"
+      })
+  console.error(JSON.stringify(failure))
+  process.exitCode = 78
+  return undefined
 }
 
 /** One composition root. Pristine components retain authority; CLI is glue. */
