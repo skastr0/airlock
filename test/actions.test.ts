@@ -4,8 +4,10 @@ import {
   ActionCallDecodeFailed,
   InvalidActionInput,
   NativeActionCatalog,
+  type NativeActionCall,
   UnknownNativeAction,
   decodeAndLowerNativeAction,
+  mapNativeActionPathSelectors,
   nativeAction
 } from "../src/actions/index.ts"
 
@@ -224,4 +226,112 @@ describe("native action catalog", () => {
       expect(malformed).toBeInstanceOf(ActionCallDecodeFailed)
     })
   )
+
+  it.effect("maps every native filesystem path field and no other selector", () =>
+    Effect.gen(function* () {
+      const bind = (selector: string) => Effect.succeed(`/bound${selector}`)
+      for (const action of [
+        "file.inspect",
+        "file.read",
+        "file.list",
+        "file.stat",
+        "file.write",
+        "file.remove",
+        "file.mkdir"
+      ] as const) {
+        const base = { action, path: "/path", realm: "local" } as const
+        const call = action === "file.read"
+          ? { ...base, format: "text" as const }
+          : action === "file.stat"
+            ? { ...base, followSymlinks: false }
+            : action === "file.write"
+              ? { ...base, content: "value" }
+              : action === "file.mkdir"
+                ? { ...base, parents: false }
+                : base
+        const mapped = yield* mapNativeActionPathSelectors(call as NativeActionCall, bind)
+        expect("path" in mapped && mapped.path, action).toBe("/bound/path")
+      }
+      for (const action of ["file.copy", "file.move"] as const) {
+        const mapped = yield* mapNativeActionPathSelectors({
+          action,
+          source: "/source",
+          destination: "/destination",
+          realm: "local"
+        }, bind)
+        expect(mapped, action).toMatchObject({
+          source: "/bound/source",
+          destination: "/bound/destination"
+        })
+      }
+      const process = yield* mapNativeActionPathSelectors({
+        action: "process.run",
+        executable: "/usr/bin/true",
+        args: ["/argument/stays"],
+        descendantExecutables: ["/usr/bin/helper"],
+        cwd: "/work",
+        env: {},
+        cellProfile: "native-contained",
+        stdin: "discard",
+        stdout: "capture",
+        stderr: "capture",
+        outputLimitBytes: 1024,
+        readable: [
+          { kind: "path", realm: "local", selector: "/read", rights: ["read"] },
+          { kind: "endpoint", realm: "external", selector: "https://unchanged.invalid/", rights: ["connect"] }
+        ],
+        writable: [
+          { kind: "path", realm: "local", selector: "/write", rights: ["write"] }
+        ],
+        realm: "local"
+      }, bind)
+      expect(process).toMatchObject({
+        cwd: "/bound/work",
+        executable: "/usr/bin/true",
+        args: ["/argument/stays"],
+        descendantExecutables: ["/usr/bin/helper"],
+        readable: [
+          { selector: "/bound/read" },
+          { selector: "https://unchanged.invalid/" }
+        ],
+        writable: [{ selector: "/bound/write" }]
+      })
+
+      const relativeCwd = yield* mapNativeActionPathSelectors(
+        { ...process, cwd: "." },
+        bind
+      )
+      expect(relativeCwd.cwd).toBe(".")
+
+      const copy = yield* mapNativeActionPathSelectors({
+        action: "file.copy",
+        source: "/from",
+        destination: "/to",
+        realm: "local"
+      }, bind)
+      expect(copy).toMatchObject({
+        source: "/bound/from",
+        destination: "/bound/to"
+      })
+
+      const glob = yield* mapNativeActionPathSelectors({
+        action: "file.glob",
+        root: "/root",
+        pattern: "**/*.ts",
+        realm: "local"
+      }, bind)
+      expect(glob).toMatchObject({ root: "/bound/root", pattern: "**/*.ts" })
+
+      const external = yield* mapNativeActionPathSelectors({
+        action: "http.stage",
+        endpoint: "https://unchanged.invalid/path",
+        method: "GET",
+        headers: {},
+        holdMillis: 30_000,
+        realm: "external"
+      }, bind)
+      expect(external.endpoint).toBe("https://unchanged.invalid/path")
+    })
+  )
+
 })

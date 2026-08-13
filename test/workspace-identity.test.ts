@@ -22,6 +22,8 @@ const runAgent = (
     cwd: repository,
     env: {
       ...process.env,
+      FORCE_COLOR: undefined,
+      NO_COLOR: "1",
       AIRLOCK_HOME: home,
       AIRLOCK_AGENT_PROFILE: "native-contained",
       ...environment
@@ -203,4 +205,80 @@ describe("native-contained workspace identity", () => {
       expect(existsSync(join(physicalWorkspace, "result.txt"))).toBe(true)
     }
   )
+
+  it.skipIf(process.platform !== "darwin")(
+    "binds relative and /tmp path selectors before native-contained admission",
+    { timeout: 60_000 },
+    () => {
+      const root = mkdtempSync("/tmp/airlock-workspace-paths-")
+      const workspace = join(root, "workspace")
+      const canonicalWorkspace = realpathSync(root) + "/workspace"
+      const policy = join(root, "policy.json")
+      mkdirSync(join(workspace, "missing"), { recursive: true })
+      writeFileSync(join(workspace, "seed.txt"), "seed")
+      writePolicy(policy, workspace)
+
+      const source = [
+        'let before = file.stat({ path: "seed.txt" })',
+        'let made = file.write({ path: "missing/value.txt", content: "written" })',
+        'let after = file.stat({ path: "missing/value.txt" })',
+        'let globbed = file.glob({ root: ".", pattern: "**/*.txt" })',
+        `let absolute = file.read({ path: ${JSON.stringify(join(workspace, "seed.txt"))}, format: "text" })`,
+        'return { before: before, made: made, after: after, globbed: globbed, absolute: absolute }'
+      ].join("\n")
+      const result = runAgent(
+        ["eval", "--workspace", workspace, "--source", source],
+        join(root, "home"),
+        { AIRLOCK_POLICY_FILE: policy }
+      )
+      expect(result.status, `${result.stderr}\n${result.stdout}`).toBe(0)
+      const payload = JSON.parse(result.stdout)
+      expect(payload.result.result).toMatchObject({
+        before: { bytes: 4 },
+        after: { bytes: 7 },
+        absolute: "seed"
+      })
+      expect(payload.result.result.globbed).toEqual(expect.arrayContaining([
+        join(canonicalWorkspace, "seed.txt"),
+        join(canonicalWorkspace, "missing", "value.txt")
+      ]))
+      for (const action of payload.result.actions) {
+        const input = action.request.call.input
+        const selector = input.path ?? input.root
+        if (selector !== undefined) expect(selector.startsWith(canonicalWorkspace)).toBe(true)
+      }
+
+      const outside = join(root, "outside.txt")
+      const denied = runAgent(
+        [
+          "eval", "--workspace", workspace, "--source",
+          'return file.write({ path: "../outside.txt", content: "blocked" })'
+        ],
+        join(root, "denied-home"),
+        { AIRLOCK_POLICY_FILE: policy }
+      )
+      expect(denied.status).toBe(1)
+      expect(existsSync(outside)).toBe(false)
+    }
+  )
+
+  it("keeps compatibility relative-path behavior and caller spelling", () => {
+    const root = mkdtempSync(join(tmpdir(), "airlock-workspace-relative-compat-"))
+    const workspace = join(root, "workspace")
+    mkdirSync(workspace)
+    writeFileSync(join(workspace, "value.txt"), "compat")
+    const result = runAgent(
+      [
+        "eval", "--workspace", workspace, "--source",
+        'return file.read({ path: "value.txt", format: "text" })'
+      ],
+      join(root, "home"),
+      { AIRLOCK_AGENT_PROFILE: "compatibility" }
+    )
+    expect(result.status, result.stderr).toBe(0)
+    const payload = JSON.parse(result.stdout)
+    expect(payload.result.result).toBe("compat")
+    expect(payload.result.actions[0].request.call.input.path).toBe("value.txt")
+  })
+
 })

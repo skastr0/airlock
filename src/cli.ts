@@ -15,7 +15,9 @@ import {
 } from "./admission/index.ts"
 import {
   NativeActionCatalog,
+  type NativeActionCall as NativeActionCallValue,
   type NativeActionName,
+  mapNativeActionPathSelectors,
   nativeActionSchema
 } from "./actions/index.ts"
 import { AirlockHome, layerFromEnv } from "./AirlockHome.ts"
@@ -29,7 +31,11 @@ import {
 import { Ledger, LedgerLive } from "./Ledger.ts"
 import { Cell, CellLive, CellRequest } from "./cell/index.ts"
 import { MacosPlatform, MacosPlatformLive } from "./platform/macos/index.ts"
-import { NativeFileSystemLive, NativeFilesystemConfig } from "./native/index.ts"
+import {
+  NativeFileSystemLive,
+  NativeFilesystemConfig,
+  bindPhysicalPathSelector
+} from "./native/index.ts"
 import { ProcessRequest, ProcessRunner, ProcessRunnerLive } from "./process/Process.ts"
 import { Outbox, OutboxLive } from "./Outbox.ts"
 import {
@@ -38,12 +44,15 @@ import {
   runDaemonHealthServer
 } from "./daemon/index.ts"
 import {
+  ProgramActionDecodeFailed,
   ProgramExecutionWithToolsLive,
   ProgramRequest,
   ProgramRunner,
+  type ProgramPathSelectorBinder,
   canonicalizeProgramAction,
   draftForAction,
-  nativeActionResultSchema
+  nativeActionResultSchema,
+  unchangedProgramPathSelector
 } from "./program/index.ts"
 import {
   ToolDefinitionDirectories,
@@ -446,7 +455,6 @@ const bindPolicyPathScopes = (
   if (policy.profile !== "native-contained") return Effect.succeed(policy)
 
   return Effect.gen(function* () {
-    const fs = yield* FileSystem.FileSystem
     const pathAllowlist = yield* Effect.forEach(
       policy.pathAllowlist,
       (scope) => {
@@ -454,7 +462,9 @@ const bindPolicyPathScopes = (
         const rawRoot = recursive ? scope.slice(0, -3) : scope
         const root = rawRoot.length === 0 ? nodePath.parse(scope).root : rawRoot
         if (!nodePath.isAbsolute(root)) return Effect.succeed(scope)
-        return fs.realPath(nodePath.resolve(root)).pipe(
+        return bindPhysicalPathSelector("/", root, {
+          rejectSymlinksWithinWorkspace: false
+        }).pipe(
           Effect.map((canonical) =>
             recursive
               ? canonical === nodePath.parse(canonical).root
@@ -462,9 +472,8 @@ const bindPolicyPathScopes = (
                 : `${canonical}/**`
               : canonical
           ),
-          // Policies may name a future path. Keep that selector inert and
-          // lexical; admission will still fail closed if it does not match the
-          // canonical workspace or a requested resource.
+          // A future or otherwise unusable trusted scope remains an inert
+          // lexical policy spelling; it never becomes requested authority.
           Effect.catchAll(() => Effect.succeed(scope))
         )
       },
@@ -494,44 +503,36 @@ const sealedAdmissionFailure = (
  * Raw compatibility verbs retain their historical adapters, but a sealed
  * route first constructs and admits the equivalent native-action Plan. Thus a
  * second CLI spelling can never bypass the signed path or endpoint policy.
+ * The decoded, bound call is returned so direct raw physics uses exactly the
+ * operand admission checked.
  */
-const bindSealedMutationPath = (
-  seal: SealContext,
-  path: string
-): Effect.Effect<string, CliInputError, FileSystem.FileSystem> => {
-  if (
-    seal._tag === "UnsealedSeal" ||
-    seal.grant.admission.profile !== "native-contained"
-  ) return Effect.succeed(path)
-
-  return Effect.flatMap(FileSystem.FileSystem, (fs) =>
-    fs.realPath(nodePath.dirname(path)).pipe(
-      Effect.map((parent) => nodePath.join(parent, nodePath.basename(path))),
-      Effect.mapError((cause) => new CliInputError({
-        field: "target",
-        reason: `cannot bind sealed mutation parent for ${path}: ${String(cause)}`
-      }))
-    )
-  )
-}
-
 const admitSealedNativeAction = (
   seal: SealContext,
   action: NativeActionName,
-  input: unknown
-): Effect.Effect<void, CliInputError, FileSystem.FileSystem> => {
-  if (seal._tag === "UnsealedSeal") return Effect.void
+  input: unknown,
+  workspace: string = process.cwd()
+): Effect.Effect<NativeActionCallValue | undefined, CliInputError, FileSystem.FileSystem> => {
+  // Preserve the historical unsealed helper: no decode, binding, or stricter
+  // validation is introduced on the zero-config compatibility route.
+  if (seal._tag === "UnsealedSeal") return Effect.succeed(undefined)
   return Effect.gen(function* () {
     const policy = yield* bindPolicyPathScopes(seal.grant.admission)
-    const call = yield* canonicalizeProgramAction(action, input).pipe(
+    const decoded = yield* canonicalizeProgramAction(action, input).pipe(
       Effect.mapError((cause) => sealedAdmissionFailure(action, cause))
     )
+    const call = seal.grant.admission.profile === "native-contained"
+      ? yield* mapNativeActionPathSelectors(
+          decoded,
+          (selector) => bindPhysicalPathSelector(workspace, selector)
+        ).pipe(Effect.mapError((cause) => sealedAdmissionFailure(action, cause)))
+      : decoded
     const request = yield* draftForAction(call, 0).pipe(
       Effect.mapError((cause) => sealedAdmissionFailure(action, cause))
     )
     yield* admit(request.draft, policy).pipe(
       Effect.mapError((cause) => sealedAdmissionFailure(action, cause))
     )
+    return call
   })
 }
 
@@ -617,13 +618,16 @@ const makeRm = (seal: SealContext) => Command.make(
     requireVerb(seal, "rm").pipe(
       Effect.zipRight(requireNativeAction(seal, "file.remove")),
       Effect.flatMap(() => resolveWithin(scope, target)),
-      Effect.flatMap((resolved) => bindSealedMutationPath(seal, resolved)),
       Effect.flatMap((resolved) => admitSealedNativeAction(
         seal,
         "file.remove",
         { action: "file.remove", path: resolved }
       ).pipe(
-        Effect.zipRight(Effect.flatMap(Hold, (hold) => hold.remove(resolved)))
+        Effect.flatMap((call) => Effect.flatMap(Hold, (hold) =>
+          hold.remove(
+            call?.action === "file.remove" ? call.path : resolved
+          )
+        ))
       ))
     )
   )
@@ -636,15 +640,17 @@ const makeWrite = (seal: SealContext) => Command.make(
     requireVerb(seal, "write").pipe(
       Effect.zipRight(requireNativeAction(seal, "file.write")),
       Effect.flatMap(() => resolveWithin(scope, target)),
-      Effect.flatMap((resolved) => bindSealedMutationPath(seal, resolved)),
       Effect.flatMap((resolved) => admitSealedNativeAction(
         seal,
         "file.write",
         { action: "file.write", path: resolved, content }
       ).pipe(
-        Effect.zipRight(
-          Effect.flatMap(Hold, (hold) => hold.overwrite(resolved, content))
-        )
+        Effect.flatMap((call) => Effect.flatMap(Hold, (hold) =>
+          hold.overwrite(
+            call?.action === "file.write" ? call.path : resolved,
+            content
+          )
+        ))
       ))
     )
   )
@@ -1076,7 +1082,7 @@ const makeSealedExec = (seal: SealContext) => Command.make(
       input.executable,
       input.descendantExecutable
     )
-    yield* admitSealedNativeAction(seal, "process.run", {
+    const call = yield* admitSealedNativeAction(seal, "process.run", {
       action: "process.run",
       executable: input.executable,
       args: input.arg,
@@ -1088,7 +1094,13 @@ const makeSealedExec = (seal: SealContext) => Command.make(
       stderr: "capture",
       outputLimitBytes: input.outputLimitBytes
     })
-    return yield* executeRawProcess(input, seal.grant.admission.profile)
+    if (call?.action !== "process.run") {
+      return yield* failInput("admission", "sealed exec did not bind process.run")
+    }
+    return yield* executeRawProcess(
+      { ...input, cwd: call.cwd },
+      seal.grant.admission.profile
+    )
   }))
 ).pipe(Command.withDescription("Run an admitted absolute executable with argv atoms; no command-string form exists"))
 
@@ -1106,6 +1118,7 @@ const executeProgram = (
       : selectedProfile
     yield* requireSealedDaemon(seal)
     const home = yield* AirlockHome
+    const fs = yield* FileSystem.FileSystem
     const workspace = yield* bindProgramWorkspace(profile, requestedWorkspace)
     const policy = yield* (
       seal._tag === "VerifiedSeal"
@@ -1131,15 +1144,32 @@ const executeProgram = (
       )
     )
     const toolActions = new Map(tools.map((tool) => [tool.name, tool]))
+    const bindPath: ProgramPathSelectorBinder = profile === "native-contained"
+      ? (action, selector) => bindPhysicalPathSelector(workspace, selector).pipe(
+          Effect.mapError((cause) => new ProgramActionDecodeFailed({
+            action,
+            reason: cause.message
+          })),
+          Effect.provideService(FileSystem.FileSystem, fs)
+        )
+      : unchangedProgramPathSelector
     const programLayer = seal._tag === "VerifiedSeal"
       ? ProgramExecutionWithToolsLive(
           policy,
           toolActions,
           profile,
           new Set(seal.grant.nativeActions),
-          { sealDigest: seal.grantDigest as `sha256:${string}` }
+          { sealDigest: seal.grantDigest as `sha256:${string}` },
+          bindPath
         )
-      : ProgramExecutionWithToolsLive(policy, toolActions, profile)
+      : ProgramExecutionWithToolsLive(
+          policy,
+          toolActions,
+          profile,
+          undefined,
+          undefined,
+          bindPath
+        )
     const runner = yield* ProgramRunner.pipe(
       Effect.provide(programLayer.pipe(Layer.provideMerge(runtimeLayer)))
     )

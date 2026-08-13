@@ -395,4 +395,29 @@ describe("Admission candidate", () => {
       expect(drift).toBeInstanceOf(AdmissionContractInvalid)
     })
   )
+
+  it.effect("keeps direct native-contained admission pure and denies unbound relative selectors", () =>
+    Effect.gen(function* () {
+      const relative = new ResourceRequirement({
+        id: req("path/relative"),
+        kind: "path",
+        realm: "macos/local",
+        selector: "relative.txt",
+        rights: ["write"]
+      })
+      const node = new ApplyNode({
+        id: id("apply-relative"),
+        dependsOn: [],
+        requires: [relative.id],
+        produces: [],
+        operation: "remove",
+        target: "relative.txt"
+      })
+      const failure = yield* admit(draft([relative], node), policy()).pipe(
+        Effect.flip
+      )
+      expect(failure).toBeInstanceOf(AdmissionDenied)
+    })
+  )
+
 })

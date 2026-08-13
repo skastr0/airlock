@@ -24,6 +24,7 @@ import {
   NativeActionCatalog,
   type NativeActionName,
   lowerNativeAction,
+  mapNativeActionPathSelectors,
   ResourceNeed
 } from "../actions/index.ts"
 import {
@@ -180,6 +181,18 @@ export type ProgramError =
   | UnknownProgramAction
   | ProgramActionDecodeFailed
   | ProgramActionExecutionFailed
+
+/** Trusted integration hook; Program itself still performs no path I/O. */
+export type ProgramPathSelectorBinder<R = never> = (
+  action: string,
+  selector: string
+) => Effect.Effect<string, ProgramActionDecodeFailed, R>
+
+/** Zero-config and direct component use preserve the caller's spelling. */
+export const unchangedProgramPathSelector: ProgramPathSelectorBinder = (
+  _action,
+  selector
+) => Effect.succeed(selector)
 
 /**
  * The only world-facing seam used by ProgramRunner. A concrete implementation
@@ -925,7 +938,8 @@ const draftForToolAction = (
   sequence: number,
   nowId: string,
   availableArtifacts: ReadonlyArray<InlineArtifact>,
-  nativeActions: NativeActionSurface
+  nativeActions: NativeActionSurface,
+  bindPath: ProgramPathSelectorBinder
 ): Effect.Effect<ProgramActionRequest, ProgramActionDecodeFailed> =>
   Effect.gen(function* () {
     const name = exportedToolActionName(exported.loaded.definition, exported.action)
@@ -948,7 +962,14 @@ const draftForToolAction = (
       input: object(input),
       executable,
       cellProfile
-    })).pipe(Effect.mapError((error) => new ProgramActionDecodeFailed({ action: name, reason: error.message ?? error._tag })))
+    }), (selector) => bindPath(name, selector)).pipe(
+      Effect.mapError((error) => error instanceof ProgramActionDecodeFailed
+        ? error
+        : new ProgramActionDecodeFailed({
+            action: name,
+            reason: error.message ?? error._tag
+          }))
+    )
     if (lowered.call.action !== requiredNativeAction) {
       return yield* new ProgramActionDecodeFailed({
         action: name,
@@ -1886,13 +1907,16 @@ export const ProgramPlanRuntimeWithPolicyLive = (
 export const ProgramExecutionLive = (
   policy: AdmissionPolicyDocument,
   nativeActions: NativeActionSurface = ALL_NATIVE_ACTIONS,
-  sealedDispatch?: ProgramSealedDispatch
+  sealedDispatch?: ProgramSealedDispatch,
+  bindPath: ProgramPathSelectorBinder = unchangedProgramPathSelector
 ) => {
   const executor = ProgramPlanExecutorLive.pipe(
     Layer.provideMerge(ProgramAdmissionLive(policy)),
     Layer.provideMerge(ProgramPlanRuntimeWithPolicyLive(policy, sealedDispatch))
   )
-  return ProgramRunnerWithNativeActionsLive(nativeActions).pipe(Layer.provide(executor))
+  return ProgramRunnerWithNativeActionsLive(nativeActions, bindPath).pipe(
+    Layer.provide(executor)
+  )
 }
 
 export const ProgramExecutionWithToolsLive = (
@@ -1900,13 +1924,19 @@ export const ProgramExecutionWithToolsLive = (
   actions: ReadonlyMap<string, ExportedToolAction>,
   cellProfile: CellProfile,
   nativeActions: NativeActionSurface = ALL_NATIVE_ACTIONS,
-  sealedDispatch?: ProgramSealedDispatch
+  sealedDispatch?: ProgramSealedDispatch,
+  bindPath: ProgramPathSelectorBinder = unchangedProgramPathSelector
 ) => {
   const executor = ProgramPlanExecutorLive.pipe(
     Layer.provideMerge(ProgramAdmissionLive(policy)),
     Layer.provideMerge(ProgramPlanRuntimeWithPolicyLive(policy, sealedDispatch))
   )
-  return ProgramRunnerWithToolsLive(actions, cellProfile, nativeActions).pipe(Layer.provide(executor))
+  return ProgramRunnerWithToolsLive(
+    actions,
+    cellProfile,
+    nativeActions,
+    bindPath
+  ).pipe(Layer.provide(executor))
 }
 
 const dottedName = (expression: Expression): string | undefined => {
@@ -1972,6 +2002,7 @@ const runProgram = (executor: {
   readonly actions: ReadonlyMap<string, ExportedToolAction>
   readonly cellProfile: CellProfile
   readonly nativeActions: NativeActionSurface
+  readonly bindPath: ProgramPathSelectorBinder
 }) =>
   (request: ProgramRequest): Effect.Effect<ProgramRunResult, ProgramError> =>
     Effect.gen(function* () {
@@ -2045,7 +2076,8 @@ const runProgram = (executor: {
               sequence++,
               crypto.randomUUID(),
               [...artifacts.values()],
-              tools.nativeActions
+              tools.nativeActions,
+              tools.bindPath
             )
             plans.push(next.draft)
             for (const input of next.inlineArtifacts) artifacts.set(input.id, input)
@@ -2055,10 +2087,14 @@ const runProgram = (executor: {
             return executed.value
           }
           const decoded = yield* decodeProgramAction(action, args)
-          const call = yield* canonicalizeProgramActionForSurface(
+          const canonical = yield* canonicalizeProgramActionForSurface(
             action,
             decoded,
             tools.nativeActions
+          )
+          const call = yield* mapNativeActionPathSelectors(
+            canonical,
+            (selector) => tools.bindPath(action, selector)
           )
           const next = yield* draftForAction(
             call,
@@ -2102,13 +2138,15 @@ const programRunnerLive = (configuration: {
   readonly actions: ReadonlyMap<string, ExportedToolAction>
   readonly cellProfile: CellProfile
   readonly nativeActions: NativeActionSurface
+  readonly bindPath: ProgramPathSelectorBinder
 }) => {
   // Bind a snapshot to the Layer so later mutation of a caller-owned Set
   // cannot widen a runner that was already configured.
   const tools = {
     actions: configuration.actions,
     cellProfile: configuration.cellProfile,
-    nativeActions: new Set(configuration.nativeActions) as NativeActionSurface
+    nativeActions: new Set(configuration.nativeActions) as NativeActionSurface,
+    bindPath: configuration.bindPath
   }
   return Layer.effect(
     ProgramRunner,
@@ -2125,17 +2163,25 @@ const programRunnerLive = (configuration: {
 export const ProgramRunnerLive = programRunnerLive({
   actions: new Map(),
   cellProfile: "compatibility",
-  nativeActions: ALL_NATIVE_ACTIONS
+  nativeActions: ALL_NATIVE_ACTIONS,
+  bindPath: unchangedProgramPathSelector
 })
 
 /** Build a native-only runner with an explicit opt-in action surface. */
 export const ProgramRunnerWithNativeActionsLive = (
-  nativeActions: NativeActionSurface
-) => programRunnerLive({ actions: new Map(), cellProfile: "compatibility", nativeActions })
+  nativeActions: NativeActionSurface,
+  bindPath: ProgramPathSelectorBinder = unchangedProgramPathSelector
+) => programRunnerLive({
+  actions: new Map(),
+  cellProfile: "compatibility",
+  nativeActions,
+  bindPath
+})
 
 /** A caller that loaded definitions may explicitly extend one runner surface. */
 export const ProgramRunnerWithToolsLive = (
   actions: ReadonlyMap<string, ExportedToolAction>,
   cellProfile: CellProfile,
-  nativeActions: NativeActionSurface = ALL_NATIVE_ACTIONS
-) => programRunnerLive({ actions, cellProfile, nativeActions })
+  nativeActions: NativeActionSurface = ALL_NATIVE_ACTIONS,
+  bindPath: ProgramPathSelectorBinder = unchangedProgramPathSelector
+) => programRunnerLive({ actions, cellProfile, nativeActions, bindPath })

@@ -5,7 +5,10 @@ import {
   NativeActionLowering,
   ProcessRunAction,
   ResourceNeed,
-  lowerNativeAction
+  lowerNativeAction,
+  mapNativeActionPathSelectors,
+  type NativePathSelectorBinder,
+  unchangedNativePathSelector
 } from "../actions/index.ts"
 import { CellProfile, Digest } from "../plan/index.ts"
 import {
@@ -518,11 +521,12 @@ const actionNamed = (
  * dispatches, resolves a credential, selects a dispatch class, or reads the
  * supervisor policy — the only thing produced is durable-staging intent.
  */
-const lowerEnqueueAction = (
+const lowerEnqueueAction = <E, R>(
   request: ToolActionLoweringRequest,
   definition: AnyToolDefinition,
-  action: ToolEnqueueActionDefinition
-): Effect.Effect<ToolActionLoweringResult, ToolActionLoweringError> =>
+  action: ToolEnqueueActionDefinition,
+  bindPath: NativePathSelectorBinder<E, R>
+): Effect.Effect<ToolActionLoweringResult, ToolActionLoweringError | E, R> =>
   Effect.gen(function* () {
     const template = action.request
     if (template === undefined) {
@@ -572,7 +576,7 @@ const lowerEnqueueAction = (
       })
     }
 
-    const call: typeof HttpStageAction.Type = {
+    const call = yield* mapNativeActionPathSelectors({
       action: "http.stage",
       endpoint,
       method: template.method,
@@ -580,7 +584,7 @@ const lowerEnqueueAction = (
       ...(body === undefined ? {} : { body }),
       holdMillis: template.holdMillis,
       realm: "external"
-    }
+    } satisfies typeof HttpStageAction.Type, bindPath)
     const lowering = yield* lowerNativeAction(call).pipe(
       Effect.mapError(
         (error) =>
@@ -614,14 +618,21 @@ const lowerEnqueueAction = (
  * admission, I/O, process creation, or network access. The selected executable
  * must be supplied explicitly and must exactly match a declared constraint.
  */
-export const lowerToolAction = (
-  request: ToolActionLoweringRequest
-): Effect.Effect<ToolActionLoweringResult, ToolActionLoweringError> =>
+export const lowerToolAction = <E = never, R = never>(
+  request: ToolActionLoweringRequest,
+  bindPath: NativePathSelectorBinder<E, R> =
+    unchangedNativePathSelector as NativePathSelectorBinder<E, R>
+): Effect.Effect<ToolActionLoweringResult, ToolActionLoweringError | E, R> =>
   Effect.gen(function* () {
     const definition = request.loaded.definition
     const action = yield* actionNamed(request.loaded, request.action)
     if (isEnqueueAction(action)) {
-      return yield* lowerEnqueueAction(request, definition, action)
+      return yield* lowerEnqueueAction(
+        request,
+        definition,
+        action,
+        bindPath
+      )
     }
     if (action.lowering !== "invoke") {
       return yield* new UnsupportedToolActionLowering({
@@ -686,7 +697,7 @@ export const lowerToolAction = (
     // finite input shape before any native lowering can occur.
     yield* validateToolValue(definition, action, action.inputSchema, request.input)
 
-    const call: typeof ProcessRunAction.Type = {
+    const call = yield* mapNativeActionPathSelectors({
       action: "process.run",
       executable: request.executable,
       args,
@@ -710,7 +721,7 @@ export const lowerToolAction = (
           resource.rights.includes("write")
       ),
       realm: executableConstraint.realm
-    }
+    } satisfies typeof ProcessRunAction.Type, bindPath)
     const lowering = yield* lowerNativeAction(call).pipe(
       Effect.mapError(
         (error) =>

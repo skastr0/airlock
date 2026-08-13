@@ -1,4 +1,5 @@
 import { Effect, Schema } from "effect"
+import * as nodePath from "node:path"
 import { ArtifactId, CellProfile, HandleKind, Right } from "../plan/index.ts"
 
 /**
@@ -190,6 +191,86 @@ export const NativeActionCall = Schema.Union(
   HttpStageAction
 )
 export type NativeActionCall = typeof NativeActionCall.Type
+
+/** A trusted adapter may bind filesystem selectors before inert lowering. */
+export type NativePathSelectorBinder<E = never, R = never> = (
+  selector: string
+) => Effect.Effect<string, E, R>
+
+/** The compatibility/default binder deliberately preserves every spelling. */
+export const unchangedNativePathSelector: NativePathSelectorBinder = (selector) =>
+  Effect.succeed(selector)
+
+/**
+ * Exhaustive ownership of every filesystem path field in the native action
+ * union. Endpoint and executable identities are deliberately not path fields.
+ * Equal raw selectors are bound once per call so one draft cannot acquire two
+ * physical names for the same requested path.
+ */
+export const mapNativeActionPathSelectors = <
+  A extends NativeActionCall,
+  E,
+  R
+>(
+  call: A,
+  bind: NativePathSelectorBinder<E, R>
+): Effect.Effect<A, E, R> =>
+  Effect.gen(function* () {
+    const cached = new Map<string, string>()
+    const path = (selector: string): Effect.Effect<string, E, R> => {
+      const existing = cached.get(selector)
+      if (existing !== undefined) return Effect.succeed(existing)
+      return bind(selector).pipe(
+        Effect.tap((bound) => Effect.sync(() => cached.set(selector, bound)))
+      )
+    }
+    const resources = (needs: ReadonlyArray<ResourceNeed>) =>
+      Effect.forEach(
+        needs,
+        (need) => need.kind === "path"
+          ? path(need.selector).pipe(
+              Effect.map((selector) => new ResourceNeed({ ...need, selector }))
+            )
+          : Effect.succeed(need),
+        { concurrency: 1 }
+      )
+    const mapped = <B extends NativeActionCall>(value: B): A => value as unknown as A
+
+    switch (call.action) {
+      case "file.inspect":
+      case "file.read":
+      case "file.list":
+      case "file.stat":
+      case "file.write":
+      case "file.remove":
+      case "file.mkdir":
+        return mapped({ ...call, path: yield* path(call.path) })
+      case "file.glob":
+        return mapped({ ...call, root: yield* path(call.root) })
+      case "file.move":
+      case "file.copy":
+        return mapped({
+          ...call,
+          source: yield* path(call.source),
+          destination: yield* path(call.destination)
+        })
+      case "process.run":
+        return mapped({
+          ...call,
+          cwd: nodePath.isAbsolute(call.cwd)
+            ? yield* path(call.cwd)
+            : call.cwd,
+          readable: yield* resources(call.readable),
+          writable: yield* resources(call.writable)
+        })
+      case "http.stage":
+        return call
+      default: {
+        const unreachable: never = call
+        return unreachable
+      }
+    }
+  })
 
 /**
  * Canonical Schema ownership for each native action. Discovery and decoding

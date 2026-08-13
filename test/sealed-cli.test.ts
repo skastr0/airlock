@@ -6,6 +6,8 @@ import {
   mkdtempSync,
   readFileSync,
   readdirSync,
+  realpathSync,
+  symlinkSync,
   writeFileSync
 } from "node:fs"
 import { tmpdir } from "node:os"
@@ -343,6 +345,42 @@ describe("sealed CLI grant graph", () => {
     })
   })
 
+  it.skipIf(process.platform !== "darwin")(
+    "binds a sealed raw exec /tmp cwd to its admitted physical spelling",
+    () => {
+      const temporary = mkdtempSync("/tmp/airlock-sealed-exec-")
+      const workspace = join(temporary, "workspace")
+      const privateWorkspace = join(temporary, "private")
+      mkdirSync(workspace)
+      const policy = new AdmissionPolicy({
+        schemaVersion: "airlock/admission-policy/v1",
+        profile: "native-contained",
+        principal: "agent:raw-exec-path-test",
+        realm: "local",
+        admittedBy: "operator:raw-exec-path-test",
+        pathAllowlist: [`${workspace}/**`],
+        executableAllowlist: ["/usr/bin/true"],
+        endpointAllowlist: []
+      })
+      const seal = makeSeal("raw-exec-path", {
+        verbs: ["exec"],
+        nativeActions: ["process.run"],
+        admission: policy
+      })
+      const result = invoke([
+        "exec",
+        "--executable", "/usr/bin/true",
+        "--cwd", workspace,
+        "--private-workspace", privateWorkspace
+      ], { seal, cwd: workspace })
+      expect(result.status, result.stderr).toBe(0)
+      expect(parseJson(result.stdout)).toMatchObject({
+        profile: "native-contained",
+        sourceWorkspace: realpathSync(workspace)
+      })
+    }
+  )
+
   it("admits sealed raw mutation and staging aliases against the signed policy", () => {
     const workspace = join(root, "raw-admission-workspace")
     const allowed = join(workspace, "allowed")
@@ -371,6 +409,32 @@ describe("sealed CLI grant graph", () => {
     ], { seal, home, cwd: workspace })
     expect(allowedWrite.status, allowedWrite.stderr).toBe(0)
     expect(readFileSync(join(allowed, "ok.txt"), "utf8")).toBe("allowed")
+
+    const relativeWrite = invoke([
+      "write", "allowed/relative.txt", "relative"
+    ], { seal, home, cwd: workspace })
+    expect(relativeWrite.status, relativeWrite.stderr).toBe(0)
+    expect(readFileSync(join(allowed, "relative.txt"), "utf8")).toBe("relative")
+    const relativeRemove = invoke(["rm", "allowed/relative.txt"], {
+      seal,
+      home,
+      cwd: workspace
+    })
+    expect(relativeRemove.status, relativeRemove.stderr).toBe(0)
+    expect(existsSync(join(allowed, "relative.txt"))).toBe(false)
+
+    const symlinkTarget = join(allowed, "symlink-target.txt")
+    const symlinkPath = join(allowed, "symlink.txt")
+    writeFileSync(symlinkTarget, "must remain")
+    symlinkSync("symlink-target.txt", symlinkPath)
+    const refusedSymlink = invoke(["rm", symlinkPath], {
+      seal,
+      home,
+      cwd: workspace
+    })
+    expect(refusedSymlink.status).toBe(1)
+    expect(readFileSync(symlinkTarget, "utf8")).toBe("must remain")
+    expect(existsSync(symlinkPath)).toBe(true)
 
     const deniedWritePath = join(denied, "blocked.txt")
     const deniedWrite = invoke([

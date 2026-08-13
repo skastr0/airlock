@@ -295,8 +295,8 @@ describe.skipIf(!supported)("hostile macOS v1 — actual agent entrypoint", () =
       const report = decodeReport(read.stdout)
       expect(report.workspace).toBe(realpathSync(physical))
       expect(report.result.failure).toMatchObject({
-        phase: "runtime",
-        causeTag: "RuntimeNodeFailure"
+        phase: "contract",
+        causeTag: "ProgramActionDecodeFailed"
       })
       expect(readFileSync(outside, "utf8")).toBe("outside")
     }
