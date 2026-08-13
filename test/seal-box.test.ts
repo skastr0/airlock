@@ -171,6 +171,7 @@ describe("seal-box operator bundle tool", () => {
     const checked = run(["verify", "--bundle", item.bundle])
     expect(checked.status, checked.stderr).toBe(0)
     expect(readFileSync(join(item.bundle, "bin", "airlock"))).toEqual(readFileSync(item.binary))
+    expect(readFileSync(join(item.bundle, "bin", "airlock-agent"))).toEqual(readFileSync(item.binary))
     expect(readFileSync(catalogPath(item.bundle))).toEqual(readFileSync(item.definition))
     expect(grant(item.bundle).binaryDigest).toBe(digest(readFileSync(item.binary)))
     expect(mode(join(item.bundle, "bin", "airlock"))).toBe(0o555)
@@ -281,6 +282,16 @@ describe("seal-box operator bundle tool", () => {
       activated: false
     })
     expect(readFileSync(join(output.generation, "bin", "airlock"))).toEqual(readFileSync(item.binary))
+    expect(readFileSync(join(output.generation, "bin", "airlock-agent"))).toEqual(readFileSync(item.binary))
+    expect(JSON.parse(readFileSync(
+      join(output.generation, "launchd", "com.airlock.box.alpha.agent.json"),
+      "utf8"
+    ))).toMatchObject({
+      schemaVersion: "airlock/agent-launch/v1",
+      executable: join(output.generation, "bin", "airlock-agent"),
+      user: "airlock_agent",
+      environment: { AIRLOCK_AGENT_SURFACE: "1" }
+    })
     expect(mode(join(output.generation, "home"))).toBe(0o700)
     expect(mode(join(output.generation, "run"))).toBe(0o2750)
     const principals = JSON.parse(readFileSync(join(output.generation, "principals.json"), "utf8"))

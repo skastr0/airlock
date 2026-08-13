@@ -643,6 +643,7 @@ const create = async (): Promise<void> => {
   await mkdirFresh(sealPath)
   await mkdirFresh(catalogPath)
   await writeExclusive(join(binPath, "airlock"), binary, 0o555)
+  await writeExclusive(join(binPath, "airlock-agent"), binary, 0o555)
   await writeExclusive(
     join(sealPath, BOX_GRANT_FILE),
     `${JSON.stringify(grant, null, 2)}\n`,
@@ -798,6 +799,7 @@ const copyBundleInto = async (bundle: string, generation: string): Promise<void>
   await mkdirFresh(sealOut)
   await mkdirFresh(catalogOut)
   await writeExclusive(join(binOut, "airlock"), binary, 0o555)
+  await writeExclusive(join(binOut, "airlock-agent"), binary, 0o555)
   await writeExclusive(join(sealOut, BOX_GRANT_FILE), grant, 0o444)
   await writeExclusive(join(sealOut, BOX_GRANT_SIGNATURE_FILE), signature, 0o444)
   await writeExclusive(join(sealOut, OPERATOR_PUBLIC_KEY_FILE), publicKey, 0o444)
@@ -901,6 +903,20 @@ const install = async (): Promise<void> => {
     }),
     0o444
   )
+  await writeExclusive(
+    join(destination, "launchd", `com.airlock.box.${box}.agent.json`),
+    `${JSON.stringify({
+      schemaVersion: "airlock/agent-launch/v1",
+      executable: join(destination, "bin", "airlock-agent"),
+      user: agentUser,
+      uid: agentUid,
+      group: agentGroup,
+      gid: agentGid,
+      environment: { AIRLOCK_AGENT_SURFACE: "1" },
+      note: "launch from the tenant harness; this file is inert and not activated by install"
+    }, null, 2)}\n`,
+    0o444
+  )
   const principalsPath = join(destination, "principals.json")
   await writeExclusive(
     principalsPath,
@@ -959,6 +975,7 @@ const install = async (): Promise<void> => {
     await chown(destination, 0, 0)
     await chown(join(destination, "bin"), 0, 0)
     await chown(join(destination, "bin", "airlock"), 0, 0)
+    await chown(join(destination, "bin", "airlock-agent"), 0, 0)
     await chown(join(destination, "seal"), 0, 0)
     await chown(join(destination, "launchd"), 0, 0)
     await chown(principalsPath, 0, 0)

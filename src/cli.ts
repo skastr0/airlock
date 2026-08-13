@@ -1509,7 +1509,10 @@ const sealedDescriptorIsEligible = (
 const makeSealedRoot = (seal: SealContext, name: string) => makeRoot(
   name,
   commandDescriptors
-    .filter((descriptor) => sealedDescriptorIsEligible(seal, descriptor))
+    .filter((descriptor) =>
+      sealedDescriptorIsEligible(seal, descriptor) &&
+      !(name === "airlock-agent" && descriptor.verb === "serve")
+    )
     .map((descriptor) =>
       (descriptor.sealed ?? descriptor.supervisor)(seal)
     )
@@ -1555,7 +1558,8 @@ const startupSeal = async (): Promise<SealContext | undefined> => {
 
 /** One composition root. Pristine components retain authority; CLI is glue. */
 const runCli = async (seal: SealContext): Promise<void> => {
-  const agentSurface = process.env["AIRLOCK_AGENT_SURFACE"] === "1"
+  const agentSurface = process.env["AIRLOCK_AGENT_SURFACE"] === "1" ||
+    nodePath.basename(process.argv[0] ?? process.execPath) === "airlock-agent"
   const commandName = agentSurface ? "airlock-agent" : "airlock"
   const root = seal._tag === "VerifiedSeal"
     ? makeSealedRoot(seal, commandName)
