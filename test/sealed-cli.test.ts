@@ -501,7 +501,7 @@ describe("sealed CLI grant graph", () => {
     })
   })
 
-  it("constructs all twenty current commands from one guarded descriptor table", () => {
+  it("constructs all current commands from one guarded descriptor table", () => {
     const source = readFileSync(join(repository, "src", "cli.ts"), "utf8")
     const table = source.slice(
       source.indexOf("const commandDescriptors"),
@@ -509,9 +509,9 @@ describe("sealed CLI grant graph", () => {
     )
     const mapped = [...table.matchAll(/\{ verb: "([^"]+)", supervisor:/g)]
       .map((match) => match[1])
-    expect(mapped).toEqual(fullVerbs)
-    expect(new Set(mapped)).toHaveLength(20)
-    expect(mapped).not.toContain("serve")
+    expect(mapped).toEqual([...fullVerbs, "serve"])
+    expect(new Set(mapped)).toHaveLength(21)
+    expect(table).toContain('{ verb: "serve", supervisor: makeServe, sealedOnly: true }')
     expect(source.match(/const requireVerb =/g)).toHaveLength(1)
     expect(source.match(/const requireNativeAction =/g)).toHaveLength(1)
     for (const [verb, action] of [

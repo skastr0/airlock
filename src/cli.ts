@@ -33,6 +33,11 @@ import { NativeFileSystemLive, NativeFilesystemConfig } from "./native/index.ts"
 import { ProcessRequest, ProcessRunner, ProcessRunnerLive } from "./process/Process.ts"
 import { Outbox, OutboxLive } from "./Outbox.ts"
 import {
+  checkDaemonSocket,
+  runDaemon,
+  runDaemonHealthServer
+} from "./daemon/index.ts"
+import {
   ProgramExecutionWithToolsLive,
   ProgramRequest,
   ProgramRunner,
@@ -292,6 +297,28 @@ const parseDuration = (field: string, raw: string): Effect.Effect<number, CliInp
 
 const duration = (name: string, fallback: string) =>
   Options.text(name).pipe(Options.withDefault(fallback))
+
+const daemonSocketPath = (): Effect.Effect<string, CliInputError> => {
+  const value = process.env["AIRLOCK_DAEMON_SOCKET"]
+  return value !== undefined && value.trim().length > 0 && nodePath.isAbsolute(value)
+    ? Effect.succeed(value)
+    : failInput("AIRLOCK_DAEMON_SOCKET", "an absolute daemon socket path is required in sealed mode")
+}
+
+const requireSealedDaemon = (seal: SealContext) =>
+  seal._tag === "VerifiedSeal" && seal.grant.daemonOps.length > 0
+  ? daemonSocketPath().pipe(
+      Effect.flatMap((socketPath) => checkDaemonSocket(
+        socketPath,
+        seal.grantDigest
+      )),
+      Effect.mapError((error) => new CliInputError({
+        field: "daemon",
+        reason: error instanceof Error ? error.message : String(error)
+      })),
+      Effect.asVoid
+    )
+  : Effect.void
 
 const scopeOption = Options.text("scope").pipe(Options.withDefault("/"))
 
@@ -1047,6 +1074,7 @@ const executeProgram = (
     const profile = seal._tag === "VerifiedSeal"
       ? seal.grant.admission.profile
       : selectedProfile
+    yield* requireSealedDaemon(seal)
     const home = yield* AirlockHome
     const workspace = yield* bindProgramWorkspace(profile, requestedWorkspace)
     const policy = yield* (
@@ -1078,7 +1106,8 @@ const executeProgram = (
           policy,
           toolActions,
           profile,
-          new Set(seal.grant.nativeActions)
+          new Set(seal.grant.nativeActions),
+          { sealDigest: seal.grantDigest as `sha256:${string}` }
         )
       : ProgramExecutionWithToolsLive(policy, toolActions, profile)
     const runner = yield* ProgramRunner.pipe(
@@ -1317,7 +1346,40 @@ const makeRunReceipt = (seal: SealContext) => Command.make(
   )
 )
 
-type CurrentCommandVerb = Exclude<BoxGrantVerb, "serve">
+
+const makeServe = (seal: SealContext) => Command.make(
+  "serve",
+  {
+    interval: duration("interval", "1s"),
+    reapOlderThan: Options.text("reap-older-than").pipe(Options.optional)
+  },
+  ({ interval, reapOlderThan }) => rendered(Effect.gen(function* () {
+    yield* requireVerb(seal, "serve")
+    if (seal._tag !== "VerifiedSeal") {
+      return yield* failInput("seal", "airlock serve requires a verified seal")
+    }
+    const intervalMillis = yield* parseDuration("interval", interval)
+    const reapOlderThanMillis = Option.isSome(reapOlderThan)
+      ? yield* parseDuration("reap-older-than", reapOlderThan.value)
+      : undefined
+    const socketPath = yield* daemonSocketPath()
+    return yield* Effect.scoped(Effect.gen(function* () {
+      yield* Effect.forkScoped(runDaemon({
+        seal,
+        intervalMillis,
+        ...(reapOlderThanMillis === undefined ? {} : { reapOlderThanMillis })
+      }))
+      return yield* runDaemonHealthServer({
+        socketPath,
+        state: { grantDigest: seal.grantDigest, ready: true }
+      })
+    }))
+  }))
+).pipe(Command.withDescription(
+  "Run the sealed supervisor loop and health-only local socket"
+))
+
+type CurrentCommandVerb = BoxGrantVerb
 type AnyCliCommand = Command.Command<any, any, any, any>
 type CommandFactory = (seal: SealContext) => AnyCliCommand
 
@@ -1327,11 +1389,12 @@ type CurrentCommandDescriptor = Readonly<{
   agent?: CommandFactory
   sealed?: CommandFactory
   nativeAction?: NativeActionName
+  sealedOnly?: boolean
 }>
 
 /**
- * One construction table owns the complete current graph. `serve` remains a
- * reserved grant spelling for PR5 and intentionally has no descriptor here.
+ * One construction table owns the complete graph. `serve` is sealed-only;
+ * zero-configuration supervisor and agent graphs remain unchanged.
  */
 const commandDescriptors: ReadonlyArray<CurrentCommandDescriptor> = [
   { verb: "rm", supervisor: makeRm, nativeAction: "file.remove" },
@@ -1353,7 +1416,8 @@ const commandDescriptors: ReadonlyArray<CurrentCommandDescriptor> = [
   { verb: "eval", supervisor: makeEvalProgram, agent: makeAgentEvalProgram, sealed: makeSealedEvalProgram },
   { verb: "ledger", supervisor: makeLedger },
   { verb: "runs", supervisor: makeRuns },
-  { verb: "run-receipt", supervisor: makeRunReceipt }
+  { verb: "run-receipt", supervisor: makeRunReceipt },
+  { verb: "serve", supervisor: makeServe, sealedOnly: true }
 ]
 
 const unsealedAgentVerbOrder: ReadonlyArray<CurrentCommandVerb> = [
@@ -1396,7 +1460,9 @@ const makeRoot = (
 
 const makeUnsealedSupervisorRoot = (seal: SealContext) => makeRoot(
   "airlock",
-  commandDescriptors.map((descriptor) => descriptor.supervisor(seal))
+  commandDescriptors
+    .filter((descriptor) => descriptor.sealedOnly !== true)
+    .map((descriptor) => descriptor.supervisor(seal))
 )
 
 /**
