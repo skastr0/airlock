@@ -23,6 +23,7 @@
     "scripts/build-macos.ts",
     "scripts/build-box.ts",
     "scripts/seal-box.ts",
+    "scripts/prove-sealed-box-macos.sh",
     "scripts/install-macos.sh",
     "scripts/uninstall-macos.sh",
     "ARCHITECTURE.md",
