@@ -38,6 +38,12 @@ import {
   RuntimeLive
 } from "./runtime/index.ts"
 import { AIRLOCK_VERSION } from "./version.ts"
+import {
+  type SealContext,
+  SealVerificationFailed,
+  UnsealedSeal,
+  loadStartupSeal
+} from "./seal/index.ts"
 
 /**
  * CLI is deliberately an adapter: it parses agent-facing atoms, invokes typed
@@ -938,37 +944,64 @@ const agentRoot = Command.make("airlock-agent").pipe(Command.withSubcommands([
   held, pending, ledger, runs, runReceipt
 ]))
 
-/** One composition root. Pristine components retain authority; CLI is glue. */
-const PlatformAndHomeLayer = layerFromEnv.pipe(
-  Layer.provideMerge(BunContext.layer)
-)
-const LedgerLayer = LedgerLive.pipe(
-  Layer.provideMerge(PlatformAndHomeLayer)
-)
-const StateLayer = Layer.mergeAll(
-  LedgerLayer,
-  HoldLive.pipe(Layer.provideMerge(LedgerLayer)),
-  OutboxLive.pipe(Layer.provideMerge(LedgerLayer))
-)
-
-const MacosExecutionLayer = Layer.mergeAll(ProcessRunnerLive, MacosPlatformLive)
-const NativeFileSystemLayer = NativeFileSystemLive(
-  new NativeFilesystemConfig({ workspace: process.cwd() })
-).pipe(Layer.provideMerge(StateLayer))
-const ExecutionDependencies = Layer.mergeAll(
-  NativeFileSystemLayer,
-  MacosExecutionLayer
-)
-const MainLayer = CellLive.pipe(Layer.provideMerge(ExecutionDependencies))
-
-const main = process.env["AIRLOCK_AGENT_SURFACE"] === "1"
-  ? Command.run(agentRoot, { name: "airlock-agent", version: AIRLOCK_VERSION })(process.argv)
-  : Command.run(supervisorRoot, { name: "airlock", version: AIRLOCK_VERSION })(process.argv)
-
-const runtime = ManagedRuntime.make(MainLayer)
-
-try {
-  await runtime.runPromise(main)
-} finally {
-  await runtime.dispose()
+/**
+ * Seal verification is the process bootstrap boundary. A present, invalid seal
+ * exits before AirlockHome, Ledger, Hold, Outbox, Runtime, or any command
+ * handler is constructed. Only an actually absent AIRLOCK_SEAL selects the
+ * unchanged compatibility path.
+ */
+const startupSeal = async (): Promise<SealContext | undefined> => {
+  try {
+    return await Effect.runPromise(loadStartupSeal())
+  } catch (cause) {
+    const failure = cause instanceof SealVerificationFailed
+      ? cause
+      : new SealVerificationFailed({
+          phase: "seal",
+          path: process.env["AIRLOCK_SEAL"] ?? "AIRLOCK_SEAL",
+          reason: "read-failed"
+        })
+    console.error(JSON.stringify(failure))
+    process.exitCode = 78
+    return undefined
+  }
 }
+
+/** One composition root. Pristine components retain authority; CLI is glue. */
+const runCli = async (_seal: SealContext): Promise<void> => {
+  const PlatformAndHomeLayer = layerFromEnv.pipe(
+    Layer.provideMerge(BunContext.layer)
+  )
+  const LedgerLayer = LedgerLive.pipe(
+    Layer.provideMerge(PlatformAndHomeLayer)
+  )
+  const StateLayer = Layer.mergeAll(
+    LedgerLayer,
+    HoldLive.pipe(Layer.provideMerge(LedgerLayer)),
+    OutboxLive.pipe(Layer.provideMerge(LedgerLayer))
+  )
+
+  const MacosExecutionLayer = Layer.mergeAll(ProcessRunnerLive, MacosPlatformLive)
+  const NativeFileSystemLayer = NativeFileSystemLive(
+    new NativeFilesystemConfig({ workspace: process.cwd() })
+  ).pipe(Layer.provideMerge(StateLayer))
+  const ExecutionDependencies = Layer.mergeAll(
+    NativeFileSystemLayer,
+    MacosExecutionLayer
+  )
+  const MainLayer = CellLive.pipe(Layer.provideMerge(ExecutionDependencies))
+
+  const main = process.env["AIRLOCK_AGENT_SURFACE"] === "1"
+    ? Command.run(agentRoot, { name: "airlock-agent", version: AIRLOCK_VERSION })(process.argv)
+    : Command.run(supervisorRoot, { name: "airlock", version: AIRLOCK_VERSION })(process.argv)
+
+  const runtime = ManagedRuntime.make(MainLayer)
+  try {
+    await runtime.runPromise(main)
+  } finally {
+    await runtime.dispose()
+  }
+}
+
+const seal = await startupSeal()
+if (seal !== undefined) await runCli(seal)
