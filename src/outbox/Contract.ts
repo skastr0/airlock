@@ -212,6 +212,8 @@ export class PersistedOutboxManifest extends Schema.Class<PersistedOutboxManifes
   request: RedactedEmissionRequest,
   stagedAt: Schema.DateTimeUtc,
   holdUntil: Schema.DateTimeUtc,
+  /** Exact digest of dispatch.json; commit refuses any post-stage substitution. */
+  dispatchDigest: StagedDispatchSealDigest,
   authorization: Schema.optional(StagedDispatchAuthorization)
 }) {}
 

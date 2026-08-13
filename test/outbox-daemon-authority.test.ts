@@ -225,4 +225,42 @@ describe("Outbox — persisted daemon dispatch authority", () => {
       })
     )
   )
+
+  it.effect("refuses an exact-byte dispatch substitution before terminal transition", () =>
+    withWorld(({ fs, path, home, outbox, baseUrl, received }) =>
+      Effect.gen(function* () {
+        const endpoint = `${baseUrl}/read`
+        const staged = yield* outbox.stage(
+          post(endpoint, "secret-body"),
+          0,
+          authorizationFor(endpoint)
+        )
+        const dispatchPath = path.join(
+          home,
+          "outbox",
+          `${staged.id}.staged`,
+          "dispatch.json"
+        )
+        const original = yield* fs.readFileString(dispatchPath)
+        expect(original).toContain("/read")
+        yield* fs.writeFileString(dispatchPath, original.replace("/read", "/evil"))
+
+        const failure = yield* outbox.commit(staged.id, new DispatchProvenance({
+          committedBy: "policy-auto",
+          grantId: "grant/read-api",
+          grantSelector: `${baseUrl}/*`,
+          dispatchClass: "read",
+          endpoint
+        })).pipe(Effect.flip)
+        expect(failure).toMatchObject({
+          _tag: "OutboxStateCorrupt",
+          id: staged.id,
+          document: "dispatch.json"
+        })
+        expect((yield* outbox.inspect(staged.id)).status).toBe("staged")
+        expect(received()).toBe(0)
+      })
+    )
+  )
+
 })

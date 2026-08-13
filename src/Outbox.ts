@@ -1,4 +1,5 @@
 import { Cause, Context, DateTime, Effect, Exit, Layer, Schema } from "effect"
+import { createHash } from "node:crypto"
 import {
   EmissionId,
   EmissionNotPending,
@@ -211,6 +212,8 @@ const decodeOutcome = Schema.decode(
 )
 
 const textEncoder = new TextEncoder()
+const sha256Text = (value: string): `sha256:${string}` =>
+  `sha256:${createHash("sha256").update(value, "utf8").digest("hex")}`
 
 const ledgerFailureReason = (error: LedgerError) =>
   `${error._tag}: ${error.reason}`
@@ -495,6 +498,9 @@ const make = Effect.gen(function* () {
     }
     const stagedAt = yield* DateTime.now
     const id = newEmissionId()
+    const dispatchJson = yield* encodeDispatch(summary.dispatch).pipe(
+      Effect.mapError(() => parseFailure(id, "dispatch-encode"))
+    )
     const manifest = new PersistedOutboxManifest({
       schemaVersion: "airlock/outbox-manifest/v1",
       id,
@@ -502,13 +508,11 @@ const make = Effect.gen(function* () {
       request: summary.request,
       stagedAt,
       holdUntil: DateTime.add(stagedAt, { millis: holdMillis }),
+      dispatchDigest: sha256Text(dispatchJson),
       ...(authorization === undefined ? {} : { authorization })
     })
     const manifestJson = yield* encodeManifest(manifest).pipe(
       Effect.mapError(() => parseFailure(id, "manifest-encode"))
-    )
-    const dispatchJson = yield* encodeDispatch(summary.dispatch).pipe(
-      Effect.mapError(() => parseFailure(id, "dispatch-encode"))
     )
     const staged = toEmission(manifest, "staged")
     const stageRecovery = (reason: string) =>
@@ -560,13 +564,26 @@ const make = Effect.gen(function* () {
   ) {
     return yield* store.withExclusive(Effect.uninterruptibleMask((restore) =>
       Effect.gen(function* () {
-      yield* transition(id, "staged", "committing")
-      const stored = yield* store.read(id, "committing")
-      const manifest = yield* decodeStoredManifest(id, stored.manifestJson)
-      const dispatchJson = yield* store.readDispatch(id, "committing")
-      const dispatch = yield* decodeDispatch(dispatchJson).pipe(
+      const state = yield* store.findState(id)
+      if (state === undefined) return yield* new UnknownEmission({ id })
+      if (state !== "staged") return yield* new EmissionNotPending({ id, status: state })
+      const stagedStored = yield* store.read(id, "staged")
+      const manifest = yield* decodeStoredManifest(id, stagedStored.manifestJson)
+      const stagedDispatchJson = yield* store.readDispatch(id, "staged")
+      if (sha256Text(stagedDispatchJson) !== manifest.dispatchDigest) {
+        return yield* new OutboxStateCorrupt({
+          id,
+          document: "dispatch.json"
+        })
+      }
+      const dispatch = yield* decodeDispatch(stagedDispatchJson).pipe(
         Effect.mapError(() => parseFailure(id, "dispatch.json"))
       )
+      // Only an exact, decoded dispatch snapshot may cross the point of no
+      // return. Validation while still staged keeps tamper a recoverable
+      // refusal rather than manufacturing an uncertain network outcome.
+      yield* transition(id, "staged", "committing")
+
 
       // Dispatch is the interruptible portion. Once dispatch has begun,
       // interruption is an honest uncertain outcome rather than a bare fiber
