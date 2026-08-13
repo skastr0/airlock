@@ -41,6 +41,7 @@ import {
 } from "./program/index.ts"
 import {
   ToolDefinitionDirectories,
+  type ExportedToolAction,
   exportToolActions,
   loadKnownToolDefinitions,
   makeFileToolDefinitionReader
@@ -55,7 +56,8 @@ import { AIRLOCK_VERSION } from "./version.ts"
 import {
   type SealContext,
   SealVerificationFailed,
-  loadStartupSeal
+  loadStartupSeal,
+  sealedTools
 } from "./seal/index.ts"
 
 /**
@@ -378,11 +380,36 @@ const definitionDirectories = (workspace: string) => new ToolDefinitionDirectori
   project: nodePath.join(workspace, ".airlock", "tools")
 })
 
-const discoveredTools = (workspace: string) =>
-  loadKnownToolDefinitions(makeFileToolDefinitionReader(), definitionDirectories(workspace)).pipe(
-    Effect.flatMap((registry) => exportToolActions(registry, new Set(NativeActionCatalog.map((action) => action.name)))),
-    Effect.mapError((error) => new CliInputError({ field: "tool-definitions", reason: error.message ?? error._tag }))
+const toolDefinitionFailure = (error: { readonly _tag: string }): CliInputError =>
+  new CliInputError({
+    field: "tool-definitions",
+    reason: "message" in error && typeof error.message === "string"
+      ? error.message
+      : "reason" in error && typeof error.reason === "string"
+        ? error.reason
+        : error._tag
+  })
+
+const discoveredTools = (
+  seal: SealContext,
+  workspace: string
+): Effect.Effect<ReadonlyArray<ExportedToolAction>, CliInputError> => {
+  if (seal._tag === "VerifiedSeal") {
+    return sealedTools(seal, workspace).pipe(
+      Effect.mapError(toolDefinitionFailure)
+    )
+  }
+  return loadKnownToolDefinitions(
+    makeFileToolDefinitionReader(),
+    definitionDirectories(workspace)
+  ).pipe(
+    Effect.flatMap((registry) => exportToolActions(
+      registry,
+      new Set(NativeActionCatalog.map((action) => action.name))
+    )),
+    Effect.mapError(toolDefinitionFailure)
   )
+}
 
 const bindPolicyPathScopes = (
   policy: AdmissionPolicyDocument
@@ -764,7 +791,7 @@ const makeActions = (seal: SealContext) => Command.make("actions", {
   workspace: Options.text("workspace").pipe(Options.withDefault(process.cwd()))
 }, ({ workspace }) => rendered(
   requireVerb(seal, "actions").pipe(
-    Effect.zipRight(discoveredTools(nodePath.resolve(workspace))),
+    Effect.zipRight(discoveredTools(seal, nodePath.resolve(workspace))),
     Effect.map((tools) => {
       const nativeActions = allowedNativeActions(seal)
       return {
@@ -1029,7 +1056,7 @@ const executeProgram = (
             Effect.flatMap(bindPolicyPathScopes)
           )
     )
-    const tools = yield* discoveredTools(workspace)
+    const tools = yield* discoveredTools(seal, workspace)
     const parsedBindings = yield* parseBindings(rawBindings)
     const bindingsValue = profile === "native-contained"
       ? { ...parsedBindings, workspace }

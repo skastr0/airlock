@@ -14,6 +14,7 @@ import { beforeAll, describe, expect, it } from "vitest"
 import {
   AdmissionPolicy,
   BoxGrant,
+  BoxGrantCatalogPin,
   type BoxGrantVerb
 } from "../src/admission/index.ts"
 import { type NativeActionName } from "../src/actions/index.ts"
@@ -22,7 +23,8 @@ import {
   BOX_GRANT_SIGNATURE_FILE,
   OPERATOR_PUBLIC_KEY_FILE,
   SEAL_CATALOG_DIRECTORY,
-  boxGrantSigningPayload
+  boxGrantSigningPayload,
+  catalogFileNameForPin
 } from "../src/seal/index.ts"
 
 const repository = resolve(import.meta.dirname, "..")
@@ -62,17 +64,26 @@ const makeSeal = (name: string, options: {
   readonly verbs: ReadonlyArray<BoxGrantVerb>
   readonly nativeActions: ReadonlyArray<NativeActionName>
   readonly admission?: AdmissionPolicy
+  readonly definitions?: ReadonlyArray<{
+    readonly id: string
+    readonly bytes: Uint8Array
+  }>
 }) => {
   const directory = join(root, `seal-${name}`)
   const catalog = join(directory, SEAL_CATALOG_DIRECTORY)
   mkdirSync(catalog, { recursive: true })
   const { privateKey, publicKey } = generateKeyPairSync("ed25519")
+  const definitions = options.definitions ?? []
+  const pins = definitions.map((definition) => new BoxGrantCatalogPin({
+    id: definition.id,
+    sha256: digest(definition.bytes)
+  }))
   const grant = new BoxGrant({
     schemaVersion: "airlock/box-grant/v1",
     admission: options.admission ?? defaultAdmission(),
     verbs: [...options.verbs],
     nativeActions: [...options.nativeActions],
-    catalog: [],
+    catalog: pins,
     daemonOps: [],
     binaryDigest: digest(readFileSync(binary))
   })
@@ -85,6 +96,12 @@ const makeSeal = (name: string, options: {
     join(directory, BOX_GRANT_SIGNATURE_FILE),
     sign(null, boxGrantSigningPayload(grant), privateKey)
   )
+  for (const [index, definition] of definitions.entries()) {
+    writeFileSync(
+      join(catalog, catalogFileNameForPin(pins[index]!)),
+      definition.bytes
+    )
+  }
   return directory
 }
 
@@ -359,11 +376,10 @@ describe("sealed CLI grant graph", () => {
     expect(JSON.parse(pending.stdout)).toEqual([])
   })
 
-  it("filters native and definition discovery by the signed native surface", () => {
+  it("loads only pinned definitions and filters discovery by the signed native surface", () => {
     const workspace = join(root, "discovery-workspace")
-    const tools = join(workspace, ".airlock", "tools")
-    mkdirSync(tools, { recursive: true })
-    writeFileSync(join(tools, "invoke.airlock-tool.json"), JSON.stringify({
+    mkdirSync(workspace, { recursive: true })
+    const invokeBytes = new TextEncoder().encode(JSON.stringify({
       schemaVersion: "airlock/tool-definition/v1",
       id: "invoke_tool",
       version: "1.0.0",
@@ -383,7 +399,7 @@ describe("sealed CLI grant graph", () => {
         resultDecoder: "exit-status"
       }]
     }))
-    writeFileSync(join(tools, "enqueue.airlock-tool.json"), JSON.stringify({
+    const enqueueBytes = new TextEncoder().encode(JSON.stringify({
       schemaVersion: "airlock/tool-definition/v2",
       id: "enqueue_tool",
       version: "1.0.0",
@@ -406,10 +422,15 @@ describe("sealed CLI grant graph", () => {
         resultDecoder: "none"
       }]
     }))
+    const definitions = [
+      { id: "invoke_tool", bytes: invokeBytes },
+      { id: "enqueue_tool", bytes: enqueueBytes }
+    ]
 
     const fileOnlySeal = makeSeal("discovery-file", {
       verbs: ["actions", "schema"],
-      nativeActions: ["file.write"]
+      nativeActions: ["file.write"],
+      definitions
     })
     const fileOnly = invoke(["actions", "--workspace", workspace], {
       seal: fileOnlySeal,
@@ -434,7 +455,8 @@ describe("sealed CLI grant graph", () => {
 
     const enqueueSeal = makeSeal("discovery-enqueue", {
       verbs: ["actions", "schema"],
-      nativeActions: ["http.stage"]
+      nativeActions: ["http.stage"],
+      definitions
     })
     const enqueueOnly = invoke(["actions", "--workspace", workspace], {
       seal: enqueueSeal,
@@ -451,7 +473,8 @@ describe("sealed CLI grant graph", () => {
 
     const invokeSeal = makeSeal("discovery-invoke", {
       verbs: ["actions"],
-      nativeActions: ["process.run"]
+      nativeActions: ["process.run"],
+      definitions
     })
     const invokeOnly = invoke(["actions", "--workspace", workspace], {
       seal: invokeSeal,
@@ -463,6 +486,19 @@ describe("sealed CLI grant graph", () => {
     }
     expect(invokePayload.definitions.map(({ name }) => name)).toContain("invoke_tool.call")
     expect(invokePayload.definitions.map(({ name }) => name)).not.toContain("enqueue_tool.stage")
+
+    const ambient = join(workspace, ".airlock", "tools")
+    mkdirSync(ambient, { recursive: true })
+    writeFileSync(join(ambient, "extra.airlock-tool.json"), invokeBytes)
+    const refused = invoke(["actions", "--workspace", workspace], {
+      seal: enqueueSeal,
+      cwd: workspace
+    })
+    expect(refused.status).toBe(1)
+    expect(parseJson(refused.stderr)).toMatchObject({
+      _tag: "CliInputError",
+      field: "tool-definitions"
+    })
   })
 
   it("constructs all twenty current commands from one guarded descriptor table", () => {
