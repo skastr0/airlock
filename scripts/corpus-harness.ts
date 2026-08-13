@@ -847,6 +847,7 @@ export const buildReport = (
 const sidechannelSchemas = [
   "process.run",
   "file.read",
+  "file.stat",
   "file.glob",
   "file.write",
   "http.stage"
@@ -927,10 +928,10 @@ export const emitSidechannel = (
         actions,
         "```",
         "",
-        "## Action input schemas",
+        "## Action schemas",
         "",
-        "Five schemas in full. The remaining verbs take the obvious subset of",
-        "`path`, `source`, `destination`, `parents`, and `realm`.",
+        "Six input and evaluator-result schemas in full. The remaining verbs take",
+        "the obvious subset of `path`, `source`, `destination`, `parents`, and `realm`.",
         "",
         ...schemas.flatMap(({ body, name }) => [
           `### ${name}`,
@@ -938,6 +939,10 @@ export const emitSidechannel = (
           "```json",
           body,
           "```",
+          ...(name === "file.stat" ? [
+            "",
+            "The evaluator returns `bytes`; there is no `size` field."
+          ] : []),
           ""
         ]),
         "## Language",

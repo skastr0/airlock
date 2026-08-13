@@ -468,6 +468,23 @@ describe("sealed CLI grant graph", () => {
       definitions: []
     })
 
+    for (const subject of ["actions", "all"]) {
+      const visibleSchema = invoke(["schema", subject], {
+        seal: fileOnlySeal,
+        cwd: workspace
+      })
+      expect(visibleSchema.status, visibleSchema.stderr).toBe(0)
+      const visibleActions = (parseJson(visibleSchema.stdout) as {
+        readonly actions: ReadonlyArray<{
+          readonly name: string
+          readonly resultSchema?: unknown
+        }>
+      }).actions
+      expect(visibleActions.map(({ name }) => name)).toEqual(["file.write"])
+      expect(visibleActions[0]?.resultSchema).toBeDefined()
+      expect(visibleSchema.stdout).not.toContain("file.read")
+    }
+
     const disabledSchema = invoke(["schema", "file.read"], {
       seal: fileOnlySeal,
       cwd: workspace

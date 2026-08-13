@@ -48,6 +48,32 @@ describe("agent-only CLI surface", () => {
     })
   })
 
+  it("binds file.stat bytes exactly and does not invent a size alias", { timeout: 30_000 }, () => {
+    const home = mkdtempSync(join(tmpdir(), "airlock-agent-stat-result-"))
+    writeFileSync(join(home, "f"), "three")
+
+    const bytes = run([
+      "eval", "--workspace", home, "--source",
+      'let s = file.stat({ path: "f" })\nreturn s.bytes'
+    ], home)
+    expect(bytes.status, bytes.stderr).toBe(0)
+    expect(json(bytes.stdout)).toMatchObject({ result: { result: 5 } })
+
+    const size = run([
+      "eval", "--workspace", home, "--source",
+      'let s = file.stat({ path: "f" })\nreturn s.size'
+    ], home)
+    expect(size.status).toBe(1)
+    expect(json(size.stdout)).toMatchObject({
+      result: {
+        failure: {
+          phase: "language",
+          causeTag: "MissingRecordField"
+        }
+      }
+    })
+  })
+
   it("normalizes Duration sugar for namespaced actions without weakening strict decoding", { timeout: 30_000 }, () => {
     const home = mkdtempSync(join(tmpdir(), "airlock-agent-duration-"))
     const processRun = run([
@@ -180,7 +206,7 @@ describe("agent-only CLI surface", () => {
     })
   })
 
-  it("derives a queryable native action input contract from its Effect Schema", { timeout: 30_000 }, () => {
+  it("publishes native input and exact evaluator result Schemas on every schema surface", { timeout: 30_000 }, () => {
     const home = mkdtempSync(join(tmpdir(), "airlock-agent-action-schema-"))
     const discovered = run(["schema", "process.run"], home)
 
@@ -203,6 +229,35 @@ describe("agent-only CLI surface", () => {
             timeoutMs: { type: "number" }
           },
           additionalProperties: false
+        },
+        resultSchema: {
+          type: "object",
+          required: [
+            "state",
+            "plan_id",
+            "process_outcome",
+            "exit_code",
+            "signal",
+            "stdout",
+            "stderr",
+            "stdout_artifact",
+            "stderr_artifact",
+            "delta_artifact",
+            "recovery",
+            "receipts"
+          ],
+          properties: {
+            state: { enum: ["succeeded", "failed", "partial"] },
+            stdout: { anyOf: [{ type: "string" }, { type: "null" }] },
+            stdout_artifact: { $ref: "#/$defs/NativeProcessArtifactResult" },
+            receipts: {
+              type: "array",
+              items: {
+                required: ["node_id", "sequence", "state", "error_tag", "output_artifacts"]
+              }
+            }
+          },
+          additionalProperties: false
         }
       }
     })
@@ -212,7 +267,77 @@ describe("agent-only CLI surface", () => {
       }
     }).inputSchema
     expect(inputSchema.properties).not.toHaveProperty("action")
-    expect(contract.action).not.toHaveProperty("resultSchema")
+
+    const write = run(["schema", "file.write"], home)
+    expect(write.status, write.stderr).toBe(0)
+    const writeAction = json(write.stdout).action as {
+      readonly inputSchema: {
+        readonly required: ReadonlyArray<string>
+        readonly properties: Readonly<Record<string, unknown>>
+      }
+      readonly resultSchema: {
+        readonly properties: Readonly<Record<string, unknown>>
+      }
+    }
+    expect(writeAction.inputSchema.required).toEqual(expect.arrayContaining(["path"]))
+    expect(writeAction.inputSchema.properties).toHaveProperty("path")
+    expect(writeAction.inputSchema.properties).not.toHaveProperty("target")
+    expect(writeAction.resultSchema.properties).toHaveProperty("target")
+
+    const stat = run(["schema", "file.stat"], home)
+    expect(stat.status, stat.stderr).toBe(0)
+    const statAction = json(stat.stdout).action as {
+      readonly resultSchema: {
+        readonly required: ReadonlyArray<string>
+        readonly properties: Readonly<Record<string, unknown>>
+      }
+    }
+    expect(statAction.resultSchema).toMatchObject({
+      required: ["path", "kind", "bytes", "mode", "device", "inode"],
+      properties: { bytes: { type: "number" } }
+    })
+    expect(statAction.resultSchema.properties).not.toHaveProperty("size")
+
+    const read = run(["schema", "file.read"], home)
+    expect(read.status, read.stderr).toBe(0)
+    const readSchema = (json(read.stdout).action as {
+      readonly resultSchema: {
+        readonly anyOf: ReadonlyArray<unknown>
+        readonly $defs: Readonly<Record<string, { readonly anyOf: ReadonlyArray<unknown> }>>
+      }
+    }).resultSchema
+    expect(readSchema.anyOf).toEqual(expect.arrayContaining([
+      expect.objectContaining({ type: "string", title: "text" }),
+      expect.objectContaining({
+        type: "array",
+        title: "bytes",
+        items: { type: "number" }
+      }),
+      { $ref: "#/$defs/AirlockLanguageValue" }
+    ]))
+    expect(readSchema.$defs.AirlockLanguageValue?.anyOf).toEqual(expect.arrayContaining([
+      expect.objectContaining({ type: "number" }),
+      expect.objectContaining({ type: "boolean" }),
+      expect.objectContaining({ type: "null" }),
+      expect.objectContaining({ type: "array" }),
+      expect.objectContaining({ type: "object" })
+    ]))
+
+    for (const subject of ["actions", "all"]) {
+      const aggregate = run(["schema", subject], home)
+      expect(aggregate.status, aggregate.stderr).toBe(0)
+      const actions = json(aggregate.stdout).actions as ReadonlyArray<{
+        readonly name: string
+        readonly resultSchema?: unknown
+      }>
+      expect(actions).toHaveLength(12)
+      expect(actions.every((action) => action.resultSchema !== undefined)).toBe(true)
+      expect(actions.find((action) => action.name === "file.stat")).toMatchObject({
+        resultSchema: {
+          properties: { bytes: { type: "number" } }
+        }
+      })
+    }
 
     const rejected = run(["schema", "not.an.action"], home)
     expect(rejected.status).toBe(1)

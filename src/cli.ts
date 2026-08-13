@@ -42,7 +42,8 @@ import {
   ProgramRequest,
   ProgramRunner,
   canonicalizeProgramAction,
-  draftForAction
+  draftForAction,
+  nativeActionResultSchema
 } from "./program/index.ts"
 import {
   ToolDefinitionDirectories,
@@ -854,6 +855,20 @@ const nativeActionInputSchema = (
   }
 }
 
+const nativeActionResultJsonSchema = (
+  name: (typeof NativeActionCatalog)[number]["name"]
+) => JSONSchema.make(
+  nativeActionResultSchema(name) as Schema.Schema.Any,
+  { target: "jsonSchema2020-12" }
+)
+
+const nativeActionDiscoveryDescriptor = (
+  action: (typeof NativeActionCatalog)[number]
+) => ({
+  ...action,
+  resultSchema: nativeActionResultJsonSchema(action.name)
+})
+
 const makeSchema = (seal: SealContext) => Command.make(
   "schema",
   { subject: Args.text({ name: "subject" }).pipe(Args.optional) },
@@ -866,7 +881,7 @@ const makeSchema = (seal: SealContext) => Command.make(
       return {
         schemaVersion: "airlock/discovery/v1",
         action: {
-          ...native,
+          ...nativeActionDiscoveryDescriptor(native),
           inputSchema: nativeActionInputSchema(native.name)
         }
       }
@@ -876,7 +891,9 @@ const makeSchema = (seal: SealContext) => Command.make(
     }
     return {
       schemaVersion: "airlock/discovery/v1",
-      ...(requested === "all" || requested === "actions" ? { actions: nativeActions } : {}),
+      ...(requested === "all" || requested === "actions" ? {
+        actions: nativeActions.map(nativeActionDiscoveryDescriptor)
+      } : {}),
       ...(requested === "all" || requested === "plan" ? {
         plan: {
           schemaVersion: "airlock/plan/v1",

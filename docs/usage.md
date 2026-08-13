@@ -285,8 +285,8 @@ Twelve generic verbs. There are no Vouch-, archive-, SQLite-, Git-, or
 OpenShell-specific runtime verbs; existing Unix programs keep those semantics.
 
 **The live source of truth is the CLI, not this page.** Discovery is generated
-from the same Effect Schemas that decode the actions, so it cannot drift from
-the decoder:
+from the same Effect Schemas that decode action inputs and enforce evaluator
+results, so it cannot drift from either boundary:
 
 ```sh
 airlock-agent actions
@@ -316,8 +316,10 @@ airlock-agent schema plan
 }
 ```
 
-Note that `schema <action>` returns the **input** contract. Result record shapes
-are not in discovery — read them off a receipt, or off the tables below.
+`schema <action>` returns both `inputSchema` and the evaluator-enforced
+`resultSchema`; `schema actions` and `schema all` attach the same result contract
+to every visible native action. The compact `actions` listing above remains a
+summary. For example, `file.stat` publishes `bytes`—not a `size` alias.
 
 ### Observations (`Capture`)
 
@@ -1318,16 +1320,17 @@ sidechannel brief. The one this repository uses is regenerable:
 bun run scripts/corpus-harness.ts --emit-sidechannel examples/corpus/sidechannel.md
 ```
 
-**Not executed in this environment** — the checked-in
+The checked-in
 [`examples/corpus/sidechannel.md`](../examples/corpus/sidechannel.md) is the
-generated artifact, and regenerating it would rewrite a tracked file. Its
-structure is the recommendation:
+generated artifact. Its structure is the recommendation:
 
 1. **The complete action list** — `airlock-agent actions` verbatim, framed as
    "nothing else is callable."
-2. **Input schemas for the actions the task needs** —
+2. **Input and evaluator-result schemas for the actions the task needs** —
    `airlock-agent schema <action>` for each. Not all twelve; the brief ships
-   `process.run`, `file.read`, `file.glob`, `file.write`, `http.stage`.
+   `process.run`, `file.read`, `file.stat`, `file.glob`, `file.write`,
+   `http.stage`. The `file.stat` result documents `bytes` (there is no `size`
+   alias), so a cold author can use the record the evaluator actually returns.
 3. **The grammar in a dozen lines**, including the three properties an author
    cannot infer: no assignment, `+` does not coerce, `workspace` is a supervisor
    binding.

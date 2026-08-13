@@ -27,6 +27,7 @@ import {
   ResourceNeed
 } from "../actions/index.ts"
 import {
+  NativeEntryKind,
   NativeListEntry,
   NativeMkdirReceipt,
   NativeMoveReceipt,
@@ -34,7 +35,8 @@ import {
   NativeWriteReceipt
 } from "../native/index.ts"
 import { OutboxEmission, StagedDispatchAuthorization } from "../Outbox.ts"
-import { RemoveReceipt } from "../domain.ts"
+import { CommitAuthority, OutboxState } from "../outbox/Contract.ts"
+import { ActId, EmissionId, RemoveReceipt } from "../domain.ts"
 import {
   ApplyNode,
   ArtifactId,
@@ -43,6 +45,7 @@ import {
   Digest,
   InvokeNode,
   NodeId,
+  NodeState,
   PlanDraft,
   PlanId,
   Plan,
@@ -55,6 +58,7 @@ import {
   RuntimeDispatchAuthorization,
   RuntimeInitialArtifact,
   type RuntimeArtifact,
+  RuntimeProcessOutcome,
   RuntimeRecoveryEvidence,
   RuntimeRun
 } from "../runtime/index.ts"
@@ -979,6 +983,155 @@ const draftForToolAction = (
     })
   })
 
+/**
+ * Exact language values returned by the native evaluator projection below.
+ * Discovery exports these same Schemas, and `nativeActionResult` decodes every
+ * projected value through them so a documentation-only result contract cannot
+ * drift away from what programs actually receive.
+ */
+const NativeStatActionResult = Schema.Struct({
+  path: Schema.String,
+  kind: NativeEntryKind,
+  bytes: Schema.Number,
+  mode: Schema.Number,
+  device: Schema.Number,
+  inode: Schema.Number
+})
+
+const FileReadActionResult = Schema.Union(
+  Schema.String.annotations({
+    title: "text",
+    description: "format=text returns decoded UTF-8 text."
+  }),
+  Schema.Array(Schema.Number).annotations({
+    title: "bytes",
+    description: "format=bytes returns byte values as a number array."
+  }),
+  LanguageValueSchema
+).annotations({
+  description: "file.read returns text, a number array of bytes, or the recursive Airlock language-value union for format=json."
+})
+
+const FileListActionResult = Schema.Array(Schema.Struct({
+  name: Schema.String,
+  stat: NativeStatActionResult
+}))
+
+const FileGlobActionResult = Schema.Array(Schema.String)
+
+const FileWriteActionResult = Schema.Struct({
+  state: Schema.Literal("applied"),
+  action: Schema.Literal("file.write"),
+  act_id: ActId,
+  target: Schema.String,
+  previous_held: Schema.Boolean,
+  bytes: Schema.Number
+})
+
+const FileRemoveActionResult = Schema.Struct({
+  state: Schema.Literal("applied"),
+  action: Schema.Literal("file.remove"),
+  act_id: ActId,
+  target: Schema.String,
+  kind: NativeEntryKind
+})
+
+const FileCopyActionResult = Schema.Struct({
+  state: Schema.Literal("applied"),
+  action: Schema.Literal("file.copy"),
+  act_id: ActId,
+  source: Schema.String,
+  target: Schema.String,
+  previous_held: Schema.Boolean,
+  bytes: Schema.Number
+})
+
+const FileMoveActionResult = Schema.Struct({
+  state: Schema.Literal("applied"),
+  action: Schema.Literal("file.move"),
+  install_act_id: ActId,
+  remove_act_id: ActId,
+  source: Schema.String,
+  target: Schema.String
+})
+
+const FileMkdirActionResult = Schema.Struct({
+  state: Schema.Literal("applied"),
+  action: Schema.Literal("file.mkdir"),
+  path: Schema.String,
+  act_ids: Schema.Array(ActId)
+})
+
+const ProcessArtifactResult = Schema.NullOr(Schema.Struct({
+  id: ArtifactId,
+  digest: Digest,
+  media_type: Schema.String,
+  byte_length: Schema.Number,
+  provenance: Schema.String
+})).annotations({ identifier: "NativeProcessArtifactResult" })
+
+const ProcessRunActionResult = Schema.Struct({
+  state: Schema.Literal("succeeded", "failed", "partial"),
+  plan_id: PlanId,
+  process_outcome: Schema.NullOr(RuntimeProcessOutcome),
+  exit_code: Schema.NullOr(Schema.Number),
+  signal: Schema.NullOr(Schema.String),
+  stdout: Schema.NullOr(Schema.String),
+  stderr: Schema.NullOr(Schema.String),
+  stdout_artifact: ProcessArtifactResult,
+  stderr_artifact: ProcessArtifactResult,
+  delta_artifact: ProcessArtifactResult,
+  recovery: Schema.Array(Schema.encodedSchema(RuntimeRecoveryEvidence)),
+  receipts: Schema.Array(Schema.Struct({
+    node_id: NodeId,
+    sequence: Schema.Number,
+    state: NodeState,
+    error_tag: Schema.NullOr(Schema.String),
+    output_artifacts: Schema.Array(ArtifactId)
+  }))
+})
+
+const HttpStageActionResult = Schema.Struct({
+  state: OutboxState,
+  action: Schema.Literal("http.stage"),
+  emission_id: EmissionId,
+  method: Schema.Literal("GET", "POST", "PUT", "PATCH", "DELETE"),
+  endpoint: Schema.String,
+  hold_millis: Schema.Number,
+  committed_by: Schema.optional(CommitAuthority),
+  dispatch_class: Schema.optional(Schema.Literal("read")),
+  grant_id: Schema.optional(Schema.String),
+  grant_selector: Schema.optional(Schema.String),
+  dispatched_endpoint: Schema.optional(Schema.String),
+  status: Schema.optional(Schema.Number),
+  response_bytes: Schema.optional(Schema.Number),
+  response_truncated: Schema.optional(Schema.Boolean),
+  response_limit_bytes: Schema.optional(Schema.Number),
+  response_content_type: Schema.optional(Schema.String),
+  response_artifact: Schema.optional(ArtifactId),
+  response_body: Schema.optional(Schema.String)
+})
+
+export const NativeActionResultSchemas = {
+  "file.inspect": NativeStatActionResult,
+  "file.read": FileReadActionResult,
+  "file.list": FileListActionResult,
+  "file.glob": FileGlobActionResult,
+  "file.stat": NativeStatActionResult,
+  "file.write": FileWriteActionResult,
+  "file.remove": FileRemoveActionResult,
+  "file.move": FileMoveActionResult,
+  "file.copy": FileCopyActionResult,
+  "file.mkdir": FileMkdirActionResult,
+  "process.run": ProcessRunActionResult,
+  "http.stage": HttpStageActionResult
+} as const satisfies Record<NativeActionName, Schema.Schema.Any>
+
+export const nativeActionResultSchema = (
+  name: NativeActionName
+): (typeof NativeActionResultSchemas)[NativeActionName] =>
+  NativeActionResultSchemas[name]
+
 const statValue = (stat: NativeStat): LanguageRecord => ({
   path: stat.path,
   kind: stat.kind,
@@ -1011,6 +1164,18 @@ const actionResult = (
   value: LanguageValue,
   artifacts: ReadonlyArray<InlineArtifact> = []
 ) => new ProgramActionResult({ value, artifacts: [...artifacts] })
+
+const nativeActionResult = (
+  action: NativeActionName,
+  value: LanguageValue,
+  artifacts: ReadonlyArray<InlineArtifact> = []
+) => actionResult(
+  Schema.decodeUnknownSync(
+    nativeActionResultSchema(action) as unknown as Schema.Schema<LanguageValue>,
+    { onExcessProperty: "error" }
+  )(value),
+  artifacts
+)
 
 const actionRecord = (
   request: ProgramActionRequest,
@@ -1416,19 +1581,20 @@ const makeProgramPlanRuntimeLive = (dispatch: ProgramDispatchAuthority) => Layer
               )
               const result = yield* runtimeArtifact(run, capture, call.action)
               const stat = yield* decodeRuntimeJson(run, result, NativeStat, call.action)
-              return actionResult(statValue(stat))
+              return nativeActionResult(call.action, statValue(stat))
             }
             case "file.read": {
               yield* requireSuccessfulRuntime(run, call.action)
               const capture = yield* captureFor(run, plan, call.action, "read")
               const result = yield* runtimeArtifact(run, capture, call.action)
               switch (capture.format) {
-                case "text": return actionResult(yield* Effect.try({
+                case "text": return nativeActionResult(call.action, yield* Effect.try({
                   try: () => strictDecodedText.decode(result.bytes),
                   catch: executionFailure(call.action, "contract", run)
                 }))
-                case "bytes": return actionResult([...result.bytes])
-                case "json": return actionResult(
+                case "bytes": return nativeActionResult(call.action, [...result.bytes])
+                case "json": return nativeActionResult(
+                  call.action,
                   yield* decodeRuntimeJson(run, result, LanguageValueSchema, call.action)
                 )
               }
@@ -1443,7 +1609,7 @@ const makeProgramPlanRuntimeLive = (dispatch: ProgramDispatchAuthority) => Layer
                 Schema.Array(NativeListEntry),
                 call.action
               )
-              return actionResult(entries.map(listEntryValue))
+              return nativeActionResult(call.action, entries.map(listEntryValue))
             }
             case "file.glob": {
               yield* requireSuccessfulRuntime(run, call.action)
@@ -1464,7 +1630,7 @@ const makeProgramPlanRuntimeLive = (dispatch: ProgramDispatchAuthority) => Layer
                 Schema.Array(Schema.String),
                 call.action
               )
-              return actionResult([...matches])
+              return nativeActionResult(call.action, [...matches])
             }
             case "file.write": {
               yield* requireSuccessfulRuntime(run, call.action)
@@ -1476,7 +1642,7 @@ const makeProgramPlanRuntimeLive = (dispatch: ProgramDispatchAuthority) => Layer
                 NativeWriteReceipt,
                 call.action
               )
-              return actionResult({
+              return nativeActionResult(call.action, {
                 state: "applied",
                 action: call.action,
                 act_id: applied.receipt.id,
@@ -1495,7 +1661,7 @@ const makeProgramPlanRuntimeLive = (dispatch: ProgramDispatchAuthority) => Layer
                 RemoveReceipt,
                 call.action
               )
-              return actionResult({
+              return nativeActionResult(call.action, {
                 state: "applied",
                 action: call.action,
                 act_id: removed.id,
@@ -1522,7 +1688,7 @@ const makeProgramPlanRuntimeLive = (dispatch: ProgramDispatchAuthority) => Layer
                 NativeWriteReceipt,
                 call.action
               )
-              return actionResult({
+              return nativeActionResult(call.action, {
                 state: "applied",
                 action: call.action,
                 act_id: copied.receipt.id,
@@ -1551,7 +1717,7 @@ const makeProgramPlanRuntimeLive = (dispatch: ProgramDispatchAuthority) => Layer
                 NativeMoveReceipt,
                 call.action
               )
-              return actionResult({
+              return nativeActionResult(call.action, {
                 state: "applied",
                 action: call.action,
                 install_act_id: moved.install.receipt.id,
@@ -1570,7 +1736,7 @@ const makeProgramPlanRuntimeLive = (dispatch: ProgramDispatchAuthority) => Layer
                 NativeMkdirReceipt,
                 call.action
               )
-              return actionResult({
+              return nativeActionResult(call.action, {
                 state: "applied",
                 action: call.action,
                 path: made.path,
@@ -1624,7 +1790,7 @@ const makeProgramPlanRuntimeLive = (dispatch: ProgramDispatchAuthority) => Layer
                 )
                 return actionResult(value, outputs)
               }
-              return actionResult(runtimeRunValue(run, plan), outputs)
+              return nativeActionResult(call.action, runtimeRunValue(run, plan), outputs)
             }
             case "http.stage": {
               yield* requireSuccessfulRuntime(run, call.action)
@@ -1655,7 +1821,7 @@ const makeProgramPlanRuntimeLive = (dispatch: ProgramDispatchAuthority) => Layer
                 1
               )
               const captured = staged.outcome?.response
-              return actionResult({
+              return nativeActionResult(call.action, {
                 state: staged.status,
                 action: call.action,
                 emission_id: staged.id,

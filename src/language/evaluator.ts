@@ -23,7 +23,10 @@ export const LanguageValueSchema: Schema.Schema<LanguageValue> = Schema.suspend(
     Schema.Array(LanguageValueSchema),
     Schema.Record({ key: Schema.String, value: LanguageValueSchema })
   )
-)
+).annotations({
+  identifier: "AirlockLanguageValue",
+  description: "A recursive Airlock language value."
+})
 
 export class EvaluationResult extends Schema.Class<EvaluationResult>("EvaluationResult")({
   returned: Schema.Boolean,
