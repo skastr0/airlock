@@ -297,6 +297,28 @@ export class ProgramRunner extends Context.Tag("airlock/ProgramRunner")<
   }
 >() {}
 
+/**
+ * The native verbs one Program runner may expose. The selected surface is a
+ * pure language-boundary fact: it grants no admission or runtime authority.
+ */
+export type NativeActionSurface = ReadonlySet<NativeActionName>
+
+/** Zero-configuration parity keeps the complete twelve-verb surface. */
+export const ALL_NATIVE_ACTIONS: NativeActionSurface = new Set<NativeActionName>([
+  "file.inspect",
+  "file.read",
+  "file.list",
+  "file.glob",
+  "file.stat",
+  "file.write",
+  "file.remove",
+  "file.move",
+  "file.copy",
+  "file.mkdir",
+  "process.run",
+  "http.stage"
+])
+
 const nativeNames = new Set<NativeActionName>(NativeActionCatalog.map((action) => action.name))
 const encoder = new TextEncoder()
 const decodeStrictNativeActionCall = Schema.decodeUnknown(NativeActionCall, {
@@ -513,6 +535,30 @@ export const canonicalizeProgramAction = (
   value: unknown
 ): Effect.Effect<NativeActionCallValue, ProgramActionDecodeFailed> =>
   strictNativeAction(action, value)
+
+const requireNativeAction = (
+  nativeActions: NativeActionSurface,
+  nativeAction: NativeActionName,
+  requestedAction: string = nativeAction
+): Effect.Effect<void, ProgramActionDecodeFailed> =>
+  nativeActions.has(nativeAction)
+    ? Effect.void
+    : Effect.fail(new ProgramActionDecodeFailed({
+        action: requestedAction,
+        reason: `native action ${nativeAction} is not available on this program surface`
+      }))
+
+/** Canonicalization plus the runner-selected surface check, still without effects. */
+export const canonicalizeProgramActionForSurface = (
+  action: string,
+  value: unknown,
+  nativeActions: NativeActionSurface
+): Effect.Effect<NativeActionCallValue, ProgramActionDecodeFailed> =>
+  Effect.gen(function* () {
+    const call = yield* canonicalizeProgramAction(action, value)
+    yield* requireNativeAction(nativeActions, call.action, action)
+    return call
+  })
 
 const requirement = (planId: PlanId, index: number, need: ResourceNeed) =>
   new ResourceRequirement({
@@ -865,16 +911,24 @@ const oneDeclaredExecutable = (
     }))
 }
 
+const nativeActionForTool = (exported: ExportedToolAction): NativeActionName =>
+  isEnqueueAction(exported.action) ? "http.stage" : "process.run"
+
 const draftForToolAction = (
   exported: ExportedToolAction,
   cellProfile: CellProfile,
   args: readonly LanguageValue[],
   sequence: number,
   nowId: string,
-  availableArtifacts: ReadonlyArray<InlineArtifact>
+  availableArtifacts: ReadonlyArray<InlineArtifact>,
+  nativeActions: NativeActionSurface
 ): Effect.Effect<ProgramActionRequest, ProgramActionDecodeFailed> =>
   Effect.gen(function* () {
     const name = exportedToolActionName(exported.loaded.definition, exported.action)
+    const requiredNativeAction = nativeActionForTool(exported)
+    // Check the definition kind before input decoding or lowering. Definitions
+    // describe a friendlier spelling; they never provide a capability bypass.
+    yield* requireNativeAction(nativeActions, requiredNativeAction, name)
     if (args.length !== 1) {
       return yield* new ProgramActionDecodeFailed({ action: name, reason: "expects exactly one record argument" })
     }
@@ -891,6 +945,14 @@ const draftForToolAction = (
       executable,
       cellProfile
     })).pipe(Effect.mapError((error) => new ProgramActionDecodeFailed({ action: name, reason: error.message ?? error._tag })))
+    if (lowered.call.action !== requiredNativeAction) {
+      return yield* new ProgramActionDecodeFailed({
+        action: name,
+        reason: `definition action lowered to ${lowered.call.action}; expected ${requiredNativeAction}`
+      })
+    }
+    // Defend the actual post-lowering call as well as the declared tool kind.
+    yield* requireNativeAction(nativeActions, lowered.call.action, name)
     const base = yield* draftForAction(lowered.call, sequence, nowId, availableArtifacts)
     const tool = new ProgramToolBinding({
       name,
@@ -1639,24 +1701,28 @@ export const ProgramPlanRuntimeWithPolicyLive = (
  * dependencies remain requirements of Runtime; Program receives exactly one
  * interpreter and cannot acquire a second native authority path.
  */
-export const ProgramExecutionLive = (policy: AdmissionPolicyDocument) => {
-  const executor = ProgramPlanExecutorLive.pipe(
-    Layer.provideMerge(ProgramAdmissionLive(policy)),
-    Layer.provideMerge(ProgramPlanRuntimeWithPolicyLive(policy))
-  )
-  return ProgramRunnerLive.pipe(Layer.provide(executor))
-}
-
-export const ProgramExecutionWithToolsLive = (
+export const ProgramExecutionLive = (
   policy: AdmissionPolicyDocument,
-  actions: ReadonlyMap<string, ExportedToolAction>,
-  cellProfile: CellProfile
+  nativeActions: NativeActionSurface = ALL_NATIVE_ACTIONS
 ) => {
   const executor = ProgramPlanExecutorLive.pipe(
     Layer.provideMerge(ProgramAdmissionLive(policy)),
     Layer.provideMerge(ProgramPlanRuntimeWithPolicyLive(policy))
   )
-  return ProgramRunnerWithToolsLive(actions, cellProfile).pipe(Layer.provide(executor))
+  return ProgramRunnerWithNativeActionsLive(nativeActions).pipe(Layer.provide(executor))
+}
+
+export const ProgramExecutionWithToolsLive = (
+  policy: AdmissionPolicyDocument,
+  actions: ReadonlyMap<string, ExportedToolAction>,
+  cellProfile: CellProfile,
+  nativeActions: NativeActionSurface = ALL_NATIVE_ACTIONS
+) => {
+  const executor = ProgramPlanExecutorLive.pipe(
+    Layer.provideMerge(ProgramAdmissionLive(policy)),
+    Layer.provideMerge(ProgramPlanRuntimeWithPolicyLive(policy))
+  )
+  return ProgramRunnerWithToolsLive(actions, cellProfile, nativeActions).pipe(Layer.provide(executor))
 }
 
 const dottedName = (expression: Expression): string | undefined => {
@@ -1718,7 +1784,11 @@ export const normalizeProgramActions = (program: Program, extraActions: Readonly
 
 const runProgram = (executor: {
   readonly execute: (request: ProgramActionRequest) => Effect.Effect<ProgramActionResult, ProgramActionExecutionFailed>
-}, tools: { readonly actions: ReadonlyMap<string, ExportedToolAction>; readonly cellProfile: CellProfile }) =>
+}, tools: {
+  readonly actions: ReadonlyMap<string, ExportedToolAction>
+  readonly cellProfile: CellProfile
+  readonly nativeActions: NativeActionSurface
+}) =>
   (request: ProgramRequest): Effect.Effect<ProgramRunResult, ProgramError> =>
     Effect.gen(function* () {
       const parsed = yield* parse(request.source)
@@ -1781,13 +1851,17 @@ const runProgram = (executor: {
         resolve: (action, args) => Effect.gen(function* () {
           const tool = tools.actions.get(action)
           if (tool !== undefined) {
+            // The runner checks before even asking the definition lowerer; the
+            // helper repeats the check so this path stays safe when refactored.
+            yield* requireNativeAction(tools.nativeActions, nativeActionForTool(tool), action)
             const next = yield* draftForToolAction(
               tool,
               tools.cellProfile,
               args,
               sequence++,
               crypto.randomUUID(),
-              [...artifacts.values()]
+              [...artifacts.values()],
+              tools.nativeActions
             )
             plans.push(next.draft)
             for (const input of next.inlineArtifacts) artifacts.set(input.id, input)
@@ -1797,7 +1871,11 @@ const runProgram = (executor: {
             return executed.value
           }
           const decoded = yield* decodeProgramAction(action, args)
-          const call = yield* canonicalizeProgramAction(action, decoded)
+          const call = yield* canonicalizeProgramActionForSurface(
+            action,
+            decoded,
+            tools.nativeActions
+          )
           const next = yield* draftForAction(
             call,
             sequence++,
@@ -1836,21 +1914,44 @@ const runProgram = (executor: {
       })
     })
 
-const programRunnerLive = (tools: { readonly actions: ReadonlyMap<string, ExportedToolAction>; readonly cellProfile: CellProfile }) => Layer.effect(
-  ProgramRunner,
-  Effect.gen(function* () {
-    const executor = yield* ProgramActionExecutor
-    return ProgramRunner.of({
-      run: runProgram(executor, tools)
+const programRunnerLive = (configuration: {
+  readonly actions: ReadonlyMap<string, ExportedToolAction>
+  readonly cellProfile: CellProfile
+  readonly nativeActions: NativeActionSurface
+}) => {
+  // Bind a snapshot to the Layer so later mutation of a caller-owned Set
+  // cannot widen a runner that was already configured.
+  const tools = {
+    actions: configuration.actions,
+    cellProfile: configuration.cellProfile,
+    nativeActions: new Set(configuration.nativeActions) as NativeActionSurface
+  }
+  return Layer.effect(
+    ProgramRunner,
+    Effect.gen(function* () {
+      const executor = yield* ProgramActionExecutor
+      return ProgramRunner.of({
+        run: runProgram(executor, tools)
+      })
     })
-  })
-)
+  )
+}
 
-/** The default language surface contains only native actions. */
-export const ProgramRunnerLive = programRunnerLive({ actions: new Map(), cellProfile: "compatibility" })
+/** The default language surface contains all native actions. */
+export const ProgramRunnerLive = programRunnerLive({
+  actions: new Map(),
+  cellProfile: "compatibility",
+  nativeActions: ALL_NATIVE_ACTIONS
+})
+
+/** Build a native-only runner with an explicit opt-in action surface. */
+export const ProgramRunnerWithNativeActionsLive = (
+  nativeActions: NativeActionSurface
+) => programRunnerLive({ actions: new Map(), cellProfile: "compatibility", nativeActions })
 
 /** A caller that loaded definitions may explicitly extend one runner surface. */
 export const ProgramRunnerWithToolsLive = (
   actions: ReadonlyMap<string, ExportedToolAction>,
-  cellProfile: CellProfile
-) => programRunnerLive({ actions, cellProfile })
+  cellProfile: CellProfile,
+  nativeActions: NativeActionSurface = ALL_NATIVE_ACTIONS
+) => programRunnerLive({ actions, cellProfile, nativeActions })
