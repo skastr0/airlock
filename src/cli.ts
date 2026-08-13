@@ -1576,6 +1576,7 @@ const startupSeal = async (): Promise<SealContext | undefined> => {
     "AIRLOCK_OPERATOR_KEY_SHA256_INTERNAL"
   ]
   const readinessPath = process.env["AIRLOCK_GENERATION_READINESS_INTERNAL"]
+  const generationMode = process.env["AIRLOCK_GENERATION_MODE_INTERNAL"]
   const startup = loadStartupSeal(
     expectedOperatorKeyDigest === undefined
       ? {}
@@ -1583,7 +1584,9 @@ const startupSeal = async (): Promise<SealContext | undefined> => {
   ).pipe(
     Effect.flatMap((seal) =>
       readinessPath !== undefined && seal._tag === "VerifiedSeal"
-        ? verifyInstalledReadiness(seal, readinessPath).pipe(Effect.as(seal))
+        ? verifyInstalledReadiness(seal, readinessPath, generationMode).pipe(
+            Effect.as(seal)
+          )
         : Effect.succeed(seal)
     )
   )

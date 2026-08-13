@@ -4,7 +4,7 @@ import { mkdir, open } from "node:fs/promises"
 import { createHash, createPublicKey } from "node:crypto"
 import { dirname, isAbsolute, resolve } from "node:path"
 
-const usage = "usage: bun scripts/build-box.ts --public-key ABSOLUTE_PEM --out ABSOLUTE_BINARY [--target bun-darwin-arm64|bun-darwin-x64]"
+const usage = "usage: bun scripts/build-box.ts --public-key ABSOLUTE_PEM --out ABSOLUTE_BINARY [--mode root-tenant|local-same-user] [--target bun-darwin-arm64|bun-darwin-x64]"
 const args = process.argv.slice(2)
 const option = (name: string, required = true) => {
   const index = args.indexOf(name)
@@ -16,14 +16,18 @@ if (args.includes("--help") || args.includes("-h")) {
   console.log(usage)
   process.exit(0)
 }
-const known = new Set(["--public-key", "--out", "--target"])
+const known = new Set(["--public-key", "--out", "--mode", "--target"])
 for (let index = 0; index < args.length; index += 2) {
   if (!known.has(args[index]!)) throw new Error(`unknown option: ${args[index]}`)
   if (args[index + 1] === undefined) throw new Error(`${args[index]} requires a value`)
 }
 const publicKeyPath = option("--public-key")!
 const out = option("--out")!
+const mode = option("--mode", false) ?? "root-tenant"
 const target = option("--target", false)
+if (mode !== "root-tenant" && mode !== "local-same-user") {
+  throw new Error("--mode must be root-tenant or local-same-user")
+}
 for (const [name, value] of [["--public-key", publicKeyPath], ["--out", out]] as const) {
   if (!isAbsolute(value) || resolve(value) !== value) throw new Error(`${name} must be an absolute normalized path`)
 }
@@ -56,6 +60,7 @@ await mkdir(dirname(out), { recursive: true })
 const command = [
   process.execPath, "build", "--compile", "--outfile", out,
   "--define", `AIRLOCK_OPERATOR_KEY_SHA256=${JSON.stringify(digest)}`,
+  "--define", `AIRLOCK_BOX_MODE=${JSON.stringify(mode)}`,
   ...(target === undefined ? [] : ["--target", target]),
   "src/box-cli.ts"
 ]
@@ -83,4 +88,4 @@ try {
 } finally {
   await anchor.close()
 }
-console.log(JSON.stringify({ binary: out, operatorKeyDigest: digest, anchor: anchorPath }))
+console.log(JSON.stringify({ binary: out, mode, operatorKeyDigest: digest, anchor: anchorPath }))

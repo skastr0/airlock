@@ -616,10 +616,17 @@ export const loadStartupSeal = (
   })
 
 
-/** Required tenant entrypoints accept only a fully published runnable generation. */
+export const InstalledGenerationMode = Schema.Literal(
+  "root-tenant",
+  "local-same-user"
+)
+export type InstalledGenerationMode = typeof InstalledGenerationMode.Type
+
+/** Required sealed entrypoints accept only their compile-bound publication mode. */
 export const verifyInstalledReadiness = (
   seal: VerifiedSeal,
-  readinessPath: string
+  readinessPath: string,
+  expectedMode: string | undefined
 ): Effect.Effect<void, SealVerificationFailed> =>
   readRegularFile(readinessPath, "seal", 4_096).pipe(
     Effect.flatMap((bytes) => decodeUtf8(bytes, "seal", readinessPath)),
@@ -628,13 +635,23 @@ export const verifyInstalledReadiness = (
       catch: () => failure("seal", readinessPath, "installation-not-ready")
     })),
     Effect.flatMap((document) => {
+      const fields = typeof document === "object" && document !== null
+        ? document as Record<string, unknown>
+        : undefined
+      const localMarker = fields?.["localSameUser"]
+      const modeReady = expectedMode === "root-tenant"
+        ? fields?.["ownershipApplied"] === true &&
+          (localMarker === undefined || localMarker === false)
+        : expectedMode === "local-same-user"
+          ? fields?.["ownershipApplied"] === false && localMarker === true
+          : false
       if (
-        typeof document !== "object" || document === null ||
-        (document as Record<string, unknown>)["schemaVersion"] !== "airlock/installed-generation/v1" ||
-        (document as Record<string, unknown>)["grantDigest"] !== seal.grantDigest ||
-        (document as Record<string, unknown>)["binaryDigest"] !== seal.binaryDigest ||
-        (document as Record<string, unknown>)["ownershipApplied"] !== true ||
-        (document as Record<string, unknown>)["runnable"] !== true
+        fields === undefined ||
+        fields["schemaVersion"] !== "airlock/installed-generation/v1" ||
+        fields["grantDigest"] !== seal.grantDigest ||
+        fields["binaryDigest"] !== seal.binaryDigest ||
+        fields["runnable"] !== true ||
+        !modeReady
       ) {
         return Effect.fail(failure("seal", readinessPath, "installation-not-ready"))
       }

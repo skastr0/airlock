@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 /**
- * Off-box operator glue for creating, checking, and installing sealed Airlock
- * box bundles. A bundle is always:
+ * Operator glue for creating, checking, and installing sealed Airlock box
+ * bundles and fresh same-user local generations. A bundle contains:
  *
  *   BUNDLE/bin/airlock
  *   BUNDLE/seal/{box-grant.json,box-grant.ed25519,operator-ed25519.pub.pem,catalog/}
@@ -21,6 +21,7 @@ import {
   open,
   lstat,
   readdir,
+  realpath,
   stat
 } from "node:fs/promises"
 import {
@@ -32,6 +33,7 @@ import {
   type KeyObject
 } from "node:crypto"
 import {
+  basename,
   dirname,
   isAbsolute,
   join,
@@ -42,7 +44,11 @@ import {
 } from "node:path"
 import { Effect, Schema } from "effect"
 import { decodeBoxGrant } from "../src/admission/BoxGrant.ts"
-import { AdmissionPolicyDocument } from "../src/admission/Admission.ts"
+import {
+  AdmissionPolicyDocument,
+  AdmissionPolicyV2
+} from "../src/admission/Admission.ts"
+import { checkDaemonSocket } from "../src/daemon/index.ts"
 import {
   BOX_GRANT_FILE,
   BOX_GRANT_SIGNATURE_FILE,
@@ -68,13 +74,17 @@ Commands:
          [--definition FILE ...] [--daemon-op O ...] --private-key FILE
          --public-key FILE --out FRESH_DIR [--allow-sealed-compatibility]
   verify --bundle DIR
+  local --workspace DIR --out FRESH_DIR --private-key FILE --public-key FILE
+        [--admission FILE] [--definition FILE ...]
+        [--allow-sealed-compatibility] [--with-daemon-commit]
   install --bundle DIR --root DIR --box ID --workspace DIR
           [--daemon-user NAME --daemon-uid N --daemon-group NAME --daemon-gid N]
           [--agent-user NAME --agent-uid N --agent-group NAME --agent-gid N]
           [--apply-ownership]
 
-create emits BUNDLE/bin/airlock plus BUNDLE/seal/. install publishes one fresh
-root/Library/Airlock/boxes/BOX/GRANT_HEX generation and does not run launchctl.`
+create emits BUNDLE/bin/airlock plus BUNDLE/seal/. local builds and publishes
+one same-user generation. install publishes one fresh root tenant generation;
+neither install mode invokes launchctl.`
 
 class CliError extends Error {
   constructor(message: string, readonly exitCode = 64) {
@@ -113,6 +123,15 @@ const optionSpecification = {
     single: new Set(["--bundle"]),
     repeated: new Set<string>(),
     boolean: new Set<string>()
+  },
+  local: {
+    single: new Set([
+      "--workspace", "--out", "--private-key", "--public-key", "--admission"
+    ]),
+    repeated: new Set(["--definition"]),
+    boolean: new Set([
+      "--allow-sealed-compatibility", "--with-daemon-commit"
+    ])
   },
   install: {
     single: new Set([
@@ -345,6 +364,66 @@ const pathInside = (parent: string, candidate: string): boolean => {
 const pathsOverlap = (left: string, right: string): boolean =>
   pathInside(left, right) || pathInside(right, left)
 
+/** Physical local-generation paths make /tmp and /private/tmp the same scope. */
+const canonicalLocalDirectory = async (
+  flag: string,
+  path: string
+): Promise<string> => {
+  try {
+    const inspected = await lstat(path)
+    if (inspected.isSymbolicLink()) fail(`${flag} must not be a symlink`, 66)
+    if (!inspected.isDirectory()) fail(`${flag} must be a directory`, 66)
+    return await realpath(path)
+  } catch (cause) {
+    if (cause instanceof CliError) throw cause
+    if (osCode(cause) === "ENOENT" || osCode(cause) === "ENOTDIR") {
+      return fail(`${flag} does not exist as a directory`, 66)
+    }
+    return fail(`${flag} cannot be resolved as a physical directory`, 66)
+  }
+}
+
+const canonicalLocalFile = async (
+  flag: string,
+  path: string,
+  requireSingleLink = false
+): Promise<string> => {
+  try {
+    const inspected = await lstat(path)
+    if (inspected.isSymbolicLink()) fail(`${flag} must not be a symlink`, 66)
+    if (!inspected.isFile()) fail(`${flag} must be a regular file`, 66)
+    if (requireSingleLink && inspected.nlink !== 1) {
+      fail(`${flag} must have exactly one filesystem link for a local generation`, 65)
+    }
+    return await realpath(path)
+  } catch (cause) {
+    if (cause instanceof CliError) throw cause
+    if (osCode(cause) === "ENOENT" || osCode(cause) === "ENOTDIR") {
+      return fail(`${flag} does not exist as a regular file`, 66)
+    }
+    return fail(`${flag} cannot be resolved as a physical regular file`, 66)
+  }
+}
+
+const canonicalFreshLocalOutput = async (path: string): Promise<string> => {
+  if (await exists(path)) fail(`destination already exists: ${path}`, 73)
+  const parent = dirname(path)
+  let physicalParent: string
+  try {
+    physicalParent = await realpath(parent)
+    const inspected = await lstat(physicalParent)
+    if (inspected.isSymbolicLink() || !inspected.isDirectory()) {
+      fail("--out parent must resolve to a physical directory", 66)
+    }
+  } catch (cause) {
+    if (cause instanceof CliError) throw cause
+    return fail("--out parent must already exist as a physical directory", 66)
+  }
+  const output = join(physicalParent, basename(path))
+  if (await exists(output)) fail(`destination already exists: ${output}`, 73)
+  return output
+}
+
 const inspectDirectoryInput = async (
   flag: string,
   path: string,
@@ -439,6 +518,30 @@ const samePublicKey = (left: KeyObject, right: KeyObject): boolean => {
   const leftDer = left.export({ format: "der", type: "spki" })
   const rightDer = right.export({ format: "der", type: "spki" })
   return Buffer.from(leftDer).equals(Buffer.from(rightDer))
+}
+
+const operatorKeyDigest = (key: KeyObject): `sha256:${string}` =>
+  `sha256:${createHash("sha256")
+    .update(key.export({ format: "der", type: "spki" }))
+    .digest("hex")}`
+
+const requireBinaryOperatorAnchor = async (
+  binaryPath: string,
+  publicKey: KeyObject
+): Promise<string> => {
+  const anchorPath = `${binaryPath}.operator-key.sha256`
+  const anchorBytes = await readRegularNoSymlink(
+    "binary operator-key anchor",
+    anchorPath,
+    { maxBytes: 128 }
+  )
+  if (
+    decodeUtf8("binary operator-key anchor", anchorBytes).trim() !==
+    operatorKeyDigest(publicKey)
+  ) {
+    fail("binary operator-key anchor does not match supplied public key", 65)
+  }
+  return anchorPath
 }
 
 const keygen = async (): Promise<void> => {
@@ -599,18 +702,7 @@ const create = async (): Promise<void> => {
   if (!samePublicKey(createPublicKey(privateKey), suppliedPublic.key)) {
     fail("supplied public key does not match private key", 65)
   }
-  const expectedOperatorDigest = `sha256:${createHash("sha256")
-    .update(suppliedPublic.key.export({ format: "der", type: "spki" }))
-    .digest("hex")}`
-  const anchorPath = `${binaryPath}.operator-key.sha256`
-  const anchorBytes = await readRegularNoSymlink(
-    "binary operator-key anchor",
-    anchorPath,
-    { maxBytes: 128 }
-  )
-  if (decodeUtf8("binary operator-key anchor", anchorBytes).trim() !== expectedOperatorDigest) {
-    fail("binary operator-key anchor does not match supplied public key", 65)
-  }
+  await requireBinaryOperatorAnchor(binaryPath, suppliedPublic.key)
 
   const grantInput = {
     schemaVersion: "airlock/box-grant/v1" as const,
@@ -677,6 +769,328 @@ const verify = async (): Promise<void> => {
     binaryDigest: verified.binaryDigest,
     definitions: verified.catalog.map((entry) => entry.id)
   }))
+}
+
+
+const localChildEnvironment = (): Record<string, string> =>
+  Object.fromEntries(
+    Object.entries(process.env).filter(
+      (entry): entry is [string, string] =>
+        entry[1] !== undefined && entry[0] !== "AIRLOCK_AGENT_SURFACE"
+    )
+  )
+
+const startLocalDaemon = async (
+  binary: string,
+  workspace: string,
+  socketPath: string,
+  grantDigest: `sha256:${string}`
+): Promise<number> => {
+  const child = Bun.spawn({
+    cmd: [binary, "serve", "--interval", "1s"],
+    cwd: workspace,
+    env: localChildEnvironment(),
+    detached: true,
+    stdin: "ignore",
+    stdout: "ignore",
+    stderr: "ignore"
+  })
+  const deadline = Date.now() + 30_000
+  let ready = false
+  while (Date.now() < deadline) {
+    if (child.exitCode !== null) break
+    try {
+      await Effect.runPromise(checkDaemonSocket(socketPath, grantDigest, 250))
+      ready = true
+      break
+    } catch {
+      await new Promise((resolveDelay) => setTimeout(resolveDelay, 50))
+    }
+  }
+  if (!ready) {
+    if (child.exitCode === null) child.kill()
+    fail("local daemon did not become ready with the signed grant digest", 75)
+  }
+  child.unref()
+  return child.pid
+}
+
+const shellQuote = (value: string): string =>
+  `'${value.split("'").join(`'"'"'`)}'`
+
+const local = async (): Promise<void> => {
+  const options = parseOptions("local")
+  if (process.platform !== "darwin") {
+    fail("local sealed generations require macOS", 69)
+  }
+
+  const requestedWorkspace = requireAbsolute(
+    "--workspace",
+    required(options, "--workspace")
+  )
+  const requestedOut = requireAbsolute("--out", required(options, "--out"))
+  const requestedPrivate = requireAbsolute(
+    "--private-key",
+    required(options, "--private-key")
+  )
+  const requestedPublic = requireAbsolute(
+    "--public-key",
+    required(options, "--public-key")
+  )
+  const requestedAdmission = options.single.get("--admission")
+  const requestedDefinitions = options.repeated.get("--definition") ?? []
+
+  // Resolve every authority-bearing input before claiming the fresh output.
+  // In particular, /tmp and /private/tmp must compare as one physical scope.
+  const workspace = await canonicalLocalDirectory("--workspace", requestedWorkspace)
+  if (workspace === parse(workspace).root) {
+    fail("--workspace must not be the filesystem root")
+  }
+  const out = await canonicalFreshLocalOutput(requestedOut)
+  const privatePath = await canonicalLocalFile(
+    "--private-key",
+    requestedPrivate,
+    true
+  )
+  const publicPath = await canonicalLocalFile("--public-key", requestedPublic)
+  if (privatePath === publicPath) fail("private and public key paths must differ")
+  const admissionPath = requestedAdmission === undefined
+    ? undefined
+    : await canonicalLocalFile(
+        "--admission",
+        requireAbsolute("--admission", requestedAdmission)
+      )
+  const definitionPaths: Array<string> = []
+  for (const requested of requestedDefinitions) {
+    definitionPaths.push(await canonicalLocalFile(
+      "--definition",
+      requireAbsolute("--definition", requested)
+    ))
+  }
+
+  if (pathsOverlap(out, workspace)) {
+    fail("--out and --workspace must be physically disjoint")
+  }
+  if (pathInside(workspace, privatePath)) {
+    fail("--private-key must be physically outside the readable workspace", 65)
+  }
+  const allInputs = [
+    privatePath,
+    publicPath,
+    ...(admissionPath === undefined ? [] : [admissionPath]),
+    ...definitionPaths
+  ]
+  if (allInputs.some((path) => pathsOverlap(out, path))) {
+    fail("--out must be physically disjoint from every input path")
+  }
+
+  const privateKey = await privateKeyFrom(privatePath)
+  const suppliedPublic = await publicKeyFrom(publicPath)
+  if (!samePublicKey(createPublicKey(privateKey), suppliedPublic.key)) {
+    fail("supplied public key does not match private key", 65)
+  }
+
+  const admission = admissionPath === undefined
+    ? new AdmissionPolicyV2({
+        schemaVersion: "airlock/admission-policy/v2",
+        profile: "native-contained",
+        principal: "agent:local-box",
+        realm: "local",
+        admittedBy: "operator:local-box",
+        pathAllowlist: [`${workspace}/**`],
+        executableAllowlist: [],
+        endpointGrants: []
+      })
+    : await decodeAdmission(admissionPath)
+  if (
+    admission.profile === "compatibility" &&
+    !options.boolean.has("--allow-sealed-compatibility")
+  ) {
+    fail("sealed compatibility policy requires --allow-sealed-compatibility", 65)
+  }
+
+  const definitions: Array<DefinitionSnapshot> = []
+  for (const path of definitionPaths) definitions.push(await decodeDefinition(path))
+  const definitionIds = new Set<string>()
+  const definitionDigests = new Set<string>()
+  for (const definition of definitions) {
+    if (definitionIds.has(definition.id)) {
+      fail(`duplicate definition id: ${definition.id}`, 65)
+    }
+    if (definitionDigests.has(definition.digest)) {
+      fail(`duplicate definition digest: ${definition.digest}`, 65)
+    }
+    definitionIds.add(definition.id)
+    definitionDigests.add(definition.digest)
+  }
+
+  // mkdir is the no-replace ownership boundary. Every failure before SEALED
+  // leaves an inspectable but inert generation, and retries conservatively fail.
+  await mkdirFresh(out, 0o700)
+  const binPath = join(out, "bin")
+  const binaryPath = join(binPath, "airlock")
+  const build = Bun.spawnSync({
+    cmd: [
+      process.execPath,
+      join(import.meta.dir, "build-box.ts"),
+      "--public-key", publicPath,
+      "--out", binaryPath,
+      "--mode", "local-same-user"
+    ],
+    cwd: resolve(import.meta.dir, ".."),
+    stdout: "pipe",
+    stderr: "pipe"
+  })
+  if (build.exitCode !== 0) {
+    const detail = Buffer.from(build.stderr).toString("utf8").trim()
+    fail(`local box build failed${detail.length === 0 ? "" : `: ${detail}`}`, 70)
+  }
+  await chmodExact(binPath, 0o755)
+  await chmodExact(binaryPath, 0o555)
+  const binary = await readRegularNoSymlink(
+    "local box binary",
+    binaryPath,
+    { executable: true }
+  )
+  const anchorPath = await requireBinaryOperatorAnchor(
+    binaryPath,
+    suppliedPublic.key
+  )
+
+  const withDaemonCommit = options.boolean.has("--with-daemon-commit")
+  const grantInput = {
+    schemaVersion: "airlock/box-grant/v1" as const,
+    admission,
+    verbs: [
+      "actions", "doctor", "eval", "held", "pending", "run", "schema", "serve"
+    ],
+    nativeActions: [
+      "file.glob", "file.inspect", "file.list", "file.read", "file.stat",
+      "http.stage"
+    ],
+    catalog: definitions
+      .map((definition) => ({ id: definition.id, sha256: definition.digest }))
+      .sort((left, right) =>
+        left.id.localeCompare(right.id) || left.sha256.localeCompare(right.sha256)
+      ),
+    daemonOps: withDaemonCommit ? ["commit"] : [],
+    binaryDigest: sha256(binary)
+  }
+  let grant
+  try {
+    grant = await Effect.runPromise(decodeBoxGrant(grantInput))
+  } catch {
+    return fail("local grant contains an invalid literal or combination", 65)
+  }
+  const signature = new Uint8Array(
+    sign(null, boxGrantSigningPayload(grant), privateKey)
+  )
+  if (signature.byteLength !== 64) {
+    fail("Ed25519 produced an invalid signature size", 70)
+  }
+
+  await writeExclusive(join(binPath, "airlock-agent"), binary, 0o555)
+  const sealPath = join(out, "seal")
+  const catalogPath = join(sealPath, SEAL_CATALOG_DIRECTORY)
+  await mkdirFresh(sealPath)
+  await mkdirFresh(catalogPath)
+  await writeExclusive(
+    join(sealPath, BOX_GRANT_FILE),
+    `${JSON.stringify(grant, null, 2)}\n`,
+    0o444
+  )
+  await writeExclusive(
+    join(sealPath, BOX_GRANT_SIGNATURE_FILE),
+    signature,
+    0o444
+  )
+  await writeExclusive(
+    join(sealPath, OPERATOR_PUBLIC_KEY_FILE),
+    suppliedPublic.bytes,
+    0o444
+  )
+  for (const definition of definitions) {
+    await writeExclusive(
+      join(catalogPath, catalogFileNameForPin({ sha256: definition.digest })),
+      definition.rawBytes,
+      0o444
+    )
+  }
+
+  const home = join(out, "home")
+  await mkdirFresh(home, 0o700)
+  for (const directory of [
+    "hold", "outbox", "hold-locks", "outbox-locks", "runs"
+  ]) {
+    await mkdirFresh(join(home, directory), 0o700)
+  }
+  await writeExclusive(join(home, "ledger.jsonl"), "", 0o600)
+  await writeExclusive(join(home, "hold-locks", "active"), "", 0o600)
+  await writeExclusive(join(home, "outbox-locks", "active"), "", 0o600)
+  const ipc = join(out, "ipc")
+  await mkdirFresh(ipc, 0o700)
+  await mkdirFresh(join(out, "run"), 0o700)
+
+  const verified = await verifyBundle(out)
+  const readiness = join(out, "SEALED")
+  await writeExclusive(
+    readiness,
+    `${JSON.stringify({
+      schemaVersion: "airlock/installed-generation/v1",
+      grantDigest: verified.grantDigest,
+      binaryDigest: verified.binaryDigest,
+      ownershipApplied: false,
+      localSameUser: true,
+      runnable: true,
+      activated: false
+    })}\n`,
+    0o444
+  )
+
+  const socketPath = join(ipc, "daemon.sock")
+  const daemonPid = withDaemonCommit
+    ? await startLocalDaemon(
+        binaryPath,
+        workspace,
+        socketPath,
+        verified.grantDigest
+      )
+    : undefined
+  const binding = JSON.stringify({ workspace })
+  const recipe = [
+    `export AIRLOCK_SEAL=${shellQuote(sealPath)}`,
+    `export AIRLOCK_HOME=${shellQuote(home)}`,
+    `export AIRLOCK_DAEMON_SOCKET=${shellQuote(socketPath)}`,
+    ...(daemonPid === undefined
+      ? ["# daemonOps is empty; no daemon is required"]
+      : [
+          `export AIRLOCK_DAEMON_PID=${daemonPid} # same-digest daemon is ready`
+        ]),
+    `${shellQuote(binaryPath)} eval --workspace ${shellQuote(workspace)} ` +
+      `--bindings ${shellQuote(binding)} --source ` +
+      `${shellQuote('return file.stat({ path: "ok.txt" })')}`
+  ].join("\n")
+
+  console.log(JSON.stringify({
+    generation: out,
+    binary: binaryPath,
+    agentBinary: join(binPath, "airlock-agent"),
+    seal: sealPath,
+    home,
+    socket: socketPath,
+    readiness,
+    operatorKeyAnchor: anchorPath,
+    grantDigest: verified.grantDigest,
+    binaryDigest: verified.binaryDigest,
+    profile: verified.grant.admission.profile,
+    daemonOps: verified.grant.daemonOps,
+    daemonPid,
+    daemonReady: daemonPid !== undefined,
+    localSameUser: true,
+    runnable: true,
+    recipe
+  }))
+  console.error(`# Airlock local sealed recipe (copy and paste)\n${recipe}`)
 }
 
 const safeBox = (value: string): string => {
@@ -1029,6 +1443,7 @@ try {
     case "keygen": await keygen(); break
     case "create": await create(); break
     case "verify": await verify(); break
+    case "local": await local(); break
     case "install": await install(); break
     default: fail(`unknown command: ${command}`)
   }

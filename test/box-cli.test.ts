@@ -1,6 +1,14 @@
 import { createHash, generateKeyPairSync, sign } from "node:crypto"
 import { spawnSync } from "node:child_process"
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs"
+import {
+  cpSync,
+  existsSync,
+  linkSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  writeFileSync
+} from "node:fs"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
 import { beforeAll, describe, expect, it } from "vitest"
@@ -126,6 +134,43 @@ describe("required-seal tenant entrypoint", () => {
     expect(JSON.parse(started.stdout)).toMatchObject({ version: expect.any(String) })
     expect(existsSync(join(generation, "home"))).toBe(true)
     expect(existsSync(join(root, "attacker-home"))).toBe(false)
+  })
+
+  it("keeps local readiness compile-bound away from a root tenant binary", () => {
+    writeGoodSeal()
+    const localGeneration = join(root, "local-marker-clone")
+    const localBinary = join(localGeneration, "bin", "airlock")
+    mkdirSync(join(localGeneration, "bin"), { recursive: true })
+    linkSync(binary, localBinary)
+    cpSync(seal, join(localGeneration, "seal"), { recursive: true })
+    const rootReadiness = JSON.parse(
+      readFileSync(join(generation, "SEALED"), "utf8")
+    )
+    writeFileSync(join(localGeneration, "SEALED"), `${JSON.stringify({
+      ...rootReadiness,
+      ownershipApplied: false,
+      localSameUser: true,
+      runnable: true
+    })}
+`)
+
+    const refused = spawnSync(localBinary, ["doctor"], {
+      cwd: repository,
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        FORCE_COLOR: undefined,
+        NO_COLOR: "1",
+        AIRLOCK_GENERATION_MODE_INTERNAL: "local-same-user"
+      }
+    })
+    expect(refused.status).toBe(78)
+    expect(refused.stdout).toBe("")
+    expect(JSON.parse(refused.stderr)).toMatchObject({
+      _tag: "SealVerificationFailed",
+      reason: "installation-not-ready"
+    })
+    expect(existsSync(join(localGeneration, "home"))).toBe(false)
   })
 
   it("rejects a copied binary beside an attacker self-signed seal", () => {
