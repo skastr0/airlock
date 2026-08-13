@@ -884,6 +884,12 @@ const install = async (): Promise<void> => {
   await mkdirFresh(destination)
   await copyBundleInto(bundle, destination)
   await mkdirFresh(join(destination, "home"), 0o700)
+  for (const directory of ["hold", "outbox", "hold-locks", "outbox-locks", "runs"]) {
+    await mkdirFresh(join(destination, "home", directory), 0o700)
+  }
+  await writeExclusive(join(destination, "home", "ledger.jsonl"), "", 0o600)
+  await writeExclusive(join(destination, "home", "hold-locks", "active"), "", 0o600)
+  await writeExclusive(join(destination, "home", "outbox-locks", "active"), "", 0o600)
   await mkdirFresh(join(destination, "run"), 0o2750)
   await mkdirFresh(join(destination, "ipc"), 0o750)
   await mkdirFresh(join(destination, "launchd"))
@@ -968,6 +974,16 @@ const install = async (): Promise<void> => {
     // immutable root-owned artifacts.
     await chown(home, agentUid, agentGid)
     await chmod(home, 0o700)
+    for (const directory of ["hold", "outbox", "hold-locks", "outbox-locks", "runs"]) {
+      await chown(join(home, directory), agentUid, agentGid)
+      await chmodExact(join(home, directory), 0o700)
+    }
+    for (const file of [
+      "ledger.jsonl", "hold-locks/active", "outbox-locks/active"
+    ]) {
+      await chown(join(home, file), agentUid, agentGid)
+      await chmodExact(join(home, file), 0o600)
+    }
     await chown(join(destination, "run"), 0, agentGid)
     await chmodExact(join(destination, "run"), 0o2750)
     await chown(join(destination, "ipc"), daemonUid, agentGid)

@@ -293,6 +293,10 @@ describe("seal-box operator bundle tool", () => {
       environment: { AIRLOCK_AGENT_SURFACE: "1" }
     })
     expect(mode(join(output.generation, "home"))).toBe(0o700)
+    for (const directory of ["hold", "outbox", "hold-locks", "outbox-locks", "runs"]) {
+      expect(mode(join(output.generation, "home", directory))).toBe(0o700)
+    }
+    expect(mode(join(output.generation, "home", "ledger.jsonl"))).toBe(0o600)
     expect(mode(join(output.generation, "run"))).toBe(0o2750)
     const principals = JSON.parse(readFileSync(join(output.generation, "principals.json"), "utf8"))
     expect(principals).toMatchObject({
