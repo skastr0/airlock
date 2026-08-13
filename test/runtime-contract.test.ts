@@ -19,7 +19,11 @@ import {
   NativeStat,
   NativeWriteReceipt
 } from "../src/native/index.ts"
-import { Outbox, OutboxEmission } from "../src/Outbox.ts"
+import {
+  Outbox,
+  OutboxEmission,
+  StagedDispatchAuthorization
+} from "../src/Outbox.ts"
 import {
   HttpIntentSummary,
   RedactedEmissionRequest
@@ -43,6 +47,7 @@ import {
   Runtime,
   RuntimeConfig,
   RuntimeConfigLive,
+  RuntimeDispatchAuthorization,
   RuntimeInitialArtifact,
   RuntimeLive,
   RuntimePlanInvalid
@@ -214,11 +219,18 @@ const nativeLayer = (calls: Array<NativeCall>) =>
     }
   }))
 
-const outboxLayer = (requests: Array<string>) =>
+const outboxLayer = (
+  requests: Array<string>,
+  options: {
+    readonly authorizations?: Array<StagedDispatchAuthorization | undefined>
+    readonly commits?: Array<string>
+  } = {}
+) =>
   Layer.succeed(Outbox, Outbox.of({
-    stage: (request, holdMillis) => {
+    stage: (request, holdMillis, authorization) => {
       if ("_tag" in request) return Effect.die("external command intent is not a Plan v1 node")
       requests.push(request.url)
+      options.authorizations?.push(authorization)
       return Effect.succeed(new OutboxEmission({
         id: EmissionId.make(`emi_${crypto.randomUUID()}`),
         status: "staged",
@@ -238,13 +250,17 @@ const outboxLayer = (requests: Array<string>) =>
           ...(request.body === undefined ? {} : { body: "[redacted]" })
         }),
         stagedAt: timestamp,
-        holdUntil: DateTime.add(timestamp, { millis: holdMillis })
+        holdUntil: DateTime.add(timestamp, { millis: holdMillis }),
+        ...(authorization === undefined ? {} : { authorization })
       }))
     },
     inspect: () => Effect.die("unused"),
     // These plans carry no dispatch authorization, so staging is the whole
     // lowering: a commit here would be an unauthorized second effect.
-    commit: () => Effect.die("Runtime stages but never commits unauthorized"),
+    commit: (id) => {
+      options.commits?.push(id)
+      return Effect.die("Runtime must not commit through this test Outbox")
+    },
     cancel: () => Effect.die("unused"),
     response: () => Effect.die("unused"),
     pending: Effect.succeed([]),
@@ -257,12 +273,17 @@ const runtimeLayer = (
     readonly profile?: "compatibility" | "native-contained"
     readonly nativeCalls?: Array<NativeCall>
     readonly externalRequests?: Array<string>
+    readonly stagedAuthorizations?: Array<StagedDispatchAuthorization | undefined>
+    readonly commits?: Array<string>
   } = {}
 ) =>
   RuntimeLive.pipe(
     Layer.provideMerge(Layer.succeed(ProcessRunner, ProcessRunner.of({ run: runner }))),
     Layer.provideMerge(nativeLayer(options.nativeCalls ?? [])),
-    Layer.provideMerge(outboxLayer(options.externalRequests ?? [])),
+    Layer.provideMerge(outboxLayer(options.externalRequests ?? [], {
+      authorizations: options.stagedAuthorizations,
+      commits: options.commits
+    })),
     Layer.provideMerge(impossibleCell),
     Layer.provideMerge(impossibleHold),
     Layer.provideMerge(RuntimeConfigLive(new RuntimeConfig({
@@ -280,13 +301,63 @@ const runtimeLayer = (
 const execute = (
   value: ExecutionAuthority,
   layer: Layer.Layer<Runtime, never, never>,
-  inputs: ReadonlyArray<RuntimeInitialArtifact> = []
+  inputs: ReadonlyArray<RuntimeInitialArtifact> = [],
+  dispatchAuthorizations: ReadonlyArray<RuntimeDispatchAuthorization> = []
 ) =>
-  Effect.flatMap(Runtime, (runtime) => runtime.execute(value, inputs)).pipe(
+  Effect.flatMap(Runtime, (runtime) => runtime.execute(value, inputs, dispatchAuthorizations)).pipe(
     Effect.provide(layer)
   )
 
 describe("Runtime total Plan contract", () => {
+  it.effect("persists sealed read authority and never auto-commits inline", () => {
+    const endpoint = "https://status.internal.example/v1/health"
+    const id = nodeId("sealed-external")
+    const authorizations: Array<StagedDispatchAuthorization | undefined> = []
+    const commits: string[] = []
+    const externalRequests: string[] = []
+    const stagedAuthorization = new StagedDispatchAuthorization({
+      sealDigest: `sha256:${"a".repeat(64)}`,
+      grantId: "grant/read-health",
+      grantSelector: "https://status.internal.example/v1/*",
+      dispatchClass: "read",
+      endpoint
+    })
+    const dispatch = new RuntimeDispatchAuthorization({
+      nodeId: id,
+      commit: "auto",
+      grantId: stagedAuthorization.grantId,
+      grantSelector: stagedAuthorization.grantSelector,
+      dispatchClass: "read",
+      endpoint,
+      stagedAuthorization
+    })
+    const authority = plan([
+      new RequestExternalNode({
+        id,
+        dependsOn: [],
+        requires: [],
+        produces: [artifactId("sealed/external")],
+        method: "GET",
+        endpoint,
+        headers: {},
+        holdMillis: 0
+      })
+    ])
+    const layer = runtimeLayer(() => Effect.die("Plan contains no Invoke"), {
+      externalRequests,
+      stagedAuthorizations: authorizations,
+      commits
+    })
+
+    return Effect.gen(function* () {
+      const result = yield* execute(authority, layer, [], [dispatch])
+      expect(result.state).toBe("succeeded")
+      expect(externalRequests).toEqual([endpoint])
+      expect(authorizations).toEqual([stagedAuthorization])
+      expect(commits).toEqual([])
+      expect(result.receipts[0]?.state).toBe("succeeded")
+    })
+  })
   it.effect("revalidates grant lifetime immediately before node execution", () => {
     let processCalls = 0
     const runner: ProcessRun = (request) => {

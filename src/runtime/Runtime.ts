@@ -38,7 +38,8 @@ import {
   DispatchProvenance,
   Outbox,
   OutboxEmission,
-  OutboxRecoveryRequired
+  OutboxRecoveryRequired,
+  StagedDispatchAuthorization
 } from "../Outbox.ts"
 import {
   ArtifactId,
@@ -123,7 +124,12 @@ export class RuntimeDispatchAuthorization extends Schema.Class<RuntimeDispatchAu
   /** The effective class the supervisor computed. Recorded, never re-derived here. */
   dispatchClass: Schema.Literal("read"),
   /** Canonical `scheme://host/path` the grant matched. */
-  endpoint: Schema.String
+  endpoint: Schema.String,
+  /**
+   * Present only in sealed daemon mode. Runtime persists this read-only
+   * evidence with the staged intent and deliberately does not commit inline.
+   */
+  stagedAuthorization: Schema.optional(StagedDispatchAuthorization)
 }) {}
 
 export class RuntimeCellWorkspaceHeld extends Schema.TaggedClass<RuntimeCellWorkspaceHeld>()(
@@ -2018,7 +2024,7 @@ const make = Effect.gen(function* () {
             method: node.method,
             headers: node.headers,
             ...(body === undefined ? {} : { body })
-          }), node.holdMillis).pipe(Effect.either)
+          }), node.holdMillis, dispatch?.stagedAuthorization).pipe(Effect.either)
           if (stagedResult._tag === "Left") {
             if (stagedResult.left._tag === "OutboxRecoveryRequired") {
               recovery.push(new RuntimeOutboxRecoveryEvidence({
@@ -2045,7 +2051,7 @@ const make = Effect.gen(function* () {
           // administrative commit path, entered only because the supervisor
           // plane pre-authorized it for this node; there is no second wire
           // site and no way to reach dispatch without the staged state above.
-          if (dispatch === undefined) {
+          if (dispatch === undefined || dispatch.stagedAuthorization !== undefined) {
             return yield* materializeStructuredResult(
               node,
               artifacts,

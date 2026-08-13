@@ -33,7 +33,7 @@ import {
   NativeStat,
   NativeWriteReceipt
 } from "../native/index.ts"
-import { OutboxEmission } from "../Outbox.ts"
+import { OutboxEmission, StagedDispatchAuthorization } from "../Outbox.ts"
 import { RemoveReceipt } from "../domain.ts"
 import {
   ApplyNode,
@@ -1338,6 +1338,11 @@ export type ProgramDispatchAuthority = (
   declaredEmissionEffect?: "read" | "mutate"
 ) => ReadonlyArray<RuntimeDispatchAuthorization>
 
+/** A verified-seal identity selects daemon-owned, never inline, dispatch. */
+export interface ProgramSealedDispatch {
+  readonly sealDigest: `sha256:${string}`
+}
+
 const stagedOnlyDispatchAuthority: ProgramDispatchAuthority = () => []
 
 /**
@@ -1345,7 +1350,8 @@ const stagedOnlyDispatchAuthority: ProgramDispatchAuthority = () => []
  * translation and nothing else: no gate, no class arithmetic, no policy read.
  */
 export const supervisorDispatchAuthority = (
-  policy: AdmissionPolicyDocument
+  policy: AdmissionPolicyDocument,
+  sealedDispatch?: ProgramSealedDispatch
 ): ProgramDispatchAuthority =>
 (authority, declaredEmissionEffect) =>
   supervisorAutoCommits(policy, authority, declaredEmissionEffect).map(
@@ -1356,7 +1362,16 @@ export const supervisorDispatchAuthority = (
         grantId: authorized.grantId,
         grantSelector: authorized.grantSelector,
         dispatchClass: authorized.effectiveClass,
-        endpoint: authorized.endpoint
+        endpoint: authorized.endpoint,
+        ...(sealedDispatch === undefined ? {} : {
+          stagedAuthorization: new StagedDispatchAuthorization({
+            sealDigest: sealedDispatch.sealDigest,
+            grantId: authorized.grantId,
+            grantSelector: authorized.grantSelector,
+            dispatchClass: authorized.effectiveClass,
+            endpoint: authorized.endpoint
+          })
+        })
       })
   )
 
@@ -1693,8 +1708,9 @@ export const ProgramPlanRuntimeLive = makeProgramPlanRuntimeLive(
 
 /** The same interpreter, told which auto-commits the supervisor already granted. */
 export const ProgramPlanRuntimeWithPolicyLive = (
-  policy: AdmissionPolicyDocument
-) => makeProgramPlanRuntimeLive(supervisorDispatchAuthority(policy))
+  policy: AdmissionPolicyDocument,
+  sealedDispatch?: ProgramSealedDispatch
+) => makeProgramPlanRuntimeLive(supervisorDispatchAuthority(policy, sealedDispatch))
 
 /**
  * Convenience composition for one managed application runtime. Platform
@@ -1703,11 +1719,12 @@ export const ProgramPlanRuntimeWithPolicyLive = (
  */
 export const ProgramExecutionLive = (
   policy: AdmissionPolicyDocument,
-  nativeActions: NativeActionSurface = ALL_NATIVE_ACTIONS
+  nativeActions: NativeActionSurface = ALL_NATIVE_ACTIONS,
+  sealedDispatch?: ProgramSealedDispatch
 ) => {
   const executor = ProgramPlanExecutorLive.pipe(
     Layer.provideMerge(ProgramAdmissionLive(policy)),
-    Layer.provideMerge(ProgramPlanRuntimeWithPolicyLive(policy))
+    Layer.provideMerge(ProgramPlanRuntimeWithPolicyLive(policy, sealedDispatch))
   )
   return ProgramRunnerWithNativeActionsLive(nativeActions).pipe(Layer.provide(executor))
 }
@@ -1716,11 +1733,12 @@ export const ProgramExecutionWithToolsLive = (
   policy: AdmissionPolicyDocument,
   actions: ReadonlyMap<string, ExportedToolAction>,
   cellProfile: CellProfile,
-  nativeActions: NativeActionSurface = ALL_NATIVE_ACTIONS
+  nativeActions: NativeActionSurface = ALL_NATIVE_ACTIONS,
+  sealedDispatch?: ProgramSealedDispatch
 ) => {
   const executor = ProgramPlanExecutorLive.pipe(
     Layer.provideMerge(ProgramAdmissionLive(policy)),
-    Layer.provideMerge(ProgramPlanRuntimeWithPolicyLive(policy))
+    Layer.provideMerge(ProgramPlanRuntimeWithPolicyLive(policy, sealedDispatch))
   )
   return ProgramRunnerWithToolsLive(actions, cellProfile, nativeActions).pipe(Layer.provide(executor))
 }
