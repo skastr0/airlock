@@ -1,0 +1,78 @@
+#!/usr/bin/env bash
+# Amp orb setup: provision the pinned Bun toolchain and install dependencies.
+#
+# Runs once for a fresh orb (and again on stale snapshots, so it must be
+# idempotent and fast on a warm filesystem). Everything else the repo needs is
+# in the lockfile; there are no databases, env files, or services.
+set -euo pipefail
+
+log() { printf '[setup] %s\n' "$*"; }
+
+step() {
+  local name="$1" start
+  shift
+  start="$(date +%s)"
+  "$@"
+  log "${name}: done in $(( $(date +%s) - start ))s"
+}
+
+# Resolve the toolchain pin from the repo's declared contract, not a hardcoded
+# copy of it.
+pinned_bun="$(sed -n 's/^[[:space:]]*"packageManager":[[:space:]]*"bun@\([^"]*\)".*/\1/p' package.json)"
+if [ -z "$pinned_bun" ]; then
+  log "ERROR: could not read the bun version from package.json packageManager"
+  exit 1
+fi
+log "repo pins bun@$pinned_bun"
+
+install_bun() {
+  log "installing bun $pinned_bun"
+  curl -fsSL https://bun.sh/install | bash -s "bun-v$pinned_bun" > /tmp/bun-install.log
+  # The installer cannot update this running script's environment.
+  export PATH="$HOME/.bun/bin:$PATH"
+  hash -r
+}
+
+persist_bun_path() {
+  # Persist for non-interactive login shells (Amp itself and supervised
+  # services start in separate login shells after setup). When ~/.bash_profile
+  # exists, bash reads it instead of ~/.profile, so cover both.
+  local rc
+  for rc in ~/.bashrc ~/.profile ~/.bash_profile; do
+    if ! grep -Fqx 'export PATH="$HOME/.bun/bin:$PATH"' "$rc" 2>/dev/null; then
+      printf '\nexport PATH="$HOME/.bun/bin:$PATH"\n' >> "$rc"
+    fi
+  done
+}
+
+ensure_bun() {
+  local current=""
+  current="$(bun --version 2>/dev/null || true)"
+  if [ "$current" = "$pinned_bun" ]; then
+    log "bun $pinned_bun already installed"
+    return
+  fi
+  log "bun is ${current:-missing}; installing pinned $pinned_bun"
+  install_bun
+}
+
+install_deps() {
+  # Idempotent on a warm snapshot: bun confirms node_modules against the
+  # lockfile and exits quickly when they match.
+  bun install --frozen-lockfile
+}
+
+export PATH="$HOME/.bun/bin:$PATH"
+hash -r
+
+step "bun toolchain" ensure_bun
+persist_bun_path
+installed="$(bun --version)"
+if [ "$installed" != "$pinned_bun" ]; then
+  log "ERROR: expected bun $pinned_bun, found $installed"
+  exit 1
+fi
+log "bun $(command -v bun) ($installed)"
+
+step "bun install" install_deps
+log "setup complete"
