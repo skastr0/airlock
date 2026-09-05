@@ -11,35 +11,32 @@ import {
 } from "node:fs"
 import { join, relative, resolve, sep } from "node:path"
 import {
-  MacosPlatform,
-  type MacosUnavailable,
-  type VolumeInspectionFailed,
-  type WorkspaceDestinationExists,
-  type WorkspacePreparationFailed,
-  type WorkspaceSourceMissing,
-  type WorkspaceSourceNotDirectory,
-  PrivateWorkspaceRequest
-} from "../platform/macos/index.ts"
+  PrivateWorkspaceRequest,
+  type NativeWorkspaceError
+} from "../platform/NativeWorkspace.ts"
+import {
+  CellUnavailable,
+  NativeCellBackend,
+  type NativeExecutableBinding
+} from "./NativeCellBackend.ts"
 import {
   ProcessRequest,
-  ProcessRunner,
   ProcessReceipt,
   type ProcessError,
   type ProcessRunOptions
 } from "../process/Process.ts"
 
 /**
- * Candidate Cell seam. The contracts are pristine; Seatbelt profile rendering
- * is intentionally local macOS glue. This is native-contained, never a claim
- * of VM enclosure: `sandbox-exec` descendants inherit the profile, but a
- * process may still exploit capabilities the profile cannot express or escape
- * the ProcessRunner's group through daemonization.
+ * Shared host-native Cell seam. Contracts, workspace identity, delta, and drift
+ * stay here; each platform backend owns its containment mechanism. This is
+ * native-contained, never a claim of VM enclosure or complete execution
+ * closure. The active capability report names the backend's exact limits.
  */
 
 export const CellNetwork = Schema.Literal("deny", "allow")
 export type CellNetwork = typeof CellNetwork.Type
 
-/** Native Seatbelt fences writes and optionally networking, not host reads. */
+/** Host-native profiles fence writes but deliberately retain ambient host reads. */
 export const CellReadAuthority = Schema.Literal("ambient-host-read")
 export type CellReadAuthority = typeof CellReadAuthority.Type
 
@@ -130,23 +127,14 @@ export class CellContractViolation extends Schema.TaggedError<CellContractViolat
   { field: Schema.String, reason: Schema.String }
 ) {}
 
-export class CellUnavailable extends Schema.TaggedError<CellUnavailable>()("CellUnavailable", {
-  capability: Schema.String,
-  reason: Schema.String
-}) {}
+export { CellUnavailable } from "./NativeCellBackend.ts"
 
 export class WorkspaceFingerprintFailed extends Schema.TaggedError<WorkspaceFingerprintFailed>()(
   "WorkspaceFingerprintFailed",
   { root: Schema.String, cause: Schema.String }
 ) {}
 
-export type CellPreparationError =
-  | MacosUnavailable
-  | VolumeInspectionFailed
-  | WorkspaceSourceMissing
-  | WorkspaceSourceNotDirectory
-  | WorkspaceDestinationExists
-  | WorkspacePreparationFailed
+export type CellPreparationError = NativeWorkspaceError | CellUnavailable
 
 export type CellError =
   | CellContractViolation
@@ -174,8 +162,6 @@ export class Cell extends Context.Tag("airlock/Cell")<
     ) => Effect.Effect<ReadonlyArray<WorkspaceDrift>, WorkspaceFingerprintFailed>
   }
 >() {}
-
-const sandboxExec = "/usr/bin/sandbox-exec"
 
 const hash = (parts: ReadonlyArray<string | Uint8Array>) => {
   const digest = createHash("sha256")
@@ -310,6 +296,13 @@ export const validateCellRequest = (request: CellRequest) =>
       "must be sourceWorkspace; Cell rewrites it to privateWorkspace"
     )
     yield* assertion(
+      request.process.stdin !== "inherit" &&
+        request.process.stdout !== "inherit" &&
+        request.process.stderr !== "inherit",
+      "process.stdio",
+      "native-contained execution forbids inherited stdin, stdout, and stderr descriptors"
+    )
+    yield* assertion(
       request.process.executable.startsWith("/") &&
         !request.process.executable.includes("\0"),
       "process.executable",
@@ -359,60 +352,12 @@ export const validateCellRequest = (request: CellRequest) =>
     }
   })
 
-// JSON string escaping is valid SBPL quoting and prevents profile injection.
-const sbpl = (value: string) => JSON.stringify(value)
-
-/**
- * Local Seatbelt glue. `file-read*` is deliberately ambient so arbitrary Unix
- * binaries and loaders work; this profile must never be used as a
- * confidentiality or secret-isolation claim.
- */
-export const renderSeatbeltProfile = (
-  privateWorkspace: string,
-  tempPaths: ReadonlyArray<string>,
-  network: CellNetwork,
-  allowedExecutables: ReadonlyArray<string>
-) => {
-  const writable = [privateWorkspace, ...tempPaths]
-    .map((path) => `(allow file-write* (subpath ${sbpl(path)}))`)
-    .join(" ")
-  return [
-    "(version 1)",
-    "(deny default)",
-    // Forking remains available, but every new exec identity must be listed.
-    // This is executable-edge fencing, not a claim about dylibs or code an
-    // already-admitted interpreter reads and executes in-process.
-    "(allow process-fork)",
-    ...allowedExecutables.map(
-      (executable) =>
-        `(allow process-exec (literal ${sbpl(executable)}))`
-    ),
-    "(allow file-read*)",
-    writable,
-    // Common programs may direct diagnostics here without gaining a general
-    // write path. This is not managed state.
-    '(allow file-write* (literal "/dev/null"))',
-    network === "deny" ? "(deny network*)" : "(allow network*)"
-  ].join(" ")
-}
-
 const runCell = (
-  platform: Context.Tag.Service<typeof MacosPlatform>,
-  runner: Context.Tag.Service<typeof ProcessRunner>,
+  backend: Context.Tag.Service<typeof NativeCellBackend>,
   request: CellRequest,
   options: CellRunOptions = {}
 ) =>
   Effect.gen(function* () {
-    if (process.platform !== "darwin") {
-      return yield* Effect.fail(
-        new CellUnavailable({ capability: "macOS Seatbelt", reason: `platform is ${process.platform}` })
-      )
-    }
-    if (!existsSync(sandboxExec)) {
-      return yield* Effect.fail(
-        new CellUnavailable({ capability: "sandbox-exec", reason: "not present at /usr/bin/sandbox-exec" })
-      )
-    }
     const paths = yield* validateCellRequest(request)
     const sourceWorkspace = yield* Effect.try({
       try: () => realpathSync(paths.source),
@@ -423,11 +368,11 @@ const runCell = (
         })
     })
     const baseline = yield* fingerprintWorkspace(paths.source)
-    const prepared = yield* platform.preparePrivateWorkspace(
+    const prepared = yield* backend.preparePrivateWorkspace(
       new PrivateWorkspaceRequest({ source: paths.source, destination: paths.privateWorkspace })
     )
-    // macOS's /tmp and /var aliases resolve under /private. Seatbelt compares
-    // canonical paths, so using realpath is necessary for the write fence.
+    // Host policy engines compare physical paths or filesystem objects, so the
+    // private view is rebound after preparation rather than trusting spelling.
     const privateWorkspace = yield* Effect.try({
       try: () => realpathSync(prepared.destination),
       catch: (cause) =>
@@ -436,13 +381,19 @@ const runCell = (
           cause: cause instanceof Error ? cause.message : String(cause)
         })
     })
-    const canonicalTemps = yield* Effect.forEach(paths.tempPaths, (path) =>
+    const canonicalTemps = yield* Effect.forEach(paths.tempPaths, (path, index) =>
       Effect.try({
-        try: () => realpathSync(path),
+        try: () => {
+          const canonical = realpathSync(path)
+          if (!lstatSync(canonical).isDirectory()) {
+            throw new Error("must be a directory")
+          }
+          return canonical
+        },
         catch: (cause) =>
           new CellContractViolation({
-            field: "tempPaths",
-            reason: `${path} must exist before it is granted: ${cause instanceof Error ? cause.message : String(cause)}`
+            field: `tempPaths[${index}]`,
+            reason: `${path} must resolve to an existing directory before it is granted: ${cause instanceof Error ? cause.message : String(cause)}`
           })
       })
     )
@@ -501,7 +452,7 @@ const runCell = (
               return {
                 requested: executable,
                 launch: canonicalContained,
-                policy: [contained, canonicalContained],
+                allowedPaths: [contained, canonicalContained],
                 workspaceRebased: true
               }
             }
@@ -510,7 +461,7 @@ const runCell = (
             return {
               requested: executable,
               launch: executable,
-              policy: [requested, canonical],
+              allowedPaths: [requested, canonical],
               workspaceRebased: false
             }
           },
@@ -532,32 +483,31 @@ const runCell = (
         reason: "root executable did not bind into the executable edge set"
       })
     }
-    const canonicalExecutables = [
-      ...new Set(executableBindings.flatMap((binding) => binding.policy))
-    ]
-    const containedRequest = new ProcessRequest({
-      ...request.process,
-      executable: sandboxExec,
-      env: {
-        ...request.process.env,
-        TMPDIR: privateTempDirectory,
-        TMP: privateTempDirectory,
-        TEMP: privateTempDirectory
+    const backendBindings: ReadonlyArray<NativeExecutableBinding> = executableBindings.map(
+      (binding) => ({
+        role: binding.requested === rootExecutable.requested ? "root" : "descendant",
+        requested: binding.requested,
+        launch: binding.launch,
+        allowedPaths: [...new Set(binding.allowedPaths)],
+        workspaceRebased: binding.workspaceRebased
+      })
+    )
+    const processReceipt = yield* backend.launchContained({
+      sourceWorkspace,
+      privateWorkspace,
+      tempPaths: canonicalTemps,
+      privateTempDirectory,
+      network: request.network,
+      process: request.process,
+      rootExecutable: {
+        role: "root",
+        requested: rootExecutable.requested,
+        launch: rootExecutable.launch,
+        allowedPaths: [...new Set(rootExecutable.allowedPaths)],
+        workspaceRebased: rootExecutable.workspaceRebased
       },
-      args: [
-        "-p",
-        renderSeatbeltProfile(
-          privateWorkspace,
-          canonicalTemps,
-          request.network,
-          canonicalExecutables
-        ),
-        rootExecutable.launch,
-        ...request.process.args
-      ],
-      cwd: privateWorkspace
-    })
-    const processReceipt = yield* runner.run(containedRequest, options)
+      executableBindings: backendBindings
+    }, options)
     const [live, privateView] = yield* Effect.all([
       fingerprintWorkspace(paths.source),
       fingerprintWorkspace(
@@ -566,20 +516,20 @@ const runCell = (
       )
     ])
     return new CellReceipt({
-      sourceWorkspace: paths.source,
+      sourceWorkspace,
       privateWorkspace,
       privateTempDirectory,
       network: request.network,
       readAuthority: "ambient-host-read",
       process: request.process,
       processReceipt,
-      executableBindings: executableBindings.map(
-        (binding, index) =>
+      executableBindings: backendBindings.map(
+        (binding) =>
           new CellExecutableBinding({
-            role: index === 0 ? "root" : "descendant",
+            role: binding.role,
             requested: binding.requested,
             launch: binding.launch,
-            allowedPaths: [...new Set(binding.policy)],
+            allowedPaths: binding.allowedPaths,
             workspaceRebased: binding.workspaceRebased
           })
       ),
@@ -591,13 +541,12 @@ const runCell = (
     })
   }).pipe(Effect.withSpan("Cell.run"))
 
-export const CellLive = Layer.effect(
+export const CellLayer = Layer.effect(
   Cell,
   Effect.gen(function* () {
-    const platform = yield* MacosPlatform
-    const runner = yield* ProcessRunner
+    const backend = yield* NativeCellBackend
     return Cell.of({
-      run: (request, options) => runCell(platform, runner, request, options),
+      run: (request, options) => runCell(backend, request, options),
       revalidate: (receipt) =>
         fingerprintWorkspace(receipt.sourceWorkspace).pipe(
           Effect.map((live) => driftEvidence(receipt.baseline, live))

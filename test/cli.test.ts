@@ -20,8 +20,16 @@ const run = (
 
 const json = (value: string) => JSON.parse(value) as Record<string, unknown>
 
+const isolatedWorkspace = (prefix: string) => {
+  const root = mkdtempSync(join(tmpdir(), prefix))
+  const home = join(root, "home")
+  const workspace = join(root, "workspace")
+  mkdirSync(workspace)
+  return { home, workspace } as const
+}
+
 describe("agent-facing CLI", () => {
-  it("discovers the explicit macOS profile envelope and closed action vocabulary", () => {
+  it("discovers the host profile envelope and closed action vocabulary", () => {
     const home = mkdtempSync(join(tmpdir(), "airlock-cli-"))
     const doctor = run(["doctor"], home)
     const actions = run(["actions"], home)
@@ -29,9 +37,14 @@ describe("agent-facing CLI", () => {
 
     expect(doctor.status).toBe(0)
     expect(json(doctor.stdout)).toMatchObject({
-      platform: "darwin",
+      platform: process.platform,
       profiles: { compatibility: { available: true } }
     })
+    if (process.platform === "linux") {
+      expect(json(doctor.stdout)).toMatchObject({
+        linux: { schemaVersion: "airlock/linux-capabilities/v1" }
+      })
+    }
     expect(actions.status).toBe(0)
     expect(json(actions.stdout)).toMatchObject({ schemaVersion: "airlock/actions/v1" })
     expect(schema.status).toBe(0)
@@ -184,8 +197,8 @@ describe("agent-facing CLI", () => {
   })
 
   it("returns a typed partial report when a later program failure aborts after completed actions", () => {
-    const home = mkdtempSync(join(tmpdir(), "airlock-cli-"))
-    const program = join(home, "partial.air")
+    const { home, workspace } = isolatedWorkspace("airlock-cli-")
+    const program = join(workspace, "partial.air")
     writeFileSync(program, `
       let written = file.write({ path: "partial.txt", content: "first" })
       let staged = http.stage({ endpoint: "https://example.invalid/partial", method: "POST", body: "payload", holdMillis: 60000 })
@@ -193,7 +206,7 @@ describe("agent-facing CLI", () => {
       return { written: written, staged: staged }
     `)
 
-    const executed = run(["run", program, "--workspace", home], home)
+    const executed = run(["run", program, "--workspace", workspace], home)
     expect(executed.status).toBe(1)
 
     const report = json(executed.stdout) as {
@@ -229,24 +242,24 @@ describe("agent-facing CLI", () => {
       state: "staged",
       emission_id: expect.any(String)
     })
-    expect(readFileSync(join(home, "partial.txt"), "utf8")).toBe("first")
+    expect(readFileSync(join(workspace, "partial.txt"), "utf8")).toBe("first")
   })
 
   it("runs a real read → process stdin → write → stage program through admission, Runtime, Hold, and Outbox", () => {
-    const home = mkdtempSync(join(tmpdir(), "airlock-cli-"))
-    const program = join(home, "workflow.air")
-    writeFileSync(join(home, "input.txt"), "source bytes\n")
+    const { home, workspace } = isolatedWorkspace("airlock-cli-")
+    const program = join(workspace, "workflow.air")
+    writeFileSync(join(workspace, "input.txt"), "source bytes\n")
     writeFileSync(program, `
       let observed = file.read({ path: "input.txt" })
-      let processed = process.run({ executable: "/bin/cat", args: [], cwd: ${JSON.stringify(home)}, stdin: { kind: "text", value: "source bytes\\n" }, stdout: "capture" })
+      let processed = process.run({ executable: "/bin/cat", args: [], cwd: ${JSON.stringify(workspace)}, stdin: { kind: "text", value: "source bytes\\n" }, stdout: "capture" })
       let written = file.write({ path: "output.txt", content: "written" })
       let staged = http.stage({ endpoint: "https://example.invalid/jobs", method: "POST", body: "done" })
       return { observed: observed, processed: processed, written: written, staged: staged }
     `)
 
-    const executed = run(["run", program, "--workspace", home], home)
+    const executed = run(["run", program, "--workspace", workspace], home)
     expect(executed.status).toBe(0)
-    expect(readFileSync(join(home, "output.txt"), "utf8")).toBe("written")
+    expect(readFileSync(join(workspace, "output.txt"), "utf8")).toBe("written")
     const report = json(executed.stdout)
     expect(report).toMatchObject({
       result: {

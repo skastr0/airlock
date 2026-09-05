@@ -2,11 +2,11 @@ let tree = file.list({ path: state_dir })
 let state_entries = file.glob({ root: state_dir, pattern: "**/*" })
 let backup_directory = file.mkdir({ path: backup_dir, parents: true })
 
-let packed = process.run({ executable: "/usr/bin/tar", args: ["-czf", "snapshot.tgz", "state"], cwd: workspace, env: { COPYFILE_DISABLE: "1", LANG: "C" }, stdin: "discard", stdout: "capture", stderr: "capture", timeoutMs: 30000, cellProfile: "native-contained" })
+let packed = process.run({ executable: "/usr/bin/tar", args: ["-czf", "snapshot.tgz", "state"], descendantExecutables: tar_descendants, cwd: workspace, env: { COPYFILE_DISABLE: "1", LANG: "C" }, stdin: "discard", stdout: "capture", stderr: "capture", timeoutMs: 30000, cellProfile: "native-contained" })
 assert packed.state == "succeeded", "snapshot command failed"
 let archive = file.inspect({ path: snapshot })
 
-let members = process.run({ executable: "/usr/bin/tar", args: ["-tzf", "snapshot.tgz"], cwd: workspace, env: { COPYFILE_DISABLE: "1", LANG: "C" }, stdin: "discard", stdout: "capture", stderr: "capture", timeoutMs: 30000, cellProfile: "native-contained" })
+let members = process.run({ executable: "/usr/bin/tar", args: ["-tzf", "snapshot.tgz"], descendantExecutables: tar_descendants, cwd: workspace, env: { COPYFILE_DISABLE: "1", LANG: "C" }, stdin: "discard", stdout: "capture", stderr: "capture", timeoutMs: 30000, cellProfile: "native-contained" })
 let member_count = process.run({ executable: "/usr/bin/wc", args: ["-l"], cwd: workspace, env: { LANG: "C" }, stdin: { kind: "artifact", id: members.stdout_artifact.id }, stdout: "capture", stderr: "capture", timeoutMs: 30000, cellProfile: "native-contained" })
 
 let argv = process.run({ executable: "/usr/bin/printf", args: ["%s\n", "--gateway", "local", "--gateway-endpoint", "unix:///tmp/gateway.sock", "sandbox", "exec", "--name", "alice", "--no-tty", "--timeout", "180", "--", "/usr/bin/python3", "-I", "-S"], cwd: workspace, env: { LANG: "C" }, stdin: "discard", stdout: "capture", stderr: "capture", timeoutMs: 30000, cellProfile: "native-contained" })

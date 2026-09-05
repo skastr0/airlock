@@ -40,7 +40,7 @@ The proof executes one admitted Plan with all four candidate Plan nodes:
 1. `Capture` reads a state archive through an explicit path grant.
 2. The archive artifact becomes stdin to `Invoke`; `/usr/bin/tar -xzf -`
    receives bytes through explicit Plan dataflow, with separate argument atoms,
-   in a macOS native-contained Cell with network denied.
+   in a host-native Cell on macOS or Linux with network denied.
 3. A second `Capture`, after `Invoke` but before `Apply`, proves the live
    `SOUL.md` was not changed by the process.
 4. `Apply.merge` installs the single private `hermes` directory delta through
@@ -65,11 +65,11 @@ Airlock physics:
 - The checked-in controller programs therefore mark OpenShell calls as
   `compatibility`; the native-contained claim remains limited to local,
   no-network work until an endpoint broker exists.
-- Native-contained macOS currently denies all network for this path; it does
-  not yet broker an allowlisted endpoint to a Cell.
+- Both host-native backends deny all network for this proof path; neither
+  brokers an allowlisted endpoint to a Cell.
 - Outbox dispatch supports HTTP. A staged external command/remote-realm Plan
   transport is still required for OpenShell-style non-HTTP control paths.
-- The VM-enclosed macOS profile is intentionally unavailable in this build.
+- The VM-enclosed profile is intentionally unavailable in this build.
 - Vouch's SQLite online backup and member-by-member permission-collision
   behavior remain semantics of the existing Python helper. They need a real
   OpenShell fixture run, not an Airlock reimplementation.

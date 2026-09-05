@@ -1,172 +1,153 @@
-# Linux beachhead
+# Linux native-contained evidence
 
-> Status: bounded platform-primitive evidence. Linux is a **design direction**
-> for Airlock, not a supported release target. This document records that the
-> two host primitives Hold, Outbox, and Ledger depend on exist on Linux and
-> behave as the contracts require, and that the portable suites pass there. It
-> is not a containment claim, not a release claim, and not a parity corpus.
+> Status: executed developer-preview evidence for the Linux implementation.
+> The original portable “beachhead” has been superseded: Linux now has a native
+> Cell backend, distribution unit, shared workload coverage, and a required CI
+> gate. The filename is retained so older links do not break.
 
-## What Linux needed
+## Tested host
 
-macOS v1 rests on two host primitives:
-
-| capability | macOS | Linux |
-| --- | --- | --- |
-| atomic no-replace rename | `renamex_np(RENAME_EXCL)` | `renameat2(RENAME_NOREPLACE)` |
-| recoverable exclusive lease | `open(2)` with `O_EXLOCK` | `flock(2)` with `LOCK_EX \| LOCK_NB` |
-
-`O_EXLOCK` is a BSD extension Linux does not implement, so the Linux lease is
-taken with `flock(2)` immediately after the descriptor is opened rather than
-atomically with the open. Both ends hold the same contract: authority is the
-open file description, the kernel releases it on close or process death, and
-stale owner JSON is an inert diagnostic rather than a lock to reclaim.
-
-Selection is by host platform only, in `src/HoldLive.ts` and inside
-`src/platform/ExclusiveFileLock.ts`. No program, profile, or tool definition
-reaches it. Each adapter independently refuses when it is not on its own
-platform, and a filesystem whose rename does not implement `RENAME_NOREPLACE`
-gets a typed `ExclusiveRenameUnavailable` — never a replacing rename.
-
-## Run it
-
-```sh
-sh scripts/prove-linux-boundary.sh     # container: proof + portable suites
-bun scripts/prove-linux-boundary.ts    # on a Linux host: the proof alone
-sh scripts/run-linux-suites.sh         # on a Linux host: proof + suites
-```
-
-`scripts/prove-linux-boundary.sh` bind-mounts the repository into the official
-Bun image and masks `node_modules` with a named volume, so the host's
-macOS-native packages never enter the container and the container never
-rewrites the host tree. `.github/workflows/linux.yml` runs
-`scripts/run-linux-suites.sh` unmodified on `ubuntu-latest`, so the container
-and CI execute byte-identical commands.
-
-Vitest must run on the Bun runtime (`bun --bun x vitest`): the Linux lease and
-rename are Bun FFI calls that a Node worker cannot make.
-
-## What actually ran
-
-Container executed on 2026-08-02 from an Apple-silicon workstation:
+The implementation was exercised directly in an Amp Debian orb on 2026-09-04:
 
 | | |
 | --- | --- |
-| image | `oven/bun:1.3.13` |
-| distribution | Debian GNU/Linux 13 (trixie) |
-| kernel | `7.0.11-orbstack-00360-gc9bc4d96ac70` |
-| architecture | `arm64` |
-| C library | glibc 2.41 |
-| Bun | 1.3.13 |
-| proof filesystem | `overlayfs` (container `/tmp`) |
+| distribution | Debian GNU/Linux 12 (bookworm) |
+| kernel | Linux 6.1.158+, x86-64 |
+| C library | glibc 2.36 |
+| Bun | 1.3.11 |
+| Bubblewrap | upstream 0.12.0, regular mode 0755, no file capabilities |
+| Bubblewrap source | tag `v0.12.0`, commit `2a76602a8c71f36c1527cf9fc3417d9149822e0c` |
+| Landlock | ABI 2 |
+| launcher | `airlock-linux-launcher-v1`, libseccomp filter loaded |
+| proof filesystem | ext-family filesystem for `/tmp` |
 
-### Boundary proof — `airlock-linux-beachhead-v1`
+Debian's packaged Bubblewrap 0.8.0 was installed but rejected as below the
+runtime minimum. Upstream 0.12.0 was built without setuid mode or file
+capabilities and installed at `/usr/local/bin/bwrap`. The orb also installed the
+C compiler, libseccomp development/runtime files, pkg-config, Meson, Ninja,
+libcap tools, and strace.
 
-`bun scripts/prove-linux-boundary.ts` emitted `ok: true` with every assertion
-true:
+## Executed evidence
 
-```text
-renameIntoAbsentTargetSucceeded          true
-renameOntoLiveTargetReportedTargetExists true    collisionTag ExclusiveRenameTargetExists
-liveTargetBytesPreserved                 true    "first bytes"
-refusedSourceBytesPreserved              true    "second bytes"
-everyContenderCompleted                  true    16 of 16
-contendersWereDistinctProcesses          true    16 distinct pids
-noIndependentOverlapObserved             true    0 overlap reports
-atMostOneHolderInside                    true    maximum 1, 32 events, balanced
-everyContenderEnteredAndExited           true
-leaseReclaimedAfterHolderKilled          true    SIGKILL, reclaimed in 12ms
+### Native adversarial suite
+
+```sh
+bun scripts/run-tests.ts test/linux-native.test.ts
 ```
 
-The sixteen contenders are the same `test/fixtures/exclusive-file-lock-contender.ts`
-process fixture the macOS cross-process test drives, so both platforms are held
-to one mechanism. Its `O_EXCL` sentinel is an independent overlap detector that
-does not depend on the lock under test. The lease-recovery case kills a holder
-with `SIGKILL`, so no release path ever runs; the reclaim is the kernel's.
+The 13 cases passed. They establish, within this host envelope:
 
-### Portable suites — 7 files, 54 passed, 4 skipped
+- rejection of Bubblewrap below 0.12.0 and of a missing launcher;
+- fresh private workspace preparation;
+- private `openat2` writes plus denial of source/outside `O_TRUNC` writes;
+- denial of TCP and Unix sockets, socketpairs, `memfd_create`, `clone3`
+  namespace creation, and `unshare`;
+- acceptance of runtime-owned byte stdin while ordinary regular-file stdin is
+  refused, even if the launcher's memfd flag is supplied;
+- denial of an undeclared direct exec and acceptance of a declared descendant;
+- required shebang-interpreter admission;
+- target loader variables taking effect only after Landlock and seccomp;
+- closure of backend mount descriptors before target execution, including
+  absence from Bubblewrap PID 1's `/proc/1/fd` table;
+- timeout teardown of a double-forked/session-changing descendant;
+- fail-closed refusal of `network: allow`;
+- the admitted ELF loader's ability to interpret an unlisted ELF as data,
+  recorded as a limitation rather than hidden; and
+- strict ELF interpreter parsing.
 
-```text
-test/exclusive-rename.test.ts          7 tests
-test/exclusive-file-lock.test.ts       4 tests
-test/hold.test.ts                     26 tests
-test/outbox-hardening.test.ts          8 tests
-test/outbox-ledger-recovery.test.ts    3 tests
-test/runtime-execution-claim.test.ts   5 tests (4 skipped, macOS-gated)
-test/cancellation-durability.test.ts   5 tests
+### Shared and Vouch-derived native workloads
+
+The previously macOS-only Cell, CLI, Runtime, workspace-identity, execution
+claim, destructive action, parity, and agent corpus tests now select the native
+backend by host. GNU-specific fixture arguments and executable descendants are
+explicit data rather than platform guesses.
+
+Both Vouch-derived proofs run on Linux:
+
+```sh
+bun scripts/run-tests.ts test/vouch-e2e.test.ts \
+  test/vouch-operations-e2e.test.ts
 ```
 
-That covers Hold remove/overwrite/undo semantics, the atomic no-replace rename
-boundary including the post-rename directory-sync recovery path, cross-instance
-Hold serialization, Outbox stage/claim/recovery hardening, Outbox↔Ledger
-recovery, and the Runtime execution claim.
+They execute real GNU tar restore/snapshot paths with root-scoped `/bin/sh` and
+`/usr/bin/gzip` descendant authority, artifact stdin, private deltas,
+Hold-backed Apply, staged Outbox intent, undo, timeout, cancellation, output
+bounds, and literal argv. They do not run Vouch, OpenShell, or a remote
+replacement service.
 
-The four skipped tests are the `Runtime execution claims on macOS` describe,
-gated on `process.platform !== "darwin"`. Cross-process Runtime claim racing
-therefore has no Linux evidence yet; cross-process lease serialization does,
-through the boundary proof.
+### Distribution proof
 
-### Partially portable suites — 13 passed, 2 excluded by name
-
-```text
-test/outbox.test.ts    5 tests (1 skipped)   stage, cancel, commit, flush
-test/ledger.test.ts   10 tests (1 skipped)   append, recovery, quarantine
+```sh
+bun scripts/run-tests.ts test/linux-distribution.test.ts
 ```
 
-Two tests are excluded by an explicit name filter in
-`scripts/run-linux-suites.sh`. Both are fixture limits, not Airlock behaviour:
+All five distribution cases passed. The suite verifies:
 
-- **`Outbox … does not recover a live commit from another Airlock process as
-  uncertain`** hangs in its own HTTP fixture teardown under the Bun runtime:
-  instrumented, the emission stages, commits, and is observed as `committed` in
-  226 ms, and then the fixture's `server.close()` never calls back. It
-  reproduces identically on macOS under `bun --bun x vitest`, where no Linux
-  code runs at all, so it is a runtime-of-the-harness artifact.
-- **`Ledger … waits for a kernel lease held by another process before
-  appending`** spawns a blocker process that hardcodes Darwin's `O_EXLOCK`
-  (`0x20`), which Linux does not implement. The Linux equivalent of that claim
-  is the 16-process contention section of the boundary proof.
+- checksum- and metadata-checked three-artifact install and reversible
+  uninstall;
+- refusal of corrupt, old, setid, and root-aliased inputs before displacement;
+- rollback after every one of the six install rename boundaries;
+- rollback during uninstall displacement; and
+- a real standalone glibc build, install, relative launcher discovery,
+  production-shaped `doctor`, native-contained Invoke→Apply run, and uninstall.
 
-## Non-claims
+The actual local release build produced standalone `airlock` and
+`airlock-agent` executables plus the native launcher, SHA-256 list, and JSON
+manifest. The installer placed the launcher under
+`$PREFIX/libexec/airlock/airlock-linux-launcher`; the installed CLI discovered
+it relative to itself without an override.
 
-- **No native containment profile exists on Linux.** There is no Seatbelt
-  equivalent in-tree, no private-view preparation, and no network fence. The
-  `native-contained` profile refuses on Linux — `Cell` fails with
-  `CellUnavailable` — and never falls back to compatibility. On Linux the
-  enclosure is the operator's container or VM, not Airlock.
-- **This is not a supported platform.** `package.json` still declares
-  `os: ["darwin"]`, the distribution scripts remain macOS-only, and no Linux
-  release artifact is built or published.
-- **The evidence covers one filesystem.** `overlayfs` on the kernel above. A
-  filesystem whose rename does not implement `RENAME_NOREPLACE` is refused with
-  a typed `ExclusiveRenameUnavailable`; that refusal path has not been exercised
-  against a real such filesystem.
-- **No parity or corpus claim.** Nothing here measures shell replacement, task
-  completion, or latency. See [`docs/evidence/parity-50.md`](parity-50.md) and
-  [`docs/acceptance.md`](../acceptance.md), both of which remain macOS-scoped.
-- **The two laws are untouched.** `Hold.reap` remains the only unlink site,
-  `Outbox.commit` remains the only wire-dispatch site, and neither adapter adds
-  a Plan constructor, a profile, or an agent-visible verb.
+### Portable durability primitives
 
-## Known Linux failures outside this scope
+```sh
+bun scripts/prove-linux-boundary.ts
+```
 
-A full `vitest run` in the container reports 37 files passing and these
-failures, none of them caused by the platform adapters:
+The existing 16-process proof still exercises
+`renameat2(RENAME_NOREPLACE)` and `flock(LOCK_EX | LOCK_NB)`: target collisions
+preserve both byte sets, at most one independent process holds the lease, and a
+lease held by a process killed with `SIGKILL` is reclaimed by the kernel.
+Linux platform selection is host-owned; no program or policy can select a
+weaker rename or lease adapter.
 
-- **`test/distribution.test.ts`** — exercises the macOS install/uninstall
-  scripts and Trash displacement. macOS-only by construction.
-- **`test/agent-cli.test.ts`, `test/cli.test.ts`** — these fixtures pass one
-  temporary directory as both `AIRLOCK_HOME` and `--workspace`, and the native
-  filesystem correctly refuses to mutate inside the Airlock home
-  (`ProtectedPath: airlock home`). They pass on macOS only because `mktemp -d`
-  there returns a symlinked `/var/folders/...` path that does not match the
-  resolved workspace. Reproduced on macOS with a resolved home:
+## CI gate
 
-  ```sh
-  H=$(cd "$(mktemp -d)" && pwd -P)
-  AIRLOCK_HOME=$H bun src/agent-cli.ts eval --workspace "$H" \
-    --source 'let receipt = file.write({ path: "a.txt", content: "x" })
-  return receipt'    # exit 1, same protection
-  ```
+`.github/workflows/linux.yml` defines a required Ubuntu 22.04 matrix for Bun
+1.3.11 and 1.3.13. Each job builds the exact upstream Bubblewrap 0.12.0 commit,
+verifies regular non-setid/no-capability metadata, builds the Linux release
+unit, requires a production-shaped candidate `doctor`, and runs
+`scripts/run-linux-suites.sh`. The script runs the native boundary proof followed
+by the complete `bun run verify` gate; there are no Linux behavior exclusions.
 
-  This is a fixture path-normalization artifact that predates Linux support and
-  is platform-independent. It is recorded here, not fixed here.
+Host-policy diagnostics are reported, but the workflow does not disable
+AppArmor or user-namespace policy. A denial is a failed native-containment gate,
+not a skip.
+
+## Claim boundary
+
+The tests support the narrower contract in [`../linux-v1.md`](../linux-v1.md):
+private writes, live-write denial, denied network, direct executable-object
+fencing, bounded process teardown, delta/Apply separation, and the shared
+Hold/Outbox/receipt physics.
+
+They do **not** establish:
+
+- confidentiality—the read-only host root is intentionally broadly readable;
+- complete execution closure—hardlink aliases, admitted ELF loaders,
+  interpreters, dynamic libraries, plugins, hooks, configuration, and
+  in-process code remain meaningful;
+- pathname exclusivity beyond pinned setup objects—Landlock execute authority
+  follows filesystem objects;
+- contained endpoint access—the Linux native profile supports deny-only
+  network and has no endpoint broker;
+- CPU, memory, process, disk, or I/O quotas—the cgroup namespace is not a
+  resource controller;
+- VM equivalence, kernel defense, administrator defense, or supply-chain
+  integrity;
+- all filesystems, kernel versions, Linux distributions, architectures, or
+  AppArmor policies; or
+- a representative model/harness shell-replacement corpus.
+
+The two repository laws are unchanged: `Hold.reap` remains the only irreversible
+managed-byte removal site, and `Outbox.commit` remains the only Airlock-owned
+wire-dispatch site.

@@ -1,7 +1,7 @@
 import { Context, DateTime, Effect, Layer, Schema } from "effect"
 
 /**
- * A structured, non-shell process boundary for macOS/Bun.
+ * A structured, non-shell process boundary for Bun-backed hosts.
  *
  * `executable` is always an absolute path and `args` is passed to Bun as
  * individual atoms. This module deliberately has no command-string API.
@@ -96,6 +96,11 @@ export interface ProcessRunOptions {
   readonly signal?: AbortSignal
   /** Grace period between SIGTERM and SIGKILL. Defaults to 500 ms. */
   readonly killGraceMs?: number
+  /**
+   * Backend-only inherited descriptors, installed contiguously from child fd 3.
+   * The caller owns and closes the source descriptors after `run` settles.
+   */
+  readonly extraFileDescriptors?: ReadonlyArray<number>
 }
 
 /** The typed process seam; Bun is confined to the adapter below. */
@@ -197,13 +202,25 @@ const runNativeProcess = async (
   let child: Bun.Subprocess<"ignore", "pipe", "pipe">
   try {
     // The explicit `cmd` array is the central no-shell guarantee.
+    const stdout = output(request.stdout)
+    const stderr = output(request.stderr)
     child = Bun.spawn({
       cmd: [request.executable, ...request.args],
       cwd: request.cwd,
       env: request.env,
       stdin: stdin as "ignore",
-      stdout: output(request.stdout) as "pipe",
-      stderr: output(request.stderr) as "pipe",
+      stdout: stdout as "pipe",
+      stderr: stderr as "pipe",
+      ...(options.extraFileDescriptors === undefined || options.extraFileDescriptors.length === 0
+        ? {}
+        : {
+            stdio: [
+              stdin as "ignore",
+              stdout as "pipe",
+              stderr as "pipe",
+              ...options.extraFileDescriptors
+            ]
+          }),
       detached: true
     })
   } catch (cause) {
@@ -259,41 +276,117 @@ const runNativeProcess = async (
         }, request.timeoutMs)
 
   let capturedBytes = 0
-  const capture = async (stream: ReadableStream<Uint8Array> | undefined) => {
-    if (stream === undefined) return new Uint8Array()
+  const capture = (stream: ReadableStream<Uint8Array> | undefined) => {
     const chunks: Uint8Array[] = []
-    const reader = stream.getReader()
-    try {
-      while (true) {
-        const next = await reader.read()
-        if (next.done) break
-        const remaining = request.outputLimitBytes - capturedBytes
-        if (remaining > 0) {
-          const accepted = next.value.subarray(0, remaining)
-          chunks.push(accepted)
-          capturedBytes += accepted.byteLength
-        }
-        if (next.value.byteLength > remaining && stopReason === undefined) {
-          stopReason = "output"
-          terminateGroup()
-        }
+    if (stream === undefined) {
+      return {
+        completion: Promise.resolve(),
+        settled: () => true,
+        cancel: () => {},
+        bytes: () => new Uint8Array(),
+        failure: () => undefined as unknown
       }
-    } finally {
-      reader.releaseLock()
     }
-    return join(chunks)
+
+    const reader = stream.getReader()
+    let settled = false
+    let readFailure: unknown
+    const completion = (async () => {
+      try {
+        while (true) {
+          const next = await reader.read()
+          if (next.done) break
+          const remaining = request.outputLimitBytes - capturedBytes
+          if (remaining > 0) {
+            const accepted = next.value.subarray(0, remaining)
+            // Retain bytes independently of Bun's native pipe buffer.
+            chunks.push(accepted.slice())
+            capturedBytes += accepted.byteLength
+          }
+          if (next.value.byteLength > remaining && stopReason === undefined) {
+            stopReason = "output"
+            terminateGroup()
+          }
+        }
+      } catch (cause) {
+        readFailure = cause
+      } finally {
+        settled = true
+        reader.releaseLock()
+      }
+    })()
+    return {
+      completion,
+      settled: () => settled,
+      cancel: () => {
+        if (!settled) void reader.cancel("Airlock process teardown").catch(() => {})
+      },
+      bytes: () => join(chunks),
+      failure: () => readFailure
+    }
   }
 
-  const stdoutRead = request.stdout === "capture" ? capture(child.stdout) : Promise.resolve(new Uint8Array())
-  const stderrRead = request.stderr === "capture" ? capture(child.stderr) : Promise.resolve(new Uint8Array())
-  await child.exited
+  const stdoutCapture = request.stdout === "capture"
+    ? capture(child.stdout)
+    : capture(undefined)
+  const stderrCapture = request.stderr === "capture"
+    ? capture(child.stderr)
+    : capture(undefined)
+  const captures = [stdoutCapture, stderrCapture]
+  const waitForCaptures = (milliseconds: number) => {
+    if (captures.every((capture) => capture.settled())) {
+      return Promise.resolve(true)
+    }
+    return new Promise<boolean>((resolve) => {
+      const timer = setTimeout(() => resolve(false), milliseconds)
+      void Promise.all(captures.map((capture) => capture.completion)).then(() => {
+        clearTimeout(timer)
+        resolve(true)
+      })
+    })
+  }
+
+  let directExitObserved = false
+  const directExit = child.exited.then(() => {
+    directExitObserved = true
+  })
+  let processGroupObserved = groupExists()
   // A direct-child receipt is not closure completion. Same-group descendants
-  // retain inherited descriptors and Cell authority, so wait until the group
-  // is empty. The still-active timeout/cancellation paths terminate it.
-  while (groupExists()) {
+  // retain inherited descriptors and Cell authority, so completion is the
+  // disappearance of the detached process group. Tracking the group directly
+  // also avoids depending solely on Bun 1.3's lossy Linux pidfd notification.
+  while (true) {
+    const present = groupExists()
+    processGroupObserved ||= present
+    if (
+      !present &&
+      (processGroupObserved || directExitObserved || stopReason !== undefined)
+    ) break
     await new Promise((resolve) => setTimeout(resolve, 10))
   }
-  const [stdout, stderr] = await Promise.all([stdoutRead, stderrRead])
+  if (!directExitObserved) {
+    // Give Bun a bounded chance to publish the already-reaped exit status.
+    await Promise.race([
+      directExit,
+      new Promise<void>((resolve) => setTimeout(resolve, 200))
+    ])
+  }
+  if (stopReason === undefined) {
+    // Successful output remains lossless and EOF-driven.
+    await Promise.all(captures.map((capture) => capture.completion))
+  } else if (!(await waitForCaptures(200))) {
+    // Bun 1.3 can leave a pipe reader pending after a killed PID namespace even
+    // when the kernel reports the process group gone. Preserve every delivered
+    // byte, then bound teardown by cancelling the parent-side readers.
+    for (const capture of captures) capture.cancel()
+    await waitForCaptures(200)
+  }
+  const captureFailure = captures
+    .map((capture) => capture.failure())
+    .find((cause) => cause !== undefined)
+  if (captureFailure !== undefined) throw captureFailure
+  const stdout = stdoutCapture.bytes()
+  const stderr = stderrCapture.bytes()
   if (timeout !== undefined) clearTimeout(timeout)
   if (killTimer !== undefined) clearTimeout(killTimer)
   options.signal?.removeEventListener("abort", abort)

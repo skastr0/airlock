@@ -10,6 +10,7 @@ import {
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
 import { describe, expect, it } from "vitest"
+import { nativeContainmentSupported } from "./support/NativeContainmentTest.ts"
 
 const repository = resolve(import.meta.dirname, "..")
 
@@ -106,8 +107,7 @@ describe("native-contained workspace identity", () => {
   })
 
   it.skipIf(
-    process.platform !== "darwin" ||
-      !existsSync("/usr/bin/sandbox-exec") ||
+    !nativeContainmentSupported ||
       !existsSync("/usr/bin/touch")
   )(
     "binds a symlink-ancestor workspace before admission and execution",
@@ -206,7 +206,7 @@ describe("native-contained workspace identity", () => {
     }
   )
 
-  it.skipIf(process.platform !== "darwin")(
+  it.skipIf(!nativeContainmentSupported)(
     "binds relative and /tmp path selectors before native-contained admission",
     { timeout: 60_000 },
     () => {

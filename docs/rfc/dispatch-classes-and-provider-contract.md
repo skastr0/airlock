@@ -440,11 +440,10 @@ move unchanged.
 
 ## 4. Linux realm claim boundary
 
-Airlock is macOS-first; every containment, Hold, Outbox, and receipt claim in
-ARCHITECTURE.md is scoped to the tested macOS envelope
-(ARCHITECTURE.md, "Why macOS first"). A Linux deployment (e.g. the Docker
-server available beside this host) is, in current vocabulary, a **separate
-realm**, and the claim boundary is:
+Airlock has separately tested macOS and Linux host envelopes. A Linux
+deployment reached from another host is still a **separate realm**; shared
+contracts do not transfer local authority or platform claims across that
+boundary:
 
 - **Realm is already a modeled field**, not a new concept: policies carry
   `realm` (`src/admission/Admission.ts:51`), requirements and grants carry
@@ -459,14 +458,13 @@ realm**, and the claim boundary is:
   single wire site — not a remote adapter driven by the macOS instance's
   authority.
 - **No borrowed claims.** Nothing in this RFC lets a macOS receipt speak for
-  Linux execution or vice versa. Seatbelt-specific properties
-  (executable-edge fencing, private APFS views) are macOS mechanisms; a Linux
-  profile would need its own enforcement evidence before advertising any
-  contained profile, and until then only `compatibility`-grade claims are
-  honest there. Remote-realm authentication and ambiguous-result
-  reconciliation remain open questions (DESIGN.md, "Open questions"), and
-  this RFC does not resolve them — it only fixes that dispatch classes and
-  endpoint grants are per-realm policy facts, never cross-realm defaults.
+  Linux execution or vice versa. Seatbelt/APFS and Bubblewrap/Landlock/seccomp
+  are separately reported mechanisms with different limitations. Linux's
+  direct host evidence is documented in `docs/linux-v1.md`; it does not make a
+  remote Linux receipt local or satisfy a macOS mechanism claim. Remote-realm
+  authentication and ambiguous-result reconciliation remain open questions
+  (DESIGN.md, "Open questions"), and this RFC does not resolve them — it only
+  fixes that dispatch classes and endpoint grants are per-realm policy facts, never cross-realm defaults.
 
 ---
 

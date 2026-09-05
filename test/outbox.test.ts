@@ -49,8 +49,12 @@ const world = <A, E>(body: (ctx: World) => Effect.Effect<A, E>) =>
           s.listen(0, "127.0.0.1", () => resume(Effect.succeed(s)))
         }),
         (s) =>
-          Effect.async<void>((resume) => {
-            s.close(() => resume(Effect.void))
+          Effect.sync(() => {
+            // Bun's Node-compatible server stops listening synchronously here,
+            // but its close callback can remain pending after a pooled fetch.
+            // Force established connections closed and do not await that shim.
+            s.close()
+            s.closeAllConnections()
           })
       )
       const address = server.address() as AddressInfo

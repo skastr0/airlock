@@ -34,6 +34,7 @@ import {
   RequirementId,
   ResourceRequirement
 } from "../src/plan/index.ts"
+import { LinuxPlatformLive } from "../src/platform/linux/index.ts"
 import { MacosPlatformLive } from "../src/platform/macos/index.ts"
 import { ProcessRunnerLive } from "../src/process/Process.ts"
 import { NativeFileSystemLive, NativeFilesystemConfig } from "../src/native/index.ts"
@@ -67,6 +68,12 @@ const externalHeaders = {
 const node = (value: string) => NodeId.make(value)
 const requirement = (value: string) => RequirementId.make(value)
 const artifact = (value: string) => ArtifactId.make(value)
+const tarDescendants = process.platform === "linux"
+  ? ["/bin/sh", "/usr/bin/gzip"]
+  : []
+const NativePlatformLive = process.platform === "linux"
+  ? LinuxPlatformLive
+  : MacosPlatformLive
 
 const receiptEvidence = Schema.Struct({
   nodeId: Schema.String,
@@ -157,6 +164,15 @@ const makeDraft = (
   const observeSoul = requirement("observe-live-soul")
   const mergeWorkspace = requirement("merge-workspace")
   const stageReplacement = requirement("stage-replacement")
+  const tarExecutionRequirements = tarDescendants.map((selector, index) =>
+    new ResourceRequirement({
+      id: requirement(`execute-tar-descendant-${index}`),
+      kind: "executable",
+      realm: "host",
+      selector,
+      rights: ["execute"]
+    })
+  )
   const archiveArtifact = artifact("vouch/archive")
   const tarStderr = artifact("vouch/tar-stderr")
   const cellDelta = artifact("vouch/restore-delta")
@@ -177,6 +193,7 @@ const makeDraft = (
       selector: "/usr/bin/tar",
       rights: ["invoke"]
     }),
+    ...tarExecutionRequirements,
     new ResourceRequirement({
       id: invokeWorkspace,
       kind: "path",
@@ -218,10 +235,15 @@ const makeDraft = (
   const invoke = new InvokeNode({
     id: node("extract-private"),
     dependsOn: [capture.id],
-    requires: [invokeTar, invokeWorkspace],
+    requires: [
+      invokeTar,
+      ...tarExecutionRequirements.map(({ id }) => id),
+      invokeWorkspace
+    ],
     produces: [tarStderr, cellDelta],
     executable: "/usr/bin/tar",
     args: ["-xzf", "-", "-C", "hermes"],
+    descendantExecutables: tarDescendants,
     cwd: workspace,
     env: {
       COPYFILE_DISABLE: "1",
@@ -284,10 +306,17 @@ const makeDraft = (
  * operation is represented by the admitted Airlock Plan.
  */
 export const runVouchProof = async (): Promise<VouchProofReport> => {
-  assert(process.platform === "darwin", "the native-contained proof requires macOS")
+  assert(
+    process.platform === "darwin" || process.platform === "linux",
+    "the native-contained proof requires macOS or Linux"
+  )
   assert(typeof Bun !== "undefined", "the proof requires Bun")
-  assert(existsSync("/usr/bin/sandbox-exec"), "sandbox-exec is unavailable")
-  assert(existsSync("/usr/bin/tar"), "/usr/bin/tar is unavailable")
+  if (process.platform === "darwin") {
+    assert(existsSync("/usr/bin/sandbox-exec"), "sandbox-exec is unavailable")
+  }
+  for (const executable of ["/usr/bin/tar", ...tarDescendants]) {
+    assert(existsSync(executable), `${executable} is unavailable`)
+  }
 
   const fixture = makeFixture()
   const soulPath = join(fixture.hermes, "SOUL.md")
@@ -306,6 +335,9 @@ export const runVouchProof = async (): Promise<VouchProofReport> => {
     grantTtlMillis: 300_000,
     pathAllowlist: [`${fixture.workspace}/**`],
     executableAllowlist: ["/usr/bin/tar"],
+    executableEdges: tarDescendants.length === 0
+      ? []
+      : [{ root: "/usr/bin/tar", descendants: tarDescendants }],
     endpointAllowlist: [endpoint]
   })
 
@@ -324,7 +356,7 @@ export const runVouchProof = async (): Promise<VouchProofReport> => {
   const executionDependencies = Layer.mergeAll(
     nativeLayer,
     ProcessRunnerLive,
-    MacosPlatformLive
+    NativePlatformLive
   )
   const cellLayer = CellLive.pipe(
     Layer.provideMerge(executionDependencies)
@@ -352,7 +384,18 @@ export const runVouchProof = async (): Promise<VouchProofReport> => {
         const runtime = yield* Runtime
         const run = yield* runtime.execute(authority)
 
-        assert(run.state === "succeeded", `runtime ended ${run.state}`)
+        const tarDiagnostic = run.artifacts.find(
+          ({ artifact }) =>
+            artifact.id === ArtifactId.make("vouch/tar-stderr")
+        )?.bytes
+        assert(
+          run.state === "succeeded",
+          `runtime ended ${run.state}: ${
+            tarDiagnostic === undefined
+              ? "tar stderr artifact absent"
+              : new TextDecoder().decode(tarDiagnostic)
+          }`
+        )
         assert(
           run.receipts.every((receipt) => receipt.state === "succeeded"),
           "not every Plan node succeeded"

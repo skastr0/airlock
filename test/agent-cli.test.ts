@@ -9,6 +9,7 @@ import {
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
 import { describe, expect, it } from "vitest"
+import { nativeContainmentSupported } from "./support/NativeContainmentTest.ts"
 
 const repository = resolve(import.meta.dirname, "..")
 
@@ -25,17 +26,25 @@ const run = (
 
 const json = (value: string) => JSON.parse(value) as Record<string, unknown>
 
+const isolatedWorkspace = (prefix: string) => {
+  const root = mkdtempSync(join(tmpdir(), prefix))
+  const home = join(root, "home")
+  const workspace = join(root, "workspace")
+  mkdirSync(workspace)
+  return { home, workspace } as const
+}
+
 describe("agent-only CLI surface", () => {
   it("accepts source directly and routes effects through admitted program execution", { timeout: 30_000 }, () => {
-    const home = mkdtempSync(join(tmpdir(), "airlock-agent-cli-"))
+    const { home, workspace } = isolatedWorkspace("airlock-agent-cli-")
     const executed = run([
       "eval",
-      "--workspace", home,
+      "--workspace", workspace,
       "--source", 'let receipt = file.write({ path: "result.txt", content: "airlocked" })\nreturn receipt'
     ], home)
 
     expect(executed.status).toBe(0)
-    expect(readFileSync(join(home, "result.txt"), "utf8")).toBe("airlocked")
+    expect(readFileSync(join(workspace, "result.txt"), "utf8")).toBe("airlocked")
     expect(json(executed.stdout)).toMatchObject({
       schemaVersion: "airlock/program-run/v1",
       profile: "compatibility",
@@ -349,7 +358,7 @@ describe("agent-only CLI surface", () => {
   })
 
   it("offers compact agent run and eval projections without changing the full default", { timeout: 30_000 }, () => {
-    const home = mkdtempSync(join(tmpdir(), "airlock-agent-compact-"))
+    const { home, workspace } = isolatedWorkspace("airlock-agent-compact-")
     const source = [
       'let first = file.write({ path: "first.txt", content: "one" })',
       'let second = file.write({ path: "second.txt", content: "two" })',
@@ -358,13 +367,13 @@ describe("agent-only CLI surface", () => {
     ].join("\n")
     const full = run([
       "eval",
-      "--workspace", home,
+      "--workspace", workspace,
       "--source", source
     ], home)
     const compact = run([
       "eval",
       "--compact",
-      "--workspace", home,
+      "--workspace", workspace,
       "--source", source
     ], home)
 
@@ -381,7 +390,7 @@ describe("agent-only CLI surface", () => {
     expect(compactReport).toMatchObject({
       schemaVersion: "airlock/program-run/v1",
       profile: "compatibility",
-      workspace: resolve(home),
+      workspace: resolve(workspace),
       result: {
         state: "succeeded",
         result: {
@@ -418,12 +427,12 @@ describe("agent-only CLI surface", () => {
     expect(compact.stdout.length).toBeLessThan(full.stdout.length)
     expect(full.stdout.length - compact.stdout.length).toBeGreaterThan(1_000)
 
-    const program = join(home, "compact.air")
+    const program = join(workspace, "compact.air")
     writeFileSync(program, source)
     const compactRun = run([
       "run",
       "--compact",
-      "--workspace", home,
+      "--workspace", workspace,
       program
     ], home)
     expect(compactRun.status, compactRun.stderr).toBe(0)
@@ -439,10 +448,10 @@ describe("agent-only CLI surface", () => {
   })
 
   it("exposes redacted durable Runtime receipts by Plan id", { timeout: 30_000 }, () => {
-    const home = mkdtempSync(join(tmpdir(), "airlock-agent-runs-"))
+    const { home, workspace } = isolatedWorkspace("airlock-agent-runs-")
     const executed = run([
       "eval",
-      "--workspace", home,
+      "--workspace", workspace,
       "--source",
       'return file.write({ path: "journaled.txt", content: "receipt" })'
     ], home)
@@ -472,7 +481,7 @@ describe("agent-only CLI surface", () => {
     })
     const second = run([
       "eval",
-      "--workspace", home,
+      "--workspace", workspace,
       "--source",
       'return file.read({ path: "journaled.txt", format: "text" })'
     ], home)
@@ -494,8 +503,7 @@ describe("agent-only CLI surface", () => {
   })
 
   it.skipIf(
-    process.platform !== "darwin" ||
-    !existsSync("/usr/bin/sandbox-exec") ||
+    !nativeContainmentSupported ||
     !existsSync("/usr/bin/touch")
   )(
     "keeps the execution profile outside agent control",

@@ -8,7 +8,7 @@
 
 ## Summary
 
-Airlock is a macOS-first, agent-only runtime for Unix machine work. In the
+Airlock is a macOS-and-Linux, agent-only runtime for Unix machine work. In the
 intended harness, the agent does not receive Bash, a terminal, a generic
 process tool, or a second filesystem/network path. It receives Airlock. An
 Airlock program calls typed, generic actions; those actions lower to a closed
@@ -39,32 +39,29 @@ The current implementation has two usable execution profiles:
 
 - `compatibility` runs structured executable-plus-argument requests with the
   invoking user's host authority and makes no containment claim.
-- `native-contained` runs supported work in a private macOS workspace under a
-  Seatbelt profile, fences declared executable edges, denies live-workspace
-  writes and network, computes a delta, and applies admitted top-level
-  file/directory changes through Hold.
+- `native-contained` runs supported work in a private host workspace, fences
+  declared direct executable edges, denies live-workspace writes and network,
+  computes a delta, and applies admitted top-level file/directory changes
+  through Hold. macOS uses Seatbelt; Linux uses Bubblewrap, Landlock, and
+  seccomp.
 
 The native profile is deliberately narrower than a VM. It permits ambient host
 reads so existing loaders and Unix programs work; it therefore does not provide
-confidentiality. A VM-enclosed backend is a future stronger backend, not the
-gate for macOS v1.
+confidentiality. A VM-enclosed backend remains future work.
 
-### Why macOS first
+### Platform strategy
 
-macOS is the first product environment, not a portability afterthought.
-Developer Macs commonly place an agent beside valuable personal credentials,
-repositories, databases, and application state under one user identity. VPS
-work already tends to arrive with a VM, container, or disposable-machine
-boundary; on a Mac, the missing agent-specific boundary is often the immediate
-problem.
+macOS was the first product environment and remains a distinct documented
+release envelope. Linux now implements the same shared contracts with native
+host mechanisms rather than borrowing macOS claims. Developer Macs and Linux
+workstations can both place an agent beside valuable credentials, repositories,
+databases, and application state under one user identity.
 
-Starting on macOS also forces the contracts to meet the real platform:
-canonical path aliases, APFS clone/copy behavior, Seatbelt's actual limits,
-codesigning, local installation, and ordinary developer tooling. The result is
-not assumed to be stronger than Linux. Native macOS containment is explicitly
-weaker in several dimensions, especially confidential reads and complete
-execution closure. Platform adapters may differ later; Plan, authority,
-Hold/Outbox finality, and receipt semantics should not.
+Platform adapters deliberately differ. macOS handles canonical aliases, APFS
+clone/copy behavior, Seatbelt, and code signing. Linux handles glibc host builds,
+GNU copy behavior, unprivileged namespace policy, Bubblewrap setup, Landlock
+object semantics, seccomp, and external runtime prerequisites. Plan, authority,
+Hold/Outbox finality, and receipt semantics remain shared.
 
 ## Status vocabulary
 
@@ -92,7 +89,7 @@ Hold/Outbox finality, and receipt semantics should not.
 | agent-only binary | **Implemented product boundary**; `airlock-agent` omits terminal-authority maintenance commands, but the external harness must still prove that it exposed no alternate effect path |
 | compatibility profile | **Implemented**; no containment claim |
 | native-contained profile | **Implemented narrow subset**; private view, source-write fence, network denial, delta/Apply path |
-| native executable-edge fence | **Implemented bounded mechanism**; root `invoke` and root-scoped descendant `execute` requirements lower to exact Seatbelt `process-exec` paths, with resolved binding evidence in Cell/Runtime receipts |
+| native executable-edge fence | **Implemented bounded mechanism**; root `invoke` and root-scoped descendant `execute` requirements lower to exact Seatbelt paths on macOS or pinned Landlock executable objects on Linux, with resolved binding evidence in Cell/Runtime receipts |
 | in-process interpretation boundary | **Implemented and proved as a limitation**; an admitted `/bin/bash` can source agent-owned `BASH_ENV` without another exec, while its live-write and network attempts remain denied and private writes remain a delta |
 | native workspace identity | **Implemented at the trusted CLI boundary**; native execution canonicalizes the workspace and existing absolute policy scopes before admission, while general path-race-safe resource identity remains incomplete |
 | private Cell lifecycle | **Implemented normal path**; exact Cell workspace identity is transferred to a non-undoable runtime-private Hold act on completion, failure, or cancellation, then only Reaper may discard it |
@@ -109,6 +106,7 @@ Hold/Outbox finality, and receipt semantics should not.
 | Unix contract corpus | **Implemented contract-shape evidence**; 72 accepted shapes across 10 families parse, decode, lower, validate, and compatibility-admit, with 8 explicit unsupported classes; they are not executed tasks or model-success evidence |
 | 50-execution agent proof | **Implemented repeatability evidence**; 10 deterministic scripted cases run five times each through real agent CLI subprocesses (40 compatibility, 10 native-contained), not 50 unique/model-generated tasks, a shell A/B, or a holdout corpus |
 | macOS distribution | **Implemented local release path**; paired supervisor/agent binaries are hashed, ad-hoc signed, verified, transactionally installed, and probed; Developer ID signing and notarization remain release gates |
+| Linux distribution | **Implemented local release path**; host-architecture glibc supervisor/agent binaries plus the native launcher are hashed, metadata-checked, transactionally installed/rolled back, probed, and executed; Bubblewrap 0.12+ remains an external prerequisite |
 | shell-replacement confidence | **Not earned**; the checked-in fixtures are useful but not a representative corpus, complete crash matrix, or red-team result |
 
 ## Product direction
@@ -525,24 +523,31 @@ The current native Cell:
 
 1. receives the canonical workspace identity bound at the trusted CLI seam;
 2. fingerprints the source workspace;
-3. creates a fresh same-volume private workspace using clone or copy;
+3. creates a fresh private workspace using the platform clone-or-copy adapter;
 4. registers that exact path for lifecycle retention;
-5. runs `/usr/bin/sandbox-exec` with a generated Seatbelt profile;
-6. permits process fork and exact `process-exec` paths for the admitted root
-   and its root-scoped declared descendants;
-7. permits ambient `file-read*`;
-8. creates a private per-Invoke temp directory, exports it through `TMPDIR`,
+5. binds the admitted root and root-scoped declared descendants into the active
+   platform's executable-edge mechanism;
+6. permits ambient host reads;
+7. creates a private per-Invoke temp directory, exports it through `TMPDIR`,
    `TMP`, and `TEMP`, and excludes it from the proposed delta;
-9. permits writes only in the private workspace, declared temporary
-   directories, and `/dev/null`;
-10. denies `network*`;
-11. runs the requested executable in the private workspace;
-12. fingerprints the live and private trees;
-13. reports private delta candidates and any live drift;
-14. leaves live mutation to a later `Apply.merge`; and
-15. on completion, typed failure, or cancellation, verifies the Cell-reported
+8. permits writes only in the private workspace and declared temporary paths;
+9. denies network;
+10. runs the requested executable in the private workspace;
+11. fingerprints the live and private trees;
+12. reports private delta candidates and any live drift;
+13. leaves live mutation to a later `Apply.merge`; and
+14. on completion, typed failure, or cancellation, verifies the Cell-reported
     private directory identity and transfers it into Hold as
     `purpose: runtime-private`.
+
+The macOS adapter renders a Seatbelt profile over an APFS clone/copy. The Linux
+adapter pins source/private/temp/launcher/executable objects with
+`O_PATH | O_NOFOLLOW`, asks Bubblewrap 0.12+ for user/mount/PID/network/IPC/UTS/
+cgroup namespaces and a read-only host root, then uses a C launcher to install
+Landlock EXECUTE+REFER and seccomp before exposing target environment or
+executing the target. It closes every backend descriptor before target code
+runs. See [`docs/linux-v1.md`](docs/linux-v1.md) for the exact Linux syscall and
+deployment envelope.
 
 Before the first live mutation, the runtime revalidates the Cell baseline and
 preflights every delta entry. The current merge envelope is top-level regular
@@ -558,9 +563,14 @@ The profile's precise limitations matter:
 - exact executable-edge fencing does not mediate dynamic-library loads,
   agent-owned code interpreted in-process, configuration, plugins, or other
   behavior that occurs without a new exec;
-- external executable binding records requested, launch, and allowed paths but
-  does not yet bind immutable code bytes across path replacement races;
-- network is denied rather than brokered;
+- Linux Landlock rules follow executable filesystem objects, so hardlink aliases
+  share authority, and an admitted ELF loader can interpret an unadmitted ELF
+  passed as data without another mediated exec;
+- external executable binding records requested, launch, and allowed paths;
+  Linux pins setup objects while macOS does not establish immutable code bytes
+  across every path replacement race;
+- network is denied rather than brokered, and no native backend installs CPU,
+  memory, process-count, disk, or I/O quotas;
 - a multi-entry merge performs individually recoverable Hold transitions but
   is not claimed as one atomic transaction;
 - runtime-private trees remain retained until a supervisor reaps them, and a
@@ -600,8 +610,9 @@ acts, and reap.
 Implemented properties include:
 
 - same-volume admission before a managed rename;
-- atomic no-replace installation/restoration on macOS through
-  `renamex_np(RENAME_EXCL)`, with a typed fail-closed platform capability;
+- atomic no-replace installation/restoration through
+  `renamex_np(RENAME_EXCL)` on macOS or `renameat2(RENAME_NOREPLACE)` on Linux,
+  with a typed fail-closed platform capability;
 - protection for filesystem root and Airlock state;
 - file/directory modeling with fail-closed symlink handling on replacement;
 - journaled runtime-private staging reserved before native adapters populate
@@ -739,11 +750,12 @@ root executable (`invoke`)
 ```
 
 Admission prevents a descendant-only Grant from becoming root authority.
-Seatbelt permits fork but grants `process-exec` only to the resolved paths in
-that set. Workspace-local executables are rebased into the private view;
-receipts retain requested, launch, allowed-path, role, and rebase evidence.
-This blocks an undeclared helper exec and is useful containment. It is not a
-semantic description of all code that runs.
+Seatbelt limits `process-exec` to resolved paths on macOS. Linux pins each
+selected file and its ELF loader into the mount namespace, then grants Landlock
+EXECUTE to those objects. Workspace-local executables are rebased into the
+private view; receipts retain requested, launch, allowed-path, role, and rebase
+evidence. This blocks an undeclared ordinary helper exec and is useful
+containment. It is not a semantic description of all code that runs.
 
 An executable path or binary digest is not a complete description of what
 runs. The stronger candidate contract is a full **execution closure**:
@@ -761,16 +773,19 @@ root/image identity
 The current native Cell does not bind this full closure. Dynamic libraries and
 configuration arrive through allowed file reads; an admitted interpreter can
 execute agent-owned bytes in-process; plugins may execute within an already
-admitted process; external executable paths may race with mutable code bytes;
-and process-group ownership does not prove every daemonization path.
+admitted process; Linux hardlinks share Landlock object authority and an
+admitted ELF loader can interpret an unadmitted ELF passed as data; external
+executable paths may race with mutable code bytes; and process-group ownership
+does not prove every daemonization path.
 Definitions describe invoke contracts but do not attest the opaque program or
 its transitive dependencies.
 
-The checked-in Bun proof makes this boundary concrete: `/bin/bash`, admitted
-as the only executable, sources an agent-owned `BASH_ENV` without a second
-exec. Seatbelt still denies the sourced code's live-workspace write and
-loopback connection, while its private write appears as the sole delta. That
-successful proof is evidence for executable-edge fencing plus resource
+The checked-in macOS Bun proof makes this boundary concrete: `/bin/bash`,
+admitted as the only executable, sources an agent-owned `BASH_ENV` without a
+second exec while Seatbelt still confines its writes/network. The Linux suite
+separately demonstrates an admitted ELF loader interpreting an undeclared
+`/usr/bin/touch` ELF as data while the write remains private. These successful
+adversarial cases are evidence for direct executable-edge fencing plus resource
 confinement, not evidence of a full execution closure.
 
 Authority also composes across time. A low-network/no-network Plan can write a
@@ -878,18 +893,18 @@ be reimplemented ad hoc in CLI or platform glue.
 
 ### Adapter implementations
 
-The CLI, Bun process runner, Seatbelt profile renderer, APFS clone/copy logic,
-definition file reader, Vouch harness, and future VM/broker implementations are
-plastic adapters. They may be local and repetitive. They must remain tested
-and observable, but they do not need generic integration frameworks.
+The CLI, Bun process runner, Seatbelt renderer, APFS/GNU-copy adapters,
+Bubblewrap argument builder, Linux launcher, definition reader, Vouch harness,
+and future VM/broker implementations are plastic adapters. They may be local
+and repetitive. They must remain tested and observable, but they do not need
+generic integration frameworks.
 
-The Linux platform adapters sit in this stratum: a
-`renameat2(RENAME_NOREPLACE)` rename and a `flock(2)` exclusive lease in
-`src/platform/linux/`, selected by host platform only and container-proven for
-the portable Hold/Outbox/Ledger/lease physics
-([`docs/evidence/linux-beachhead.md`](docs/evidence/linux-beachhead.md)). No
-Linux containment profile exists — `native-contained` refuses there — and
-macOS remains the release platform.
+Linux also implements `renameat2(RENAME_NOREPLACE)`, a `flock(2)` exclusive
+lease, host-native private workspace preparation, and a Bubblewrap/Landlock/
+seccomp Cell under `src/platform/linux/`. Selection is by host platform only;
+programs, profiles, and definitions cannot choose an adapter. The native and
+distribution boundaries are directly exercised on Linux
+([`docs/evidence/linux-beachhead.md`](docs/evidence/linux-beachhead.md)).
 
 The current CLI composes services through one application Layer graph and
 runtime. It does not yet run a persistent daemon or expose the future local RPC
@@ -903,7 +918,8 @@ Implemented, bounded properties:
 - the integrated program seam retains and validates the exact
   Plan/Grant/Handle closure as `ExecutionAuthority`;
 - native Admission separates root `invoke` from root-scoped descendant
-  `execute`, and Seatbelt fences new execs to the resolved executable edge set;
+  `execute`, and Seatbelt or Landlock fences ordinary new execs to the resolved
+  executable edge set;
 - Cell and Runtime receipts retain executable binding roles and resolved path
   evidence;
 - native workspace aliases are canonicalized before admission and the
@@ -999,9 +1015,10 @@ collapsed:
    workflow decomposition without running real Vouch/OpenShell remote work.
    Both pass as individual tests in the final integrated gate. No repeated-run
    report is checked in, so they are not described as repetition campaigns.
-4. Bun/macOS boundary proofs exercise the private write/network/temp fence,
-   exact executable descendants and shebang chains, and the admitted
-   interpreter/in-process-code boundary.
+4. Host-native boundary proofs exercise private write/network/temp fences,
+   exact executable descendants and shebang chains, descriptor closure,
+   hostile syscalls, daemon teardown, and admitted interpreter/loader
+   in-process-code limits on their respective backends.
 5. One [**50-execution repeatability
    campaign**](docs/evidence/parity-50.md) launches the real agent CLI as a
    fresh Bun subprocess for exactly ten deterministic scripted cases, five
@@ -1009,15 +1026,13 @@ collapsed:
    automated gate enforces a five-minute cold-campaign ceiling. It is not 50
    unique/model-generated tasks, a direct-shell A/B, or a held-out corpus.
 
-The final integrated `bun run verify` gate passes 54 test files plus one
-skipped file and 283 tests plus 16 skipped tests. Its explicit Bun/macOS
-boundary suites pass 11 ProcessRunner, eight native Cell, seven
-executable-edge, and nine in-process-boundary cases. These counts establish the
-revision's tested baseline; they do not transform fixtures into representative
-agent-task evidence. Newer bounded evidence documents — the external-read
-fixture slice, the Linux beachhead, and the model-generated corpus campaign
-v0 — are recorded under `docs/evidence/` with their own claim boundaries and
-do not change this classification.
+The integrated `bun run verify` gate runs the complete platform-selected suite
+plus explicit Bun ProcessRunner and host-native boundary evidence. The Linux
+gate additionally builds a fresh launcher and release unit, runs the adversarial
+Linux Cell and distribution proofs, and executes shared native workloads. These
+tests do not transform fixtures into representative agent-task evidence.
+Bounded evidence documents under `docs/evidence/` retain their own claim
+boundaries and do not change this classification.
 
 The published native exclusions include unstructured command strings, symlink
 Apply, special files/devices, mount mutation, interactive PTY/job control,

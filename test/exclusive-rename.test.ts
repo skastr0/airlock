@@ -107,7 +107,7 @@ const world = <A, E>(
     })
   ).pipe(Effect.provide(BunContext.layer))
 
-describe("ExclusiveRename — macOS Hold boundary", () => {
+describe("ExclusiveRename — host Hold boundary", () => {
   it.effect("reports a confirmed rename and exact recovery evidence when directory sync fails", () =>
     world(({ fs, path, root, home, base }) =>
       Effect.gen(function* () {
@@ -325,7 +325,7 @@ describe("ExclusiveRename — macOS Hold boundary", () => {
   it.effect(
     "survives Bun compilation and exercises a complete overwrite/undo path",
     () =>
-    process.platform !== "darwin"
+    process.platform !== "darwin" && process.platform !== "linux"
       ? Effect.void
       : Effect.scoped(
           Effect.gen(function* () {

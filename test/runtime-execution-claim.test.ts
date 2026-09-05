@@ -160,8 +160,8 @@ describe("Runtime execution claim contract", () => {
   )
 })
 
-describe.skipIf(process.platform !== "darwin")(
-  "Runtime execution claims on macOS",
+describe.skipIf(process.platform !== "darwin" && process.platform !== "linux")(
+  "Runtime execution claims on the host kernel lock",
   () => {
     it.effect("serializes concurrent duplicate Plans and runs world work once", () =>
       Effect.sync(() => temporaryRealm("airlock-runtime-claim-race-")).pipe(

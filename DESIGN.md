@@ -18,8 +18,8 @@ design target:
 
 - **Invariant** — implemented repository law; changing it requires an explicit
   architecture decision and corresponding construction test.
-- **v1 contract** — acceptance condition for the first macOS release; it is not
-  a claim that the current code already satisfies it.
+- **v1 contract** — an acceptance condition for a named platform/envelope; it
+  is not a claim that the current code already satisfies it.
 - **Design direction** — intended product shape; useful for sequencing work,
   but neither a law nor a present-tense capability claim.
 - **Candidate** — a concrete contract or mechanism awaiting enough
@@ -29,8 +29,9 @@ design target:
 
 The two laws below are the only frozen architectural invariants today. The
 four-class model and four-node Plan are implemented candidate seams. The
-current macOS profiles, runtime interpretation, labels, and tool definitions
-have narrower evidence envelopes described below; none becomes a third law.
+current macOS and Linux profiles, runtime interpretation, labels, and tool
+definitions have narrower evidence envelopes described below; none becomes a
+third law.
 
 ## The four effect classes
 
@@ -115,28 +116,33 @@ An external effect has no undo after the recipient observes it. Delayed
 dispatch is cancellation of queued intent, not reversal of a send. If dispatch
 may have happened, the honest result is `uncertain`, never an automatic retry.
 
-## macOS-first v1
+## Host-native v1
 
-The first release targets macOS, with Apple silicon as the primary tested
-platform and an x86_64 build target. It uses one physics model across two v1
-profiles:
+Airlock implements one physics model on macOS and Linux across two profiles:
 
 - **`compatibility`** — zero-config, broad Unix capability, recovery and
   receipts where compatible; no containment claim.
-- **`native-contained`** — a lower-overhead profile for the subset that the
-  native macOS backend can enforce with private APFS views, controlled process
-  execution, denied network, and Hold-backed Apply. Unsupported capabilities
-  fail explicitly; ambient host reads remain allowed, and this profile is not
-  described as confidential or VM-equivalent.
+- **`native-contained`** — a lower-overhead, opt-in profile for the subset the
+  active host backend can enforce. Both backends provide a private writable
+  workspace, deny live-host writes and network, fence declared direct
+  executable edges, and leave mutation to Hold-backed Apply. Unsupported or
+  unavailable mechanisms fail explicitly. Ambient host reads remain allowed,
+  so this profile is neither confidential nor VM-equivalent.
+
+macOS uses APFS clone/copy plus Seatbelt. Linux uses a clone-or-copy,
+Bubblewrap 0.12+ namespaces and pinned mounts, Landlock ABI 2+ executable-object
+rules, and a libseccomp launcher. These are different mechanisms with separately
+reported caveats; neither platform borrows claims from the other.
 
 Profile choice is an explicit ratchet turn. All profiles use the same
 Schema-validated contracts, Plan algebra, runtime algebra, Hold, Outbox, and
-receipt vocabulary. See [the macOS runtime contract](docs/macos-v1.md).
+receipt vocabulary. See [the macOS runtime contract](docs/macos-v1.md) and
+[the Linux runtime contract](docs/linux-v1.md).
 
 `vm-enclosed` is future design direction. The current CLI reports that the
 backend is unavailable and refuses it rather than falling back. A future VM
 may widen the enforceable workload and strengthen confidentiality, but it is
-not the default profile or a macOS v1 release prerequisite.
+not the default profile or a host-native release prerequisite.
 
 ## Plan algebra and runtime vocabulary
 
@@ -219,14 +225,14 @@ Plan, Cell, EndpointBroker, label flow, VM/native backends, and tool
 definitions remain candidates until real integrations and adversarial tests
 earn narrower component boundaries.
 
-The macOS VM adapter, native sandbox adapter, APFS adapter, CLI/RPC wiring, and
-Vouch integration remain local glue. Policy, authorization, ordering,
-idempotency, retry, uncertainty, and receipt semantics never live only in that
-glue.
+The host native adapters, APFS/copy workspace glue, Linux launcher, CLI/RPC
+wiring, and Vouch integration remain local glue. Policy, authorization,
+ordering, idempotency, retry, uncertainty, and receipt semantics never live
+only in that glue.
 
 ## Security gates and stronger directions
 
-The macOS release claims only mechanisms advertised by its selected profile.
+Each host release claims only mechanisms advertised by its selected profile.
 The following contracts become release gates when the corresponding stronger
 capability or claim is advertised; an unadvertised capability may remain future
 direction, but must fail explicitly rather than borrow a stronger description:
@@ -298,7 +304,7 @@ Airlock does not:
 - treat an installed binary or definition as trustworthy by existence;
 - require a curated model for every tool;
 - expose an unstructured shell escape in the agent language; or
-- claim native containment provides guarantees the active macOS backend cannot
+- claim native containment provides guarantees the active host backend cannot
   enforce.
 
 ## Open questions
@@ -306,6 +312,6 @@ Airlock does not:
 The smallest useful language beyond the syntax already implemented, metadata
 and hardlink semantics, tool-definition distribution and trust (the v2 schema
 concretizes the definition document itself; signing, precedence, and
-distribution do not follow from it), native network enforcement, complete
+distribution do not follow from it), contained endpoint brokerage, complete
 Journal protocol, and remote-realm transport remain open. They may be resolved only by implementation evidence without weakening
 the two laws or creating a new effect or terminal-authority path accidentally.

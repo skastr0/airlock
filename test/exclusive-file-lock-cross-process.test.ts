@@ -50,8 +50,8 @@ const collect = (stream: NodeJS.ReadableStream) =>
     stream.on("end", () => resolve(Buffer.concat(chunks).toString("utf8")))
   })
 
-describe("ExclusiveFileLock — real macOS process contention", () => {
-  it.skipIf(process.platform !== "darwin")(
+describe("ExclusiveFileLock — real host process contention", () => {
+  it.skipIf(process.platform !== "darwin" && process.platform !== "linux")(
     "serializes independent Bun processes with one kernel-owned lease",
     async () => {
       const temporary = await mkdtemp(

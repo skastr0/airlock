@@ -10,9 +10,9 @@
  * The sixteen contenders are the same `test/fixtures` process fixture the macOS
  * cross-process test drives, so the two platforms are held to one mechanism.
  *
- * What this does NOT prove: nothing here is a containment claim. Linux has no
- * Airlock native containment profile; the enclosure on this platform is the
- * operator's container or VM.
+ * What this does NOT prove: nothing here is a containment claim. The Linux
+ * native-contained profile has its own direct-host test gate; this portable
+ * proof exercises only the managed-mutation primitives.
  */
 import { Effect, Schema } from "effect"
 import { execFileSync, spawn } from "node:child_process"
@@ -151,7 +151,7 @@ const boundary =
   "renameat2(RENAME_NOREPLACE) and flock(2) supply the atomic no-replace rename and the recoverable kernel lease on Linux; neither is a containment claim" as const
 
 const nonClaims = [
-  "no native containment profile exists on Linux; the enclosure is the operator's container or VM",
+  "this portable proof does not exercise or attest the separate Linux native-contained profile",
   "this proves the two host primitives and their contention behaviour, not a shell-replacement corpus",
   "the evidence covers only the filesystem reported in host.proofFilesystem",
   "a filesystem whose rename does not implement RENAME_NOREPLACE is refused, never silently replaced"

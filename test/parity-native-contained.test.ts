@@ -10,12 +10,12 @@ import {
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
 import { describe, expect, it } from "vitest"
+import { nativeContainmentSupported } from "./support/NativeContainmentTest.ts"
 
 const repository = resolve(import.meta.dirname, "..")
 const fixture = join(repository, "examples", "parity", "native-rewrite.air")
 const supported =
-  process.platform === "darwin" &&
-  existsSync("/usr/bin/sandbox-exec") &&
+  nativeContainmentSupported &&
   existsSync("/bin/cp")
 
 const run = (

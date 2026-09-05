@@ -1,4 +1,4 @@
-let edited = process.run({ executable: "/usr/bin/sed", args: ["-i", "", "s/draft/ready/g", "src/app.ts"], cwd: workspace, env: { LANG: "C", LC_ALL: "C" }, stdin: "discard", stdout: "capture", stderr: "capture", timeoutMs: 30000, cellProfile: "native-contained" })
+let edited = process.run({ executable: sed_executable, args: sed_arguments, cwd: workspace, env: { LANG: "C", LC_ALL: "C" }, stdin: "discard", stdout: "capture", stderr: "capture", timeoutMs: 30000, cellProfile: "native-contained" })
 assert edited.state == "succeeded", "contained edit failed"
 
 let source = workspace + "/src/app.ts"

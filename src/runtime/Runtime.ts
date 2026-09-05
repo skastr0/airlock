@@ -1363,7 +1363,7 @@ const make = Effect.gen(function* () {
   const enforce = (node: PlanNode): Effect.Effect<void, RuntimeError> => {
     if (config.profile === "vm-enclosed") {
       return Effect.fail(new RuntimeUnsupported({
-        nodeId: node.id, feature: "vm-enclosed execution", reason: "no macOS VM Cell backend is installed in this runtime"
+        nodeId: node.id, feature: "vm-enclosed execution", reason: "no VM Cell backend is installed in this runtime"
       }))
     }
     if (node._tag !== "Invoke") return Effect.void
@@ -1393,11 +1393,11 @@ const make = Effect.gen(function* () {
       }
       return yield* Effect.forEach(receipt.delta, (candidate) => Effect.gen(function* () {
         if (!relativeTopLevel(candidate.path)) {
-          return yield* new RuntimeDeltaUnsupported({ nodeId, path: candidate.path, reason: "only top-level non-symlink paths are mergeable in macOS v1" })
+          return yield* new RuntimeDeltaUnsupported({ nodeId, path: candidate.path, reason: "only top-level non-symlink paths are mergeable in host-native v1" })
         }
         const expected = candidate.kind === "deleted" ? candidate.baseline : candidate.private
         if (expected === undefined || (expected.kind !== "file" && expected.kind !== "directory")) {
-          return yield* new RuntimeDeltaUnsupported({ nodeId, path: candidate.path, reason: "symlink and special-file Cell deltas are not mergeable in macOS v1" })
+          return yield* new RuntimeDeltaUnsupported({ nodeId, path: candidate.path, reason: "symlink and special-file Cell deltas are not mergeable in host-native v1" })
         }
         const target = nodePath.join(workspace, candidate.path)
         const live = yield* fingerprintManagedEntry(target).pipe(Effect.mapError(() => new RuntimeDeltaUnsupported({

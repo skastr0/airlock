@@ -11,14 +11,15 @@ import { tmpdir } from "node:os"
 import { join, relative, resolve } from "node:path"
 import { Schema } from "effect"
 import { describe, expect, it } from "vitest"
+import { nativeContainmentSupported } from "./support/NativeContainmentTest.ts"
 
 const repository = resolve(import.meta.dirname, "..")
 const corpus = join(repository, "examples", "parity", "corpus")
 
 const developerTool = (name: string): string | undefined => {
-  const located = spawnSync("/usr/bin/xcrun", ["-f", name], {
-    encoding: "utf8"
-  })
+  const located = process.platform === "darwin"
+    ? spawnSync("/usr/bin/xcrun", ["-f", name], { encoding: "utf8" })
+    : spawnSync("/usr/bin/which", [name], { encoding: "utf8" })
   if (located.status !== 0) return undefined
   const candidate = located.stdout.trim()
   return candidate.length > 0 && existsSync(candidate)
@@ -28,6 +29,15 @@ const developerTool = (name: string): string | undefined => {
 
 const gitExecutable = developerTool("git")
 const makeExecutable = developerTool("make")
+const checksumExecutable = process.platform === "darwin"
+  ? "/sbin/md5"
+  : "/usr/bin/md5sum"
+const checksumArguments = process.platform === "darwin"
+  ? ["-q", "package.tgz"]
+  : ["package.tgz"]
+const archiveDescendants = process.platform === "linux"
+  ? ["/bin/sh", "/usr/bin/gzip"]
+  : []
 
 const Receipt = Schema.Struct({
   node_id: Schema.String,
@@ -89,7 +99,7 @@ const executeCorpus = (
   home: string,
   profile: AgentProfile,
   policy?: string,
-  bindings: Readonly<Record<string, string>> = {}
+  bindings: Readonly<Record<string, unknown>> = {}
 ) => {
   const canonicalWorkspace = realpathSync(workspace)
   const executed = runAgent([
@@ -150,13 +160,8 @@ const expectProcessReceipts = (
 const nodeKinds = (report: typeof ProgramReport.Type) =>
   report.result.plans.flatMap(({ nodes }) => nodes.map(({ kind }) => kind))
 
-const macosCell =
-  process.platform === "darwin" &&
-  existsSync("/usr/bin/sandbox-exec")
-
-describe("agent-only macOS shell-parity corpus", () => {
+describe("agent-only host shell-parity corpus", () => {
   it.skipIf(
-    process.platform !== "darwin" ||
     !["/usr/bin/git", "/usr/bin/grep", "/usr/bin/wc"].every(existsSync)
   )(
     "observes, searches, pipes artifacts, and checks a repository under a supervisor-pinned compatibility profile",
@@ -173,7 +178,7 @@ describe("agent-only macOS shell-parity corpus", () => {
       execFileSync("/usr/bin/git", ["add", "."], { cwd: workspace })
       execFileSync(
         "/usr/bin/git",
-        ["-c", "user.name=Corpus", "-c", "user.email=corpus@airlock.invalid", "commit", "-q", "-m", "seed"],
+        ["-c", "user.name=Corpus", "-c", "user.email=corpus@airlock.invalid", "-c", "commit.gpgsign=false", "commit", "-q", "-m", "seed"],
         { cwd: workspace }
       )
       writeFileSync(join(workspace, "notes.txt"), "untracked\n")
@@ -217,7 +222,7 @@ describe("agent-only macOS shell-parity corpus", () => {
   )
 
   it.skipIf(
-    !macosCell ||
+    !nativeContainmentSupported ||
     !existsSync("/usr/bin/sed") ||
     gitExecutable === undefined
   )(
@@ -233,7 +238,7 @@ describe("agent-only macOS shell-parity corpus", () => {
       execFileSync("/usr/bin/git", ["add", "."], { cwd: workspace })
       execFileSync(
         "/usr/bin/git",
-        ["-c", "user.name=Corpus", "-c", "user.email=corpus@airlock.invalid", "commit", "-q", "-m", "seed"],
+        ["-c", "user.name=Corpus", "-c", "user.email=corpus@airlock.invalid", "-c", "commit.gpgsign=false", "commit", "-q", "-m", "seed"],
         { cwd: workspace }
       )
       const policy = writeNativePolicy(
@@ -242,6 +247,9 @@ describe("agent-only macOS shell-parity corpus", () => {
         ["/usr/bin/sed", gitExecutable!],
         "agent:parity-edit"
       )
+      const sedArguments = process.platform === "darwin"
+        ? ["-i", "", "s/draft/ready/g", "src/app.ts"]
+        : ["-i", "s/draft/ready/g", "src/app.ts"]
 
       const report = executeCorpus(
         "edit-repository.air",
@@ -249,7 +257,11 @@ describe("agent-only macOS shell-parity corpus", () => {
         home,
         "native-contained",
         policy,
-        { git_executable: gitExecutable! }
+        {
+          git_executable: gitExecutable!,
+          sed_executable: "/usr/bin/sed",
+          sed_arguments: sedArguments
+        }
       )
       expect(report.profile).toBe("native-contained")
       expect(nodeKinds(report)).toEqual([
@@ -291,8 +303,8 @@ describe("agent-only macOS shell-parity corpus", () => {
   )
 
   it.skipIf(
-    !macosCell ||
-    !["/usr/bin/tar", "/sbin/md5"].every(existsSync)
+    !nativeContainmentSupported ||
+    !["/usr/bin/tar", checksumExecutable, ...archiveDescendants].every(existsSync)
   )(
     "creates, verifies, and extracts an archive through existing Unix tools",
     { timeout: 60_000 },
@@ -306,8 +318,11 @@ describe("agent-only macOS shell-parity corpus", () => {
       const policy = writeNativePolicy(
         root,
         workspace,
-        ["/usr/bin/tar", "/sbin/md5"],
-        "agent:parity-archive"
+        ["/usr/bin/tar", checksumExecutable],
+        "agent:parity-archive",
+        archiveDescendants.length === 0
+          ? []
+          : [{ root: "/usr/bin/tar", descendants: archiveDescendants }]
       )
 
       const report = executeCorpus(
@@ -315,7 +330,12 @@ describe("agent-only macOS shell-parity corpus", () => {
         workspace,
         home,
         "native-contained",
-        policy
+        policy,
+        {
+          archive_descendants: archiveDescendants,
+          checksum_executable: checksumExecutable,
+          checksum_arguments: checksumArguments
+        }
       )
       expect(nodeKinds(report)).toEqual([
         "Invoke", "Apply",
@@ -337,7 +357,7 @@ describe("agent-only macOS shell-parity corpus", () => {
       const result = Schema.decodeUnknownSync(Result)(report.result.result)
       expectProcessReceipts(result.packed, 2)
       expect(expectProcessReceipts(result.checksum, 2).stdout)
-        .toMatch(/^[0-9a-f]{32}\n$/)
+        .toMatch(/^[0-9a-f]{32}(?:  package\.tgz)?\n$/)
       expectProcessReceipts(result.unpacked, 2)
       expect(result.config).toBe('{"mode":"contained"}\n')
       expect(result.entries.map((path) => relative(realpathSync(workspace), path)).sort())
@@ -355,7 +375,7 @@ describe("agent-only macOS shell-parity corpus", () => {
     }
   )
 
-  it.skipIf(!macosCell || gitExecutable === undefined)(
+  it.skipIf(!nativeContainmentSupported || gitExecutable === undefined)(
     "initializes, authors, stages, commits, and verifies a local Git repository",
     { timeout: 60_000 },
     () => {
@@ -417,7 +437,7 @@ describe("agent-only macOS shell-parity corpus", () => {
   )
 
   it.skipIf(
-    !macosCell ||
+    !nativeContainmentSupported ||
     makeExecutable === undefined ||
     !["/usr/bin/awk", "/bin/test", "/bin/mkdir"].every(existsSync)
   )(

@@ -1,9 +1,6 @@
-# The Linux beachhead gate.
-#
-# It runs exactly what `scripts/prove-linux-boundary.sh` runs in a container, on
-# a real ubuntu host: one boundary proof for renameat2(RENAME_NOREPLACE) and
-# flock(2), then the portable suites. Nothing here claims containment — Linux
-# has no native contained profile, and the enclosure is the operator's own.
+# Required Linux release gate. It uses a normal, non-setuid Bubblewrap built
+# from the audited 0.12.0 source and never disables AppArmor or user-namespace
+# policy. A host-policy denial is a failed containment gate, not a skipped test.
 name: linux
 
 on:
@@ -16,29 +13,84 @@ permissions:
   contents: read
 
 jobs:
-  beachhead:
-    name: linux beachhead (ubuntu)
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
+  native-contained:
+    name: linux native-contained (Ubuntu 22.04, Bun ${{ matrix.bun }})
+    runs-on: ubuntu-22.04
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        bun: [1.3.11, 1.3.13]
     steps:
       - uses: actions/checkout@v4
 
       - uses: oven-sh/setup-bun@v2
         with:
-          bun-version: 1.3.13
+          bun-version: ${{ matrix.bun }}
 
-      - name: install
+      - name: Install native build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential libseccomp-dev pkg-config meson ninja-build \
+            libcap-dev libcap2-bin python3
+
+      - name: Build audited Bubblewrap 0.12.0
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone --depth 1 --branch v0.12.0 \
+            https://github.com/containers/bubblewrap.git /tmp/bubblewrap
+          test "$(git -C /tmp/bubblewrap rev-parse HEAD)" = \
+            "2a76602a8c71f36c1527cf9fc3417d9149822e0c"
+          meson setup /tmp/bubblewrap/_build /tmp/bubblewrap \
+            -Dselinux=disabled -Dman=disabled -Dtests=false
+          meson compile -C /tmp/bubblewrap/_build
+          sudo install -m 0755 /tmp/bubblewrap/_build/bwrap /usr/local/bin/bwrap
+          test ! -u /usr/local/bin/bwrap
+          test ! -g /usr/local/bin/bwrap
+          test -z "$(getcap /usr/local/bin/bwrap)"
+          test "$(/usr/local/bin/bwrap --version)" = "bubblewrap 0.12.0"
+
+      - name: Install JavaScript dependencies
         run: bun install --frozen-lockfile
 
-      - name: report host
+      - name: Report enforcement host
+        shell: bash
         run: |
+          set -u
           uname -srm
+          cat /etc/os-release
           bun --version
           getconf GNU_LIBC_VERSION || true
-          stat -f -c '%T' "${TMPDIR:-/tmp}"
+          for key in \
+            kernel.apparmor_restrict_unprivileged_userns \
+            kernel.unprivileged_userns_clone \
+            user.max_user_namespaces
+          do
+            printf '%s=' "$key"
+            sysctl -n "$key" 2>&1 || true
+          done
+          cat /proc/self/attr/current 2>/dev/null || true
+          cat /sys/kernel/security/lsm 2>/dev/null || true
+          stat -Lc '%n mode=%a owner=%u:%g' /usr/local/bin/bwrap
+          getcap /usr/local/bin/bwrap || true
 
-      - name: typecheck
-        run: bun run typecheck
+      - name: Build Linux release unit
+        run: bun run build:linux
 
-      - name: linux boundary proof and portable suites
+      - name: Require production-shaped native smoke test
+        shell: bash
+        run: |
+          set -euo pipefail
+          report="$(AIRLOCK_BWRAP=/usr/local/bin/bwrap \
+            AIRLOCK_LINUX_LAUNCHER="$PWD/dist/airlock-linux-launcher" \
+            ./dist/airlock doctor)"
+          printf '%s\n' "$report"
+          grep -Fq '"schemaVersion": "airlock/linux-capabilities/v1"' <<<"$report"
+          grep -Fq '"runtime": {' <<<"$report"
+
+      - name: Full Linux boundary and verification gate
+        env:
+          AIRLOCK_BWRAP: /usr/local/bin/bwrap
         run: sh scripts/run-linux-suites.sh

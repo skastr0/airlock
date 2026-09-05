@@ -687,8 +687,8 @@ program asking for a `compatibility` Cell is refused and performs no effect:
 Selecting it yields `RuntimeUnsupported`. It is a future, stronger enclosure —
 not a macOS v1 release prerequisite.
 
-Full envelope: [`macos-v1.md`](macos-v1.md) and
-[`security-model.md`](security-model.md).
+Full envelope: [`macos-v1.md`](macos-v1.md),
+[`linux-v1.md`](linux-v1.md), and [`security-model.md`](security-model.md).
 
 ---
 

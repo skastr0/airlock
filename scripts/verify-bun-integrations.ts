@@ -1,11 +1,11 @@
 #!/usr/bin/env bun
 /**
- * Required Bun/macOS evidence gate.
+ * Required host-native Bun evidence gate.
  *
- * Vitest workers run under Node, so a green Vitest run cannot execute the
- * ProcessRunner tests or construct a native Cell itself. Keep those boundaries
- * explicit here: execute the Bun test file, require its complete expected test
- * count, then Schema-decode the native Cell construction proof.
+ * ProcessRunner depends on Bun's subprocess semantics. Linux additionally uses
+ * Bun FFI for its host primitives and compiles a fresh native launcher; macOS
+ * retains its explicit proof scripts. A green generic test command cannot
+ * silently substitute for either boundary.
  */
 import { existsSync } from "node:fs"
 import { resolve } from "node:path"
@@ -53,14 +53,35 @@ console.log(
   })
 )
 
+if (process.platform === "linux") {
+  const expectedNativeTests = 13
+  const nativeResult = run([
+    "scripts/run-tests.ts",
+    "test/linux-native.test.ts"
+  ])
+  const nativeOutput = `${nativeResult.stdout}\n${nativeResult.stderr}`
+  if (
+    !nativeOutput.includes(`Tests  ${expectedNativeTests} passed`) &&
+    !nativeOutput.includes(`Tests   ${expectedNativeTests} passed`)
+  ) {
+    throw new Error(
+      `Linux native evidence was incomplete; expected exactly ${expectedNativeTests} passing tests.\n${nativeOutput}`
+    )
+  }
+  console.log(JSON.stringify({
+    gate: "linux-native-contained",
+    status: "passed",
+    tests: expectedNativeTests
+  }))
+  process.exit(0)
+}
+
 if (process.platform !== "darwin") {
-  console.log(
-    JSON.stringify({
-      gate: "macos-native-cell",
-      status: "skipped",
-      reason: `intentional platform skip: host is ${process.platform}, expected darwin`
-    })
-  )
+  console.log(JSON.stringify({
+    gate: "host-native-cell",
+    status: "skipped",
+    reason: `unsupported host platform: ${process.platform}`
+  }))
   process.exit(0)
 }
 

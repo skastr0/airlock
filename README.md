@@ -11,7 +11,7 @@
 </p>
 
 <p align="center">
-  <code>macOS</code> · <code>Bun 1.3.11+</code> · <code>MIT</code> · <code>developer preview</code>
+  <code>macOS + Linux</code> · <code>Bun 1.3.11+</code> · <code>MIT</code> · <code>developer preview</code>
 </p>
 
 ---
@@ -49,7 +49,7 @@ and gives each one a physics that makes it safe by construction:
 | What the agent wants | Airlock class | What happens |
 |---|---|---|
 | Read the world | **observation** | `Capture` — information enters with provenance attached |
-| Run existing programs | **computation** | `Invoke` — executes inside a controlled Cell, never a raw shell string |
+| Run existing programs | **computation** | `Invoke` — uses the selected execution profile, never a raw shell string |
 | Change local files | **mutation** | `Apply` — the old state is renamed into **Hold** before the new one lands. Undo is a first-class verb |
 | Call the network | **emission** | `RequestExternal` — the request is **staged** in the **Outbox**, not sent. Dispatch is a separate, supervisor-gated act |
 
@@ -64,8 +64,9 @@ Two laws govern the whole system:
    ratchet: a profile may narrow authority, but an agent program can never
    widen it. No silent fallbacks, ever.
 
-The result: an agent can `rm -rf` inside its workspace, and the supervisor
-can put every byte back. An agent can prepare an HTTP POST, and nothing
+The result: an agent can `rm -rf` inside a native-contained private workspace,
+apply its supported delta through Hold, and the supervisor can restore the
+prior bytes. An agent can prepare an HTTP POST through Outbox, and nothing
 touches the wire until someone — or an explicit policy — says so. Every run
 returns a versioned JSON receipt of exactly what happened, what was planned,
 and what failed.
@@ -98,11 +99,11 @@ return process.run({
 ```
 
 Run it under a supervisor-owned policy (the program cannot pick its own
-grants), then undo the whole thing:
+grants; see the [policy setup](docs/install.md)), then undo the whole thing:
 
 ```sh
-airlock run create.air --workspace . --profile native-contained \
-  --bindings '{"workspace":"."}'
+AIRLOCK_POLICY_FILE="$PWD/policy.json" \
+  airlock run create.air --workspace . --profile native-contained
 
 airlock held     # what's recoverable right now
 airlock undo     # put it back
@@ -157,19 +158,28 @@ policy.
 
 - **`compatibility`** — zero-config, broad bash-like capability with receipts
   where compatible. No containment claim. The ratchet's starting position.
-- **`native-contained`** (macOS) — private APFS workspace view, controlled
-  process execution, network denied, all deltas applied through Hold.
+  Child writes and network sends retain ambient host authority and are not
+  converted into Hold mutations or Outbox dispatches.
+- **`native-contained`** (macOS and Linux) — private clone/copy workspace,
+  live-host write denial, network denial, and declared direct-exec fencing;
+  supported deltas are applied separately through Hold. macOS uses Seatbelt;
+  Linux uses Bubblewrap 0.12+, Landlock ABI 2+, and a libseccomp launcher.
   Unsupported capabilities fail explicitly — they never degrade to
-  compatibility. Not a confidentiality boundary; a VM backend is a future
-  stronger enclosure.
+  compatibility. Both permit ambient host reads: neither is confidential or
+  VM-equivalent. Linux supports deny-only networking and provides no resource
+  quotas; executable-object fencing is not complete execution closure because
+  hardlink aliases, ELF loaders, and in-process interpretation remain relevant.
 - **`vm-enclosed`** — design direction. The CLI refuses it today rather than
   pretend.
 
 ## Status
 
-**Usable developer preview.** macOS-only, Bun 1.3.11+. The compatibility and
-native-contained profiles are implemented and exercised end-to-end; the
-integrated gate is 283 passing tests plus the boundary suites. The claim
+**Usable developer preview.** macOS and Linux, Bun 1.3.11+. Compatibility and
+native-contained profiles are implemented and exercised end to end. Direct
+[Debian 12 x86-64 evidence](docs/evidence/linux-beachhead.md) covers adversarial
+containment, shared native and Vouch workloads, and a real standalone
+build/install/execution/uninstall cycle. This is a bounded host envelope, not
+evidence for every Linux distribution or architecture. The claim
 "replaces most shell usage for agents" is a written acceptance contract with
 explicit gates — deliberately not yet claimed. See
 [docs/acceptance.md](docs/acceptance.md) for the bar, and
@@ -178,13 +188,45 @@ change them.
 
 ## Install
 
+From a checkout; no npm release yet. On Linux, install the
+[runtime and build prerequisites](docs/linux-v1.md#build-and-install) first:
+glibc, working unprivileged user namespaces, Bubblewrap 0.12+ without setid bits
+or file capabilities, Landlock ABI 2+, libseccomp, libcap tools, and GNU `cp`.
+Blocked namespace/AppArmor policy is reported as unavailable, never bypassed.
+
 ```sh
-# from a checkout (no npm release yet)
-bun install
+bun install --frozen-lockfile
 bun run verify
+```
+
+On macOS:
+
+```sh
 bun run build:macos
 sh scripts/install-macos.sh
+```
+
+On Linux, build into a fresh directory and name the external Bubblewrap:
+
+```sh
+OUT="$(mktemp -d)"
+bun scripts/build-linux.ts --out "$OUT"
+sh scripts/install-linux.sh \
+  --source "$OUT/airlock" \
+  --agent-source "$OUT/airlock-agent" \
+  --launcher-source "$OUT/airlock-linux-launcher" \
+  --checksum "$OUT/airlock.sha256" \
+  --bwrap /usr/local/bin/bwrap
+```
+
+The Linux installer verifies and probes all three artifacts before replacing
+anything, and preserves prior bytes for rollback. Bundles are host-architecture
+glibc builds; Bubblewrap remains an external prerequisite.
+
+```sh
+export PATH="$HOME/.local/bin:$PATH"
 airlock doctor
+airlock-agent actions
 ```
 
 ## Documentation
@@ -195,6 +237,8 @@ airlock doctor
 - [Security model](docs/security-model.md)
 - [Architecture](ARCHITECTURE.md) — implemented seams and design direction
 - [macOS runtime profiles](docs/macos-v1.md)
+- [Linux runtime contract](docs/linux-v1.md)
+- [Executed Linux evidence](docs/evidence/linux-beachhead.md)
 - [Airlock Programs field guide](docs/programs/README.md)
 - [Evidence](docs/evidence/) — what has actually been executed, and the claim boundaries
 

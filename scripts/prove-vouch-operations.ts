@@ -31,6 +31,9 @@ const fixtureProgram = join(
 )
 const endpoint =
   "https://realm.example.invalid/v1/runtime-events?sensitive=query"
+const tarDescendants = process.platform === "linux"
+  ? ["/bin/sh", "/usr/bin/gzip"]
+  : []
 
 const NodeSummary = Schema.Union(
   Schema.Struct({
@@ -288,6 +291,9 @@ const makeFixture = () => {
       "/usr/bin/tar",
       "/usr/bin/wc"
     ],
+    executableEdges: tarDescendants.length === 0
+      ? []
+      : [{ root: "/usr/bin/tar", descendants: tarDescendants }],
     endpointAllowlist: [endpoint]
   }))
   return {
@@ -389,14 +395,21 @@ const processBoundaryProof = (workspace: string) =>
 
 export const runVouchOperationsProof =
   async (): Promise<VouchOperationsProofReport> => {
-    assert(process.platform === "darwin", "native-contained proof requires macOS")
+    assert(
+      process.platform === "darwin" || process.platform === "linux",
+      "native-contained proof requires macOS or Linux"
+    )
+    assert(typeof Bun !== "undefined", "native-contained proof requires Bun")
+    const platformExecutables = process.platform === "darwin"
+      ? ["/usr/bin/sandbox-exec"]
+      : tarDescendants
     for (const executable of [
       "/bin/sleep",
       "/usr/bin/printf",
-      "/usr/bin/sandbox-exec",
       "/usr/bin/tar",
       "/usr/bin/wc",
-      "/usr/bin/yes"
+      "/usr/bin/yes",
+      ...platformExecutables
     ]) {
       assert(existsSync(executable), `${executable} is unavailable`)
     }
@@ -410,6 +423,7 @@ export const runVouchOperationsProof =
       staged_backup: fixture.stagedBackup,
       final_backup: fixture.finalBackup,
       stale_file: fixture.stale,
+      tar_descendants: tarDescendants,
       endpoint
     }
     const rawWorkflow = runCli([

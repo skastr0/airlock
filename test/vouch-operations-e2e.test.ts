@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url"
 import { describe, expect, it } from "@effect/vitest"
 import { Schema } from "effect"
 import { VouchOperationsProofReport } from "../scripts/prove-vouch-operations.ts"
+import { nativeContainmentSupported } from "./support/NativeContainmentTest.ts"
 
 const projectRoot = fileURLToPath(new URL("../", import.meta.url))
 const bunPath = (() => {
@@ -16,15 +17,17 @@ const bunPath = (() => {
   }
 })()
 const supported =
-  process.platform === "darwin" &&
+  nativeContainmentSupported &&
   bunPath.length > 0 &&
   [
     "/bin/sleep",
     "/usr/bin/printf",
-    "/usr/bin/sandbox-exec",
     "/usr/bin/tar",
     "/usr/bin/wc",
-    "/usr/bin/yes"
+    "/usr/bin/yes",
+    ...(process.platform === "darwin"
+      ? ["/usr/bin/sandbox-exec"]
+      : ["/bin/sh", "/usr/bin/gzip"])
   ].every(existsSync)
 
 describe.skipIf(!supported)("Vouch-derived operation acceptance", () => {
@@ -42,7 +45,7 @@ describe.skipIf(!supported)("Vouch-derived operation acceptance", () => {
       JSON.parse(output)
     )
 
-    expect(report.platform).toBe("darwin")
+    expect(report.platform).toBe(process.platform)
     expect(report.sourcePatterns).toHaveLength(5)
     expect(report.workflow.planCount).toBe(12)
     expect(report.workflow.nodeKinds).toEqual([

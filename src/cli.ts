@@ -30,6 +30,7 @@ import {
 } from "./language/evaluator.ts"
 import { Ledger, LedgerLive } from "./Ledger.ts"
 import { Cell, CellLive, CellRequest } from "./cell/index.ts"
+import { LinuxPlatform, LinuxPlatformLive } from "./platform/linux/index.ts"
 import { MacosPlatform, MacosPlatformLive } from "./platform/macos/index.ts"
 import {
   NativeFileSystemLive,
@@ -773,36 +774,76 @@ const makeFlush = (seal: SealContext) => Command.make("flush", {}, () =>
 
 // ── discovery + structured computation ──────────────────────────────────────
 
-const capabilityPayload = Effect.flatMap(MacosPlatform, (macos) =>
+const compatibilityCapability = {
+  available: true,
+  guarantee: "bash-parity; no containment claim"
+} as const
+
+const macosCapabilityPayload = Effect.flatMap(MacosPlatform, (macos) =>
   macos.capabilityReport.pipe(
-    Effect.map((macosReport) => ({
+    Effect.map((report) => ({
       version: AIRLOCK_VERSION,
       platform: process.platform,
       profiles: {
-        compatibility: { available: true, guarantee: "bash-parity; no containment claim" },
+        compatibility: compatibilityCapability,
         "native-contained": {
           available:
-            macosReport.nativeContainment.seatbelt.posture === "enforced" &&
-            macosReport.nativeContainment.privateWritableView.posture === "enforced" &&
-            macosReport.nativeContainment.liveWorkspaceWriteFence.posture === "enforced" &&
-            macosReport.nativeContainment.deniedNetworkFence.posture === "enforced",
-          guarantee: "native Cell: private workspace, live-workspace write denial, and opt-in network denial; not VM-equivalent"
+            report.nativeContainment.seatbelt.posture === "enforced" &&
+            report.nativeContainment.privateWritableView.posture === "enforced" &&
+            report.nativeContainment.liveWorkspaceWriteFence.posture === "enforced" &&
+            report.nativeContainment.deniedNetworkFence.posture === "enforced",
+          guarantee: "native Cell: private workspace, live-workspace write denial, network denial, and exact executable paths; not VM-equivalent"
         },
         "vm-enclosed": {
-          available: macosReport.vmEnclosure.backend.posture === "enforced",
-          reason: macosReport.vmEnclosure.backend.caveats.join("; ")
+          available: report.vmEnclosure.backend.posture === "enforced",
+          reason: report.vmEnclosure.backend.caveats.join("; ")
         }
       },
-      macos: macosReport
+      macos: report
     }))
   )
+)
+
+const linuxCapabilityPayload = Effect.flatMap(LinuxPlatform, (linux) =>
+  linux.capabilityReport.pipe(
+    Effect.map((report) => ({
+      version: AIRLOCK_VERSION,
+      platform: process.platform,
+      profiles: {
+        compatibility: compatibilityCapability,
+        "native-contained": {
+          available:
+            report.cloneOrCopyWorkspace.posture === "enforced" &&
+            report.nativeContainment.namespaces.posture === "enforced" &&
+            report.nativeContainment.privateWritableView.posture === "enforced" &&
+            report.nativeContainment.liveWorkspaceWriteFence.posture === "enforced" &&
+            report.nativeContainment.deniedNetworkFence.posture === "enforced" &&
+            report.nativeContainment.executableObjectFence.posture === "enforced" &&
+            report.nativeContainment.bootstrapEnvironment.posture === "enforced",
+          guarantee: "native Cell: private workspace, live-workspace write denial, all-socket denial, and admitted executable-object fencing; ambient reads and runtime-loader caveat remain"
+        },
+        "vm-enclosed": {
+          available: report.vmEnclosure.backend.posture === "enforced",
+          reason: report.vmEnclosure.backend.caveats.join("; ")
+        }
+      },
+      linux: report
+    }))
+  )
+)
+
+const capabilityPayload = Effect.suspend(
+  (): Effect.Effect<unknown, unknown, LinuxPlatform | MacosPlatform> =>
+    process.platform === "linux"
+      ? linuxCapabilityPayload
+      : macosCapabilityPayload
 )
 
 const makeDoctor = (seal: SealContext) => Command.make("doctor", {}, () =>
   rendered(
     requireVerb(seal, "doctor").pipe(Effect.zipRight(capabilityPayload))
   )
-).pipe(Command.withDescription("Report the exact macOS enforcement envelope"))
+).pipe(Command.withDescription("Report the exact host enforcement envelope"))
 
 const makeCapabilities = (seal: SealContext) => Command.make("capabilities", {}, () =>
   rendered(
@@ -1629,13 +1670,17 @@ const runCli = async (seal: SealContext): Promise<void> => {
     OutboxLive.pipe(Layer.provideMerge(LedgerLayer))
   )
 
-  const MacosExecutionLayer = Layer.mergeAll(ProcessRunnerLive, MacosPlatformLive)
+  const HostExecutionLayer = Layer.mergeAll(
+    ProcessRunnerLive,
+    LinuxPlatformLive,
+    MacosPlatformLive
+  )
   const NativeFileSystemLayer = NativeFileSystemLive(
     new NativeFilesystemConfig({ workspace: process.cwd() })
   ).pipe(Layer.provideMerge(StateLayer))
   const ExecutionDependencies = Layer.mergeAll(
     NativeFileSystemLayer,
-    MacosExecutionLayer
+    HostExecutionLayer
   )
   const MainLayer = CellLive.pipe(Layer.provideMerge(ExecutionDependencies))
 

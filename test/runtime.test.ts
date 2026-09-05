@@ -28,7 +28,6 @@ import { OutboxLive } from "../src/Outbox.ts"
 import {
   ArtifactId, CaptureNode, NodeId, RequestExternalNode, ApplyNode, InvokeNode
 } from "../src/plan/index.ts"
-import { MacosPlatformLive } from "../src/platform/macos/index.ts"
 import { ProcessReceipt, ProcessRunner, ProcessRunnerLive } from "../src/process/Process.ts"
 import {
   Runtime,
@@ -38,6 +37,7 @@ import {
   RuntimeLive
 } from "../src/runtime/index.ts"
 import { ExclusiveRenameTestLive } from "./support/ExclusiveRenameTestLive.ts"
+import { nativeContainmentSupported } from "./support/NativeContainmentTest.ts"
 import { runtimeAuthority as plan } from "./support/RuntimeAuthority.ts"
 
 const HoldTestLive = HoldLayer.pipe(
@@ -47,8 +47,6 @@ const HoldTestLive = HoldLayer.pipe(
 const node = (id: string) => NodeId.make(id)
 const artifact = (id: string) => ArtifactId.make(id)
 const now = () => DateTime.unsafeMake(new Date("2026-07-29T00:00:00.000Z"))
-const darwinCell = globalThis.process.platform === "darwin" && existsSync("/usr/bin/sandbox-exec") && typeof Bun !== "undefined"
-
 const impossibleCell = Layer.succeed(Cell, Cell.of({
   run: () => Effect.die("compatibility never calls Cell.run"),
   revalidate: () => Effect.die("compatibility never calls Cell.revalidate")
@@ -88,7 +86,7 @@ const nativeLayer = (
   cell: Layer.Layer<Cell, any, any>,
   hold: Layer.Layer<Hold, any, any> = HoldTestLive
 ) => RuntimeLive.pipe(
-  Layer.provideMerge(cell), Layer.provideMerge(ProcessRunnerLive), Layer.provideMerge(MacosPlatformLive),
+  Layer.provideMerge(cell), Layer.provideMerge(ProcessRunnerLive),
   Layer.provideMerge(NativeFileSystemLive(new NativeFilesystemConfig({ workspace }))),
   Layer.provideMerge(hold), Layer.provideMerge(OutboxLive), Layer.provideMerge(LedgerLive),
   Layer.provideMerge(AirlockHome.layer(home)),
@@ -443,7 +441,7 @@ describe("runtime Plan interpreter", () => {
   )
 })
 
-describe.skipIf(!darwinCell)("native-contained runtime on macOS", () => {
+describe.skipIf(!nativeContainmentSupported)("host native-contained runtime", () => {
   it.effect("keeps process edits private until Apply and makes the merge undoable", () =>
     Effect.sync(() => {
       const root = mkdtempSync(join(tmpdir(), "airlock-runtime-cell-"))

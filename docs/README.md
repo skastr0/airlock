@@ -8,13 +8,15 @@ Airlock's documentation separates implemented proof from release contracts:
   action vocabulary, profiles and policy, dispatch classes, Hold/Outbox
   operations, harness integration, the corpus harness, and the failure taxonomy.
 - [`DESIGN.md`](../DESIGN.md) — product thesis, four effect classes, the two
-  repository laws, and the macOS-first v1 direction.
+  repository laws, and the shared host-native profile direction.
 - [`ARCHITECTURE.md`](../ARCHITECTURE.md) — complete candidate architecture and
   epistemic status.
 - [`contracts/plan-runtime.md`](contracts/plan-runtime.md) — versioned
   Plan/runtime seam and total-lowering obligations.
-- [`macos-v1.md`](macos-v1.md) — implemented compatibility/native-contained
-  profiles, paired release binaries, and the future VM direction.
+- [`macos-v1.md`](macos-v1.md) — the macOS compatibility/native-contained
+  mechanisms and release envelope.
+- [`linux-v1.md`](linux-v1.md) — Linux prerequisites, Bubblewrap/Landlock/
+  seccomp mechanism, installation, verification, and exact limitations.
 - [`security-model.md`](security-model.md) — execution closure, endpoint
   brokerage, information labels, and persistent authority.
 - [`acceptance.md`](acceptance.md) — the executable contract for claiming that
@@ -29,9 +31,9 @@ Airlock's documentation separates implemented proof from release contracts:
 - [`evidence/external-read-slice.md`](evidence/external-read-slice.md) — the
   executed `RequestExternal` read slice: staged intent, policy auto-commit
   through `Outbox.commit`, receipts, and its fixture-only boundary.
-- [`evidence/linux-beachhead.md`](evidence/linux-beachhead.md) — containerized
-  evidence that the two host primitives Hold and Outbox depend on exist on
-  Linux, with the explicit no-containment, no-release non-claims.
+- [`evidence/linux-beachhead.md`](evidence/linux-beachhead.md) — direct Debian
+  evidence for Linux native containment, distribution, Vouch-derived workloads,
+  and portable durability primitives, with explicit non-claims.
 - [`evidence/model-generated-corpus-v0.md`](evidence/model-generated-corpus-v0.md)
   — one executed model-authored corpus campaign, its per-task results, and why
   it supports no acceptance-rate claim.

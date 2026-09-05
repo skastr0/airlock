@@ -28,8 +28,8 @@
 | Receipts are operational evidence rather than proof of semantic correctness | direct | [`ARCHITECTURE.md`](../../ARCHITECTURE.md#terms) |
 | Only the Reaper unlinks | law, construction-tested | [`DESIGN.md`](../../DESIGN.md#1-only-the-reaper-unlinks), [`test/hold.test.ts`](../../test/hold.test.ts) |
 | Explicit profiles may narrow authority and agent programs cannot widen it | law | [`DESIGN.md`](../../DESIGN.md#2-the-ratchet-law) |
-| Compatibility retains ambient host authority and makes no containment claim | direct | [`DESIGN.md`](../../DESIGN.md#macos-first-v1), [`docs/macos-v1.md`](../macos-v1.md) |
-| Native-contained uses a private workspace and denied network, but is not confidential or VM-equivalent | direct | [`DESIGN.md`](../../DESIGN.md#macos-first-v1), [`docs/macos-v1.md`](../macos-v1.md) |
+| Compatibility retains ambient host authority and makes no containment claim | direct | [`DESIGN.md`](../../DESIGN.md#host-native-v1), [`docs/macos-v1.md`](../macos-v1.md), [`docs/linux-v1.md`](../linux-v1.md) |
+| Native-contained uses a private workspace and denied network, but is not confidential or VM-equivalent | direct | [`DESIGN.md`](../../DESIGN.md#host-native-v1), [`docs/macos-v1.md`](../macos-v1.md), [`docs/linux-v1.md`](../linux-v1.md) |
 
 ## Important caveats
 

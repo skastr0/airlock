@@ -1,8 +1,8 @@
 # Vouch-derived shell-replacement evidence
 
-> Status: two executed local macOS proofs plus parser-backed full-workflow
-> examples. This is workload evidence, not a representative corpus and not a
-> real Vouch/OpenShell replacement.
+> Status: two local proofs executed on macOS and Linux plus parser-backed
+> full-workflow examples. This is workload evidence, not a representative corpus
+> and not a real Vouch/OpenShell replacement.
 
 Vouch's state-preserving replacement path motivates three stages:
 

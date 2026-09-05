@@ -17,14 +17,10 @@ import {
   renderSeatbeltProfile,
   validateCellRequest
 } from "../src/cell/index.ts"
-import { MacosPlatformLive } from "../src/platform/macos/index.ts"
 import { ProcessRequest, ProcessRunnerLive } from "../src/process/Process.ts"
+import { nativeContainmentSupported } from "./support/NativeContainmentTest.ts"
 
-const darwinBun = globalThis.process.platform === "darwin" && typeof Bun !== "undefined"
-
-const CellTestLive = CellLive.pipe(
-  Layer.provide(Layer.merge(MacosPlatformLive, ProcessRunnerLive))
-)
+const CellTestLive = CellLive.pipe(Layer.provide(ProcessRunnerLive))
 
 const command = (source: string, script: string, env: Record<string, string>) =>
   new ProcessRequest({
@@ -95,7 +91,7 @@ describe("Cell construction", () => {
   )
 })
 
-describe.skipIf(!darwinBun)("macOS native-contained Cell", () => {
+describe.skipIf(!nativeContainmentSupported)("host native-contained Cell", () => {
   it.effect("denies live writes and network while retaining private workspace writes and delta evidence", () =>
     Effect.gen(function* () {
       const server = Bun.serve({

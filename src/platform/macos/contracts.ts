@@ -1,30 +1,25 @@
 import { Schema } from "effect"
+export {
+  CapabilityClaim,
+  CapabilityPosture,
+  VmEnclosureAvailability
+} from "../Capabilities.ts"
+import {
+  CapabilityClaim,
+  VmEnclosureAvailability
+} from "../Capabilities.ts"
+export {
+  PrivateWorkspaceRequest,
+  WorkspaceDestinationExists,
+  WorkspacePreparationFailed,
+  WorkspaceSourceMissing,
+  WorkspaceSourceNotDirectory
+} from "../NativeWorkspace.ts"
+import { PrivateWorkspaceRequest } from "../NativeWorkspace.ts"
 
 // The platform seam is deliberately small: these are observed host facts and
 // reversible workspace preparation. A capability claim always says what is
 // enforced, what merely remains available, and where the claim stops.
-
-/**
- * Capability reports are evidence, not a product check-box. In particular,
- * `enforced` says that the selected native Cell has a concrete mechanism;
- * it does not promote that mechanism to VM-equivalent confinement.
- */
-export const CapabilityPosture = Schema.Literal(
-  "enforced",
-  "available",
-  "allowed",
-  "bounded",
-  "unavailable",
-  "not-provided"
-)
-export type CapabilityPosture = typeof CapabilityPosture.Type
-
-export class CapabilityClaim extends Schema.Class<CapabilityClaim>("CapabilityClaim")({
-  posture: CapabilityPosture,
-  mechanism: Schema.String,
-  scope: Schema.String,
-  caveats: Schema.Array(Schema.String)
-}) {}
 
 export class MacosVolume extends Schema.Class<MacosVolume>("MacosVolume")({
   path: Schema.String,
@@ -64,13 +59,6 @@ export class NativeContainment extends Schema.Class<NativeContainment>(
   processCancellation: CapabilityClaim
 }) {}
 
-export class VmEnclosureAvailability extends Schema.Class<VmEnclosureAvailability>(
-  "VmEnclosureAvailability"
-)({
-  hardwareVirtualization: CapabilityClaim,
-  backend: CapabilityClaim
-}) {}
-
 export class MacosCapabilityReport extends Schema.Class<MacosCapabilityReport>(
   "MacosCapabilityReport"
 )({
@@ -80,13 +68,6 @@ export class MacosCapabilityReport extends Schema.Class<MacosCapabilityReport>(
   cloneOrCopyWorkspace: CapabilityClaim,
   nativeContainment: NativeContainment,
   vmEnclosure: VmEnclosureAvailability
-}) {}
-
-export class PrivateWorkspaceRequest extends Schema.Class<PrivateWorkspaceRequest>(
-  "PrivateWorkspaceRequest"
-)({
-  source: Schema.String,
-  destination: Schema.String
 }) {}
 
 export class PrivateWorkspaceReceipt extends Schema.Class<PrivateWorkspaceReceipt>(
@@ -114,24 +95,4 @@ export class MacosCommandFailed extends Schema.TaggedError<MacosCommandFailed>()
 export class VolumeInspectionFailed extends Schema.TaggedError<VolumeInspectionFailed>()(
   "VolumeInspectionFailed",
   { path: Schema.String, cause: Schema.String }
-) {}
-
-export class WorkspaceSourceMissing extends Schema.TaggedError<WorkspaceSourceMissing>()(
-  "WorkspaceSourceMissing",
-  { source: Schema.String }
-) {}
-
-export class WorkspaceSourceNotDirectory extends Schema.TaggedError<WorkspaceSourceNotDirectory>()(
-  "WorkspaceSourceNotDirectory",
-  { source: Schema.String }
-) {}
-
-export class WorkspaceDestinationExists extends Schema.TaggedError<WorkspaceDestinationExists>()(
-  "WorkspaceDestinationExists",
-  { destination: Schema.String }
-) {}
-
-export class WorkspacePreparationFailed extends Schema.TaggedError<WorkspacePreparationFailed>()(
-  "WorkspacePreparationFailed",
-  { source: Schema.String, destination: Schema.String, cause: Schema.String }
 ) {}

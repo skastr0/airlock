@@ -106,11 +106,10 @@ Evidence present today:
   grant — across 26 cases against a local fixture provider on one macOS host;
   it preserves the single wire site and is bounded evidence only, not a passed
   brokerage gate, real-provider evidence, or corpus evidence; and
-- a [Linux beachhead container run](evidence/linux-beachhead.md) proves the
-  portable Hold/Outbox/Ledger/lease physics on Linux
-  (`renameat2(RENAME_NOREPLACE)` and `flock` adapters, a 16-process boundary
-  proof, and the portable suites); it carries no Linux containment profile and
-  no release claim, and every gate in this contract remains macOS-scoped.
+- the separate [Linux native-contained evidence](evidence/linux-beachhead.md)
+  now covers Linux platform primitives, containment, shared workloads, and
+  local distribution. It neither borrows nor satisfies this document's
+  macOS-specific acceptance gates.
 
 Evidence absent today:
 

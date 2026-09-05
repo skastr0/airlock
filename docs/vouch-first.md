@@ -41,8 +41,8 @@ state, local finality, external staging, and receipts.
 ## What runs today
 
 `scripts/prove-vouch.ts` executes one fixed, safe, local proof on supported
-macOS hosts. The test is `test/vouch-e2e.test.ts`; the operation inventory is
-`examples/vouch/OPERATIONS.md`.
+macOS and Linux hosts. The test is `test/vouch-e2e.test.ts`; the operation
+inventory is `examples/vouch/OPERATIONS.md`.
 
 The admitted Plan contains five generic nodes:
 
@@ -59,11 +59,12 @@ The proof then invokes Hold undo as an administrative transition.
 
 The proof asserts:
 
-- six admitted grants and six handles, including separate executable and
-  working-directory authority for the `tar` invocation;
+- six admitted grants/handles on macOS and eight on Linux, where GNU tar's
+  `/bin/sh` and `/usr/bin/gzip` descendant execs are explicit;
 - five succeeded Plan-node receipts in sequence;
 - one admitted resource identity per node except the invocation, which carries
-  its distinct executable and working-directory identities;
+  root executable, working-directory, and platform-required descendant
+  identities;
 - the archive digest is attached to the Invoke input;
 - the actual executable and args are recorded;
 - network is denied;

@@ -4,6 +4,7 @@ import { existsSync } from "node:fs"
 import { fileURLToPath } from "node:url"
 import { Schema } from "effect"
 import { VouchProofReport } from "../scripts/prove-vouch.ts"
+import { nativeContainmentSupported } from "./support/NativeContainmentTest.ts"
 
 const projectRoot = fileURLToPath(new URL("../", import.meta.url))
 const bunPath = (() => {
@@ -16,12 +17,13 @@ const bunPath = (() => {
   }
 })()
 const supported =
-  process.platform === "darwin" &&
+  nativeContainmentSupported &&
   bunPath.length > 0 &&
-  existsSync("/usr/bin/sandbox-exec") &&
-  existsSync("/usr/bin/tar")
+  existsSync("/usr/bin/tar") &&
+  (process.platform !== "linux" ||
+    ["/bin/sh", "/usr/bin/gzip"].every(existsSync))
 
-describe.skipIf(!supported)("Vouch-derived macOS end-to-end proof", () => {
+describe.skipIf(!supported)("Vouch-derived host end-to-end proof", () => {
   it("admits, contains, applies, stages, receipts, and undoes real Unix work", async () => {
     const output = execFileSync(
       bunPath,
@@ -33,8 +35,9 @@ describe.skipIf(!supported)("Vouch-derived macOS end-to-end proof", () => {
     )
 
     expect(report.profile).toBe("native-contained")
-    expect(report.grantCount).toBe(6)
-    expect(report.handleCount).toBe(6)
+    const authorityCount = process.platform === "linux" ? 8 : 6
+    expect(report.grantCount).toBe(authorityCount)
+    expect(report.handleCount).toBe(authorityCount)
     expect(report.receipts.map((receipt) => receipt.state)).toEqual([
       "succeeded",
       "succeeded",
@@ -47,7 +50,7 @@ describe.skipIf(!supported)("Vouch-derived macOS end-to-end proof", () => {
     ])
     expect(
       report.receipts.map((receipt) => receipt.resourceIdentities.length)
-    ).toEqual([1, 2, 1, 1, 1])
+    ).toEqual(process.platform === "linux" ? [1, 4, 1, 1, 1] : [1, 2, 1, 1, 1])
     expect(report.receipts[1]?.inputDigests).toHaveLength(1)
 
     expect(report.cell).toMatchObject({

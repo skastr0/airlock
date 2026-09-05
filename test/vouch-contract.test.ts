@@ -233,7 +233,10 @@ const responseValue = (request: ProgramActionRequest): LanguageValue => {
   }
 }
 
-const runExample = async (name: string, bindings: Record<string, string>) => {
+const runExample = async (
+  name: string,
+  bindings: Readonly<Record<string, LanguageValue>>
+) => {
   const requests: ProgramActionRequest[] = []
   const executor = Layer.succeed(ProgramActionExecutor, {
     execute: (request: ProgramActionRequest) => {
@@ -410,6 +413,7 @@ describe("Vouch-derived generic shell replacement corpus", () => {
       staged_backup: "/work/staged-backup.tgz",
       final_backup: "/work/final-backup.tgz",
       stale_file: "/work/stale.txt",
+      tar_descendants: [],
       endpoint: "https://example.test/stage"
     })
     for (const request of hostWorkflow.requests) {

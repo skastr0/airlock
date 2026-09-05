@@ -1,13 +1,12 @@
 #!/bin/sh
-# Runs the Linux beachhead evidence inside a real Linux container.
+# Runs only the portable rename/flock boundary proof in an ordinary Linux
+# container. Native containment deliberately is not attempted here: Docker's
+# outer seccomp/AppArmor/user-namespace policy varies, and this helper never
+# asks for --privileged or weakens host policy to manufacture a pass.
 #
-# The repository is bind-mounted into the official Bun image; `node_modules` is
-# masked by a named volume so the host's macOS-native packages never enter the
-# container and the container never rewrites the host tree.
-#
-# Everything below also runs unchanged on a Linux host (see
-# .github/workflows/linux.yml); the container exists so a macOS workstation can
-# produce the same evidence.
+# Use scripts/run-linux-suites.sh on a Linux host for the complete required
+# native-contained gate. The repository is bind-mounted here and node_modules
+# is masked so host-native dependencies neither enter nor rewrite the checkout.
 set -eu
 
 IMAGE="${AIRLOCK_LINUX_IMAGE:-oven/bun:1.3.13}"
@@ -24,8 +23,8 @@ if [ -n "${AIRLOCK_LINUX_PLATFORM:-}" ]; then
 fi
 set -- "$@" "${IMAGE}" sh -euc '
   bun install --frozen-lockfile >/dev/null
-  exec sh scripts/run-linux-suites.sh
+  exec bun scripts/prove-linux-boundary.ts
 '
 
-printf 'airlock: linux evidence in %s\n' "${IMAGE}" >&2
+printf 'airlock: portable Linux boundary evidence in %s\n' "${IMAGE}" >&2
 exec "$@"

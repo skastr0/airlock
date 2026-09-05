@@ -6,6 +6,7 @@ import { Hold } from "../../src/Hold.ts"
 import { HoldLive } from "../../src/HoldLive.ts"
 import { LedgerLive } from "../../src/Ledger.ts"
 import { ExclusiveRename } from "../../src/platform/ExclusiveRename.ts"
+import { LinuxExclusiveRenameLive } from "../../src/platform/linux/LinuxExclusiveRename.ts"
 import { MacosExclusiveRenameLive } from "../../src/platform/macos/MacosExclusiveRename.ts"
 
 const root = process.argv.at(-1)
@@ -14,6 +15,10 @@ if (root === undefined || root === process.argv[0]) {
 }
 const home = `${root}/airlock-home`
 const target = `${root}/managed.txt`
+
+const PlatformExclusiveRenameLive = process.platform === "linux"
+  ? LinuxExclusiveRenameLive
+  : MacosExclusiveRenameLive
 
 const layer = HoldLive.pipe(
   Layer.provideMerge(LedgerLive),
@@ -36,7 +41,7 @@ const proof = Effect.gen(function* () {
     ExclusiveRename,
     (rename) =>
       rename.moveNoReplace(collisionSource, collisionTarget).pipe(Effect.flip)
-  ).pipe(Effect.provide(MacosExclusiveRenameLive))
+  ).pipe(Effect.provide(PlatformExclusiveRenameLive))
   yield* Console.log(JSON.stringify({
     collision: collision._tag,
     collisionSource: yield* fs.readFileString(collisionSource),

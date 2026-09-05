@@ -23,7 +23,8 @@ Untrusted inputs include:
 
 Trusted for a particular result:
 
-- the macOS/Bun/Seatbelt mechanisms named by the capability report;
+- the Bun and host-native mechanisms named by the active macOS or Linux
+  capability report;
 - Airlock's Admission, Runtime, Hold, Outbox, and storage implementation;
 - the supervisor that selects the profile and supplies policy;
 - admitted executable and resource identities at the precision the current
@@ -134,11 +135,12 @@ and `Hold.reap` owns the only irreversible removal site in the runtime.
 Compatibility children retain ambient host writes, so syscalls they perform
 internally are not mediated as Apply and receive no Hold recovery guarantee.
 
-On macOS, installing or restoring live managed bytes uses an Effect capability
-over `renamex_np(RENAME_EXCL)`. A target that appears after preflight is
-preserved and reported as a typed conflict; there is no fallback to an
-overwriting rename. Replacing rename remains limited to publishing journal
-replicas, where old and new names represent the same state record.
+Installing or restoring live managed bytes uses an Effect capability over
+`renamex_np(RENAME_EXCL)` on macOS or `renameat2(RENAME_NOREPLACE)` on Linux. A
+target that appears after preflight is preserved and reported as a typed
+conflict; there is no fallback to an overwriting rename. Replacing rename
+remains limited to publishing journal replicas, where old and new names
+represent the same state record.
 
 Native adapters reserve a journaled runtime-private Hold act before populating
 candidate bytes for write/copy/move/mkdir. If population fails or is
@@ -206,12 +208,11 @@ These checks close the demonstrated top-level workspace alias/substitution
 paths. They do not establish general identity-safe resolution for every
 resource under symlink, rename, hardlink, or mount races.
 
-The Seatbelt profile also permits:
-
-- ambient `file-read*`;
-- process fork; and
-- `process-exec` only for the resolved paths of the admitted root and its
-  root-scoped declared descendants.
+Both native backends permit ambient host reads. macOS Seatbelt grants
+`process-exec` only to resolved admitted paths. Linux pins selected executable
+objects and required ELF loaders into Bubblewrap, then grants Landlock EXECUTE
+only to those objects; its launcher also installs seccomp before target
+environment variables become active and closes descriptors above stderr.
 
 The Cell records each executable binding's root/descendant role, requested
 path, launch path, allowed paths, and whether a workspace-local executable was
@@ -220,29 +221,31 @@ receipt. A private per-Invoke temp directory is exported through `TMPDIR`,
 `TMP`, and `TEMP`, excluded from the proposed delta, and retained with the
 private workspace lifecycle.
 
-This is an **exact executable-edge fence**, not a complete execution closure.
-Dynamic libraries load through file reads. An admitted interpreter can execute
-agent-owned data in-process. Configuration and plugins can affect behavior
-without a new exec. External executable paths are resolved for the Seatbelt
-profile but are not yet bound to immutable code bytes across replacement
-races.
+This is a **direct executable-edge/object fence**, not complete execution
+closure. Dynamic libraries load through file reads. An admitted interpreter can
+execute agent-owned data in-process. Configuration and plugins can affect
+behavior without a new exec. On Linux, hardlink aliases share Landlock object
+authority, and an admitted ELF loader can interpret another ELF passed as data
+without a second mediated exec. Linux setup objects are descriptor-pinned;
+macOS external paths do not establish immutable code bytes across every
+replacement race.
 
 Therefore the implemented native profile supports a local-state integrity
 claim only within its advertised delta envelope. It does **not** support a
 confidentiality claim, complete execution-closure claim, or proof against all
 daemonization and descendant-escape techniques.
 
-The Schema-decoded Bun proof makes the distinction observable: `/bin/bash` is
-the only bound executable and still sources an agent-owned `BASH_ENV` without
-a second exec. Seatbelt denies the sourced code's live-workspace write and
-loopback connection, while its private write becomes the sole delta. This is a
-successful boundary proof, not a vulnerability-test failure.
+Adversarial tests make the distinction observable. On macOS, an admitted
+`/bin/bash` sources agent-owned `BASH_ENV` in-process while Seatbelt still
+confines writes and loopback. On Linux, an admitted ELF loader interprets an
+unlisted ELF while the resulting mutation remains in the private view. These
+are successful boundary proofs, not hidden failures.
 
-The process runner owns a process group and now waits for same-group
-descendants before reporting completion; timeout and cancellation terminate
-the owned group, and output limits retain a bounded partial process receipt.
-PTY, double-fork/session escape, and every daemonization technique remain
-outside the proof.
+The process runner waits for its owned process group; Linux additionally uses
+Bubblewrap as PID-namespace init with parent-death teardown, and the adversarial
+suite covers a double-forked session on timeout. Output limits retain bounded
+partial receipts. No backend proves every daemonization technique, and neither
+installs CPU, memory, process-count, disk, or I/O quotas.
 
 Runtime-private Hold acts are excluded from ordinary undo and can be discarded
 only by Reaper. The normal finalizer never prefix-sweeps neighboring paths.
@@ -311,10 +314,11 @@ root/image identity
 ```
 
 That is an acceptance condition, not a current native guarantee. The present
-Seatbelt profile fences declared root/descendant exec paths and permits
-ambient reads. It does not mediate dynamic-library or config reads, code
+Seatbelt and Landlock mechanisms fence declared root/descendant direct execs and
+permit ambient reads. They do not mediate dynamic-library or config reads, code
 interpreted within an admitted process, every plugin callback, mutable
-executable bytes, or every descendant-lifetime escape.
+executable bytes, hardlink aliases on Linux, or every descendant-lifetime
+escape.
 
 Airlock intentionally does not replace or semantically verify the program:
 `tar`, `git`, compilers, package managers, and interpreters retain their
@@ -480,7 +484,7 @@ Before claiming more than the current narrow envelope, the project needs:
   Journal beyond the bounded lease/journal evidence already present;
 - end-to-end labels and persistent-authority fixtures;
 - endpoint-broker tests if network is advertised;
-- repeated results on each published macOS/architecture combination; and
+- repeated results on each published platform/architecture combination; and
 - a representative model/harness corpus rather than the current local
   Vouch/parity fixtures.
 

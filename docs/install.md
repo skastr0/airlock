@@ -11,10 +11,10 @@
 
 | | |
 | --- | --- |
-| operating system | macOS. `package.json` declares `os: ["darwin"]`. |
+| operating system | macOS or Linux. `package.json` declares both. |
 | runtime | Bun 1.3.11 or newer (`engines.bun`). |
-| architecture | Apple silicon or Intel; the builder targets `bun-darwin-arm64` or `bun-darwin-x64` and the published evidence must name which one ran. |
-| shell tools used by examples | `/usr/bin/grep`, `/usr/bin/tr`, `/usr/bin/touch`, `/usr/bin/printf`, `/bin/sleep` — all base macOS. |
+| architecture | macOS arm64/x64, or glibc Linux arm64/x64; Linux bundles are host builds. |
+| native runtime | macOS Seatbelt, or the probed Bubblewrap/Landlock/seccomp prerequisites in [`linux-v1.md`](linux-v1.md). |
 
 ```sh
 bun --version
@@ -32,19 +32,19 @@ arm64
 
 ### Linux status
 
-Linux is a **design direction, not a supported release platform**. The two host
-primitives Hold, Outbox, and Ledger depend on — an atomic no-replace rename and
-a recoverable exclusive lease — exist on Linux and behave as the contracts
-require, and the portable suites pass in a container. That is the whole claim.
+Linux native containment and local distribution are implemented. The backend
+uses Bubblewrap 0.12+, unprivileged namespaces, descriptor-pinned mounts,
+Landlock ABI 2+, and libseccomp. It fails closed when any mechanism is missing
+or blocked and never changes AppArmor/sysctl policy or installs privileged
+helpers.
 
-There is **no native containment on Linux**: no Seatbelt equivalent ships
-in-tree, and `native-contained` refuses with `CellUnavailable` rather than
-falling back to compatibility. On Linux the enclosure is the operator's
-container or VM, not Airlock. No Linux release artifact is built or published.
-
-See [`evidence/linux-beachhead.md`](evidence/linux-beachhead.md) for the exact
-executed boundary and its non-claims, and
-[Linux (experimental)](#linux-experimental) below for how to reproduce it.
+The profile is a live-write/network/direct-exec fence, not a confidentiality or
+VM boundary. It permits broad read-only host access, follows Landlock object
+semantics (including hardlink aliases), does not close admitted-loader or
+in-process interpretation gaps, supports deny-only native network, and installs
+no resource quotas. See [`linux-v1.md`](linux-v1.md) for prerequisites and
+[`evidence/linux-beachhead.md`](evidence/linux-beachhead.md) for executed Debian
+evidence.
 
 ## Install from npm
 
@@ -95,8 +95,9 @@ bun run verify
 >
 > which succeeds against the committed lockfile and leaves it byte-identical.
 
-`bun run verify` is the repository gate: `tsc --noEmit`, then the vitest suite,
-then the four Bun/macOS boundary suites. Executed here:
+`bun run verify` is the repository gate: `tsc --noEmit`, the complete
+platform-selected Vitest suite, and explicit Bun/host-native boundary evidence.
+The historical macOS run recorded below predates the Linux backend:
 
 ```text
 $ tsc --noEmit
@@ -350,94 +351,104 @@ export AIRLOCK_POLICY_FILE="$WORKSPACE/policy.json"
 > reachable in-process only — see
 > [Dispatch classes](usage.md#4-dispatch-classes-and-tool-definitions-v2).
 
-## Linux (experimental)
+## Linux native-contained installation
 
-Reproduce the portable-core evidence from a macOS workstation with Docker, or
-run the suites directly on a Linux host:
+Linux requires a glibc x64/arm64 host, Landlock ABI 2+, working unprivileged user
+namespaces, Bubblewrap 0.12+ without setid bits or file capabilities,
+`libseccomp.so.2`, libcap's `getcap`, and GNU `cp`. Build dependencies include a
+C compiler, `libseccomp-dev`, and `pkg-config`. See
+[`linux-v1.md`](linux-v1.md) for the audited Bubblewrap source-build recipe and
+Ubuntu AppArmor caveat.
+
+The installer never downloads Bubblewrap, invokes privilege elevation, grants
+capabilities, installs a setuid helper, or changes AppArmor/sysctl policy. A
+blocked user namespace is an unavailable capability, not permission to weaken
+the host.
+
+Build a host-architecture release unit into a fresh directory:
 
 ```sh
-sh scripts/prove-linux-boundary.sh     # container: proof + portable suites
-sh scripts/run-linux-suites.sh         # on a Linux host: the same commands
-bun scripts/prove-linux-boundary.ts    # on a Linux host: the boundary proof alone
+OUT="$(mktemp -d)"
+bun scripts/build-linux.ts --out "$OUT"
 ```
 
-`prove-linux-boundary.sh` bind-mounts the repository into `oven/bun:1.3.13` and
-masks `node_modules` with a named volume, so macOS-native packages never enter
-the container and the container never rewrites the host tree.
-`.github/workflows/linux.yml` runs `run-linux-suites.sh` unmodified on
-`ubuntu-latest`, so container and CI execute byte-identical commands. **The CI
-job itself was not executed in this environment.**
-
-Executed here (container, Apple-silicon host):
+The result contains:
 
 ```text
-airlock: linux evidence in oven/bun:1.3.13
-
-== renameat2 + flock boundary, 16-process contention, lease recovery ==
-{
-  "proof": "airlock-linux-beachhead-v1",
-  "ok": true,
-  "assertions": {
-    "renameIntoAbsentTargetSucceeded": true,
-    "renameOntoLiveTargetReportedTargetExists": true,
-    "liveTargetBytesPreserved": true,
-    "refusedSourceBytesPreserved": true,
-    "everyContenderCompleted": true,
-    "contendersWereDistinctProcesses": true,
-    "noIndependentOverlapObserved": true,
-    "atMostOneHolderInside": true,
-    "everyContenderEnteredAndExited": true,
-    "leaseReclaimedAfterHolderKilled": true
-  },
-  "host": {
-    "distribution": "Debian GNU/Linux 13 (trixie)",
-    "kernelRelease": "7.0.11-orbstack-…",
-    "architecture": "arm64",
-    "cLibrary": "glibc 2.41",
-    "bunVersion": "1.3.13",
-    "proofFilesystem": "overlayfs"
-  }
-}
-
-== portable suites ==
- Test Files  7 passed (7)
-      Tests  54 passed | 4 skipped (58)
-
-== partially portable suites (two fixture-limited tests excluded) ==
- Test Files  2 passed (2)
-      Tests  13 passed | 2 skipped (15)
+airlock
+airlock-agent
+airlock-linux-launcher
+airlock.sha256
+airlock.manifest.json
 ```
 
-**What this proves.** `renameat2(RENAME_NOREPLACE)` supplies the atomic
-no-replace rename and `flock(2)` supplies the recoverable exclusive lease;
-sixteen independent processes contend for the lease with at most one holder
-inside at any time, verified by an independent `O_EXCL` sentinel; a `SIGKILL`ed
-holder's lease is reclaimed by the kernel with no release path running. The
-portable suites — Hold semantics, the rename boundary and its post-rename
-directory-sync recovery, cross-instance Hold serialization, Outbox hardening,
-Outbox↔Ledger recovery, cancellation durability — pass on that platform.
+Install all three executable artifacts transactionally:
 
-**What this does not prove.** No containment: `native-contained` refuses on
-Linux. No release: no artifact is built or published, and `os: ["darwin"]`
-stands. One filesystem only (`overlayfs`); a filesystem lacking
-`RENAME_NOREPLACE` gets a typed `ExclusiveRenameUnavailable`, and that path has
-not been exercised against a real such filesystem. Cross-process *Runtime claim*
-racing is macOS-gated and has no Linux evidence. No parity, corpus, latency, or
-task-completion claim. Four tests are skipped by platform gate and two are
-excluded by name — both exclusions are fixture limits documented in
-[`evidence/linux-beachhead.md`](evidence/linux-beachhead.md), not Airlock
-behaviour.
+```sh
+sh scripts/install-linux.sh \
+  --source "$OUT/airlock" \
+  --agent-source "$OUT/airlock-agent" \
+  --launcher-source "$OUT/airlock-linux-launcher" \
+  --checksum "$OUT/airlock.sha256" \
+  --bwrap /usr/local/bin/bwrap \
+  --prefix "$HOME/.local"
+```
+
+Before displacement, the installer verifies SHA-256s, regular/non-setid/no-cap
+metadata, Bubblewrap version, launcher Landlock/seccomp linkage, and a
+production-shaped candidate `doctor`. It takes an install `flock`, requires
+`bin` and `libexec` on one filesystem, and publishes the unit by rename. With
+`--replace`, prior artifacts move into
+`$PREFIX/libexec/airlock/replaced/install.*`; every tested rename-boundary
+failure rolls the unit back.
+
+The installed layout is:
+
+```text
+$PREFIX/bin/airlock
+$PREFIX/bin/airlock-agent
+$PREFIX/libexec/airlock/airlock-linux-launcher
+```
+
+The CLIs discover the launcher relative to their own installed path. Name a
+nonstandard Bubblewrap with `AIRLOCK_BWRAP` or `--bwrap` during install.
+
+```sh
+export PATH="$HOME/.local/bin:$PATH"
+AIRLOCK_BWRAP=/usr/local/bin/bwrap airlock doctor
+airlock-agent actions
+```
+
+Uninstall preserves rather than deletes the installed unit and does not touch
+Airlock state or retained Holds:
+
+```sh
+sh scripts/uninstall-linux.sh --prefix "$HOME/.local"
+```
+
+Run the complete Linux gate directly on Linux:
+
+```sh
+AIRLOCK_BWRAP=/usr/local/bin/bwrap sh scripts/run-linux-suites.sh
+```
+
+`scripts/prove-linux-boundary.sh` is only the portable rename/flock proof in an
+ordinary Docker container. It deliberately does not request `--privileged` or
+weaken outer AppArmor/seccomp policy for nested containment. The required
+Ubuntu 22.04 CI matrix builds exact Bubblewrap 0.12.0 and runs the complete host
+gate on Bun 1.3.11 and 1.3.13.
 
 ## What actually ran
 
-| | |
-| --- | --- |
-| date | 2026-08-03 |
-| host | macOS 26.5.2 (build 25F84), arm64 |
-| Bun | 1.3.14 |
-| binaries under test | `airlock` / `airlock-agent` 0.1.0, built and installed during this session |
-| container image | `oven/bun:1.3.13` |
-| not executed | `npm install --global @skastr0/airlock` (no such release), `scripts/uninstall-macos.sh`, the `ubuntu-latest` CI job |
+The macOS command transcripts earlier in this document were recorded on macOS
+26.5.2 arm64 with Bun 1.3.14 on 2026-08-03. The Linux implementation was
+executed directly on 2026-09-04 in a Debian 12 x86-64 orb (Linux 6.1.158+,
+glibc 2.36, Bun 1.3.11, Bubblewrap 0.12.0, Landlock ABI 2). Its native,
+distribution, shared workload, and Vouch evidence is recorded in
+[`evidence/linux-beachhead.md`](evidence/linux-beachhead.md).
+
+No npm package, hosted GitHub Actions result, Developer ID/notarized macOS
+artifact, or public Linux artifact is claimed here.
 
 ## Next
 

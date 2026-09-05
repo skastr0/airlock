@@ -12,6 +12,7 @@ import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
 import { Schema } from "effect"
 import { describe, expect, it } from "vitest"
+import { nativeContainmentSupported } from "./support/NativeContainmentTest.ts"
 
 const repository = resolve(import.meta.dirname, "..")
 const terminalCommands = [
@@ -376,8 +377,7 @@ describe("agent-hostile admission and containment", () => {
   )
 
   it.skipIf(
-    process.platform !== "darwin" ||
-      !existsSync("/usr/bin/sandbox-exec") ||
+    !nativeContainmentSupported ||
       !existsSync("/usr/bin/curl")
   )(
     "denies native-contained network access and receipts the failed Invoke",

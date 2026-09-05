@@ -256,7 +256,7 @@ describe("Ledger — append-only receipts", () => {
   )
 })
 
-describe("Ledger — macOS cross-process serialization", () => {
+describe("Ledger — cross-process serialization", () => {
   it("waits for a kernel lease held by another process before appending", async () => {
     const temporary = await mkdtemp(join(tmpdir(), "airlock-ledger-process-"))
     const home = join(temporary, "home")
@@ -270,13 +270,18 @@ describe("Ledger — macOS cross-process serialization", () => {
     const blockerSource = `
       import { constants, existsSync } from "node:fs"
       import { open, writeFile } from "node:fs/promises"
+      import { acquireLinuxFileLease } from ${JSON.stringify(new URL("../src/platform/linux/LinuxExclusiveFileLock.ts", import.meta.url).href)}
       const [lockFile, readyFile, releaseFile] = process.argv.slice(1)
       const O_EXLOCK = 0x20
       const handle = await open(
         lockFile,
-        constants.O_RDWR | constants.O_CREAT | O_EXLOCK,
+        constants.O_RDWR | constants.O_CREAT |
+          (process.platform === "darwin" ? O_EXLOCK : 0),
         0o600
       )
+      if (process.platform === "linux" && !(await acquireLinuxFileLease(handle.fd))) {
+        process.exit(75)
+      }
       await writeFile(readyFile, "ready")
       const deadline = Date.now() + 10_000
       while (!existsSync(releaseFile) && Date.now() < deadline) {
