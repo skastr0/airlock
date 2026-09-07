@@ -1,8 +1,8 @@
 # Reviewed local changes
 
-**Status: implementation target pending parent integration validation.** The
-syntax below is frozen for implementation; this document is not evidence that
-the workflow has executed successfully in a released build.
+**Status: implemented developer preview.** See the [executed Linux evidence](evidence/reviewed-changes.md)
+for the tested integration and crash boundaries. This is not a production
+release or evidence of execution on macOS.
 
 Use Bash or Python to prepare a replacement. Use Airlock for the consequential
 step: bind that candidate to one target, review it, apply exactly what was
@@ -112,6 +112,13 @@ the displaced current state through Hold rather than deleting it in place.
 If someone edited the live target after apply, undo refuses instead of
 overwriting their work. There is no force flag or replay path.
 
+Receipts describe historical transitions, not the current filesystem. Repeating
+apply returns its original receipt without reinstalling—even after undo.
+Use status to inspect workflow state; it too is not a live filesystem check.
+Undo requires the retained Hold payload: an authorized reaper can eventually
+discard it after durable receipt publication. Independent baseline snapshots
+are not an alternative force-restore path.
+
 For a **single file**, start a fresh fixture and use the same sequence with:
 
 ```sh
@@ -157,12 +164,17 @@ actively written tree. Airlock neither makes databases safe nor restarts
 services. There is no confidentiality or defense against malicious tampering
 by another process with the same UID.
 
-Snapshots are retained initially with **no snapshot garbage collection**.
-Bound retained storage operationally: use small candidates, budget free space,
-and stop staging before exhausting it. Cancellation and undo are not storage
-reclamation. Preserve the Airlock home for receipts and recovery; this demo
-does not auto-delete it. Source immutability means later edits to the original
-source are irrelevant, not that same-UID attackers cannot modify private state.
+Snapshots are retained initially with **no snapshot garbage collection**. Each
+tree is limited to 64 MiB, 4,096 entries, depth 64, and 256 KiB of entry paths.
+The store allows at most 128 proposals and a 512 MiB reservation budget,
+whichever is reached first. Each stage reserves twice the candidate-plus-baseline
+bytes plus 32 MiB overhead, so even tiny proposals exhaust the budget before
+the count limit. Interrupted allocations remain conservatively charged.
+These are application limits, not a filesystem quota; budget actual free space
+too. Cancellation and undo do not reclaim the reservation. Preserve the Airlock
+home for receipts and recovery; the demo does not auto-delete it. Source
+immutability means later edits to the original source are irrelevant, not that
+same-UID attackers cannot modify private state.
 
 The implementation composes Hold directly with **supervisor-managed Apply
 semantics**. It does not claim Plan lowering or add a fifth Plan node. The

@@ -1,6 +1,6 @@
 # Scratch change example
 
-**Implementation-target walkthrough; CLI integration is not yet validated.**
+**Developer-preview walkthrough with [executed Linux evidence](../../docs/evidence/reviewed-changes.md).**
 Requires Bash and Python 3 to generate the fixture, plus installed Airlock
 binaries or Bun for the [stage → review → apply → undo journey](../../docs/changes.md).
 No `.air` program, native containment, production paths, or running service.

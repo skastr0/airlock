@@ -267,7 +267,7 @@ See [the security model](docs/security-model.md).
 
 ## Adoption: consequential local changes first
 
-**Implementation target pending integration validation:** `change` stages an
+**Implemented developer preview ([Linux evidence](docs/evidence/reviewed-changes.md)):** `change` stages an
 immutable candidate and baseline for one target file or directory. Review
 identifies the exact proposal digest; supervisor apply requires that full
 digest and an unchanged baseline. Later source edits are irrelevant. Apply

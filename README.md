@@ -11,10 +11,11 @@ would be expensive. Generate a candidate with the tools you already use; stage
 it against one target; review it; let a supervisor apply exactly the approved
 digest. Keep a receipt for checked undo and durable recovery.
 
-**Developer preview · macOS + Linux · MIT.** The `change` workflow below is an
-**implementation target pending integration validation**, not executed release
-evidence. Existing compatibility, `.air`, Cell, Hold, and Outbox features remain
-available; they are not prerequisites for this first journey.
+**Developer preview · macOS + Linux · MIT.** The `change` workflow is implemented
+with [executed Linux integration and recovery evidence](docs/evidence/reviewed-changes.md).
+This is not production certification or macOS execution evidence. Existing
+compatibility, `.air`, Cell, Hold, and Outbox features remain available; they
+are not prerequisites for this first journey.
 
 ## First journey: a reviewed directory replacement
 
@@ -47,8 +48,13 @@ airlock change undo "$RECEIPT_ID"
 Apply runs no arbitrary command: it installs the immutable staged candidate
 only if the target still matches its recorded baseline. Editing the original
 source after staging cannot alter the approved proposal. Undo refuses drift;
-it is not an unconditional restore. JSON is the default; human-readable diff
-is opt-in. No `.air` program or native-contained setup is needed.
+it is not an unconditional restore. Output is JSON; bounded per-path text
+previews are opt-in with `--diff`. No `.air` program or native-contained setup
+is needed. Try the scratch-only interactive demo directly from this checkout:
+
+```sh
+bash examples/changes/demo.sh
+```
 
 Read the [complete walkthrough and command contract](docs/changes.md), including
 cancel, recovery, and deliberate drift checks.
