@@ -129,18 +129,20 @@ airlock_getcap() {
 audited_bwrap() {
   local dest="$1"
   local caps
+  [ -f "$dest" ] || return 1
+  [ ! -L "$dest" ] || return 1
   [ -x "$dest" ] || return 1
   [ ! -u "$dest" ] || return 1
   [ ! -g "$dest" ] || return 1
   [ "$("$dest" --version 2>/dev/null || true)" = "bubblewrap 0.12.0" ] || return 1
-  caps="$(airlock_getcap "$dest" 2>/dev/null || true)"
+  caps="$(airlock_getcap "$dest")" || return 1
   [ -z "$caps" ]
 }
 
 ensure_bubblewrap() {
   local dest="/usr/local/bin/bwrap"
   local pin="2a76602a8c71f36c1527cf9fc3417d9149822e0c"
-  local src="/tmp/airlock-bubblewrap-0.12.0"
+  local src
   if [ "$(uname -s)" != "Linux" ]; then
     log "skipping Bubblewrap on $(uname -s)"
     return
@@ -150,7 +152,7 @@ ensure_bubblewrap() {
     return
   fi
   log "building audited Bubblewrap 0.12.0 ($pin)"
-  rm -rf "$src"
+  src="$(mktemp -d /tmp/airlock-bubblewrap-0.12.0.XXXXXXXX)"
   git clone --depth 1 --branch v0.12.0 \
     https://github.com/containers/bubblewrap.git "$src"
   if [ "$(git -C "$src" rev-parse HEAD)" != "$pin" ]; then
