@@ -12,8 +12,8 @@ deployment service, command runner, or service manager.
 
 ## Command contract
 
-All commands default to JSON; only `review --diff` opts into a human-readable
-diff. `ID` is a proposal ID; `RECEIPT_ID` is an apply receipt ID. `sha256:FULL`
+All commands return JSON; `review --diff` adds per-path changes and bounded text
+previews with binary/truncation markers. `ID` is a proposal ID; `RECEIPT_ID` is an apply receipt ID. `sha256:FULL`
 means the entire reviewed digest (64 hex digits after the prefix), not a prefix
 match or the hash of a source file calculated separately.
 
@@ -27,7 +27,7 @@ airlock change status ID
 airlock-agent change status ID
 airlock change undo RECEIPT_ID
 airlock change cancel ID
-airlock change recover ID
+airlock change recover ID [--restore]
 ```
 
 Within this command group, the agent surface is **stage, review, status only**.
@@ -133,6 +133,11 @@ Only that file is replaced; its siblings are outside the proposal.
   Recovery reconciles durable transition evidence; it is not permission to
   replay an apply or run a command again. Do not manually move Hold entries or
   guess success from the presence of the target alone.
+- **Interrupted with the live target absent:** after inspecting recovery
+  evidence, `airlock change recover "$ID" --restore` explicitly restores the
+  verified prior binding, never the candidate installation. It refuses to
+  overwrite a foreign occupant. A completed restoration reports `rolled-back`;
+  applying that consumed proposal again does not execute it.
 
 For deliberate drift tests, use a fresh scratch fixture per case. After stage,
 append a line to `"$DEMO/live/config.json"` and check that apply refuses. In a

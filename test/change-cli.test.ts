@@ -1,12 +1,13 @@
-import { spawnSync } from "node:child_process"
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs"
+import { execFile, spawnSync } from "node:child_process"
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
+import { promisify } from "node:util"
 import { describe, expect, it } from "vitest"
 
 const repository = resolve(import.meta.dirname, "..")
 const fixture = () => {
-  const root = mkdtempSync(join(tmpdir(), "airlock-change-cli-"))
+  const root = realpathSync(mkdtempSync(join(tmpdir(), "airlock-change-cli-")))
   const home = join(root, "home")
   const source = join(root, "candidate.json")
   const target = join(root, "live.json")
@@ -109,6 +110,26 @@ describe("reviewed change CLI", () => {
     successful(run(home, ["undo", applied.receiptId]))
     expect(readFileSync(join(target, "old.txt"), "utf8")).toBe("old")
     expect(existsSync(join(target, "new.txt"))).toBe(false)
+  })
+
+  it("serializes simultaneous supervisor processes without a second installation", async () => {
+    const { home, source, target } = fixture()
+    const staged = successful(run(home, ["stage", "--source", source, "--target", target]))
+    const execute = promisify(execFile)
+    const results = await Promise.all([0, 1, 2].map(() => execute("bun", [
+      "src/cli.ts", "change", "apply", staged.id, "--expect-digest", staged.proposalDigest
+    ], {
+      cwd: repository,
+      env: { ...process.env, AIRLOCK_HOME: home, AIRLOCK_SEAL: undefined, AIRLOCK_AGENT_SURFACE: undefined },
+      encoding: "utf8",
+      timeout: 30_000
+    })))
+    const receipts = results.map(result => JSON.parse(result.stdout))
+    expect(receipts.every(receipt => receipt.state === "installed")).toBe(true)
+    expect(new Set(receipts.map(receipt => receipt.actId)).size).toBe(1)
+    expect(receipts[0].actId).toBeTypeOf("string")
+    expect(readdirSync(join(home, "hold")).filter(name => name.startsWith("act_"))).toHaveLength(1)
+    expect(readFileSync(target, "utf8")).toBe('{"enabled":true}\n')
   })
 
   it("cancels a proposal without mutating the target", () => {

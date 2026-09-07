@@ -4,6 +4,8 @@ set -euo pipefail
 umask 077
 script_dir="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
 demo="$(mktemp -d "${TMPDIR:-/tmp}/airlock-changes.XXXXXXXX")"
+# macOS /tmp and /var are aliases; bind the physical scratch path explicitly.
+demo="$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$demo")"
 mkdir "$demo/live" "$demo/candidate" "$demo/airlock-home"
 printf '{"message":"before","workers":1}\n' > "$demo/live/config.json"
 printf 'Retained through Hold when absent from the candidate.\n' > "$demo/live/obsolete.txt"

@@ -614,10 +614,11 @@ const bindProgramWorkspace = (
 // ── reviewed local changes ──────────────────────────────────────────────────
 
 const renderedChangeOutcome = <A extends { readonly state: string }, E, R>(
-  effect: Effect.Effect<A, E, R>
+  effect: Effect.Effect<A, E, R>,
+  successfulStates: ReadonlyArray<string> = ["installed", "undone"]
 ) => rendered(effect.pipe(
   Effect.tap((outcome) => Effect.sync(() => {
-    if (outcome.state === "rejected" || outcome.state === "recovery-required") {
+    if (!successfulStates.includes(outcome.state)) {
       process.exitCode = 1
     }
   }))
@@ -661,9 +662,13 @@ const makeChange = (seal: SealContext, agent = false) => {
     Command.make("cancel", { id }, ({ id }) => rendered(local.pipe(
       Effect.zipRight(Effect.flatMap(Change, (change) => change.cancel(id)))
     ))).pipe(Command.withDescription("Cancel an unclaimed proposal; snapshots remain retained")),
-    Command.make("recover", { id }, ({ id }) => renderedChangeOutcome(local.pipe(
-      Effect.zipRight(Effect.flatMap(Change, (change) => change.recover(id)))
-    ))).pipe(Command.withDescription("Reconcile interrupted work from durable evidence; never retry installation"))
+    Command.make("recover", {
+      id,
+      restore: Options.boolean("restore")
+    }, ({ id, restore }) => renderedChangeOutcome(local.pipe(
+      Effect.zipRight(Effect.flatMap(Change, (change) => change.recover(id, { restore })))
+    ), ["staged", "cancelled", "installed", "undone", "rolled-back"]))
+      .pipe(Command.withDescription("Reconcile evidence; --restore restores retained prior state into an absent target, never retries installation"))
   )
   return makeRoot("change", commands).pipe(Command.withDescription(
     "Prepare with Bash or Python; review, apply, and recover consequential local replacements"
