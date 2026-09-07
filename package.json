@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "type": "module",
   "packageManager": "bun@1.3.11",
-  "description": "An agent-only Unix runtime for structured plans, recoverable managed mutations, staged external intent, and durable receipts.",
+  "description": "Optional tools for reviewed local changes, checked undo, staged external intent, and durable receipts alongside Bash and Python.",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/skastr0/airlock.git"
