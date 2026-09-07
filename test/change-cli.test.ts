@@ -16,7 +16,7 @@ const fixture = () => {
 }
 
 const run = (home: string, args: ReadonlyArray<string>, agent = false) => {
-  const environment = { ...process.env, AIRLOCK_HOME: home }
+  const environment: NodeJS.ProcessEnv = { ...process.env, AIRLOCK_HOME: home }
   delete environment.AIRLOCK_SEAL
   delete environment.AIRLOCK_AGENT_SURFACE
   return spawnSync("bun", [agent ? "src/agent-cli.ts" : "src/cli.ts", "change", ...args], {

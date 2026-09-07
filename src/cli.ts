@@ -1564,7 +1564,7 @@ type CurrentCommandDescriptor = Readonly<{
 
 /**
  * One construction table owns the complete graph. `serve` is sealed-only;
- * zero-configuration supervisor and agent graphs remain unchanged.
+ * `change` is local-only and its agent factory omits terminal authority.
  */
 const commandDescriptors: ReadonlyArray<CurrentCommandDescriptor> = [
   { verb: "rm", supervisor: makeRm, nativeAction: "file.remove" },
