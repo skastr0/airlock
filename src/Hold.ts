@@ -25,7 +25,7 @@ import {
   type ExclusiveRenameError
 } from "./platform/ExclusiveRename.ts"
 import { makeExclusiveFileLock } from "./platform/ExclusiveFileLock.ts"
-import { CheckedOutcome, CheckedRecord, CheckedRequest, OperationKey } from "./change/Checked.ts"
+import { CheckedOutcome, CheckedRecord, CheckedRequest, observeClaim, OperationKey } from "./change/Checked.ts"
 import { attempt, ChangeError, checkParent, checkTree, exists as treeExists, scan, snapshot } from "./change/Tree.ts"
 
 // The recovery floor, by construction: the destructive part of every mutation
@@ -433,11 +433,12 @@ const make = Effect.gen(function* () {
   const writeNewDurable = (
     target: string,
     content: string,
-    operation: string
+    operation: string,
+    replaceReplica = false
   ) =>
     Effect.tryPromise({
       try: async () => {
-        const handle = await open(target, "wx", 0o600)
+        const handle = await open(target, replaceReplica ? "w" : "wx", 0o600)
         try {
           await handle.writeFile(content, "utf8")
           await handle.sync()
@@ -457,11 +458,12 @@ const make = Effect.gen(function* () {
       Effect.mapError(fsError("encode hold journal", manifestFile(journal.manifest.id))),
       Effect.flatMap((json) => {
         const target = manifestFile(journal.manifest.id)
-        const staged = `${target}.next-${crypto.randomUUID()}`
+        const staged = `${target}.next-${journal.checkedKey === undefined ? crypto.randomUUID() : "checked"}`
         return writeNewDurable(
           staged,
           json,
-          "write staged hold journal"
+          "write staged hold journal",
+          journal.checkedKey !== undefined
         ).pipe(
           Effect.zipRight(
             renameJournalReplacingDurable(staged, target, "install hold journal")
@@ -813,7 +815,7 @@ const make = Effect.gen(function* () {
     checkedKey?: string
   ) {
     yield* fs
-      .makeDirectory(actDir(manifest.id), { recursive: true })
+      .makeDirectory(actDir(manifest.id), { recursive: true, ...(checkedKey === undefined ? {} : { mode: 0o700 }) })
       .pipe(Effect.mapError(fsError("create hold act", actDir(manifest.id))))
     yield* syncDirectory(home.holdDir, "create hold act directory sync")
     yield* writeJournal(
@@ -1610,9 +1612,21 @@ const make = Effect.gen(function* () {
     const now = yield* DateTime.now
     const cutoff = DateTime.subtract(now, { millis: olderThanMillis })
     const all = yield* listJournals
-    const expired = all.filter((journal) =>
-      journal.checkedPinned !== true && DateTime.lessThanOrEqualTo(journal.manifest.at, cutoff)
-    )
+    const expired: HoldJournal[] = []
+    for (const journal of all) {
+      if (journal.checkedPinned === true || !DateTime.lessThanOrEqualTo(journal.manifest.at, cutoff)) continue
+      if (journal.checkedKey !== undefined) {
+        // Correlated receipts are the release authority. Even a stale staged
+        // unpin journal must not make a newer unresolved undo collectible.
+        const record = yield* readChecked(journal.checkedKey).pipe(Effect.mapError(fsError("read checked reaper authority", manifestFile(journal.manifest.id))))
+        if (record?.phase !== "finished" || record.acknowledged !== true) continue
+        if (record.undoOf === undefined) {
+          const undo = yield* readChecked(`undo_${journal.checkedKey}`).pipe(Effect.mapError(fsError("read checked undo reaper authority", manifestFile(journal.manifest.id))))
+          if (undo !== undefined && (undo.phase !== "finished" || undo.acknowledged !== true)) continue
+        }
+      }
+      expired.push(journal)
+    }
     const reaped: ActId[] = []
     for (const journal of expired) {
       const id = journal.manifest.id
@@ -1714,14 +1728,17 @@ const make = Effect.gen(function* () {
       yield* syncDirectory(home.holdDir, "checked root sync")
       yield* writeNewDurable(checkedFile(record.request.operationKey), json, "claim checked operation")
     } else {
-      const next = `${checkedFile(record.request.operationKey)}.next-${crypto.randomUUID()}`
-      yield* writeNewDurable(next, json, "stage checked outcome")
+      // Reuse only an unpublished metadata replica. The canonical record is
+      // always authoritative; private recovery payloads are never overwritten.
+      const next = `${checkedFile(record.request.operationKey)}.next`
+      yield* writeNewDurable(next, json, "stage checked outcome", true)
       yield* renameJournalReplacingDurable(next, checkedFile(record.request.operationKey), "publish checked outcome")
     }
   })
   const outcomeOf = (record: CheckedRecord): CheckedOutcome => record.outcome ?? ({
     version: "checked-hold/v1", receiptId: record.request.operationKey,
     operationKey: record.request.operationKey, target: record.request.target,
+    proposalDigest: record.request.proposalDigest, claim: record.claim,
     state: "recovery-required", actId: record.actId, displacedActId: record.displacedActId,
     installed: record.installed, reason: `interrupted at ${record.phase}; installation is never retried`
   })
@@ -1732,6 +1749,11 @@ const make = Effect.gen(function* () {
     yield* writeChecked({ ...record, phase: state === "recovery-required" ? record.phase : "finished", outcome })
     return outcome
   })
+  const failedChecked = (record: CheckedRecord, state: "rejected" | "recovery-required", cause: unknown) =>
+    finishChecked(record, state, reasonOf(cause)).pipe(Effect.catchAll(publication => Effect.succeed({
+      ...outcomeOf({ ...record, outcome: undefined }),
+      reason: `${reasonOf(cause)}; outcome publication failed (${reasonOf(publication)}); durable claim requires recovery`
+    })))
   const reserveChecked = Effect.fnUntraced(function* (
     request: CheckedRequest, kind: "file" | "directory", hasPayload: boolean, act: "overwrite" | "displaced"
   ) {
@@ -1745,6 +1767,7 @@ const make = Effect.gen(function* () {
   })
   const pinCheckedAct = Effect.fnUntraced(function* (id: string, pinned: boolean) {
     const journal = yield* readJournal(ActId.make(id))
+    if (journal.checkedPinned === pinned) return
     yield* writeJournal(new HoldJournal({ ...journal, checkedPinned: pinned }))
   })
 
@@ -1755,7 +1778,7 @@ const make = Effect.gen(function* () {
     const request = yield* Schema.decodeUnknown(CheckedRequest)(raw)
     const prior = yield* readChecked(request.operationKey)
     if (prior !== undefined) return outcomeOf(prior)
-    let record: CheckedRecord = { request, phase: "claimed" }
+    let record: CheckedRecord = { request, phase: "claimed", claim: observeClaim() }
     yield* writeChecked(record, true)
     let mutationPossible = false
     const execution = yield* Effect.gen(function* () {
@@ -1790,7 +1813,7 @@ const make = Effect.gen(function* () {
       return yield* finishChecked(record, "installed")
     }).pipe(Effect.either)
     if (execution._tag === "Right") return execution.right
-    return yield* finishChecked(record, mutationPossible ? "recovery-required" : "rejected", reasonOf(execution.left))
+    return yield* failedChecked(record, mutationPossible ? "recovery-required" : "rejected", execution.left)
   })
 
   const undoChecked = Effect.fnUntraced(function* (receiptId: string) {
@@ -1806,7 +1829,7 @@ const make = Effect.gen(function* () {
       ...original.request, operationKey: key, expected: original.installed,
       candidate: { path: payloadFile(original.actId), tree: original.request.expected?.tree ?? original.installed.tree }
     }
-    let record: CheckedRecord = { request, undoOf: receiptId, actId: original.actId, phase: "claimed" }
+    let record: CheckedRecord = { request, undoOf: receiptId, actId: original.actId, phase: "claimed", claim: observeClaim() }
     yield* writeChecked(record, true)
     let mutationPossible = false
     const execution = yield* Effect.gen(function* () {
@@ -1836,7 +1859,7 @@ const make = Effect.gen(function* () {
       return yield* finishChecked(record, "undone")
     }).pipe(Effect.either)
     if (execution._tag === "Right") return execution.right
-    return yield* finishChecked(record, mutationPossible ? "recovery-required" : "rejected", reasonOf(execution.left))
+    return yield* failedChecked(record, mutationPossible ? "recovery-required" : "rejected", execution.left)
   })
 
   const recoverChecked = Effect.fnUntraced(function* (key: string, restore = false) {
@@ -1913,15 +1936,19 @@ const make = Effect.gen(function* () {
       yield* attempt("verify recovery restoration", () => checkTree(current.request.target, rollback.restored))
       return yield* finishChecked({ ...record, installed: rollback.restored }, "rolled-back")
     }).pipe(Effect.either)
-    return restored._tag === "Right" ? restored.right : yield* finishChecked(record, "recovery-required", reasonOf(restored.left))
+    return restored._tag === "Right" ? restored.right : yield* failedChecked(record, "recovery-required", restored.left)
   })
   const acknowledgeChecked = Effect.fnUntraced(function* (key: string) {
     const record = yield* readChecked(key)
     if (record === undefined || record.phase !== "finished") return yield* checkedError("cannot acknowledge unresolved operation")
-    if (record.acknowledged === true) return
+    if (record.undoOf === undefined) {
+      const undo = yield* readChecked(`undo_${key}`)
+      if (undo !== undefined && (undo.phase !== "finished" || undo.acknowledged !== true)) return
+    }
     // Caller has already fsynced its workflow receipt. Mark that fact before
-    // releasing any recovery bytes. A crash here can only over-retain.
-    yield* writeChecked({ ...record, acknowledged: true })
+    // releasing any recovery bytes. Repeating acknowledgement completes a
+    // crashed unpin, but cannot release a later undo's unacknowledged pins.
+    if (record.acknowledged !== true) yield* writeChecked({ ...record, acknowledged: true })
     for (const id of [record.actId, record.displacedActId]) {
       if (id !== undefined && (yield* pathExists(actDir(id)))) yield* pinCheckedAct(id, false)
     }

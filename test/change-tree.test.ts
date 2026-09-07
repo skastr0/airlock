@@ -75,5 +75,10 @@ describe("regular-tree/v1", () => {
     await expect(bindTarget(root, home)).rejects.toThrow("overlaps")
     await symlink(root, path.join(root, "alias"))
     await expect(bindTarget(path.join(root, "alias", "file"), home)).rejects.toThrow("symlink")
+    await expect(bindTarget(`${root}/alias/../file`, home)).rejects.toThrow("symlink")
   }))
+
+  it.skipIf(process.platform !== "linux")("rejects mounted trees before traversing them", async () => {
+    await expect(scan("/proc")).rejects.toThrow("mount topology")
+  })
 })

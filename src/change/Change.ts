@@ -4,7 +4,7 @@ import * as path from "node:path"
 import { AirlockHome } from "../AirlockHome.ts"
 import { Hold } from "../Hold.ts"
 import { makeExclusiveFileLock } from "../platform/ExclusiveFileLock.ts"
-import { CheckedOutcome, OperationKey, ProposalDigest } from "./Checked.ts"
+import { CheckedOutcome, ClaimObservation, observeClaim, OperationKey, ProposalDigest } from "./Checked.ts"
 import { attempt, bindTarget, BoundTree, canonical, ChangeError, checkParent, checkTree, Entry, exists, hash, limits, metadataPolicy, overlaps, Parent, scan, snapshot, sync, Tree, writeNew } from "./Tree.ts"
 
 export { ChangeError } from "./Tree.ts"
@@ -32,6 +32,7 @@ export type Review = typeof Review.Type
 export const Status = Schema.Struct({
   version: Schema.Literal("change/v1"), id: ProposalId,
   state: Schema.Literal("staged", "claimed", "cancelled", "installed", "undone", "rolled-back", "rejected", "recovery-required"),
+  claim: Schema.optional(ClaimObservation),
   receipt: Schema.optional(CheckedOutcome), undoReceipt: Schema.optional(CheckedOutcome)
 })
 export type Status = typeof Status.Type
@@ -91,26 +92,33 @@ const make = Effect.gen(function* () {
   })
   const writeStatus = (status: Status) => attempt("publish workflow status", async () => {
     const file = path.join(directory(status.id), "status.json")
-    const next = `${file}.next-${crypto.randomUUID()}`
-    await writeNew(next, Schema.encodeSync(Schema.parseJson(Status))(status))
+    const next = `${file}.next`
+    await writeNew(next, Schema.encodeSync(Schema.parseJson(Status))(status), true)
     await rename(next, file)
     await sync(directory(status.id))
   })
-  const persistReceipt = Effect.fnUntraced(function* (id: string, receipt: CheckedOutcome, undo = false) {
+  const persistReceipt = (id: string, receipt: CheckedOutcome, undo = false) => Effect.gen(function* () {
     const status = yield* readStatus(id)
+    if (JSON.stringify(undo ? status.undoReceipt : status.receipt) === JSON.stringify(receipt)) {
+      if (receipt.state !== "recovery-required") yield* hold.acknowledgeChecked(receipt.operationKey)
+      return receipt
+    }
     const file = path.join(directory(id), `${undo ? "undo-" : ""}receipt.json`)
     // A recovery-required observation can later be replaced by a proven final
     // outcome. Only final durable receipts release Hold's pins.
     yield* attempt("publish exact workflow receipt", async () => {
-      const next = `${file}.next-${crypto.randomUUID()}`
-      await writeNew(next, Schema.encodeSync(Schema.parseJson(CheckedOutcome))(receipt))
+      const next = `${file}.next`
+      await writeNew(next, Schema.encodeSync(Schema.parseJson(CheckedOutcome))(receipt), true)
       await rename(next, file)
       await sync(directory(id))
     })
     yield* writeStatus({ ...status, state: receipt.state, ...(undo ? { undoReceipt: receipt } : { receipt }) })
     if (receipt.state !== "recovery-required") yield* hold.acknowledgeChecked(receipt.operationKey)
     return receipt
-  })
+  }).pipe(Effect.catchAll(cause => Effect.succeed({
+    ...receipt, state: "recovery-required" as const,
+    reason: `workflow receipt/acknowledgement publication failed: ${String(cause)}; durable Hold claim retained`
+  })))
 
   const stage = (input: { source: string, target: string }) => locked(attempt("stage immutable proposal", async () => {
     const source = await canonical(input.source)
@@ -156,7 +164,10 @@ const make = Effect.gen(function* () {
     const staged: Staged = { version: "change/v1", id, proposalDigest: proposalDigest(proposal), proposal }
     await writeNew(path.join(directory(id), "status.json"), JSON.stringify({ version: "change/v1", id, state: "staged" }))
     // Publication is last, after independent snapshots and directory syncs.
-    await writeNew(path.join(directory(id), "proposal.json"), Schema.encodeSync(Schema.parseJson(Staged))(staged))
+    const prepared = path.join(directory(id), "proposal.prepared")
+    await writeNew(prepared, Schema.encodeSync(Schema.parseJson(Staged))(staged))
+    await rename(prepared, path.join(directory(id), "proposal.json"))
+    await sync(directory(id))
     return staged
   }))
 
@@ -202,15 +213,18 @@ const make = Effect.gen(function* () {
       const prior = yield* hold.checkedStatus(input.id)
       if (prior !== undefined) return prior
       return { version: "checked-hold/v1" as const, receiptId: input.id, operationKey: input.id, target: stored.proposal.target,
+        proposalDigest: stored.proposalDigest, claim: status.claim,
         state: "recovery-required" as const, reason: "workflow claim exists; no Hold outcome; never retried" }
     }
-    yield* writeStatus({ version: "change/v1", id: input.id, state: "claimed" })
+    const claim = observeClaim()
+    yield* writeStatus({ version: "change/v1", id: input.id, state: "claimed", claim })
     // Tampering after claim consumes the attempt too. Hold revalidates its
     // independent install stage and the live baseline inside its own lease.
     const valid = yield* validateSnapshots(stored).pipe(Effect.either)
     if (valid._tag === "Left") {
-      const receipt: CheckedOutcome = { version: "checked-hold/v1", receiptId: input.id, operationKey: input.id, target: stored.proposal.target, state: "rejected", reason: valid.left.reason }
-      yield* writeStatus({ version: "change/v1", id: input.id, state: "rejected", receipt })
+      const receipt: CheckedOutcome = { version: "checked-hold/v1", receiptId: input.id, operationKey: input.id, target: stored.proposal.target,
+        proposalDigest: stored.proposalDigest, claim, state: "rejected", reason: valid.left.reason }
+      yield* writeStatus({ version: "change/v1", id: input.id, state: "rejected", receipt, claim })
       return receipt
     }
     const receipt = yield* hold.replaceChecked({ operationKey: input.id, target: stored.proposal.target,
@@ -240,8 +254,19 @@ const make = Effect.gen(function* () {
     if (status.state === "staged" || status.state === "cancelled") return status
     const undone = yield* hold.recoverChecked(`undo_${id}`, options?.restore)
     const receipt = undone ?? (yield* hold.recoverChecked(id, options?.restore))
-    if (receipt !== undefined) yield* persistReceipt(id, receipt, undone !== undefined)
-    else if (status.state === "claimed") yield* writeStatus({ ...status, state: "rejected" })
+    if (receipt !== undefined) {
+      const published = yield* persistReceipt(id, receipt, undone !== undefined)
+      if (published.state === "recovery-required") return { ...status, state: published.state,
+        ...(undone === undefined ? { receipt: published } : { undoReceipt: published }) }
+    }
+    else if (status.state === "claimed") {
+      const staged = yield* readProposal(id)
+      yield* writeStatus({ ...status, state: "rejected", receipt: {
+        version: "checked-hold/v1", receiptId: id, operationKey: id, target: staged.proposal.target,
+        proposalDigest: staged.proposalDigest, claim: status.claim,
+        state: "rejected", reason: "interrupted workflow claim; no Hold claim, so no world effect; attempt consumed"
+      } })
+    }
     return yield* readStatus(id)
   }))
   return Change.of({ stage, review, status: readStatus, apply, cancel, undo, recover })

@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto"
 import { constants, type Stats } from "node:fs"
-import { chmod, lstat, mkdir, open, readdir, realpath } from "node:fs/promises"
+import { chmod, lstat, mkdir, open, opendir, readFile, realpath } from "node:fs/promises"
 import * as path from "node:path"
 import { Effect, Schema } from "effect"
 
@@ -47,15 +47,18 @@ export const sync = async (p: string) => {
   const h = await open(p, "r")
   try { await h.sync() } finally { await h.close() }
 }
-export const writeNew = async (p: string, data: string) => {
-  const h = await open(p, "wx", 0o600)
+/** Reuse is limited to unpublished journal replicas, never snapshot bytes. */
+export const writeNew = async (p: string, data: string, replaceReplica = false) => {
+  const h = await open(p, replaceReplica ? "w" : "wx", 0o600)
   try { await h.writeFile(data); await h.sync() } finally { await h.close() }
   await sync(path.dirname(p))
 }
 
 /** Reject links in ancestors too; realpath alone would silently authorize them. */
 export const canonical = async (p: string) => {
-  const absolute = path.resolve(p)
+  // Preserve traversal until each component has been inspected: resolve()
+  // would erase a symlink followed by /.. before we could reject it.
+  const absolute = path.isAbsolute(p) ? p : `${process.cwd()}${path.sep}${p}`
   let cursor = path.parse(absolute).root
   for (const part of absolute.slice(cursor.length).split(path.sep).filter(Boolean)) {
     cursor = path.join(cursor, part)
@@ -65,7 +68,8 @@ export const canonical = async (p: string) => {
 }
 export const overlaps = (a: string, b: string) => a === b || a.startsWith(b + path.sep) || b.startsWith(a + path.sep)
 export const bindTarget = async (raw: string, home: string): Promise<{ target: string, parent: Parent }> => {
-  const absolute = path.resolve(raw)
+  let absolute = path.isAbsolute(raw) ? raw : `${process.cwd()}${path.sep}${raw}`
+  if ([".", ".."].includes(path.basename(absolute))) absolute = await canonical(absolute)
   const parentPath = await canonical(path.dirname(absolute))
   const target = path.join(parentPath, path.basename(absolute))
   if (target === path.parse(target).root || overlaps(target, await canonical(home))) throw new Error("target overlaps AIRLOCK_HOME or root")
@@ -80,7 +84,16 @@ export const checkParent = async (target: string, parent: Parent, home: string) 
 
 /** Length-delimited JSON tuples in UTF-8 byte-name order; digest excludes identity/time/dir size. */
 export const scan = async (root: string, destination?: string, byteLimit = limits.bytes): Promise<BoundTree> => {
-  await canonical(root)
+  root = await canonical(root)
+  if (process.platform === "linux") {
+    // st_dev alone misses same-device bind mounts. Linux exposes the actual
+    // topology in mountinfo; never relocate a tree containing a mount binding.
+    const mounts = (await readFile("/proc/self/mountinfo", "utf8")).trim().split("\n")
+    for (const line of mounts) {
+      const mounted = line.split(" ")[4]?.replace(/\\([0-7]{3})/g, (_, octal: string) => String.fromCharCode(parseInt(octal, 8)))
+      if (mounted === root || mounted?.startsWith(root + path.sep)) throw new Error(`unsupported mount topology: ${mounted}`)
+    }
+  }
   const entries: Array<typeof Entry.Type> = []
   let bytes = 0
   let pathBytes = 0
@@ -121,7 +134,13 @@ export const scan = async (root: string, destination?: string, byteLimit = limit
     } else if (out !== undefined) await mkdir(out, { mode: 0o700 })
     entries.push({ path: rel, kind, mode, bytes: kind === "file" ? before.size : 0, digest: contentDigest })
     if (kind === "directory") {
-      const names = await readdir(p, { encoding: "buffer" })
+      const names: Buffer[] = []
+      // Latin-1 round-trips raw name bytes on both Node and Bun without
+      // replacing invalid UTF-8 before the explicit admission check below.
+      for await (const entry of await opendir(p, { encoding: "latin1" })) {
+        if (names.length + entries.length >= limits.entries) throw new Error("tree entry limit")
+        names.push(Buffer.from(entry.name, "latin1"))
+      }
       names.sort(Buffer.compare)
       for (const name of names) {
         const text = Buffer.from(name).toString("utf8")
