@@ -5,6 +5,7 @@ import { FileSystem } from "@effect/platform"
 import { Cause, Console, Effect, Exit, JSONSchema, Layer, ManagedRuntime, Option, Schema } from "effect"
 import * as nodePath from "node:path"
 import * as nodeOs from "node:os"
+import { createInterface } from "node:readline"
 import {
   AdmissionPolicy,
   AdmissionPolicyDocument,
@@ -25,6 +26,7 @@ import { ActId, EmissionId, EmissionRequest, ScopeEscape } from "./domain.ts"
 import { Hold } from "./Hold.ts"
 import { HoldLive } from "./HoldLive.ts"
 import { Change, ChangeLive } from "./change/Change.ts"
+import { formatContent, formatInventory, formatReview } from "./change-view.ts"
 import {
   type LanguageValue,
   LanguageValueSchema
@@ -92,10 +94,11 @@ export class CliInputError extends Schema.TaggedError<CliInputError>()(
 const emit = (value: unknown) => Console.log(JSON.stringify(value, null, 2))
 
 const rendered = <A, E, R>(
-  effect: Effect.Effect<A, E, R>
+  effect: Effect.Effect<A, E, R>,
+  format?: (value: A) => string
 ) =>
   effect.pipe(
-    Effect.flatMap(emit),
+    Effect.flatMap(value => format === undefined ? emit(value) : Console.log(format(value))),
     Effect.catchAll((error) =>
       Console.error(JSON.stringify(error)).pipe(
         Effect.zipRight(Effect.sync(() => {
@@ -624,6 +627,19 @@ const renderedChangeOutcome = <A extends { readonly state: string }, E, R>(
   }))
 ))
 
+const confirmChange = () => Effect.async<boolean>((resume) => {
+  const terminal = createInterface({ input: process.stdin, output: process.stderr, terminal: true })
+  terminal.once("line", answer => {
+    resume(Effect.succeed(answer === "APPLY"))
+    terminal.close()
+  })
+  terminal.once("close", () => resume(Effect.succeed(false)))
+  terminal.once("SIGINT", () => terminal.close())
+  terminal.setPrompt("Approve exactly this frozen proposal? Type APPLY, or anything else to leave it staged: ")
+  terminal.prompt()
+  return Effect.sync(() => terminal.close())
+})
+
 /** Local proposals do not inherit sealed grants or program execution authority. */
 const makeChange = (seal: SealContext, agent = false) => {
   const local = seal._tag === "VerifiedSeal"
@@ -631,6 +647,9 @@ const makeChange = (seal: SealContext, agent = false) => {
     : Effect.void
   const id = Args.text({ name: "proposal-id" })
   const commands: Array<AnyCliCommand> = [
+    Command.make("inbox", { human: Options.boolean("human") }, ({ human }) => rendered(local.pipe(
+      Effect.zipRight(Effect.flatMap(Change, change => change.inventory()))
+    ), human ? formatInventory : undefined)).pipe(Command.withDescription("Discover proposals, distinct apply/undo outcomes, and retained storage")),
     Command.make("stage", {
       source: Options.text("source"),
       target: Options.text("target")
@@ -639,15 +658,43 @@ const makeChange = (seal: SealContext, agent = false) => {
     ))).pipe(Command.withDescription("Snapshot a target-specific replacement without changing the target")),
     Command.make("review", {
       id,
-      diff: Options.boolean("diff")
-    }, ({ id, diff }) => rendered(local.pipe(
-      Effect.zipRight(Effect.flatMap(Change, (change) => change.review(id, { diff })))
-    ))).pipe(Command.withDescription("Inspect the exact stored proposal; --diff includes per-path changes")),
+      diff: Options.boolean("diff"),
+      human: Options.boolean("human")
+    }, ({ id, diff, human }) => rendered(local.pipe(
+      Effect.zipRight(Effect.flatMap(Change, (change) => change.review(id, { diff: diff || human })))
+    ), human ? formatReview : undefined)).pipe(Command.withDescription("Inspect the frozen proposal; --human renders safe text, --diff adds JSON previews")),
+    Command.make("content", {
+      id,
+      side: Options.choice("side", ["before", "after"]),
+      path: Options.text("path"),
+      offset: Options.integer("offset").pipe(Options.withDefault(0)),
+      limit: Options.integer("limit").pipe(Options.withDefault(8192)),
+      human: Options.boolean("human")
+    }, ({ human, ...request }) => rendered(local.pipe(
+      Effect.zipRight(Effect.flatMap(Change, change => change.content(request)))
+    ), human ? formatContent : undefined)).pipe(Command.withDescription("Read a bounded page of frozen file bytes; root file uses --path ''")),
     Command.make("status", { id }, ({ id }) => rendered(local.pipe(
       Effect.zipRight(Effect.flatMap(Change, (change) => change.status(id)))
     ))).pipe(Command.withDescription("Read durable proposal and recovery status"))
   ]
   if (!agent) commands.push(
+    Command.make("approve", { id }, ({ id }) => rendered(local.pipe(Effect.zipRight(Effect.gen(function* () {
+      if (!process.stdin.isTTY || !process.stderr.isTTY) return yield* failInput("approve", "interactive terminal required; automation must use apply with an explicitly reviewed full digest")
+      const change = yield* Change
+      const review = yield* change.review(id, { diff: true })
+      yield* Console.error(formatReview(review))
+      if (!(yield* confirmChange())) return { version: "change-approval/v1", id: review.id, state: "not-approved", proposalDigest: review.proposalDigest }
+      // Bind approval to the review already displayed; never refresh its digest.
+      const outcome = yield* change.apply({ id: review.id, expectedDigest: review.proposalDigest })
+      if (outcome.state !== "installed") yield* Effect.sync(() => { process.exitCode = 1 })
+      return outcome
+    }))))).pipe(Command.withDescription("Review and approve the displayed digest on an interactive supervisor terminal")),
+    Command.make("retire", { id, expectedDigest: Options.text("expect-digest") }, request => renderedChangeOutcome(local.pipe(
+      Effect.zipRight(Effect.flatMap(Change, change => change.retire(request)))
+    ), ["retired", "collected"])).pipe(Command.withDescription("Retire eligible review snapshots using the inbox retirement digest, preserving undo payloads")),
+    Command.make("collect", { id }, ({ id }) => renderedChangeOutcome(local.pipe(
+      Effect.zipRight(Effect.flatMap(Change, change => change.collect(id)))
+    ), ["collected"])).pipe(Command.withDescription("Irreversibly reap only this proposal's retired snapshots; keep receipts and undo payloads")),
     Command.make("apply", {
       id,
       expectedDigest: Options.text("expect-digest")
