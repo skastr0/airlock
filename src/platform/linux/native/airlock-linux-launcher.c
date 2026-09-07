@@ -23,6 +23,10 @@
 #ifndef CLOSE_RANGE_UNSHARE
 #define CLOSE_RANGE_UNSHARE (1U << 1)
 #endif
+/* Linux 5.19 UAPI; older distro headers (Ubuntu 22.04) omit the name. */
+#ifndef LANDLOCK_ACCESS_FS_REFER
+#define LANDLOCK_ACCESS_FS_REFER (1ULL << 13)
+#endif
 
 #define AIRLOCK_LAUNCHER_FAILURE 125
 #define AIRLOCK_MIN_LANDLOCK_ABI 2
