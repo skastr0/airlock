@@ -1,10 +1,14 @@
 #!/usr/bin/env bash
-# Amp orb setup: provision the pinned Bun toolchain and install dependencies.
+# Amp orb setup: provision the pinned Bun toolchain, Linux native build
+# prerequisites, and install dependencies.
 #
 # Runs once for a fresh orb (and again on stale snapshots, so it must be
 # idempotent and fast on a warm filesystem). Workspace deps come from the
 # lockfile. Tailscale and the published Quasar CLI are installed here;
 # authentication happens in .agents/resume so credentials never enter a snapshot.
+# Linux native-contained work needs libseccomp development files and an audited
+# Bubblewrap 0.12.0 regular executable. This script never grants capabilities,
+# installs a setuid helper, or changes AppArmor/sysctl policy.
 set -euo pipefail
 
 log() { printf '[setup] %s\n' "$*"; }
@@ -72,6 +76,105 @@ install_deps() {
   bun install --frozen-lockfile
 }
 
+linux_native_packages=(
+  build-essential
+  libseccomp-dev
+  libseccomp2
+  pkg-config
+  meson
+  ninja-build
+  libcap-dev
+  libcap2-bin
+  python3
+  git
+)
+
+package_installed() {
+  dpkg-query -W -f='${Status}' "$1" 2>/dev/null | grep -q 'install ok installed'
+}
+
+ensure_linux_native_packages() {
+  if [ "$(uname -s)" != "Linux" ]; then
+    log "skipping linux native packages on $(uname -s)"
+    return
+  fi
+  local missing=() pkg
+  for pkg in "${linux_native_packages[@]}"; do
+    if ! package_installed "$pkg"; then
+      missing+=("$pkg")
+    fi
+  done
+  if [ "${#missing[@]}" -eq 0 ]; then
+    log "linux native packages already installed"
+    return
+  fi
+  log "installing linux native packages: ${missing[*]}"
+  sudo apt-get update
+  sudo apt-get install -y --no-install-recommends "${missing[@]}"
+}
+
+airlock_getcap() {
+  if command -v getcap >/dev/null 2>&1; then
+    getcap "$@"
+  elif [ -x /sbin/getcap ]; then
+    /sbin/getcap "$@"
+  elif [ -x /usr/sbin/getcap ]; then
+    /usr/sbin/getcap "$@"
+  else
+    log "ERROR: getcap is required to verify Bubblewrap has no file capabilities"
+    exit 1
+  fi
+}
+
+audited_bwrap() {
+  local dest="$1"
+  local caps
+  [ -x "$dest" ] || return 1
+  [ ! -u "$dest" ] || return 1
+  [ ! -g "$dest" ] || return 1
+  [ "$("$dest" --version 2>/dev/null || true)" = "bubblewrap 0.12.0" ] || return 1
+  caps="$(airlock_getcap "$dest" 2>/dev/null || true)"
+  [ -z "$caps" ]
+}
+
+ensure_bubblewrap() {
+  local dest="/usr/local/bin/bwrap"
+  local pin="2a76602a8c71f36c1527cf9fc3417d9149822e0c"
+  local src="/tmp/airlock-bubblewrap-0.12.0"
+  if [ "$(uname -s)" != "Linux" ]; then
+    log "skipping Bubblewrap on $(uname -s)"
+    return
+  fi
+  if audited_bwrap "$dest"; then
+    log "audited bubblewrap 0.12.0 already installed at $dest"
+    return
+  fi
+  log "building audited Bubblewrap 0.12.0 ($pin)"
+  rm -rf "$src"
+  git clone --depth 1 --branch v0.12.0 \
+    https://github.com/containers/bubblewrap.git "$src"
+  if [ "$(git -C "$src" rev-parse HEAD)" != "$pin" ]; then
+    log "ERROR: Bubblewrap HEAD is not the audited commit $pin"
+    exit 1
+  fi
+  meson setup "$src/_build" "$src" -Dselinux=disabled -Dman=disabled -Dtests=false
+  meson compile -C "$src/_build"
+  sudo install -m 0755 "$src/_build/bwrap" "$dest"
+  if [ -u "$dest" ] || [ -g "$dest" ]; then
+    log "ERROR: refusing setuid/setgid Bubblewrap at $dest"
+    exit 1
+  fi
+  if [ -n "$(airlock_getcap "$dest")" ]; then
+    log "ERROR: refusing Bubblewrap with file capabilities at $dest"
+    exit 1
+  fi
+  if [ "$("$dest" --version)" != "bubblewrap 0.12.0" ]; then
+    log "ERROR: expected bubblewrap 0.12.0 at $dest"
+    exit 1
+  fi
+  log "installed audited bubblewrap 0.12.0 at $dest"
+}
+
 install_tailscale() {
   # Install only: authentication belongs in resume, never in a shared snapshot.
   sudo install -d /etc/systemd/system/tailscaled.service.d
@@ -116,6 +219,8 @@ fi
 log "bun $(command -v bun) ($installed)"
 
 step "bun install" install_deps
+step "linux native packages" ensure_linux_native_packages
+step "audited bubblewrap" ensure_bubblewrap
 step "tailscale" install_tailscale
 step "quasar-cli" install_quasar
 persist_local_bin
