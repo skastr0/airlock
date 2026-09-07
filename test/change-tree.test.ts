@@ -1,12 +1,12 @@
 import { describe, expect, it } from "vitest"
 import { execFileSync } from "node:child_process"
-import { chmod, link, mkdir, mkdtemp, readFile, rename, rm, symlink, truncate, utimes, writeFile } from "node:fs/promises"
+import { chmod, link, mkdir, mkdtemp, readFile, realpath, rename, rm, symlink, truncate, utimes, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import * as path from "node:path"
 import { bindTarget, hash, limits, scan, snapshot } from "../src/change/Tree.ts"
 
 const world = async (body: (root: string) => Promise<void>) => {
-  const root = await mkdtemp(path.join(tmpdir(), "change-tree-"))
+  const root = await realpath(await mkdtemp(path.join(tmpdir(), "change-tree-")))
   try { await body(root) } finally { await rm(root, { recursive: true, force: true }) }
 }
 

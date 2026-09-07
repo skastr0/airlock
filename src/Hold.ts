@@ -25,6 +25,8 @@ import {
   type ExclusiveRenameError
 } from "./platform/ExclusiveRename.ts"
 import { makeExclusiveFileLock } from "./platform/ExclusiveFileLock.ts"
+import { CheckedOutcome, CheckedRecord, CheckedRequest, OperationKey } from "./change/Checked.ts"
+import { attempt, ChangeError, checkParent, checkTree, exists as treeExists, scan, snapshot } from "./change/Tree.ts"
 
 // The recovery floor, by construction: the destructive part of every mutation
 // is a rename. The single unlink site in this component is `reap` — the runner's
@@ -153,6 +155,11 @@ export class ReplaceReceipt extends Schema.Class<ReplaceReceipt>("ReplaceReceipt
 export class Hold extends Context.Tag("airlock/Hold")<
   Hold,
   {
+    readonly replaceChecked: (request: CheckedRequest) => Effect.Effect<CheckedOutcome, ChangeError>
+    readonly undoChecked: (receiptId: string) => Effect.Effect<CheckedOutcome, ChangeError>
+    readonly checkedStatus: (operationKey: string) => Effect.Effect<CheckedOutcome | undefined, ChangeError>
+    readonly recoverChecked: (operationKey: string, restore?: boolean) => Effect.Effect<CheckedOutcome | undefined, ChangeError>
+    readonly acknowledgeChecked: (operationKey: string) => Effect.Effect<void, ChangeError>
     readonly remove: (
       target: string
     ) => Effect.Effect<
@@ -267,7 +274,9 @@ class HoldJournal extends Schema.Class<HoldJournal>("HoldJournal")({
   state: Schema.Literal("prepared", "held", "restored"),
   manifest: HeldManifest,
   retained: Schema.optional(RetainedMetadata),
-  installed: Schema.optional(InstalledIdentity)
+  installed: Schema.optional(InstalledIdentity),
+  checkedKey: Schema.optional(Schema.String),
+  checkedPinned: Schema.optional(Schema.Boolean)
 }) {}
 
 type Entry = Readonly<{
@@ -800,14 +809,16 @@ const make = Effect.gen(function* () {
 
   const reserveAct = Effect.fnUntraced(function* (
     manifest: HeldManifest,
-    retained?: RetainedMetadata
+    retained?: RetainedMetadata,
+    checkedKey?: string
   ) {
     yield* fs
       .makeDirectory(actDir(manifest.id), { recursive: true })
       .pipe(Effect.mapError(fsError("create hold act", actDir(manifest.id))))
     yield* syncDirectory(home.holdDir, "create hold act directory sync")
     yield* writeJournal(
-      new HoldJournal({ state: "prepared", manifest, ...(retained === undefined ? {} : { retained }) })
+      new HoldJournal({ state: "prepared", manifest, ...(retained === undefined ? {} : { retained }),
+        ...(checkedKey === undefined ? {} : { checkedKey, checkedPinned: true }) })
     )
   })
 
@@ -1153,6 +1164,9 @@ const make = Effect.gen(function* () {
     )
 
   const reconcileJournal = Effect.fnUntraced(function* (journal: HoldJournal) {
+    // Checked operations own their recovery evidence. An ambiguous operation
+    // remains inspectable and pinned, never bricks legacy Hold construction.
+    if (journal.checkedKey !== undefined) return
     if (journal.state === "restored") return
     const { manifest } = journal
     const payloadExists = yield* pathExists(payloadFile(manifest.id))
@@ -1501,6 +1515,9 @@ const make = Effect.gen(function* () {
 
   const undo = Effect.fn("Hold.undo")(function* (id: ActId) {
     const journal = yield* readJournal(id)
+    if (journal.checkedKey !== undefined) {
+      return yield* new NotHeld({ id, status: "checked operation: use exact change receipt" })
+    }
     if (journal.state !== "held") {
       return yield* new NotHeld({ id, status: journal.state })
     }
@@ -1594,7 +1611,7 @@ const make = Effect.gen(function* () {
     const cutoff = DateTime.subtract(now, { millis: olderThanMillis })
     const all = yield* listJournals
     const expired = all.filter((journal) =>
-      DateTime.lessThanOrEqualTo(journal.manifest.at, cutoff)
+      journal.checkedPinned !== true && DateTime.lessThanOrEqualTo(journal.manifest.at, cutoff)
     )
     const reaped: ActId[] = []
     for (const journal of expired) {
@@ -1679,7 +1696,245 @@ const make = Effect.gen(function* () {
     return new ReapReport({ reaped, at: now })
   })
 
+  const checkedRoot = path.join(home.holdDir, "checked")
+  const checkedFile = (key: string) => path.join(checkedRoot, `${key}.json`)
+  const checkedError = (cause: unknown) => new ChangeError({ operation: "checked Hold", reason: reasonOf(cause) })
+  const readChecked = Effect.fnUntraced(function* (raw: string) {
+    const key = yield* Schema.decodeUnknown(OperationKey)(raw)
+    if (!(yield* pathExists(checkedFile(key)))) return undefined
+    const json = yield* fs.readFileString(checkedFile(key))
+    const record = yield* Schema.decode(Schema.parseJson(CheckedRecord))(json)
+    if (record.request.operationKey !== key) return yield* checkedError("operation key mismatch")
+    return record
+  })
+  const writeChecked = Effect.fnUntraced(function* (record: CheckedRecord, initial = false) {
+    const json = yield* Schema.encode(Schema.parseJson(CheckedRecord))(record)
+    if (initial) {
+      yield* fs.makeDirectory(checkedRoot, { recursive: true, mode: 0o700 })
+      yield* syncDirectory(home.holdDir, "checked root sync")
+      yield* writeNewDurable(checkedFile(record.request.operationKey), json, "claim checked operation")
+    } else {
+      const next = `${checkedFile(record.request.operationKey)}.next-${crypto.randomUUID()}`
+      yield* writeNewDurable(next, json, "stage checked outcome")
+      yield* renameJournalReplacingDurable(next, checkedFile(record.request.operationKey), "publish checked outcome")
+    }
+  })
+  const outcomeOf = (record: CheckedRecord): CheckedOutcome => record.outcome ?? ({
+    version: "checked-hold/v1", receiptId: record.request.operationKey,
+    operationKey: record.request.operationKey, target: record.request.target,
+    state: "recovery-required", actId: record.actId, displacedActId: record.displacedActId,
+    installed: record.installed, reason: `interrupted at ${record.phase}; installation is never retried`
+  })
+  const finishChecked = Effect.fnUntraced(function* (
+    record: CheckedRecord, state: CheckedOutcome["state"], reason?: string
+  ) {
+    const outcome: CheckedOutcome = { ...outcomeOf({ ...record, outcome: undefined }), state, reason }
+    yield* writeChecked({ ...record, phase: state === "recovery-required" ? record.phase : "finished", outcome })
+    return outcome
+  })
+  const reserveChecked = Effect.fnUntraced(function* (
+    request: CheckedRequest, kind: "file" | "directory", hasPayload: boolean, act: "overwrite" | "displaced"
+  ) {
+    yield* admitSameVolume(request.target)
+    const manifest = new HeldManifest({
+      id: newActId(), target: request.target, kind, hasPayload, act,
+      at: yield* DateTime.now, status: "held"
+    })
+    yield* reserveAct(manifest, undefined, request.operationKey)
+    return manifest
+  })
+  const pinCheckedAct = Effect.fnUntraced(function* (id: string, pinned: boolean) {
+    const journal = yield* readJournal(ActId.make(id))
+    yield* writeJournal(new HoldJournal({ ...journal, checkedPinned: pinned }))
+  })
+
+  /** Declarative checks run under the same lease as retain/install/reap.
+   * The correlation record and pinned act precede every live rename. No
+   * callback supplied by a caller can substitute for these checks. */
+  const replaceChecked = Effect.fnUntraced(function* (raw: CheckedRequest) {
+    const request = yield* Schema.decodeUnknown(CheckedRequest)(raw)
+    const prior = yield* readChecked(request.operationKey)
+    if (prior !== undefined) return outcomeOf(prior)
+    let record: CheckedRecord = { request, phase: "claimed" }
+    yield* writeChecked(record, true)
+    let mutationPossible = false
+    const execution = yield* Effect.gen(function* () {
+      yield* guard(request.target)
+      yield* attempt("check target parent", () => checkParent(request.target, request.parent, home.home))
+      const manifest = yield* reserveChecked(request, request.candidate.tree.kind, request.expected !== null, "overwrite")
+      record = { ...record, actId: manifest.id }
+      yield* writeChecked(record)
+      const candidate = yield* attempt("copy checked candidate", async () => {
+        const source = await snapshot(request.candidate.path, stageFile(manifest.id), request.candidate.tree.bytes)
+        if (source.tree.digest !== request.candidate.tree.digest) throw new Error("candidate digest drift")
+        const copied = await scan(stageFile(manifest.id))
+        if (request.expected !== null && request.expected.tree.kind !== copied.tree.kind) throw new Error("target kind differs")
+        return copied
+      })
+      record = { ...record, installed: candidate, phase: "retaining" }
+      yield* writeChecked(record)
+      yield* attempt("check baseline immediately before retain", async () => {
+        await checkParent(request.target, request.parent, home.home)
+        await checkTree(stageFile(manifest.id), candidate)
+        await checkTree(request.target, request.expected)
+      })
+      mutationPossible = true
+      if (request.expected !== null) {
+        yield* renameExclusiveDurable(request.target, payloadFile(manifest.id), "checked retain")
+        yield* attempt("verify retained baseline", () => checkTree(payloadFile(manifest.id), request.expected))
+      }
+      record = { ...record, phase: "installing" }
+      yield* writeChecked(record)
+      yield* renameExclusiveDurable(stageFile(manifest.id), request.target, "checked install")
+      yield* attempt("verify checked installation", () => checkTree(request.target, candidate))
+      return yield* finishChecked(record, "installed")
+    }).pipe(Effect.either)
+    if (execution._tag === "Right") return execution.right
+    return yield* finishChecked(record, mutationPossible ? "recovery-required" : "rejected", reasonOf(execution.left))
+  })
+
+  const undoChecked = Effect.fnUntraced(function* (receiptId: string) {
+    yield* Schema.decodeUnknown(OperationKey)(receiptId)
+    const key = `undo_${receiptId}`
+    const prior = yield* readChecked(key)
+    if (prior !== undefined) return outcomeOf(prior)
+    const original = yield* readChecked(receiptId)
+    if (original?.outcome?.state !== "installed" || original.installed === undefined || original.actId === undefined || original.undoOf !== undefined) {
+      return yield* checkedError("exact successful apply receipt required")
+    }
+    const request: CheckedRequest = {
+      ...original.request, operationKey: key, expected: original.installed,
+      candidate: { path: payloadFile(original.actId), tree: original.request.expected?.tree ?? original.installed.tree }
+    }
+    let record: CheckedRecord = { request, undoOf: receiptId, actId: original.actId, phase: "claimed" }
+    yield* writeChecked(record, true)
+    let mutationPossible = false
+    const execution = yield* Effect.gen(function* () {
+      yield* pinCheckedAct(original.actId!, true)
+      yield* attempt("check undo bindings", async () => {
+        await checkParent(request.target, request.parent, home.home)
+        await checkTree(request.target, original.installed!)
+        if (original.request.expected !== null) await checkTree(payloadFile(original.actId!), original.request.expected)
+      })
+      const displaced = yield* reserveChecked(request, original.installed!.tree.kind, true, "displaced")
+      record = { ...record, displacedActId: displaced.id, phase: "retaining", installed: original.request.expected ?? undefined }
+      yield* writeChecked(record)
+      yield* attempt("check current immediately before undo retain", async () => {
+        await checkParent(request.target, request.parent, home.home)
+        if (original.request.expected !== null) await checkTree(payloadFile(original.actId!), original.request.expected)
+        await checkTree(request.target, original.installed!)
+      })
+      mutationPossible = true
+      yield* renameExclusiveDurable(request.target, payloadFile(displaced.id), "checked undo displace")
+      yield* attempt("verify undo displaced candidate", () => checkTree(payloadFile(displaced.id), original.installed!))
+      record = { ...record, phase: "installing" }
+      yield* writeChecked(record)
+      if (original.request.expected !== null) {
+        yield* renameExclusiveDurable(payloadFile(original.actId!), request.target, "checked undo restore")
+      }
+      yield* attempt("verify checked undo", () => checkTree(request.target, original.request.expected))
+      return yield* finishChecked(record, "undone")
+    }).pipe(Effect.either)
+    if (execution._tag === "Right") return execution.right
+    return yield* finishChecked(record, mutationPossible ? "recovery-required" : "rejected", reasonOf(execution.left))
+  })
+
+  const recoverChecked = Effect.fnUntraced(function* (key: string, restore = false) {
+    let record = yield* readChecked(key)
+    if (record === undefined) return undefined
+    if (record.phase === "finished") return outcomeOf(record)
+    if (record.phase === "claimed") return yield* finishChecked(record, "rejected", "interrupted before live mutation was authorized")
+    const current = record
+    const syncRecovery = Effect.gen(function* () {
+      yield* syncDirectory(path.dirname(current.request.target), "checked recovery target sync")
+      if (current.actId !== undefined) yield* syncDirectory(actDir(current.actId), "checked recovery original sync")
+      if (current.displacedActId !== undefined) yield* syncDirectory(actDir(current.displacedActId), "checked recovery displaced sync")
+    })
+    // A restoration is itself a journaled, no-clobber operation. Reconcile its
+    // exact identity after interruption; do not confuse it with installation.
+    if (record.phase === "restoring" && record.rollback !== undefined) {
+      const rollback = record.rollback
+      const restored = yield* attempt("prove recovery restoration", async () => {
+        await checkParent(current.request.target, current.request.parent, home.home)
+        await checkTree(current.request.target, rollback.restored)
+        if (await treeExists(payloadFile(rollback.sourceActId))) throw new Error("restoration source still present")
+      }).pipe(Effect.either)
+      if (restored._tag === "Right") {
+        yield* syncRecovery
+        return yield* finishChecked({ ...record, installed: rollback.restored }, "rolled-back")
+      }
+    }
+    const proven = yield* Effect.gen(function* () {
+      if (current.phase !== "installing" || current.actId === undefined) return yield* checkedError("not an install completion phase")
+      yield* attempt("reconcile checked target", async () => {
+        await checkParent(current.request.target, current.request.parent, home.home)
+        await checkTree(current.request.target, current.installed ?? null)
+        if (current.undoOf === undefined) {
+          if (current.request.expected !== null) await checkTree(payloadFile(current.actId!), current.request.expected)
+          if (await treeExists(stageFile(current.actId!))) throw new Error("install source still present")
+        } else {
+          if (current.displacedActId === undefined) throw new Error("missing displaced act")
+          await checkTree(payloadFile(current.displacedActId), current.request.expected)
+        }
+      })
+      yield* syncRecovery
+      return yield* finishChecked(current, current.undoOf === undefined ? "installed" : "undone")
+    }).pipe(Effect.either)
+    if (proven._tag === "Right") return proven.right
+
+    // A source still at its bound live name and no retained payload proves
+    // that the first rename did not occur. This consumes, never resumes, it.
+    const sourceActId = record.undoOf === undefined ? record.actId : record.displacedActId
+    if (record.phase === "retaining" && sourceActId !== undefined) {
+      const untouched = yield* attempt("prove unmutated checked operation", async () => {
+        await checkParent(current.request.target, current.request.parent, home.home)
+        await checkTree(current.request.target, current.request.expected)
+        if (await treeExists(payloadFile(sourceActId))) throw new Error("retained payload exists")
+        if (current.undoOf === undefined && current.installed !== undefined) await checkTree(stageFile(current.actId!), current.installed)
+      }).pipe(Effect.either)
+      if (untouched._tag === "Right") return yield* finishChecked(record, "rejected", "interrupted before first live rename")
+    }
+    if (!restore || sourceActId === undefined || record.request.expected === null) return outcomeOf(record)
+    const rollback = record.rollback ?? { sourceActId, restored: record.request.expected }
+    const restored = yield* Effect.gen(function* () {
+      yield* attempt("admit explicit recovery restoration", async () => {
+        await checkParent(current.request.target, current.request.parent, home.home)
+        await checkTree(payloadFile(rollback.sourceActId), rollback.restored)
+        await checkTree(current.request.target, null)
+      })
+      record = { ...current, rollback, phase: "restoring", outcome: undefined }
+      yield* writeChecked(record)
+      yield* attempt("check immediately before recovery restoration", async () => {
+        await checkParent(current.request.target, current.request.parent, home.home)
+        await checkTree(payloadFile(rollback.sourceActId), rollback.restored)
+        await checkTree(current.request.target, null)
+      })
+      yield* renameExclusiveDurable(payloadFile(rollback.sourceActId), current.request.target, "checked recovery restoration")
+      yield* attempt("verify recovery restoration", () => checkTree(current.request.target, rollback.restored))
+      return yield* finishChecked({ ...record, installed: rollback.restored }, "rolled-back")
+    }).pipe(Effect.either)
+    return restored._tag === "Right" ? restored.right : yield* finishChecked(record, "recovery-required", reasonOf(restored.left))
+  })
+  const acknowledgeChecked = Effect.fnUntraced(function* (key: string) {
+    const record = yield* readChecked(key)
+    if (record === undefined || record.phase !== "finished") return yield* checkedError("cannot acknowledge unresolved operation")
+    if (record.acknowledged === true) return
+    // Caller has already fsynced its workflow receipt. Mark that fact before
+    // releasing any recovery bytes. A crash here can only over-retain.
+    yield* writeChecked({ ...record, acknowledged: true })
+    for (const id of [record.actId, record.displacedActId]) {
+      if (id !== undefined && (yield* pathExists(actDir(id)))) yield* pinCheckedAct(id, false)
+    }
+  })
+  const checkedLocked = <A, E>(effect: Effect.Effect<A, E>) =>
+    withLock(Effect.uninterruptible(effect)).pipe(Effect.mapError(checkedError))
+
   return Hold.of({
+    replaceChecked: (request) => checkedLocked(replaceChecked(request)),
+    undoChecked: (receiptId) => checkedLocked(undoChecked(receiptId)),
+    checkedStatus: (key) => checkedLocked(readChecked(key).pipe(Effect.map(r => r === undefined ? undefined : outcomeOf(r)))),
+    recoverChecked: (key, restore) => checkedLocked(recoverChecked(key, restore)),
+    acknowledgeChecked: (key) => checkedLocked(acknowledgeChecked(key)),
     remove: (target) => withLock(remove(target)),
     overwrite: (target, content) => withLock(overwrite(target, content)),
     retireRuntimePrivate: (target) => withLock(retireRuntimePrivate(target)),
