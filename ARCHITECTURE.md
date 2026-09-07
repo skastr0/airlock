@@ -8,18 +8,18 @@
 
 ## Summary
 
-Airlock is a macOS-and-Linux, agent-only runtime for Unix machine work. In the
-intended harness, the agent does not receive Bash, a terminal, a generic
-process tool, or a second filesystem/network path. It receives Airlock. An
-Airlock program calls typed, generic actions; those actions lower to a closed
-four-node Plan, pass through admission, and are interpreted by trusted
-services that observe files, run existing programs, apply recoverable local
-changes, or stage external intent.
+Airlock is an optional tool for consequential local changes on macOS and Linux.
+Bash, Python, and existing tools prepare a replacement; `change` snapshots it
+against one target, exposes its exact digest for review, and lets a supervisor
+apply or recover it through checked Hold transitions. This direct workflow
+does not need a Plan, an `.air` program, or native containment.
 
-This is not a human shell project and “replace shell” does not mean copying
-shell syntax or interactive job control. It means preserving task-level access
-to legitimate Unix work for an agent while moving authority, finality, and
-evidence out of ambient command text.
+The structured runtime remains an optional integration: an Airlock program
+calls typed generic actions, which lower to a closed four-node Plan, pass
+through admission, and execute through trusted services. A harness may choose
+to expose only that surface, but removing the agent's shell is not a product
+prerequisite. Optional safety tooling and enforced reference monitoring are
+different claims; the latter requires an external authority boundary.
 
 Airlock does not replace Unix algorithms:
 
@@ -85,6 +85,7 @@ Hold/Outbox finality, and receipt semantics remain shared.
 | agent/runtime algebra split | **Implemented in the integrated program path, candidate as a complete reference monitor**; agents author action calls and Plans, while admission, Outbox claim/dispatch/cancel, Hold, reconciliation, and reap remain trusted transitions |
 | execution authority | **Implemented candidate seam**; Runtime accepts only `ExecutionAuthority` (closed Plan plus retained Grants/bindings), rejects malformed authority, and refreshes closure, Grant lifetime, and handles immediately before each runnable node |
 | single-use Plan execution | **Implemented interaction seam**; a persistent run journal plus kernel-backed per-Plan claim precedes adapter work, and any durable prior snapshot rejects concurrent or sequential replay |
+| reviewed local changes | **Implemented bounded workflow**; independent candidate/baseline snapshots, exact-digest supervisor application, checked Hold mutation/undo, and explicit no-clobber recovery; no arbitrary command runs during apply |
 | Airlock program runner | **Implemented**; `airlock run` parses, evaluates, lowers, admits, and executes native actions |
 | agent-only binary | **Implemented product boundary**; `airlock-agent` omits terminal-authority maintenance commands, but the external harness must still prove that it exposed no alternate effect path |
 | compatibility profile | **Implemented**; no containment claim |
@@ -111,7 +112,14 @@ Hold/Outbox finality, and receipt semantics remain shared.
 
 ## Product direction
 
-Airlock remains generic, Unix-shaped, and independent of Vouch:
+The primary journey composes ordinary tools with one consequential transition:
+
+```text
+Bash/Python preparation → immutable proposal → review exact digest
+  → supervisor checked Hold replacement → receipt → checked undo/recovery
+```
+
+The optional structured runtime remains generic and independent of Vouch:
 
 ```text
 agent program
@@ -138,7 +146,7 @@ view, managed-state finality, external staging, and evidence. It does not
 become an archive library, Git implementation, package manager, database
 engine, or Vouch-specific runtime.
 
-The Plan IR and the runtime are the center of the product. The Airlock DSL is
+The Plan IR and runtime are the structured-program seam. The Airlock DSL is
 one agent-oriented frontend over that seam, not the authority boundary itself.
 Structured RPC/tool calls and future frontends may produce the same
 `PlanDraft`; none may bypass admission or invent runtime operations. The
@@ -146,9 +154,26 @@ current small language is implemented, but its syntax and pure composition
 forms should evolve from measured model-generation success, token cost, error
 rate, and task completion—not from a goal of resembling a human shell.
 
-The target agent surface is `airlock-agent` rather than a direct shell. That is
-a design direction and acceptance goal. The current repository proves useful
-vertical slices, not broad shell replacement.
+`airlock-agent change` exposes staging and inspection, not application or
+recovery. An agent that retains equivalent direct filesystem authority can
+bypass this optional tool. The separate shell-replacement acceptance corpus
+measures a stronger harness configuration, not a requirement for adopting
+reviewed changes.
+
+### Reviewed change ownership
+
+`src/change/Tree.ts` owns bounded regular-tree snapshots and canonical digests;
+`src/change/Change.ts` owns proposal identity, review, and single-use lifecycle.
+The existing Hold lease encloses checked baseline validation, retained-object
+verification, no-replace installation, undo, and recovery. Correlated checked
+journals pin unresolved recovery bytes against Reaper. This introduces neither
+a fifth Plan node nor a second unlink or wire authority.
+
+The envelope is quiescent local targets, ordinary files/directories, and bytes
+plus ordinary POSIX modes. A whole-root replacement takes two renames, not an
+atomic swap. External writers, other Airlock homes, live databases, remote
+deployment, and malicious same-UID state tampering are not made safe by this
+workflow. See [the command contract](docs/changes.md).
 
 ## The two laws
 

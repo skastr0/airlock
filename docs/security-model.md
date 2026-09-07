@@ -1,16 +1,45 @@
 # Security model
 
 > Status: current guarantee boundary plus candidate stronger contracts.
-> Airlock is a reference-monitor design for agent-originated effects, not an
-> intent oracle. The current native backend is a write/network fence around a
-> private workspace; it is not a confidentiality sandbox.
+> Airlock offers optional reviewed local changes and a separate structured
+> runtime/reference-monitor design. Neither is an intent oracle. The current
+> native backend is a write/network fence around a private workspace, not a
+> confidentiality sandbox.
 >
 > Only the reaper and ratchet laws in [`DESIGN.md`](../DESIGN.md) are frozen.
 > The execution-closure, information-flow, two-phase, endpoint, and persistent-
 > authority material below is implemented only where explicitly stated; the
 > rest is candidate design or acceptance work.
 
-## Trust boundary
+## Reviewed local changes
+
+The `change` workflow deliberately composes with Bash and Python. It does not
+claim to intercept their effects. An agent may stage and inspect a proposal;
+the supervisor applies its exact digest or requests checked undo/recovery.
+These commands compose Hold directly, not Plan admission or sealed grants.
+They are absent from both sealed aliases in this release.
+
+Candidate and baseline snapshots are independent copies. Application validates
+the approved snapshot and expected target under the existing Hold lock;
+installation and restoration use no-replace renames. Correlated durable records
+consume an attempt once and retain recovery material across interruption.
+`recover --restore` can restore verified prior state into an absent target,
+but never overwrites a new occupant or retries the candidate installation.
+
+The guarantee requires quiescent external writers and the published regular
+file/directory envelope. The lock coordinates one Airlock home, not arbitrary
+host processes or other homes. Two renames are not an atomic swap. Snapshot
+digests detect mismatches; they are not signatures proving human review.
+Private state is unencrypted and is not protected against malicious same-UID
+tampering. No live database, remote deployment, ownership/ACL/xattr preservation,
+or persistent-authority safety claim follows from installing reviewed bytes.
+
+If the agent retains direct write authority, this is an optional safer path.
+Enforcement requires an external boundary that withholds protected authority
+from the agent. Bash/Python computation itself need not be prohibited. See
+[the command contract](changes.md) for limits and recovery semantics.
+
+## Structured runtime trust boundary
 
 Untrusted inputs include:
 
@@ -35,10 +64,11 @@ The harness is outside this repository. If it exposes a shell, filesystem,
 network, Docker, SSH, or equivalent bypass beside Airlock, a shell-free
 reference-monitor claim is invalid.
 
-Airlock is agent-only in this threat model. It is not trying to make a human
-terminal safe. A valid harness removes direct shell and peer effect tools,
+This stronger reference-monitor threat model assumes an agent-only harness.
+To earn that claim, the harness removes direct shell and peer effect tools,
 exposes the reduced `airlock-agent` surface, and retains supervisor control of
-profile, policy, commit, undo, and reap authority.
+profile, policy, commit, undo, and reap authority. This is not a prerequisite
+for the optional reviewed-change workflow above.
 
 Security gates are profile- and claim-specific. A native profile that advertises
 no contained network must deny it and need not pretend an EndpointBroker exists;
