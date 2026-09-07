@@ -24,6 +24,7 @@ import { AirlockHome, layerFromEnv } from "./AirlockHome.ts"
 import { ActId, EmissionId, EmissionRequest, ScopeEscape } from "./domain.ts"
 import { Hold } from "./Hold.ts"
 import { HoldLive } from "./HoldLive.ts"
+import { Change, ChangeLive } from "./change/Change.ts"
 import {
   type LanguageValue,
   LanguageValueSchema
@@ -609,6 +610,67 @@ const bindProgramWorkspace = (
     return workspace
   })
 }
+
+// ── reviewed local changes ──────────────────────────────────────────────────
+
+const renderedChangeOutcome = <A extends { readonly state: string }, E, R>(
+  effect: Effect.Effect<A, E, R>
+) => rendered(effect.pipe(
+  Effect.tap((outcome) => Effect.sync(() => {
+    if (outcome.state === "rejected" || outcome.state === "recovery-required") {
+      process.exitCode = 1
+    }
+  }))
+))
+
+/** Local proposals do not inherit sealed grants or program execution authority. */
+const makeChange = (seal: SealContext, agent = false) => {
+  const local = seal._tag === "VerifiedSeal"
+    ? failInput("change", "reviewed changes are unavailable in sealed installations")
+    : Effect.void
+  const id = Args.text({ name: "proposal-id" })
+  const commands: Array<AnyCliCommand> = [
+    Command.make("stage", {
+      source: Options.text("source"),
+      target: Options.text("target")
+    }, (request) => rendered(local.pipe(
+      Effect.zipRight(Effect.flatMap(Change, (change) => change.stage(request)))
+    ))).pipe(Command.withDescription("Snapshot a target-specific replacement without changing the target")),
+    Command.make("review", {
+      id,
+      diff: Options.boolean("diff")
+    }, ({ id, diff }) => rendered(local.pipe(
+      Effect.zipRight(Effect.flatMap(Change, (change) => change.review(id, { diff })))
+    ))).pipe(Command.withDescription("Inspect the exact stored proposal; --diff includes per-path changes")),
+    Command.make("status", { id }, ({ id }) => rendered(local.pipe(
+      Effect.zipRight(Effect.flatMap(Change, (change) => change.status(id)))
+    ))).pipe(Command.withDescription("Read durable proposal and recovery status"))
+  ]
+  if (!agent) commands.push(
+    Command.make("apply", {
+      id,
+      expectedDigest: Options.text("expect-digest")
+    }, (request) => renderedChangeOutcome(local.pipe(
+      Effect.zipRight(Effect.flatMap(Change, (change) => change.apply(request)))
+    ))).pipe(Command.withDescription("Approve and apply this exact digest once, refusing baseline drift")),
+    Command.make("undo", {
+      receiptId: Args.text({ name: "receipt-id" })
+    }, ({ receiptId }) => renderedChangeOutcome(local.pipe(
+      Effect.zipRight(Effect.flatMap(Change, (change) => change.undo(receiptId)))
+    ))).pipe(Command.withDescription("Restore one exact apply receipt, refusing changes made since installation")),
+    Command.make("cancel", { id }, ({ id }) => rendered(local.pipe(
+      Effect.zipRight(Effect.flatMap(Change, (change) => change.cancel(id)))
+    ))).pipe(Command.withDescription("Cancel an unclaimed proposal; snapshots remain retained")),
+    Command.make("recover", { id }, ({ id }) => renderedChangeOutcome(local.pipe(
+      Effect.zipRight(Effect.flatMap(Change, (change) => change.recover(id)))
+    ))).pipe(Command.withDescription("Reconcile interrupted work from durable evidence; never retry installation"))
+  )
+  return makeRoot("change", commands).pipe(Command.withDescription(
+    "Prepare with Bash or Python; review, apply, and recover consequential local replacements"
+  ))
+}
+
+const makeAgentChange = (seal: SealContext) => makeChange(seal, true)
 
 // ── mutation verbs ──────────────────────────────────────────────────────────
 
@@ -1487,7 +1549,7 @@ const makeServe = (seal: SealContext) => Command.make(
   "Run the sealed supervisor loop and health-only local socket"
 ))
 
-type CurrentCommandVerb = BoxGrantVerb
+type CurrentCommandVerb = BoxGrantVerb | "change"
 type AnyCliCommand = Command.Command<any, any, any, any>
 type CommandFactory = (seal: SealContext) => AnyCliCommand
 
@@ -1525,7 +1587,8 @@ const commandDescriptors: ReadonlyArray<CurrentCommandDescriptor> = [
   { verb: "ledger", supervisor: makeLedger },
   { verb: "runs", supervisor: makeRuns },
   { verb: "run-receipt", supervisor: makeRunReceipt },
-  { verb: "serve", supervisor: makeServe, sealedOnly: true }
+  { verb: "serve", supervisor: makeServe, sealedOnly: true },
+  { verb: "change", supervisor: makeChange, agent: makeAgentChange }
 ]
 
 const unsealedAgentVerbOrder: ReadonlyArray<CurrentCommandVerb> = [
@@ -1539,7 +1602,8 @@ const unsealedAgentVerbOrder: ReadonlyArray<CurrentCommandVerb> = [
   "pending",
   "ledger",
   "runs",
-  "run-receipt"
+  "run-receipt",
+  "change"
 ]
 
 /**
@@ -1589,6 +1653,7 @@ const sealedDescriptorIsEligible = (
   seal: SealContext,
   descriptor: CurrentCommandDescriptor
 ) => seal._tag === "VerifiedSeal" &&
+  descriptor.verb !== "change" &&
   seal.grant.verbs.includes(descriptor.verb) &&
   (descriptor.nativeAction === undefined ||
     seal.grant.nativeActions.includes(descriptor.nativeAction))
@@ -1669,6 +1734,7 @@ const runCli = async (seal: SealContext): Promise<void> => {
     HoldLive.pipe(Layer.provideMerge(LedgerLayer)),
     OutboxLive.pipe(Layer.provideMerge(LedgerLayer))
   )
+  const ChangeStateLayer = ChangeLive.pipe(Layer.provideMerge(StateLayer))
 
   const HostExecutionLayer = Layer.mergeAll(
     ProcessRunnerLive,
@@ -1677,7 +1743,7 @@ const runCli = async (seal: SealContext): Promise<void> => {
   )
   const NativeFileSystemLayer = NativeFileSystemLive(
     new NativeFilesystemConfig({ workspace: process.cwd() })
-  ).pipe(Layer.provideMerge(StateLayer))
+  ).pipe(Layer.provideMerge(ChangeStateLayer))
   const ExecutionDependencies = Layer.mergeAll(
     NativeFileSystemLayer,
     HostExecutionLayer

@@ -247,7 +247,7 @@ describe("sealed CLI grant graph", () => {
     expect(nonsense.status).not.toBe(0)
     expect(stripAnsi(nonsense.stderr)).toContain("CommandMismatch")
 
-    for (const denied of ["commit", "exec", "undo"] as const) {
+    for (const denied of ["commit", "exec", "undo", "change"] as const) {
       const result = invoke([denied], { seal })
       expect(result.status).toBe(nonsense.status)
       expect(normalizeMismatch(result.stderr)).toBe(normalizeMismatch(nonsense.stderr))
@@ -258,7 +258,7 @@ describe("sealed CLI grant graph", () => {
     expect(help.status, help.stderr).toBe(0)
     for (const visible of ["run", "eval", "held"])
       expect(help.stdout).toMatch(new RegExp(`\\b${visible}\\b`))
-    for (const hidden of ["commit", "exec", "undo", "serve"])
+    for (const hidden of ["commit", "exec", "undo", "serve", "change"])
       expect(help.stdout).not.toMatch(new RegExp(`\\b${hidden}\\b`))
 
     // A verb alone cannot reopen a second raw native-action route.
@@ -616,9 +616,10 @@ describe("sealed CLI grant graph", () => {
     )
     const mapped = [...table.matchAll(/\{ verb: "([^"]+)", supervisor:/g)]
       .map((match) => match[1])
-    expect(mapped).toEqual([...fullVerbs, "serve"])
-    expect(new Set(mapped)).toHaveLength(21)
+    expect(mapped).toEqual([...fullVerbs, "serve", "change"])
+    expect(new Set(mapped)).toHaveLength(22)
     expect(table).toContain('{ verb: "serve", supervisor: makeServe, sealedOnly: true }')
+    expect(source).toContain('descriptor.verb !== "change"')
     expect(source.match(/const requireVerb =/g)).toHaveLength(1)
     expect(source.match(/const requireNativeAction =/g)).toHaveLength(1)
     for (const [verb, action] of [
