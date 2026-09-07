@@ -2,7 +2,7 @@
 
 **Implementation-target walkthrough; CLI integration is not yet validated.**
 Requires Bash and Python 3 to generate the fixture, plus installed Airlock
-binaries for the [stage → review → apply → undo journey](../../docs/changes.md).
+binaries or Bun for the [stage → review → apply → undo journey](../../docs/changes.md).
 No `.air` program, native containment, production paths, or running service.
 
 For the full scripted journey, run from the repository root:
@@ -13,6 +13,8 @@ bash examples/changes/demo.sh
 
 It prepares a fresh fixture, stages and reviews it (including opt-in diff),
 and waits for you to type `APPLY` before applying the exact staged digest.
+If the paired commands are not on PATH, it runs this checkout's entrypoints
+through Bun instead. Both roles always use the same selected implementation.
 It then checks the installed files, undoes by receipt, and checks restoration.
 Any other answer cancels. The script accepts no target arguments and must never
 be adapted by substituting a real target. This scratch-only demo uses the

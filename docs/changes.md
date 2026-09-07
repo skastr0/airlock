@@ -13,9 +13,10 @@ deployment service, command runner, or service manager.
 ## Command contract
 
 All commands return JSON; `review --diff` adds per-path changes and bounded text
-previews with binary/truncation markers. `ID` is a proposal ID; `RECEIPT_ID` is an apply receipt ID. `sha256:FULL`
-means the entire reviewed digest (64 hex digits after the prefix), not a prefix
-match or the hash of a source file calculated separately.
+previews with binary/truncation markers. `ID` is a proposal ID; `RECEIPT_ID` is
+an apply receipt ID. `sha256:FULL` means the entire reviewed digest (64 hex
+digits after the prefix), not a prefix match or the hash of a source file
+calculated separately.
 
 ```text
 airlock change stage --source PATH --target PATH
@@ -39,11 +40,12 @@ that gives production authority to the supervisor, not the agent.
 
 ## First journey
 
-These commands assume the installed binaries are on PATH. From the repository
-root, `bash examples/changes/demo.sh` runs the full scratch-only sequence with
-an explicit `APPLY` prompt, checks replacement, and undoes it by receipt. It
-accepts no target arguments. For the equivalent manual journey, generate a
-small scratch fixture:
+The manual commands assume the installed binaries are on PATH. From the
+repository root, `bash examples/changes/demo.sh` also works with Bun alone:
+it uses this checkout if the paired commands are absent. It runs the full
+scratch-only sequence with an explicit `APPLY` prompt, checks replacement,
+and undoes it by receipt. It accepts no target arguments. For the equivalent
+manual journey, generate a small scratch fixture:
 
 ```sh
 DEMO="$(bash examples/changes/prepare.sh)"
