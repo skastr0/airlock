@@ -304,18 +304,26 @@ describe("ExclusiveRename — host Hold boundary", () => {
       expect(source.match(/\bfs\.rename\(/g)).toHaveLength(1)
       expect(
         source.match(/\brenameJournalReplacingDurable\(/g)
-      ).toHaveLength(2)
+      ).toHaveLength(3)
       expect(source).toContain(
         'renameJournalReplacingDurable(staged, target, "install hold journal")'
       )
+      expect(source).toContain(
+        'renameJournalReplacingDurable(next, checkedFile(record.request.operationKey), "publish checked outcome")'
+      )
       expect(source).toContain('"promote staged hold journal"')
-      expect(source.match(/\brenameExclusiveDurable\(/g)).toHaveLength(5)
+      expect(source.match(/\brenameExclusiveDurable\(/g)).toHaveLength(10)
       for (const operation of [
         "retain target",
         "install staged replacement",
         "install replacement source",
         "restore target after failed install",
-        "restore held payload"
+        "restore held payload",
+        "checked retain",
+        "checked install",
+        "checked undo displace",
+        "checked undo restore",
+        "checked recovery restoration"
       ]) {
         expect(source).toContain(`"${operation}"`)
       }

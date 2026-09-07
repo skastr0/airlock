@@ -219,9 +219,9 @@ describe("agent-hostile command surface", () => {
 
       const help = runAgent(["--help"], home)
       expect(help.status, help.stderr).toBe(0)
-      const discovered = [...help.stdout.matchAll(/^  - ([a-z-]+)/gm)].map(
+      const discovered = [...new Set([...help.stdout.matchAll(/^  - ([a-z-]+)/gm)].map(
         (match) => match[1]!
-      )
+      ))]
       expect(discovered).toEqual([
         "doctor",
         "capabilities",
@@ -233,11 +233,14 @@ describe("agent-hostile command surface", () => {
         "pending",
         "ledger",
         "runs",
-        "run-receipt"
+        "run-receipt",
+        "change"
       ])
       expect(discovered.some((command) => terminalCommands.includes(command))).toBe(
         false
       )
+      expect([...help.stdout.matchAll(/^  - change ([a-z-]+)/gm)].map(match => match[1]))
+        .toEqual(["stage", "review", "status"])
 
       const attempts = [
         ["rm", sentinel],

@@ -671,7 +671,9 @@ const makeChange = (seal: SealContext, agent = false) => {
       .pipe(Command.withDescription("Reconcile evidence; --restore restores retained prior state into an absent target, never retries installation"))
   )
   return makeRoot("change", commands).pipe(Command.withDescription(
-    "Prepare with Bash or Python; review, apply, and recover consequential local replacements"
+    agent
+      ? "Stage and inspect consequential local replacements for supervisor approval"
+      : "Prepare with Bash or Python; review, apply, and recover consequential local replacements"
   ))
 }
 
