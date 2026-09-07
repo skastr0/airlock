@@ -140,7 +140,7 @@ const parseJson = (text: string) => JSON.parse(text) as Record<string, unknown>
 const stripAnsi = (text: string) => text.replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, "")
 const normalizeMismatch = (text: string) => stripAnsi(text)
   .replaceAll(basename(binary), "<binary>")
-  .replace(/\b(?:commit|exec|undo|nonsense)\b/g, "<command>")
+  .replace(/\b(?:commit|exec|undo|change|nonsense)\b/g, "<command>")
   .trim()
 
 const fullVerbs = [
@@ -151,7 +151,7 @@ const fullVerbs = [
 ] as const
 
 describe("sealed CLI grant graph", () => {
-  it("keeps the unsealed supervisor and reduced agent surfaces unchanged", () => {
+  it("preserves legacy unsealed commands alongside local change proposals", () => {
     const help = invoke(["--help"])
     expect(help.status, help.stderr).toBe(0)
     for (const verb of fullVerbs) expect(help.stdout).toMatch(new RegExp(`\\b${verb}\\b`))
@@ -174,7 +174,7 @@ describe("sealed CLI grant graph", () => {
     expect(agentHelp.status, agentHelp.stderr).toBe(0)
     for (const verb of [
       "doctor", "capabilities", "actions", "schema", "run", "eval",
-      "held", "pending", "ledger", "runs", "run-receipt"
+      "held", "pending", "ledger", "runs", "run-receipt", "change"
     ]) expect(agentHelp.stdout).toMatch(new RegExp(`\\b${verb}\\b`))
     for (const verb of ["exec", "commit", "undo", "reap", "flush"])
       expect(agentHelp.stdout).not.toMatch(new RegExp(`\\b${verb}\\b`))
@@ -293,6 +293,22 @@ describe("sealed CLI grant graph", () => {
     expect(emptyHelp.status, emptyHelp.stderr).toBe(0)
     for (const verb of fullVerbs)
       expect(emptyHelp.stdout).not.toMatch(new RegExp(`\\b${verb}\\b`))
+  })
+
+  it("omits local changes from both sealed aliases even with all existing grants", () => {
+    const seal = makeSeal("no-local-changes", {
+      verbs: [...fullVerbs],
+      nativeActions: ["file.write", "file.remove", "process.run", "http.stage"]
+    })
+    for (const agent of [false, true]) {
+      const options = { seal, env: { AIRLOCK_AGENT_SURFACE: agent ? "1" : undefined } }
+      const help = invoke(["--help"], options)
+      expect(help.status, help.stderr).toBe(0)
+      expect(help.stdout).not.toMatch(/\bchange\b/)
+      const refused = invoke(["change", "apply", "proposal"], options)
+      expect(refused.status).not.toBe(0)
+      expect(stripAnsi(refused.stderr)).toContain("CommandMismatch")
+    }
   })
 
   it("requires process.run in addition to exec before a shell alias can run", () => {
