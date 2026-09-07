@@ -1,15 +1,16 @@
 # Airlock — design
 
-Airlock is the chamber between agents and the world. It is an agent-oriented
-runtime and language for Unix machine work: agents author structured actions;
-Airlock composes existing Unix programs inside controlled execution, makes
-local changes recoverable, stages external effects before dispatch, and records
-receipts.
+Airlock is an optional tool for consequential local work, composed with Bash,
+Python, and existing Unix programs—not a mandatory shell replacement. The
+first adoption journey is a target-specific, reviewed file or directory
+replacement with checked undo and durable recovery. The structured language,
+controlled execution, and staged external effects remain optional features.
 
 The founding incident was an installer test that derived a write path from the
 wrong root and truncated a real database through Bash `>`—one character, no
-preview, no recovery. Airlock exists so that class of event is recoverable by
-default without requiring the user to model every tool in advance.
+preview, no recovery. Airlock makes mediated local replacements recoverable
+without requiring the user to model every tool. It cannot intercept a direct
+Bash redirect by an agent that still has ambient access to the target.
 
 ## Status vocabulary
 
@@ -264,9 +265,39 @@ direction, but must fail explicitly rather than borrow a stronger description:
 
 See [the security model](docs/security-model.md).
 
-## Adoption and the v1 claim
+## Adoption: consequential local changes first
 
-Vouch is the first adoption corpus, not the source of Airlock's ontology. Its
+**Implementation target pending integration validation:** `change` stages an
+immutable candidate and baseline for one target file or directory. Review
+identifies the exact proposal digest; supervisor apply requires that full
+digest and an unchanged baseline. Later source edits are irrelevant. Apply
+executes no arbitrary command. Receipts support checked undo, and durable
+state supports explicit recovery without replay or force.
+
+This is direct Hold composition with **supervisor-managed Apply semantics**,
+not a claim of Plan lowering and not a fifth Plan node. Managed replacement
+and undo retain displaced state through Hold; only its reaper can unlink it.
+The first journey needs neither `.air` nor native-contained prerequisites.
+Agents receive only stage, review, and status within the change command group;
+apply, undo, cancel, and recover belong to the supervisor.
+
+The envelope is local, quiescent, ordinary user-owned regular files and
+directory trees, without symlinks, hardlinks, or special files. It covers bytes
+and ordinary POSIX modes, not ACLs, xattrs, ownership, or timestamps. Whole
+directory replacement removes absent entries through Hold. Two renames are
+not an atomic swap or zero-downtime update. There is no live database safety,
+service restart, remote deploy service, confidentiality, or same-UID malicious
+tamper defense. Undo refuses target drift. Initial snapshots have no garbage
+collection; retained storage must be bounded operationally.
+
+This optional tool becomes an enforcement boundary only when production
+authority is externally owned and unavailable to the agent's ambient tools.
+Selecting it does not restrict ordinary Bash/Python work or weaken the ratchet.
+See [the change contract and walkthrough](docs/changes.md).
+
+### Existing optional adoption evidence
+
+Vouch is an adoption corpus, not the source of Airlock's ontology. Its
 snapshot, upload, restore, validate, and replace workflow must lower only to
 general Airlock actions. An unrelated held-out repository workload follows it
 to detect vocabulary overfitting.
@@ -282,12 +313,14 @@ v2 definition schema also lowers `enqueue` actions onto the staged
 `RequestExternal` seam with local fixture evidence, which concretizes the
 definition contract while distribution and trust remain open.
 
-Airlock may say that macOS v1 “replaces most shell usage for agents” only after
+Shell replacement is not the current adoption objective. Any future claim
+that macOS v1 “replaces most shell usage for agents” still requires that
 the published acceptance corpus clears all applicable construction,
 containment, recovery, crash, label, and authority-laundering gates and at
 least 90% of representative tasks complete with the agent receiving only
 `airlock-agent`. Endpoint-broker gates apply only when contained networking is
-advertised. Until then this sentence is a release target, not a product claim.
+advertised. That historical acceptance target is not a current product claim
+or a prerequisite for the local change workflow.
 
 See [the macOS v1 acceptance contract](docs/acceptance.md) and
 [the Vouch-first adoption plan](docs/vouch-first.md).
