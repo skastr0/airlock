@@ -132,6 +132,48 @@ describe("reviewed change CLI", () => {
     expect(readFileSync(target, "utf8")).toBe('{"enabled":true}\n')
   })
 
+  it("requires explicit restoration after a real process exit leaves the target absent", () => {
+    const { home, source, target } = fixture()
+    const staged = successful(run(home, ["stage", "--source", source, "--target", target]))
+    const child = spawnSync("bun", ["-e", `
+      import { BunContext } from "@effect/platform-bun"
+      import { Effect, Layer, ManagedRuntime } from "effect"
+      import * as AirlockHome from "./src/AirlockHome.ts"
+      import { Change, ChangeLive } from "./src/change/Change.ts"
+      import { HoldLayer } from "./src/Hold.ts"
+      import { LedgerLive } from "./src/Ledger.ts"
+      import { ExclusiveRename } from "./src/platform/ExclusiveRename.ts"
+      import { ExclusiveRenameTestLive } from "./test/support/ExclusiveRenameTestLive.ts"
+      const moves = Layer.effect(ExclusiveRename, Effect.gen(function* () {
+        const real = yield* ExclusiveRename
+        return ExclusiveRename.of({ moveNoReplace: (source, target) => Effect.gen(function* () {
+          yield* real.moveNoReplace(source, target)
+          if (target.endsWith("/payload")) process.exit(86)
+        }) })
+      })).pipe(Layer.provide(ExclusiveRenameTestLive))
+      const runtime = ManagedRuntime.make(ChangeLive.pipe(
+        Layer.provideMerge(HoldLayer), Layer.provideMerge(moves),
+        Layer.provideMerge(LedgerLive), Layer.provideMerge(AirlockHome.layer(${JSON.stringify(home)})),
+        Layer.provideMerge(BunContext.layer)
+      ))
+      const change = await runtime.runPromise(Change)
+      await runtime.runPromise(change.apply(${JSON.stringify({ id: staged.id, expectedDigest: staged.proposalDigest })}))
+      await runtime.dispose()
+      process.exit(87)
+    `], { cwd: repository, encoding: "utf8", timeout: 30_000 })
+    expect(child.status, child.stderr).toBe(86)
+    expect(existsSync(target)).toBe(false)
+    const reconciled = run(home, ["recover", staged.id])
+    expect(reconciled.status, reconciled.stderr).toBe(1)
+    expect(JSON.parse(reconciled.stdout).state).toBe("recovery-required")
+    expect(existsSync(target)).toBe(false)
+    const restored = successful(run(home, ["recover", staged.id, "--restore"]))
+    expect(restored.state).toBe("rolled-back")
+    expect(readFileSync(target, "utf8")).toBe('{"enabled":false}\n')
+    expect(run(home, ["apply", staged.id, "--expect-digest", staged.proposalDigest]).status).toBe(1)
+    expect(readFileSync(target, "utf8")).toBe('{"enabled":false}\n')
+  })
+
   it("cancels a proposal without mutating the target", () => {
     const { home, source, target } = fixture()
     const staged = successful(run(home, ["stage", "--source", source, "--target", target]))
