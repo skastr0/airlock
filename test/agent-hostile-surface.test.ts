@@ -240,7 +240,7 @@ describe("agent-hostile command surface", () => {
         false
       )
       expect([...help.stdout.matchAll(/^  - change ([a-z-]+)/gm)].map(match => match[1]))
-        .toEqual(["stage", "review", "status"])
+        .toEqual(["inbox", "stage", "review", "content", "status"])
 
       const attempts = [
         ["rm", sentinel],
