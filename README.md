@@ -12,7 +12,7 @@ it against one target; review it; let a supervisor apply exactly the approved
 digest. Keep a receipt for checked undo and durable recovery.
 
 **Developer preview · macOS + Linux · MIT.** The `change` workflow is implemented
-with [executed Linux integration and recovery evidence](docs/evidence/reviewed-changes.md).
+with [executed Linux integration and recovery evidence](docs/evidence/repeated-use.md).
 This is not production certification or macOS execution evidence. Existing
 compatibility, `.air`, Cell, Hold, and Outbox features remain available; they
 are not prerequisites for this first journey.

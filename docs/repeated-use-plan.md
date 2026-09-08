@@ -15,6 +15,23 @@ consumed by a stopped batch job. The target's readers and writers remain
 quiescent through replacement. This fits whole-directory replacement without
 promising a service restart, live database safety, or a deployment transaction.
 
+## Delivery status — 2026-09-08
+
+The local implementation phases below are complete; [executed evidence](evidence/repeated-use.md)
+records the boundaries and commands, not just planned acceptance criteria.
+
+| Phase | Delivered | Verification |
+|---|---|---|
+| Lifecycle | Inventory, distinct operation states, digest-bound retirement, targeted collection | 200 cycles in one home; eight lifecycle process-exit cases; undo preserved |
+| Review | Human inbox/review, frozen content pages, exact interactive approval | Nine CLI cases, including real PTY approval and redirected-store refusal |
+| Agent handoff | Configuration preparation/validation/submission, no supervisor call | Real same-home CLI and standalone journeys; six fake-agent glue tests |
+| Combined gate | Typecheck, repository suite, Bun/native integration | `bun run verify` exit 0: 498 passed / 27 skipped, plus 11 Bun and 13 native checks |
+| Adoption experiment | Not run; requires real users and external-sharing authorization | Voluntary second use remains unmeasured |
+
+All implementation work is local and committed; nothing is pushed or deployed.
+Snapshot collection does not reclaim historical metadata or original-world
+undo payloads, and this is not production certification or macOS execution evidence.
+
 ## Product decisions
 
 1. Keep the existing Change/Hold transition machinery. Extend its source of

@@ -4,6 +4,10 @@ Developer-preview integration evidence, exercised on 2026-09-07 in an Amp
 Debian 12 Linux x86-64 orb, kernel 6.1.158+, Bun 1.3.11. This is not a
 production certification, power-loss proof, or macOS execution claim.
 
+This records the initial slice. See [repeated-use evidence](repeated-use.md)
+for the later inbox, approval, content paging, and explicit snapshot collection;
+the initial no-GC boundary below is historical, not the current contract.
+
 ## Integrated gate
 
 ```sh

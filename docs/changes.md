@@ -1,6 +1,6 @@
 # Reviewed local changes
 
-**Status: implemented developer preview.** See the [executed Linux evidence](evidence/reviewed-changes.md)
+**Status: implemented developer preview.** See the [executed Linux evidence](evidence/repeated-use.md)
 for the tested integration and crash boundaries. This is not a production
 release or evidence of execution on macOS.
 
