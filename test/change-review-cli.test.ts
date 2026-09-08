@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process"
-import { existsSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs"
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, symlinkSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
 import { describe, expect, it } from "vitest"
@@ -66,6 +66,18 @@ print(json.dumps({"code": os.waitstatus_to_exitcode(status), "output": output.de
 }
 
 describe("repeated-use review CLI", () => {
+  it("refuses redirected read leases without truncating an outside lock file", () => {
+    const f = fixture(), outside = join(f.root, "outside")
+    mkdirSync(f.home)
+    mkdirSync(outside, { mode: 0o700 })
+    const sentinel = join(outside, "lock")
+    writeFileSync(sentinel, "not an Airlock lock")
+    symlinkSync(outside, join(f.home, "changes"))
+    const result = run(f.home, ["inbox"])
+    expect(readFileSync(sentinel, "utf8")).toBe("not an Airlock lock")
+    expect(result.status, result.stdout).toBe(1)
+  })
+
   it("shows empty inventory without allocating a change store", () => {
     const f = fixture()
     expect(json(run(f.home, ["inbox"])).rows).toEqual([])

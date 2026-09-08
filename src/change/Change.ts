@@ -34,12 +34,15 @@ const make = Effect.gen(function* () {
   // Construction has no store reads/writes; corrupt proposals cannot disable
   // unrelated commands. The lease serializes stage budgets, claim and cancel.
   const lock = makeExclusiveFileLock({ root, active: path.join(root, "lock"), released: path.join(root, "released"), abandoned: path.join(root, "abandoned"), onError: (_op, _p, cause) => error(cause) })
+  const validateStore = async () => {
+    const stat = await lstat(root)
+    if (!stat.isDirectory() || stat.isSymbolicLink() || (stat.mode & 0o077) !== 0) throw new Error("change store must be a private directory")
+    await canonical(root)
+  }
   const locked = <A, E>(effect: Effect.Effect<A, E>) =>
     attempt("open private change store", async () => {
       await mkdir(root, { recursive: true, mode: 0o700 })
-      const stat = await lstat(root)
-      if (!stat.isDirectory() || stat.isSymbolicLink() || (stat.mode & 0o077) !== 0) throw new Error("change store must be a private directory")
-      await canonical(root)
+      await validateStore()
       await sync(home.home)
     }).pipe(Effect.zipRight(lock.withLock(Effect.uninterruptible(effect))), Effect.mapError(error))
   const directory = (id: string) => path.join(root, id)
@@ -115,7 +118,9 @@ const make = Effect.gen(function* () {
         errors: rows.reduce((n, r) => n + r.errors.length, 0) }, limits: { proposals: limits.proposals, storage: limits.storage } }
   })
   const readLocked = <A>(effect: Effect.Effect<A, ChangeError>) => attempt("check change store", () => exists(root)).pipe(
-    Effect.flatMap(present => present ? lock.withLock(effect) : effect), Effect.mapError(error))
+    Effect.flatMap(present => present
+      ? attempt("validate read lease store", validateStore).pipe(Effect.zipRight(lock.withLock(effect)))
+      : effect), Effect.mapError(error))
   const stage = (input: { source: string, target: string }) => locked(Effect.gen(function* () {
     const budget = yield* inventory()
     return yield* attempt("stage immutable proposal", async () => {
