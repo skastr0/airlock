@@ -26,6 +26,14 @@ consume an attempt once and retain recovery material across interruption.
 `recover --restore` can restore verified prior state into an absent target,
 but never overwrites a new occupant or retries the candidate installation.
 
+Human review escapes terminal controls and exposes bounded pages of exact
+frozen content. Interactive approval uses the displayed digest; it is not a
+signature proving that a human inspected every byte. Snapshot retirement uses
+a separate digest binding eligible private bytes and workflow state. Explicit
+collection invokes Hold's sole reaper on that retired bundle, not unrelated
+undo payloads. Historical receipts and the one-use decision remain after
+collection. Snapshot reservations do not cap all retained disk space.
+
 The guarantee requires quiescent external writers and the published regular
 file/directory envelope. The lock coordinates one Airlock home, not arbitrary
 host processes or other homes. Two renames are not an atomic swap. Snapshot

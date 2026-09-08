@@ -164,10 +164,20 @@ reviewed changes.
 
 `src/change/Tree.ts` owns bounded regular-tree snapshots and canonical digests;
 `src/change/Change.ts` owns proposal identity, review, and single-use lifecycle.
+`Contracts.ts` is the shared schema source; `Snapshots.ts` derives approved
+private retirement bindings. `src/change-view.ts` renders safe terminal data,
+while CLI approval captures the displayed proposal digest without inventing
+another transition path. Frozen content pages never read preparation sources.
 The existing Hold lease encloses checked baseline validation, retained-object
 verification, no-replace installation, undo, and recovery. Correlated checked
 journals pin unresolved recovery bytes against Reaper. This introduces neither
 a fifth Plan node nor a second unlink or wire authority.
+
+Explicit snapshot retirement and collection share the Change/Hold lock order.
+They retain historical proposal/receipt metadata and original-world undo
+payloads. Only the reaper removes the specifically retired private bundle;
+collection releases snapshot/private-stage reservation, not total disk usage.
+The inbox distinguishes historical apply, undo, and snapshot lifecycle state.
 
 The envelope is quiescent local targets, ordinary files/directories, and bytes
 plus ordinary POSIX modes. A whole-root replacement takes two renames, not an

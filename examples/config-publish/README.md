@@ -1,8 +1,9 @@
 # Repeated configuration publishing: agent handoff only
 
-**Implementation-target integration.** The glue tests use a fake agent; they
-do not prove real Airlock staging, approval, retirement, or collection. The
-parent integration must execute the real workflow before claiming it works.
+**Developer-preview integration.** Real CLI submission, frozen application,
+stale-proposal refusal, targeted collection, undo after collection, and a third
+submission were exercised in one Linux scratch home without resetting it.
+The separate six glue tests use a fake agent and test only the handoff adapter.
 
 This small Bash/Python example prepares a JSON configuration for a fictional
 `scratch-api`, validates its environment and worker count (1–16), and submits
@@ -48,9 +49,7 @@ been staged—inspect the existing inbox before retrying.
 ## Operator-owned follow-up (not run by these scripts)
 
 Use the same `AIRLOCK_HOME`. Read the handoff's `proposalId` and
-`proposalDigest`; review in the operator inbox or use the forthcoming approval
-flow. These are **parent integration contracts**, not independently executed
-evidence here:
+`proposalDigest`; review in the operator inbox or use interactive approval:
 
 ```sh
 ID='PASTE_PROPOSAL_ID'
@@ -66,8 +65,9 @@ airlock change collect "$ID"
 ```
 
 These are alternative lifecycle actions, not a script to run blindly in order.
-`approve` is interactive: the operator reviews and enters the exact reviewed
-digest in a terminal. The agent submission never invokes it. Retirement uses
+`approve` is interactive: the operator reviews and types `APPLY` in a terminal;
+the controller applies the exact displayed digest. The agent submission never
+invokes it. Retirement uses
 the inventory's `rows[].retirementDigest` (also shown by `inbox --human`), **not
 the proposal digest in this handoff**. It binds the currently eligible snapshots
 and workflow; cancel a staged proposal before retiring it. `collect` explicitly

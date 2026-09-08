@@ -278,8 +278,9 @@ This is direct Hold composition with **supervisor-managed Apply semantics**,
 not a claim of Plan lowering and not a fifth Plan node. Managed replacement
 and undo retain displaced state through Hold; only its reaper can unlink it.
 The first journey needs neither `.air` nor native-contained prerequisites.
-Agents receive only stage, review, and status within the change command group;
-apply, undo, cancel, and recover belong to the supervisor.
+Agents receive stage, inbox, review, content, and status within the change
+command group; approve, apply, undo, cancel, recover, retire, and collect belong
+to the supervisor. Human approval binds the digest actually displayed.
 
 The envelope is local, quiescent, ordinary user-owned regular files and
 directory trees, without symlinks, hardlinks, or special files. It covers bytes
@@ -287,8 +288,10 @@ and ordinary POSIX modes, not ACLs, xattrs, ownership, or timestamps. Whole
 directory replacement removes absent entries through Hold. Two renames are
 not an atomic swap or zero-downtime update. There is no live database safety,
 service restart, remote deploy service, confidentiality, or same-UID malicious
-tamper defense. Undo refuses target drift. Initial snapshots have no garbage
-collection; retained storage must be bounded operationally.
+tamper defense. Undo refuses target drift. Explicit snapshot retirement and
+targeted collection route through Hold and its sole reaper, preserving receipts
+and world recovery payloads. Snapshot/private-stage reservations are released
+only after collection, not retirement; they do not bound total retained disk.
 
 This optional tool becomes an enforcement boundary only when production
 authority is externally owned and unavailable to the agent's ambient tools.

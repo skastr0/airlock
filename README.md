@@ -59,6 +59,13 @@ bash examples/changes/demo.sh
 Read the [complete walkthrough and command contract](docs/changes.md), including
 cancel, recovery, and deliberate drift checks.
 
+For repeated work, use `airlock change inbox --human` to find proposals and
+`airlock change approve ID` for interactive approval of the displayed digest.
+Read beyond truncated previews with `change content`; explicitly retire and
+collect review snapshots when finished. The [configuration handoff example](examples/config-publish/README.md)
+keeps one target and home across submissions and never approves on the agent's
+behalf. See the [action plan and acceptance gates](docs/repeated-use-plan.md).
+
 ## Where the guarantee stops
 
 - **Optional is not enforced.** An agent with ambient direct access can bypass
@@ -72,9 +79,10 @@ cancel, recovery, and deliberate drift checks.
   the live target through Hold. Moving the old target aside and installing the
   candidate takes two renames, not an atomic swap or zero-downtime update.
 - **Recovery has limits.** No confidentiality or same-UID malicious-tamper
-  defense; no force or replay. Undo refuses changes made since apply. Initial
-  snapshots have no garbage collection: retained storage must be bounded
-  operationally. Do not treat this as an unlimited backup system.
+  defense; no force or replay. Undo refuses changes made since apply. Review
+  snapshots require explicit retirement and collection; receipts and world
+  recovery payloads remain separately retained. Snapshot reservations are not
+  a total disk cap. Do not treat this as an unlimited backup system.
 
 ## Existing tools, still optional
 

@@ -12,8 +12,9 @@ deployment service, command runner, or service manager.
 
 ## Command contract
 
-All commands return JSON; `review --diff` adds per-path changes and bounded text
-previews with binary/truncation markers. `ID` is a proposal ID; `RECEIPT_ID` is
+JSON is the default; `review --diff` adds per-path changes and bounded text
+previews with binary/truncation markers. `--human` on inbox, review, or content
+prints escaped terminal text instead. `ID` is a proposal ID; `RECEIPT_ID` is
 an apply receipt ID. `sha256:FULL` means the entire reviewed digest (64 hex
 digits after the prefix), not a prefix match or the hash of a source file
 calculated separately.
@@ -21,18 +22,26 @@ calculated separately.
 ```text
 airlock change stage --source PATH --target PATH
 airlock-agent change stage --source PATH --target PATH
-airlock change review ID [--diff]
-airlock-agent change review ID [--diff]
+airlock change inbox [--human]
+airlock-agent change inbox [--human]
+airlock change review ID [--diff] [--human]
+airlock-agent change review ID [--diff] [--human]
+airlock change content ID --side before|after --path PATH [--offset N] [--limit N] [--human]
+airlock-agent change content ID --side before|after --path PATH [--offset N] [--limit N] [--human]
+airlock change approve ID
 airlock change apply ID --expect-digest sha256:FULL
 airlock change status ID
 airlock-agent change status ID
 airlock change undo RECEIPT_ID
 airlock change cancel ID
 airlock change recover ID [--restore]
+airlock change retire ID --expect-digest sha256:RETIREMENT_DIGEST
+airlock change collect ID
 ```
 
-Within this command group, the agent surface is **stage, review, status only**.
-The supervisor owns apply, undo, cancel, and recover. A reduced command surface
+Within this command group, the agent surface is **stage, inbox, review, content,
+status only**. The supervisor owns approve, apply, undo, cancel, recover, retire,
+and collect. A reduced command surface
 does not remove ambient access: if the agent can write the target directly or
 invoke the supervisor binary with equivalent authority, using Airlock is a
 convention, not enforcement. Enforced deployments need an external boundary
@@ -112,6 +121,11 @@ the displaced current state through Hold rather than deleting it in place.
 If someone edited the live target after apply, undo refuses instead of
 overwriting their work. There is no force flag or replay path.
 
+A rejected undo also consumes its attempt: restoring matching bytes later does
+not make that same undo retryable. The inbox shows historical apply and undo
+outcomes separately; `workflow=rejected` can mean apply succeeded but undo did
+not. Status and inventory never probe undo by trying it.
+
 Receipts describe historical transitions, not the current filesystem. Repeating
 apply returns its original receipt without reinstalling—even after undo.
 Use status to inspect workflow state; it too is not a live filesystem check.
@@ -154,6 +168,62 @@ separate successful apply, append a line afterward and check that undo refuses.
 For source isolation, edit only `"$DEMO/candidate/config.json"` after stage and
 confirm apply still installs the reviewed snapshot, not that later edit.
 
+## Repeated use: inbox, approval, and storage lifecycle
+
+Use [the configuration handoff example](../examples/config-publish/README.md)
+to prepare and validate multiple submissions against the same scratch target
+and home. The agent submits JSON, not approval. Operators discover the proposals:
+
+```sh
+airlock change inbox --human
+airlock change review "$ID" --human
+airlock change approve "$ID"
+```
+
+`approve` displays the frozen review and asks you to type `APPLY` on an
+interactive terminal. It passes exactly that displayed ID/digest to apply;
+it does not refresh the digest at confirmation. Any other answer, EOF, or
+Ctrl-C leaves the proposal unapproved. Automation must use the existing explicit
+`apply --expect-digest`; piping an answer into `approve` is refused.
+
+Previews are **not complete review** when marked truncated. Inspect later bytes
+of the immutable file, not the mutable preparation directory:
+
+```sh
+airlock change content "$ID" --side after --path config.json --offset 8192 --human
+```
+
+For a root single-file proposal use `--path ''`. Offsets are bytes; the default
+page is 8,192 bytes, maximum 65,536. JSON returns exact base64 bytes, full file
+digest, total size, and `nextOffset`; human output escapes control characters
+and renders binary or split UTF-8 pages as base64. Follow `nextOffset` until
+EOF. Paths must identify an exact stored regular-file entry. Retired snapshots
+are unavailable; there is never a source-file fallback.
+
+When review snapshots are no longer needed, cancel an unwanted staged proposal
+first (do not cancel one already applied). Inspect fresh inventory, then copy
+its **retirementDigest**, which binds eligible private snapshots and workflow:
+
+```sh
+airlock change inbox
+airlock change retire "$ID" --expect-digest "$RETIREMENT_DIGEST"
+airlock change collect "$ID"
+```
+
+The retirement digest is **not the approval/proposal digest**. Retirement moves
+eligible snapshots into correlated Hold retention. Collection explicitly and
+irreversibly reaps those retired snapshot bytes only. It preserves proposal
+history, receipts, and original-world apply/undo payloads. Unresolved transitions
+block cleanup. Retirement alone does not free budget; successful collection
+does. Interrupted cleanup keeps conservative accounting and can be reconciled
+by repeating the lifecycle operation. Do not delete/reset the home to regain
+capacity, and do not use global `reap` as a substitute for targeted collection.
+
+Inventory exposes incomplete/corrupt rows rather than hiding them. An eligible
+incomplete allocation can have a retirement digest without a published proposal.
+An empty inbox does not allocate the change store; the existing CLI home Layer
+can still initialize the base Hold/Outbox directories.
+
 ## Supported envelope and storage
 
 Use **quiescent ordinary user-owned regular files or directory trees**, with
@@ -164,14 +234,17 @@ actively written tree. Airlock neither makes databases safe nor restarts
 services. There is no confidentiality or defense against malicious tampering
 by another process with the same UID.
 
-Snapshots are retained initially with **no snapshot garbage collection**. Each
-tree is limited to 64 MiB, 4,096 entries, depth 64, and 256 KiB of entry paths.
-The store allows at most 128 proposals and a 512 MiB reservation budget,
+Snapshots are retained until **explicit retirement and collection**. Each tree
+is limited to 64 MiB, 4,096 entries, depth 64, and 256 KiB of entry paths.
+The store allows at most 128 active proposals and a 512 MiB snapshot/private-stage reservation budget,
 whichever is reached first. Each stage reserves twice the candidate-plus-baseline
 bytes plus 32 MiB overhead, so even tiny proposals exhaust the budget before
 the count limit. Interrupted allocations remain conservatively charged.
-These are application limits, not a filesystem quota; budget actual free space
-too. Cancellation and undo do not reclaim the reservation. Preserve the Airlock
+Collection releases the snapshot reservation and active slot, not historical
+metadata or separately retained world recovery payloads. Those continue to
+consume disk under existing Hold retention policy. These application limits
+are not a total-home disk cap or filesystem quota; budget actual free space
+too. Cancellation and undo alone do not reclaim the reservation. Preserve the Airlock
 home for receipts and recovery; the demo does not auto-delete it. Source
 immutability means later edits to the original source are irrelevant, not that
 same-UID attackers cannot modify private state.
