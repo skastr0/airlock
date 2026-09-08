@@ -649,7 +649,7 @@ const makeChange = (seal: SealContext, agent = false) => {
   const commands: Array<AnyCliCommand> = [
     Command.make("inbox", { human: Options.boolean("human") }, ({ human }) => rendered(local.pipe(
       Effect.zipRight(Effect.flatMap(Change, change => change.inventory()))
-    ), human ? formatInventory : undefined)).pipe(Command.withDescription("Discover proposals, distinct apply/undo outcomes, and retained storage")),
+    ), human ? formatInventory : undefined)).pipe(Command.withDescription("Discover proposals, operation outcomes, and retained storage")),
     Command.make("stage", {
       source: Options.text("source"),
       target: Options.text("target")
