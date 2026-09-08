@@ -1,9 +1,9 @@
 import { Schema } from "effect"
-import { lstat, readFile } from "node:fs/promises"
+import { lstat, readFile, readdir } from "node:fs/promises"
 import * as path from "node:path"
 import { CheckedRecord, ProposalDigest } from "./Checked.ts"
 import { InventoryRow, Proposal, ProposalId, SnapshotReceipt, Staged, Status } from "./Contracts.ts"
-import { BoundTree, canonical, Digest, exists, hash, Identity, limits, scan } from "./Tree.ts"
+import { BoundTree, canonical, checkTree, Digest, exists, hash, Identity, identity, limits, sameIdentity, scan } from "./Tree.ts"
 
 export const SnapshotBinding = Schema.Struct({
   side: Schema.Literal("candidate", "baseline", "apply-stage"), expected: BoundTree,
@@ -83,8 +83,12 @@ export const inspectSnapshots = async (home: string, id: string): Promise<Snapsh
     proposal.proposalDigest !== `sha256:${hash(Schema.encodeSync(Schema.parseJson(Proposal))(proposal.proposal))}`)) {
     errors.push({ operation: "proposal", reason: "proposal/store digest binding mismatch" }); proposal = undefined
   }
+  if (proposalRaw !== undefined && proposal === undefined) safe = false
   if (status !== undefined && status.id !== id) { errors.push({ operation: "workflow", reason: "workflow id mismatch" }); safe = false }
-  if (statusRaw !== undefined && status === undefined) safe = false
+  // A crash can truncate the initial status write before proposal publication.
+  // No published proposal means apply cannot claim it; private bytes remain
+  // explicitly abandonable even when that initial metadata is incomplete.
+  if (proposalRaw !== undefined && statusRaw !== undefined && status === undefined) safe = false
   const operations: Array<CheckedRecord | undefined> = []
   for (const key of [id, `undo_${id}`]) {
     const raw = await read(key, path.join(home, "hold", "checked", `${key}.json`))
@@ -108,9 +112,11 @@ export const inspectSnapshots = async (home: string, id: string): Promise<Snapsh
   if ((proposalRaw !== undefined && status?.state === "staged") || status?.state === "claimed" || status?.state === "recovery-required") safe = false
   if (proposalRaw !== undefined && status === undefined) safe = false
   const bindings: SnapshotBinding[] = []
+  let privateSourcePresent = false
   for (const side of ["candidate", "baseline"] as const) {
     const source = path.join(directory, side)
     if (await exists(source)) {
+      privateSourcePresent = true
       try { bindings.push({ side, expected: await scan(source) }) }
       catch (cause) { errors.push({ operation: side, reason: String(cause) }); safe = false }
     }
@@ -119,6 +125,7 @@ export const inspectSnapshots = async (home: string, id: string): Promise<Snapsh
     const actId = safeAct(apply.actId)
     const stage = path.join(home, "hold", actId, "stage")
     if (await exists(stage)) {
+      privateSourcePresent = true
       const journalRaw = await read("apply-stage-journal", path.join(home, "hold", actId, "manifest.json"))
       const journal = journalRaw === undefined ? undefined : JSON.parse(journalRaw)
       if (journal?.checkedKey !== id || journal?.manifest?.id !== actId) { errors.push({ operation: "apply-stage", reason: "stage lacks correlated Hold authority" }); safe = false }
@@ -134,8 +141,19 @@ export const inspectSnapshots = async (home: string, id: string): Promise<Snapsh
   if (record !== undefined) {
     snapshotState = record.phase === "prepared" ? "retiring" : record.phase
     bytes = record.phase === "collected" ? 0 : record.plan.bindings.reduce((n, b) => n + b.expected.tree.bytes, 0)
+    if (record.phase === "retired") {
+      try {
+        if (record.actId === undefined || record.bundle === undefined) throw new Error("unbound retirement bundle")
+        const bundle = path.join(home, "hold", record.actId, "payload")
+        const stat = await lstat(bundle)
+        if (!stat.isDirectory() || !sameIdentity(identity(stat), record.bundle)) throw new Error("retirement bundle identity drift")
+        if ((await readdir(bundle)).length !== record.plan.bindings.length) throw new Error("retirement bundle entry drift")
+        for (const b of record.plan.bindings) await checkTree(path.join(bundle, b.side), b.expected)
+      } catch (cause) { snapshotState = "recovery-required"; errors.push({ operation: "retired", reason: String(cause) }) }
+    }
     if (record.phase === "collected") {
-      if (bindings.length !== 0 || (record.actId !== undefined && await exists(path.join(home, "hold", record.actId, "payload")))) {
+      for (const binding of record.plan.bindings) if (await exists(snapshotSource(home, id, binding))) privateSourcePresent = true
+      if (privateSourcePresent || (record.actId !== undefined && await exists(path.join(home, "hold", record.actId, "payload")))) {
         snapshotState = "recovery-required"
         errors.push({ operation: "collected", reason: "private bytes remain despite collection tombstone" })
       } else reservationBytes = 0

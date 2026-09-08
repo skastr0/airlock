@@ -1599,7 +1599,7 @@ const make = Effect.gen(function* () {
   const held = listJournals.pipe(
     Effect.map((journals) =>
       journals
-        .filter((journal) => journal.state === "held")
+        .filter((journal) => journal.state === "held" && journal.snapshotRetirementId === undefined)
         .map((journal) => journal.manifest)
         .sort((a, b) => DateTime.toEpochMillis(a.at) - DateTime.toEpochMillis(b.at))
     )
@@ -1628,6 +1628,11 @@ const make = Effect.gen(function* () {
         // unpin journal must not make a newer unresolved undo collectible.
         const record = yield* readChecked(journal.checkedKey).pipe(Effect.mapError(fsError("read checked reaper authority", manifestFile(journal.manifest.id))))
         if (record?.phase !== "finished" || record.acknowledged !== true) continue
+        if (Schema.is(ProposalId)(journal.checkedKey)) {
+          const retirement = yield* attempt("read private-stage retirement pin", () => readSnapshotRecord(home.home, journal.checkedKey!))
+            .pipe(Effect.mapError(fsError("read snapshot reaper authority", manifestFile(journal.manifest.id))))
+          if (retirement?.phase === "prepared" && retirement.plan.bindings.some(b => b.sourceActId === journal.manifest.id)) continue
+        }
         if (record.undoOf === undefined) {
           const undo = yield* readChecked(`undo_${journal.checkedKey}`).pipe(Effect.mapError(fsError("read checked undo reaper authority", manifestFile(journal.manifest.id))))
           if (undo !== undefined && (undo.phase !== "finished" || undo.acknowledged !== true)) continue
@@ -1981,7 +1986,7 @@ const make = Effect.gen(function* () {
     const inspected = yield* attempt("inspect snapshot retirement", () => inspectSnapshots(home.home, input.id))
     if (inspected.plan === undefined || inspected.plan.retirementDigest !== input.expectedDigest) return yield* checkedError("retirement digest mismatch or unsettled proposal; not retired")
     let record: SnapshotRecord = inspected.record ?? { plan: inspected.plan, phase: "prepared", actId: newActId() }
-    if (record.phase !== "prepared") return snapshotReceipt(record)
+    if (record.phase !== "prepared") return snapshotReceipt(record, inspected.row.snapshots.state === "recovery-required" ? "retirement state drift; inspect inventory errors" : undefined)
     const result = yield* Effect.gen(function* () {
       if (inspected.record === undefined) yield* writeSnapshotRecord(record)
       const id = ActId.make(record.actId!)
@@ -2009,6 +2014,9 @@ const make = Effect.gen(function* () {
           yield* renameExclusiveDurable(source, destination, "retire change snapshot")
         }
         yield* attempt("verify retired snapshot", async () => { await checkTree(source, null); await checkTree(destination, binding.expected) })
+        // A prior process may have exited between rename and either sync.
+        yield* syncDirectory(path.dirname(source), "retired snapshot source sync")
+        yield* syncDirectory(path.dirname(destination), "retired snapshot destination sync")
       }
       record = { ...record, phase: "retired" }
       yield* writeSnapshotRecord(record)
@@ -2020,11 +2028,15 @@ const make = Effect.gen(function* () {
     const id = yield* Schema.decodeUnknown(ProposalId)(raw)
     let record = yield* attempt("read snapshot retirement", () => readSnapshotRecord(home.home, id))
     if (record === undefined || record.phase === "prepared") return yield* checkedError("explicit completed retirement required before collection")
-    if (record.phase === "collected") return snapshotReceipt(record)
+    if (record.phase === "collected") {
+      const inspected = yield* attempt("verify collected private bytes absent", () => inspectSnapshots(home.home, id))
+      return snapshotReceipt(record, inspected.row.snapshots.state === "collected" ? undefined : "private bytes remain; reservation not released")
+    }
     const result = yield* Effect.gen(function* () {
       const actId = ActId.make(record!.actId!)
       const journal = yield* readJournal(actId)
       if (journal.snapshotRetirementId !== id) return yield* checkedError("collection act correlation mismatch")
+      for (const side of ["candidate", "baseline"]) yield* attempt("verify proposal private bytes absent", () => checkTree(path.join(home.home, "changes", id, side), null))
       for (const binding of record!.plan.bindings) yield* attempt("verify private source absent", () => checkTree(snapshotSource(home.home, id, binding), null))
       if (yield* pathExists(payloadFile(actId))) {
         yield* verifyBundle(record!)

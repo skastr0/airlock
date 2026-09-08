@@ -94,6 +94,10 @@ describe("checked operation process-exit boundaries (real no-replace renames)", 
       await writeFile(source, "new"); await writeFile(target, "old")
       const staged = await runtime.runPromise(change.stage({ source, target }))
       crash({ home, id: staged.id, digest: staged.proposalDigest, target, point, action: "apply" })
+      if (point !== "after-acknowledgement") {
+        expect((await runtime.runPromise(change.inventory())).rows[0]!.retirementDigest).toBeUndefined()
+        await expect(runtime.runPromise(change.retire({ id: staged.id, expectedDigest: staged.proposalDigest }))).rejects.toThrow("unsettled")
+      }
       expect((await runtime.runPromise(hold.reap(0))).reaped).toEqual([])
       const restarted = ManagedRuntime.make(layers(home))
       try {
