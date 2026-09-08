@@ -130,6 +130,38 @@ describe("repeated-use review CLI", () => {
     expect(readFileSync(f.target, "utf8")).toBe("old\n")
   })
 
+  it("renders binary content and hostile target names as data", () => {
+    const f = fixture()
+    f.target = join(f.root, "live\u001b[2J\u202econfig")
+    writeFileSync(f.target, "old\n")
+    writeFileSync(f.source, Buffer.from([0, 255, 27, 10]))
+    const proposal = stage(f)
+    const reviewed = run(f.home, ["review", proposal.id, "--human"])
+    expect(reviewed.status, reviewed.stderr).toBe(0)
+    expect(reviewed.stdout).toContain("BINARY")
+    expect(reviewed.stdout).toContain("\\u001b[2J\\u202econfig")
+    expect(reviewed.stdout).not.toMatch(/[\u001b\u202e]/)
+    const content = run(f.home, ["content", proposal.id, "--side", "after", "--path", "", "--human"])
+    expect(content.status, content.stderr).toBe(0)
+    expect(content.stdout).toContain("AP8bCg==")
+  })
+
+  it("keeps successful apply distinct from rejected undo and exposes corrupt rows", () => {
+    const f = fixture(), proposal = stage(f)
+    const applied = json(run(f.home, ["apply", proposal.id, "--expect-digest", proposal.proposalDigest]))
+    writeFileSync(f.target, "operator edit")
+    expect(run(f.home, ["undo", applied.receiptId]).status).toBe(1)
+    const view = run(f.home, ["inbox", "--human"])
+    expect(view.status, view.stderr).toBe(0)
+    expect(view.stdout).toContain("apply=installed  undo=rejected")
+    expect(view.stdout).toContain("live target NOT CHECKED")
+    writeFileSync(join(f.home, "changes", proposal.id, "proposal.json"), "corrupt")
+    const broken = json(run(f.home, ["inbox"]))
+    expect(broken.rows).toHaveLength(1)
+    expect(broken.rows[0].errors.length).toBeGreaterThan(0)
+    expect(run(f.home, ["inbox", "--human"]).stdout).toContain("ERROR")
+  })
+
   it("does not expose approval or lifecycle authority to the agent", () => {
     const f = fixture(), proposal = stage(f)
     for (const args of [["approve", proposal.id], ["retire", proposal.id, "--expect-digest", proposal.proposalDigest], ["collect", proposal.id]]) {

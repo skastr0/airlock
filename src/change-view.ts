@@ -5,6 +5,10 @@ const quoted = (value: string) => JSON.stringify(value).replace(
   /[\u007f-\u009f\u2028-\u202e\u2066-\u2069]/g,
   character => `\\u${character.charCodeAt(0).toString(16).padStart(4, "0")}`
 )
+const textLine = (value: string) => value.replace(
+  /[\\\u0000-\u001f\u007f-\u009f\u2028-\u202e\u2066-\u2069]/g,
+  character => character === "\\" ? "\\\\" : `\\u${character.charCodeAt(0).toString(16).padStart(4, "0")}`
+)
 const mode = (value: number) => `0${value.toString(8).padStart(3, "0")}`
 
 export const formatReview = (review: Review): string => {
@@ -32,7 +36,7 @@ export const formatReview = (review: Review): string => {
       lines.push(`  ${label}: ${metadata.kind} mode=${mode(metadata.mode)} bytes=${metadata.bytes} sha256=${metadata.digest}`)
       if (preview?.binary) lines.push(`  ${label}: BINARY — use content to inspect encoded bytes.`)
       if (preview?.text !== undefined) {
-        for (const line of preview.text.split("\n")) lines.push(`  ${prefix} ${quoted(line)}`)
+        for (const line of preview.text.split("\n")) lines.push(`  ${prefix} ${textLine(line)}`)
       }
       if (preview?.truncated) lines.push(`  ${label}: TRUNCATED — this preview is NOT the complete file.`)
     }
@@ -44,7 +48,8 @@ export const formatReview = (review: Review): string => {
 export const formatInventory = (inventory: Inventory): string => {
   const lines = [
     "Airlock review inbox — historical state; live target NOT CHECKED",
-    `${inventory.totals.rows} proposals; ${inventory.totals.active}/${inventory.limits.proposals} active; reserved ${inventory.totals.reservedBytes}/${inventory.limits.storage} bytes`,
+    `${inventory.totals.rows} proposals; ${inventory.totals.active}/${inventory.limits.proposals} active; snapshot/private-stage reserved ${inventory.totals.reservedBytes}/${inventory.limits.storage} bytes`,
+    "World recovery payloads and historical metadata consume additional disk.",
     ""
   ]
   if (inventory.rows.length === 0) lines.push("No proposals. Prepare with Bash/Python, then airlock-agent change stage.")
@@ -73,7 +78,7 @@ export const formatContent = (page: ContentPage): string => {
   if (text === undefined || bytes.includes(0)) {
     lines.push("Binary or split UTF-8 page; exact bytes (base64):", page.dataBase64)
   } else {
-    lines.push(...text.split("\n").map(quoted))
+    lines.push(...text.split("\n").map(textLine))
   }
   if (page.nextOffset !== null) lines.push(`MORE CONTENT: repeat with --offset ${page.nextOffset}. This page is not the entire file.`)
   return lines.join("\n")
