@@ -26,7 +26,9 @@ import {
 } from "./platform/ExclusiveRename.ts"
 import { makeExclusiveFileLock } from "./platform/ExclusiveFileLock.ts"
 import { CheckedOutcome, CheckedRecord, CheckedRequest, observeClaim, OperationKey } from "./change/Checked.ts"
-import { attempt, ChangeError, checkParent, checkTree, exists as treeExists, scan, snapshot } from "./change/Tree.ts"
+import { attempt, ChangeError, checkParent, checkTree, exists as treeExists, identity, sameIdentity, scan, snapshot } from "./change/Tree.ts"
+import { ProposalId, SnapshotReceipt } from "./change/Contracts.ts"
+import { inspectSnapshots, readSnapshotRecord, type SnapshotInspection, SnapshotRecord, snapshotReceipt, snapshotRecordPath, snapshotSource } from "./change/Snapshots.ts"
 
 // The recovery floor, by construction: the destructive part of every mutation
 // is a rename. The single unlink site in this component is `reap` — the runner's
@@ -242,6 +244,9 @@ export class Hold extends Context.Tag("airlock/Hold")<
       | HoldMutationError
     >
     readonly held: Effect.Effect<ReadonlyArray<HeldManifest>, HoldFilesystemError>
+    readonly inspectChangeSnapshots: (id: string) => Effect.Effect<SnapshotInspection, ChangeError>
+    readonly retireChangeSnapshots: (input: { id: string, expectedDigest: string }) => Effect.Effect<SnapshotReceipt, ChangeError>
+    readonly collectChangeSnapshots: (id: string) => Effect.Effect<SnapshotReceipt, ChangeError>
     readonly reap: (
       olderThanMillis: number
     ) => Effect.Effect<
@@ -276,7 +281,8 @@ class HoldJournal extends Schema.Class<HoldJournal>("HoldJournal")({
   retained: Schema.optional(RetainedMetadata),
   installed: Schema.optional(InstalledIdentity),
   checkedKey: Schema.optional(Schema.String),
-  checkedPinned: Schema.optional(Schema.Boolean)
+  checkedPinned: Schema.optional(Schema.Boolean),
+  snapshotRetirementId: Schema.optional(Schema.String)
 }) {}
 
 type Entry = Readonly<{
@@ -1168,7 +1174,7 @@ const make = Effect.gen(function* () {
   const reconcileJournal = Effect.fnUntraced(function* (journal: HoldJournal) {
     // Checked operations own their recovery evidence. An ambiguous operation
     // remains inspectable and pinned, never bricks legacy Hold construction.
-    if (journal.checkedKey !== undefined) return
+    if (journal.checkedKey !== undefined || journal.snapshotRetirementId !== undefined) return
     if (journal.state === "restored") return
     const { manifest } = journal
     const payloadExists = yield* pathExists(payloadFile(manifest.id))
@@ -1517,7 +1523,7 @@ const make = Effect.gen(function* () {
 
   const undo = Effect.fn("Hold.undo")(function* (id: ActId) {
     const journal = yield* readJournal(id)
-    if (journal.checkedKey !== undefined) {
+    if (journal.checkedKey !== undefined || journal.snapshotRetirementId !== undefined) {
       return yield* new NotHeld({ id, status: "checked operation: use exact change receipt" })
     }
     if (journal.state !== "held") {
@@ -1608,12 +1614,14 @@ const make = Effect.gen(function* () {
     return yield* undo(last.id)
   })
 
-  const reap = Effect.fn("Hold.reap")(function* (olderThanMillis: number) {
+  const reap = Effect.fn("Hold.reap")(function* (olderThanMillis: number, retirement?: HoldJournal) {
     const now = yield* DateTime.now
     const cutoff = DateTime.subtract(now, { millis: olderThanMillis })
-    const all = yield* listJournals
+    const all = retirement === undefined ? yield* listJournals : []
     const expired: HoldJournal[] = []
+    if (retirement !== undefined) expired.push(retirement)
     for (const journal of all) {
+      if (journal.snapshotRetirementId !== undefined) continue
       if (journal.checkedPinned === true || !DateTime.lessThanOrEqualTo(journal.manifest.at, cutoff)) continue
       if (journal.checkedKey !== undefined) {
         // Correlated receipts are the release authority. Even a stale staged
@@ -1641,7 +1649,7 @@ const make = Effect.gen(function* () {
         Effect.gen(function* () {
           // The single physical deletion site in this component.
           yield* fs
-            .remove(actDir(id), { recursive: true })
+            .remove(retirement === undefined ? actDir(id) : payloadFile(id), { recursive: true })
             .pipe(
               Effect.mapError((cause) =>
                 new HoldReapRecoveryRequired({
@@ -1656,7 +1664,7 @@ const make = Effect.gen(function* () {
             )
           reaped.push(id)
           yield* syncDirectory(
-            home.holdDir,
+            retirement === undefined ? home.holdDir : actDir(id),
             "reap hold act directory sync"
           ).pipe(
             Effect.mapError((cause) =>
@@ -1956,7 +1964,91 @@ const make = Effect.gen(function* () {
   const checkedLocked = <A, E>(effect: Effect.Effect<A, E>) =>
     withLock(Effect.uninterruptible(effect)).pipe(Effect.mapError(checkedError))
 
+  const writeSnapshotRecord = Effect.fnUntraced(function* (record: SnapshotRecord) {
+    const file = snapshotRecordPath(home.home, record.plan.id)
+    yield* fs.makeDirectory(path.dirname(file), { recursive: true, mode: 0o700 })
+    yield* syncDirectory(home.holdDir, "snapshot retirement root sync")
+    const json = Schema.encodeSync(Schema.parseJson(SnapshotRecord))(record)
+    yield* writeNewDurable(`${file}.next`, json, "snapshot retirement replica", true)
+    yield* renameJournalReplacingDurable(`${file}.next`, file, "snapshot retirement publication")
+  })
+  const verifyBundle = (record: SnapshotRecord) => attempt("verify retirement bundle binding", async () => {
+    if (record.actId === undefined || record.bundle === undefined) throw new Error("retirement bundle not bound")
+    const stat = await lstat(payloadFile(record.actId))
+    if (!stat.isDirectory() || !sameIdentity(identity(stat), record.bundle)) throw new Error("retirement bundle identity drift")
+  })
+  const retireChangeSnapshots = Effect.fnUntraced(function* (input: { id: string, expectedDigest: string }) {
+    const inspected = yield* attempt("inspect snapshot retirement", () => inspectSnapshots(home.home, input.id))
+    if (inspected.plan === undefined || inspected.plan.retirementDigest !== input.expectedDigest) return yield* checkedError("retirement digest mismatch or unsettled proposal; not retired")
+    let record: SnapshotRecord = inspected.record ?? { plan: inspected.plan, phase: "prepared", actId: newActId() }
+    if (record.phase !== "prepared") return snapshotReceipt(record)
+    const result = yield* Effect.gen(function* () {
+      if (inspected.record === undefined) yield* writeSnapshotRecord(record)
+      const id = ActId.make(record.actId!)
+      if (!(yield* pathExists(manifestFile(id)))) {
+        yield* fs.makeDirectory(actDir(id), { recursive: true, mode: 0o700 })
+        yield* syncDirectory(home.holdDir, "snapshot act directory sync")
+        const manifest = new HeldManifest({ id, act: "remove", target: path.join(home.home, "changes", input.id),
+          kind: "directory", at: yield* DateTime.now, status: "held", hasPayload: true })
+        yield* writeJournal(new HoldJournal({ state: "held", manifest, checkedPinned: true, snapshotRetirementId: input.id }))
+      }
+      const journal = yield* readJournal(id)
+      if (journal.snapshotRetirementId !== input.id) return yield* checkedError("retirement act correlation mismatch")
+      if (record.bundle === undefined) {
+        yield* fs.makeDirectory(payloadFile(id), { recursive: true, mode: 0o700 })
+        if ((yield* fs.readDirectory(payloadFile(id))).length !== 0) return yield* checkedError("unbound nonempty retirement bundle")
+        yield* syncDirectory(actDir(id), "snapshot bundle directory sync")
+        record = { ...record, bundle: yield* attempt("bind retirement bundle", async () => identity(await lstat(payloadFile(id)))) }
+        yield* writeSnapshotRecord(record)
+      }
+      yield* verifyBundle(record)
+      for (const binding of record.plan.bindings) {
+        const source = snapshotSource(home.home, input.id, binding), destination = path.join(payloadFile(id), binding.side)
+        if (yield* pathExists(source)) {
+          yield* attempt("check private snapshot retirement", async () => { await checkTree(source, binding.expected); await checkTree(destination, null) })
+          yield* renameExclusiveDurable(source, destination, "retire change snapshot")
+        }
+        yield* attempt("verify retired snapshot", async () => { await checkTree(source, null); await checkTree(destination, binding.expected) })
+      }
+      record = { ...record, phase: "retired" }
+      yield* writeSnapshotRecord(record)
+      return snapshotReceipt(record)
+    }).pipe(Effect.either)
+    return result._tag === "Right" ? result.right : snapshotReceipt(record, reasonOf(result.left))
+  })
+  const collectChangeSnapshots = Effect.fnUntraced(function* (raw: string) {
+    const id = yield* Schema.decodeUnknown(ProposalId)(raw)
+    let record = yield* attempt("read snapshot retirement", () => readSnapshotRecord(home.home, id))
+    if (record === undefined || record.phase === "prepared") return yield* checkedError("explicit completed retirement required before collection")
+    if (record.phase === "collected") return snapshotReceipt(record)
+    const result = yield* Effect.gen(function* () {
+      const actId = ActId.make(record!.actId!)
+      const journal = yield* readJournal(actId)
+      if (journal.snapshotRetirementId !== id) return yield* checkedError("collection act correlation mismatch")
+      for (const binding of record!.plan.bindings) yield* attempt("verify private source absent", () => checkTree(snapshotSource(home.home, id, binding), null))
+      if (yield* pathExists(payloadFile(actId))) {
+        yield* verifyBundle(record!)
+        if (record!.phase === "retired") {
+          const names = yield* fs.readDirectory(payloadFile(actId))
+          if (names.length !== record!.plan.bindings.length) return yield* checkedError("unapproved retirement bundle entries")
+          for (const b of record!.plan.bindings) yield* attempt("verify collection digest", () => checkTree(path.join(payloadFile(actId), b.side), b.expected))
+        }
+        record = { ...record!, phase: "collecting" }
+        yield* writeSnapshotRecord(record)
+        yield* reap(0, journal)
+      } else if (record!.phase !== "collecting") return yield* checkedError("retired bundle missing before collection claim")
+      yield* syncDirectory(actDir(actId), "collected bundle absence sync")
+      record = { ...record!, phase: "collected" }
+      yield* writeSnapshotRecord(record)
+      return snapshotReceipt(record)
+    }).pipe(Effect.either)
+    return result._tag === "Right" ? result.right : snapshotReceipt(record!, reasonOf(result.left))
+  })
+
   return Hold.of({
+    inspectChangeSnapshots: (id) => checkedLocked(attempt("inspect change snapshots", () => inspectSnapshots(home.home, id))),
+    retireChangeSnapshots: (input) => checkedLocked(retireChangeSnapshots(input)),
+    collectChangeSnapshots: (id) => checkedLocked(collectChangeSnapshots(id)),
     replaceChecked: (request) => checkedLocked(replaceChecked(request)),
     undoChecked: (receiptId) => checkedLocked(undoChecked(receiptId)),
     checkedStatus: (key) => checkedLocked(readChecked(key).pipe(Effect.map(r => r === undefined ? undefined : outcomeOf(r)))),

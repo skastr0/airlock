@@ -4,38 +4,13 @@ import * as path from "node:path"
 import { AirlockHome } from "../AirlockHome.ts"
 import { Hold } from "../Hold.ts"
 import { makeExclusiveFileLock } from "../platform/ExclusiveFileLock.ts"
-import { CheckedOutcome, ClaimObservation, observeClaim, OperationKey, ProposalDigest } from "./Checked.ts"
-import { attempt, bindTarget, BoundTree, canonical, ChangeError, checkParent, checkTree, Entry, exists, hash, limits, metadataPolicy, overlaps, Parent, scan, snapshot, sync, Tree, writeNew } from "./Tree.ts"
+import { CheckedOutcome, observeClaim, OperationKey } from "./Checked.ts"
+import { attempt, bindTarget, canonical, ChangeError, checkParent, checkTree, Entry, exists, hash, limits, metadataPolicy, overlaps, scan, snapshot, sync, writeNew } from "./Tree.ts"
+import { ContentPage, ContentRequest, Difference, Inventory, InventoryRow, Proposal, ProposalId, Review, SnapshotReceipt, Staged, Status } from "./Contracts.ts"
+import { maximumReservation, readSnapshotRecord } from "./Snapshots.ts"
 
 export { ChangeError } from "./Tree.ts"
-export const ProposalId = Schema.String.pipe(Schema.pattern(/^change_[a-f0-9-]{36}$/))
-export const Proposal = Schema.Struct({
-  version: Schema.Literal("change-proposal/v1"), id: ProposalId, storeId: Schema.String,
-  createdAt: Schema.String, target: Schema.String, parent: Parent,
-  expected: Schema.NullOr(BoundTree), candidate: Tree, baseline: Schema.NullOr(Tree),
-  metadataPolicy: Schema.Literal("ordinary-posix-mode/v1"),
-  assumptions: Schema.Literal("quiescent-external-writers; private-unencrypted-store; no-filesystem-CAS")
-})
-export type Proposal = typeof Proposal.Type
-export const Staged = Schema.Struct({
-  version: Schema.Literal("change/v1"), id: ProposalId, proposalDigest: ProposalDigest, proposal: Proposal
-})
-export type Staged = typeof Staged.Type
-const TextPreview = Schema.Struct({ text: Schema.optional(Schema.String), binary: Schema.Boolean, truncated: Schema.Boolean })
-export const Difference = Schema.Struct({
-  path: Schema.String, change: Schema.Literal("added", "deleted", "modified"),
-  before: Schema.optional(Entry), after: Schema.optional(Entry),
-  beforeText: Schema.optional(TextPreview), afterText: Schema.optional(TextPreview)
-})
-export const Review = Schema.Struct({ ...Staged.fields, diff: Schema.Array(Difference) })
-export type Review = typeof Review.Type
-export const Status = Schema.Struct({
-  version: Schema.Literal("change/v1"), id: ProposalId,
-  state: Schema.Literal("staged", "claimed", "cancelled", "installed", "undone", "rolled-back", "rejected", "recovery-required"),
-  claim: Schema.optional(ClaimObservation),
-  receipt: Schema.optional(CheckedOutcome), undoReceipt: Schema.optional(CheckedOutcome)
-})
-export type Status = typeof Status.Type
+export * from "./Contracts.ts"
 
 export class Change extends Context.Tag("airlock/Change")<Change, {
   readonly stage: (input: { source: string, target: string }) => Effect.Effect<Staged, ChangeError>
@@ -45,6 +20,10 @@ export class Change extends Context.Tag("airlock/Change")<Change, {
   readonly cancel: (id: string) => Effect.Effect<Status, ChangeError>
   readonly undo: (receiptId: string) => Effect.Effect<CheckedOutcome, ChangeError>
   readonly recover: (id: string, options?: { restore: boolean }) => Effect.Effect<Status, ChangeError>
+  readonly inventory: () => Effect.Effect<Inventory, ChangeError>
+  readonly content: (input: ContentRequest) => Effect.Effect<ContentPage, ChangeError>
+  readonly retire: (input: { id: string, expectedDigest: string }) => Effect.Effect<SnapshotReceipt, ChangeError>
+  readonly collect: (id: string) => Effect.Effect<SnapshotReceipt, ChangeError>
 }>() {}
 
 const make = Effect.gen(function* () {
@@ -120,7 +99,26 @@ const make = Effect.gen(function* () {
     reason: `workflow receipt/acknowledgement publication failed: ${String(cause)}; durable Hold claim retained`
   })))
 
-  const stage = (input: { source: string, target: string }) => locked(attempt("stage immutable proposal", async () => {
+  const inventory = Effect.fnUntraced(function* () {
+    const names = yield* attempt("list change inventory", async () => await exists(root) ? (await readdir(root)).filter(n => n.startsWith("change_")).sort() : [])
+    const rows: InventoryRow[] = []
+    for (const id of names) {
+      const inspected = yield* hold.inspectChangeSnapshots(id).pipe(Effect.either)
+      rows.push(inspected._tag === "Right" ? inspected.right.row : {
+        id, workflowState: "corrupt", applyState: "unknown", undoState: "unknown", snapshots: { state: "recovery-required", bytes: 0, holdActIds: [] },
+        reservationBytes: maximumReservation, active: true, errors: [{ operation: "inventory", reason: String(inspected.left) }]
+      })
+    }
+    return { version: "change-inventory/v1" as const, rows,
+      totals: { rows: rows.length, active: rows.filter(r => r.active).length, reservedBytes: rows.reduce((n, r) => n + r.reservationBytes, 0),
+        snapshotBytes: rows.reduce((n, r) => n + r.snapshots.bytes, 0), collected: rows.filter(r => r.snapshots.state === "collected").length,
+        errors: rows.reduce((n, r) => n + r.errors.length, 0) }, limits: { proposals: limits.proposals, storage: limits.storage } }
+  })
+  const readLocked = <A>(effect: Effect.Effect<A, ChangeError>) => attempt("check change store", () => exists(root)).pipe(
+    Effect.flatMap(present => present ? lock.withLock(effect) : effect), Effect.mapError(error))
+  const stage = (input: { source: string, target: string }) => locked(Effect.gen(function* () {
+    const budget = yield* inventory()
+    return yield* attempt("stage immutable proposal", async () => {
     const source = await canonical(input.source)
     const binding = await bindTarget(input.target, home.home)
     if (overlaps(source, await canonical(home.home)) || overlaps(source, binding.target)) throw new Error("source overlaps target or AIRLOCK_HOME")
@@ -128,21 +126,12 @@ const make = Effect.gen(function* () {
     const baseline = await exists(binding.target) ? await scan(binding.target) : null
     if (baseline !== null && baseline.tree.kind !== candidate.tree.kind) throw new Error("same-kind target required")
     if ((await lstat(home.holdDir)).dev !== binding.parent.identity.device || (baseline !== null && baseline.identity.device !== binding.parent.identity.device)) throw new Error("unsupported cross-volume target")
-    const entries = (await readdir(root)).filter(n => n.startsWith("change_"))
-    if (entries.length >= limits.proposals) throw new Error("proposal count limit; private failures retained, no GC")
-    let reserved = 0
-    for (const name of entries) {
-      // An interrupted allocation remains charged conservatively, but does
-      // not disable all future proposals while capacity remains. This is an
-      // application budget, not a hard filesystem quota against outside writes.
-      let amount = NaN
-      try { amount = Number(await readFile(path.join(root, name, "reservation"), "utf8")) } catch { /* incomplete allocation */ }
-      reserved += Number.isSafeInteger(amount) && amount > 0 ? amount : 4 * limits.bytes + 32 * 1024 * 1024
-    }
+    if (budget.totals.active >= limits.proposals) throw new Error("active proposal count limit; explicitly retire and collect settled snapshots")
+    const reserved = budget.totals.reservedBytes
     // Reserve worst-case retained private copies before writing. Baseline live
     // bytes are moved, not copied into Hold. Failed stages keep their charge.
     const charge = 2 * (candidate.tree.bytes + (baseline?.tree.bytes ?? 0)) + 32 * 1024 * 1024
-    if (reserved + charge > limits.storage) throw new Error("private storage limit; no GC in v1")
+    if (reserved + charge > limits.storage) throw new Error("snapshot/private-stage budget exceeded; explicitly retire and collect settled snapshots")
     const storeFile = path.join(root, "store-id")
     if (!(await exists(storeFile))) await writeNew(storeFile, crypto.randomUUID())
     const storeId = await readFile(storeFile, "utf8")
@@ -169,11 +158,14 @@ const make = Effect.gen(function* () {
     await rename(prepared, path.join(directory(id), "proposal.json"))
     await sync(directory(id))
     return staged
+    })
   }))
 
   const review = Effect.fnUntraced(function* (id: string, options?: { diff: boolean }) {
     const stored = yield* readProposal(id)
-    yield* validateSnapshots(stored)
+    const retired = yield* attempt("read snapshot lifecycle", () => readSnapshotRecord(home.home, id))
+    if (retired === undefined) yield* validateSnapshots(stored)
+    else if (options?.diff) return yield* error("snapshots retired; frozen content unavailable")
     const diff: Array<typeof Difference.Type> = []
     if (options?.diff) {
       const before = new Map((stored.proposal.baseline?.entries ?? []).map(e => [e.path, e]))
@@ -269,7 +261,31 @@ const make = Effect.gen(function* () {
     }
     return yield* readStatus(id)
   }))
-  return Change.of({ stage, review, status: readStatus, apply, cancel, undo, recover })
+  const content = (raw: ContentRequest) => readLocked(Effect.gen(function* () {
+    const input = yield* Schema.decodeUnknown(ContentRequest)(raw).pipe(Effect.mapError(error))
+    const stored = yield* readProposal(input.id)
+    const retired = yield* attempt("read snapshot lifecycle", () => readSnapshotRecord(home.home, input.id))
+    if (retired !== undefined) return yield* error("snapshots retired; frozen content unavailable")
+    yield* validateSnapshots(stored)
+    const tree = input.side === "before" ? stored.proposal.baseline : stored.proposal.candidate
+    const entry = tree?.entries.find(e => e.path === input.path && e.kind === "file")
+    if (entry === undefined) return yield* error("exact stored regular-file entry path required")
+    const offset = input.offset ?? 0, limit = input.limit ?? 8192
+    if (offset > entry.bytes) return yield* error("offset beyond stored file")
+    const data = yield* attempt("read frozen content page", async () => {
+      const handle = await open(path.join(input.side === "before" ? baselinePath(input.id) : candidatePath(input.id), entry.path), "r")
+      try { const buffer = Buffer.alloc(Math.min(limit, entry.bytes - offset)); const { bytesRead } = await handle.read(buffer, 0, buffer.length, offset); return buffer.subarray(0, bytesRead) }
+      finally { await handle.close() }
+    })
+    yield* validateSnapshots(stored)
+    const end = offset + data.length
+    return { version: "change-content/v1" as const, id: input.id, proposalDigest: stored.proposalDigest, side: input.side, path: input.path,
+      fileDigest: entry.digest, offset, limit, bytes: data.length, totalBytes: entry.bytes, encoding: "base64" as const,
+      dataBase64: data.toString("base64"), nextOffset: end < entry.bytes ? end : null, eof: end === entry.bytes }
+  }))
+  return Change.of({ stage, review: (id, options) => readLocked(review(id, options)), status: (id) => readLocked(readStatus(id)), apply, cancel, undo, recover,
+    inventory: () => readLocked(inventory()), content,
+    retire: (input) => locked(hold.retireChangeSnapshots(input)), collect: (id) => locked(hold.collectChangeSnapshots(id)) })
 })
 
 export const ChangeLayer = Layer.effect(Change, make)
