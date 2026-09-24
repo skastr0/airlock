@@ -1,29 +1,39 @@
 #!/usr/bin/env bash
-# Never echo the short-lived OIDC token, even when invoked with bash -x.
+# Never trace the short-lived workload identity, even when invoked with bash -x.
 set +x
 set -euo pipefail
 
-export PATH="$HOME/.local/bin:$PATH"
-: "${TAILSCALE_CLIENT_ID:?Refresh the Orb environment with amp orb restart-processes}"
-: "${TAILSCALE_AUDIENCE:?Refresh the Orb environment with amp orb restart-processes}"
-: "${QUASAR_SERVER_URL:?Refresh the Orb environment with amp orb restart-processes}"
-if [[ "$QUASAR_SERVER_URL" != https://* ]]; then
-  echo "QUASAR_SERVER_URL must use HTTPS" >&2
-  exit 1
-fi
+export PATH="${HOME}/.local/bin:${HOME}/.bun/bin:${PATH}"
 
-# Start a stopped daemon without disrupting an already connected orb.
-sudo systemctl enable --now tailscaled
-# Keep the fresh project identity in memory only, and clear it on failure too.
-trap 'unset token' EXIT
-token="$(amp orb id-token --audience "$TAILSCALE_AUDIENCE" --subject-scope project)"
-# Pass through a pipe, not argv (which sudo can persist in its audit log).
-printf '%s' "$token" | sudo tailscale up \
-  --client-id="${TAILSCALE_CLIENT_ID}?ephemeral=true&preauthorized=true" \
-  --id-token=file:/dev/stdin \
-  --advertise-tags=tag:amp-orb \
-  --hostname="amp-orb-$(hostname | cut -c1-40)" \
-  --timeout=60s
-unset token
-curl --fail --silent --show-error --proto '=https' --max-time 60 "${QUASAR_SERVER_URL%/}/health"
-printf '\nquasar: reachable over Tailscale\n'
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$repo_root"
+
+pinned_bun="$(sed -n 's/^[[:space:]]*"packageManager":[[:space:]]*"bun@\([^"]*\)".*/\1/p' package.json)"
+command -v bun >/dev/null 2>&1 || {
+  printf '[resume] Bun is unavailable; rerun .agents/setup\n' >&2
+  exit 1
+}
+[[ "$(bun --version)" == "$pinned_bun" ]] || {
+  printf '[resume] expected Bun %s; rerun .agents/setup\n' "$pinned_bun" >&2
+  exit 1
+}
+
+locate_orb_setup() {
+  local candidate
+  for candidate in \
+    "${repo_root}/../repos/orb-setup" \
+    "${repo_root}/../repos/skastr0/orb-setup" \
+    "${repo_root}/../orb-setup"; do
+    if [[ -x "${candidate}/bin/resume.sh" ]]; then
+      printf '%s' "$(cd "$candidate" && pwd)"
+      return 0
+    fi
+  done
+  return 1
+}
+
+orb_setup="$(locate_orb_setup)" || {
+  printf '[resume] error: orb-setup checkout not found next to this repository\n' >&2
+  exit 1
+}
+bash "${orb_setup}/bin/resume.sh"

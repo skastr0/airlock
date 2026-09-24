@@ -4,8 +4,8 @@
 #
 # Runs once for a fresh orb (and again on stale snapshots, so it must be
 # idempotent and fast on a warm filesystem). Workspace deps come from the
-# lockfile. Tailscale and the published Quasar CLI are installed here;
-# authentication happens in .agents/resume so credentials never enter a snapshot.
+# lockfile. The shared checkout installs Tailscale and Quasar; authentication
+# happens in .agents/resume so credentials never enter a snapshot.
 # Linux native-contained work needs libseccomp development files and an audited
 # Bubblewrap 0.12.0 regular executable. This script never grants capabilities,
 # installs a setuid helper, or changes AppArmor/sysctl policy.
@@ -20,6 +20,31 @@ step() {
   "$@"
   log "${name}: done in $(( $(date +%s) - start ))s"
 }
+
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$repo_root"
+
+locate_orb_setup() {
+  local candidate
+  for candidate in \
+    "${repo_root}/../repos/orb-setup" \
+    "${repo_root}/../repos/skastr0/orb-setup" \
+    "${repo_root}/../orb-setup"; do
+    if [[ -x "${candidate}/bin/setup.sh" ]]; then
+      printf '%s' "$(cd "$candidate" && pwd)"
+      return 0
+    fi
+  done
+  return 1
+}
+
+orb_setup="$(locate_orb_setup)" || {
+  printf '[setup] error: orb-setup checkout not found next to this repository\n' >&2
+  exit 1
+}
+log "Using shared runtime at $orb_setup"
+step "shared orb runtime" bash "${orb_setup}/bin/setup.sh"
+export PATH="${HOME}/.local/bin:${PATH}"
 
 # Resolve the toolchain pin from the repo's declared contract, not a hardcoded
 # copy of it.
@@ -177,37 +202,6 @@ ensure_bubblewrap() {
   log "installed audited bubblewrap 0.12.0 at $dest"
 }
 
-install_tailscale() {
-  # Install only: authentication belongs in resume, never in a shared snapshot.
-  sudo install -d /etc/systemd/system/tailscaled.service.d
-  sudo tee /etc/systemd/system/tailscaled.service.d/amp-orb.conf >/dev/null <<'EOF'
-[Service]
-Environment=TS_ASSUME_NETWORK_UP_FOR_TEST=true
-EOF
-  if command -v tailscale >/dev/null 2>&1; then
-    log "Tailscale already installed"
-  else
-    log "installing Tailscale"
-    curl -fsSL https://tailscale.com/install.sh | sh
-  fi
-  sudo systemctl daemon-reload
-  # Starting an inactive daemon is safe; restarting an active one breaks reconnects.
-  sudo systemctl enable --now tailscaled
-}
-
-install_quasar() {
-  local quasar_version="0.5.3"
-  local quasar_package="$HOME/.local/lib/node_modules/@skastr0/quasar-cli/package.json"
-  local installed=""
-  installed="$(node -p 'require(process.argv[1]).version' "$quasar_package" 2>/dev/null || true)"
-  if [ -x "$HOME/.local/bin/quasar" ] && [ "$installed" = "$quasar_version" ]; then
-    log "quasar-cli $quasar_version already installed"
-    return
-  fi
-  log "installing @skastr0/quasar-cli@$quasar_version"
-  npm install --global --prefix "$HOME/.local" "@skastr0/quasar-cli@$quasar_version"
-}
-
 export PATH="$HOME/.bun/bin:$PATH"
 hash -r
 
@@ -223,8 +217,6 @@ log "bun $(command -v bun) ($installed)"
 step "bun install" install_deps
 step "linux native packages" ensure_linux_native_packages
 step "audited bubblewrap" ensure_bubblewrap
-step "tailscale" install_tailscale
-step "quasar-cli" install_quasar
 persist_local_bin
 export PATH="$HOME/.local/bin:$PATH"
 log "setup complete"
