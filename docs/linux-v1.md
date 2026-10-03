@@ -28,7 +28,7 @@ The Linux bundle is built on and for one glibc host architecture:
 
 - x86-64: `bun-linux-x64`;
 - arm64: `bun-linux-arm64`;
-- Bun 1.3.11 or newer; and
+- Bun 1.4.0 or newer; and
 - an unprivileged Linux host with Landlock ABI 2 or newer.
 
 The native launcher is compiled for the build host, so `build:linux` rejects a
@@ -239,7 +239,7 @@ That runs the rename/flock boundary proof and `bun run verify`, including a
 fresh launcher build, adversarial native tests, shared native workloads,
 standalone build/install/discovery/execution/uninstall, and Bun subprocess
 evidence. `.github/workflows/linux.yml` repeats the gate on Ubuntu 22.04 with
-Bun 1.3.11 and 1.3.13 and builds the exact Bubblewrap 0.12.0 commit above.
+Bun 1.4.0 and 1.4.2 and builds the exact Bubblewrap 0.12.0 commit above.
 
 `scripts/prove-linux-boundary.sh` is intentionally narrower: it proves only the
 portable rename/flock primitives in an ordinary Docker container. It does not

@@ -9,7 +9,7 @@
 # is masked so host-native dependencies neither enter nor rewrite the checkout.
 set -eu
 
-IMAGE="${AIRLOCK_LINUX_IMAGE:-oven/bun:1.3.13}"
+IMAGE="${AIRLOCK_LINUX_IMAGE:-oven/bun:1.4.2}"
 VOLUME="${AIRLOCK_LINUX_MODULES_VOLUME:-airlock-linux-node-modules}"
 REPOSITORY="$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)"
 

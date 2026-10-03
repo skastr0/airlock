@@ -12,7 +12,7 @@
 | | |
 | --- | --- |
 | operating system | macOS or Linux. `package.json` declares both. |
-| runtime | Bun 1.3.11 or newer (`engines.bun`). |
+| runtime | Bun 1.4.0 or newer (`engines.bun`). |
 | architecture | macOS arm64/x64, or glibc Linux arm64/x64; Linux bundles are host builds. |
 | native runtime | macOS Seatbelt, or the probed Bubblewrap/Landlock/seccomp prerequisites in [`linux-v1.md`](linux-v1.md). |
 
@@ -436,7 +436,7 @@ AIRLOCK_BWRAP=/usr/local/bin/bwrap sh scripts/run-linux-suites.sh
 ordinary Docker container. It deliberately does not request `--privileged` or
 weaken outer AppArmor/seccomp policy for nested containment. The required
 Ubuntu 22.04 CI matrix builds exact Bubblewrap 0.12.0 and runs the complete host
-gate on Bun 1.3.11 and 1.3.13.
+gate on Bun 1.4.0 and 1.4.2.
 
 ## What actually ran
 
