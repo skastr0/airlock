@@ -1,4 +1,4 @@
-import { BunContext } from "@effect/platform-bun"
+import { BunServices } from "@effect/platform-bun"
 import { describe, expect, it } from "vitest"
 import { Effect } from "effect"
 import {
@@ -17,7 +17,7 @@ import {
 
 const effect = (workspace: string, selector: string) =>
   bindPhysicalPathSelector(workspace, selector).pipe(
-    Effect.provide(BunContext.layer)
+    Effect.provide(BunServices.layer)
   )
 
 const run = (workspace: string, selector: string) =>

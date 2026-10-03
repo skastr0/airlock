@@ -1,5 +1,4 @@
-import { FileSystem, Path } from "@effect/platform"
-import { Cause, Context, DateTime, Effect, Exit, Layer, Schema } from "effect"
+import { Cause, Context, DateTime, Effect, Exit, FileSystem, Layer, Path, Schema } from "effect"
 import { lstat, open } from "node:fs/promises"
 import { AirlockHome } from "./AirlockHome.ts"
 import {
@@ -95,7 +94,7 @@ export class UnsupportedReplacementSymlink extends Schema.TaggedError<Unsupporte
   "UnsupportedReplacementSymlink",
   {
     path: Schema.String,
-    role: Schema.Literal("source", "target")
+    role: Schema.Literals(["source", "target"])
   }
 ) {}
 
@@ -104,11 +103,11 @@ export class HoldRecoveryRequired extends Schema.TaggedError<HoldRecoveryRequire
   {
     id: ActId,
     target: Schema.String,
-    phase: Schema.Literal("retain", "install", "restore", "undo", "ledger"),
+    phase: Schema.Literals(["retain", "install", "restore", "undo", "ledger"]),
     recovery: Schema.optional(
       Schema.Struct({
-        act: Schema.Literal("remove", "overwrite", "displaced"),
-        journalState: Schema.Literal("prepared", "held"),
+        act: Schema.Literals(["remove", "overwrite", "displaced"]),
+        journalState: Schema.Literals(["prepared", "held"]),
         rename: Schema.Literal("confirmed"),
         next: Schema.Literal("journal-reconciliation-required"),
         source: Schema.String,
@@ -126,9 +125,9 @@ export class HoldReapRecoveryRequired extends Schema.TaggedError<HoldReapRecover
   {
     reaped: Schema.Array(ActId),
     current: ActId,
-    phase: Schema.Literal("remove", "sync", "ledger"),
-    currentRemoval: Schema.Literal("possible", "confirmed"),
-    at: Schema.DateTimeUtc,
+    phase: Schema.Literals(["remove", "sync", "ledger"]),
+    currentRemoval: Schema.Literals(["possible", "confirmed"]),
+    at: Schema.DateTimeUtcFromString,
     reason: Schema.String
   }
 ) {}
@@ -148,13 +147,13 @@ export class ReplaceReceipt extends Schema.Class<ReplaceReceipt>("ReplaceReceipt
   id: ActId,
   source: Schema.String,
   target: Schema.String,
-  kind: Schema.Literal("file", "directory"),
+  kind: Schema.Literals(["file", "directory"]),
   metadata: ReplaceMetadata,
   previousHeld: Schema.Boolean,
-  at: Schema.DateTimeUtc
+  at: Schema.DateTimeUtcFromString
 }) {}
 
-export class Hold extends Context.Tag("airlock/Hold")<
+export class Hold extends Context.Service<
   Hold,
   {
     readonly replaceChecked: (request: CheckedRequest) => Effect.Effect<CheckedOutcome, ChangeError>
@@ -254,7 +253,7 @@ export class Hold extends Context.Tag("airlock/Hold")<
       HoldFilesystemError | HoldReapRecoveryRequired
     >
   }
->() {}
+>()("airlock/Hold") {}
 
 // `HeldManifest` is the stable public receipt shape. The journal adds an
 // internal prepared state so a crash between rename and receipt can be
@@ -267,7 +266,7 @@ class RetainedMetadata extends Schema.Class<RetainedMetadata>("RetainedMetadata"
 }) {}
 
 class InstalledIdentity extends Schema.Class<InstalledIdentity>("InstalledIdentity")({
-  kind: Schema.Literal("file", "directory"),
+  kind: Schema.Literals(["file", "directory"]),
   device: Schema.Number,
   inode: Schema.Number,
   birthtimeMillis: Schema.Number,
@@ -276,7 +275,7 @@ class InstalledIdentity extends Schema.Class<InstalledIdentity>("InstalledIdenti
 }) {}
 
 class HoldJournal extends Schema.Class<HoldJournal>("HoldJournal")({
-  state: Schema.Literal("prepared", "held", "restored"),
+  state: Schema.Literals(["prepared", "held", "restored"]),
   manifest: HeldManifest,
   retained: Schema.optional(RetainedMetadata),
   installed: Schema.optional(InstalledIdentity),
@@ -308,9 +307,9 @@ class HoldPostRenameDirectorySyncFailed extends Schema.TaggedError<HoldPostRenam
   }
 ) {}
 
-const encodeJournal = Schema.encode(Schema.parseJson(HoldJournal))
-const decodeJournal = Schema.decode(Schema.parseJson(HoldJournal))
-const decodeLegacyManifest = Schema.decode(Schema.parseJson(HeldManifest))
+const encodeJournal = Schema.encodeEffect(Schema.fromJsonString(HoldJournal))
+const decodeJournal = Schema.decodeEffect(Schema.fromJsonString(HoldJournal))
+const decodeLegacyManifest = Schema.decodeEffect(Schema.fromJsonString(HeldManifest))
 
 const newActId = () => ActId.make(`act_${crypto.randomUUID().slice(0, 13)}`)
 
@@ -381,7 +380,7 @@ const make = Effect.gen(function* () {
   ) =>
     fs.rename(source, target).pipe(
       Effect.mapError(fsError(operation, target)),
-      Effect.zipRight(
+      Effect.andThen(
         Effect.forEach(
           [...new Set([path.dirname(source), path.dirname(target)])],
           (directory) =>
@@ -405,7 +404,7 @@ const make = Effect.gen(function* () {
         const synced = yield* syncDirectory(
           directory,
           `${operation} directory sync`
-        ).pipe(Effect.either)
+        ).pipe(Effect.result)
         if (synced._tag === "Left") {
           return yield* new HoldPostRenameDirectorySyncFailed({
             source,
@@ -454,7 +453,7 @@ const make = Effect.gen(function* () {
       },
       catch: fsError(operation, target)
     }).pipe(
-      Effect.zipRight(
+      Effect.andThen(
         syncDirectory(path.dirname(target), `${operation} directory sync`)
       )
     )
@@ -471,7 +470,7 @@ const make = Effect.gen(function* () {
           "write staged hold journal",
           journal.checkedKey !== undefined
         ).pipe(
-          Effect.zipRight(
+          Effect.andThen(
             renameJournalReplacingDurable(staged, target, "install hold journal")
           )
         )
@@ -500,7 +499,7 @@ const make = Effect.gen(function* () {
       // Existing v0 manifests are a supported persisted format. Rewrite them
       // as journals on their next state transition; never make a prior hold
       // unreadable because the recovery format grew a phase.
-      Effect.catchAll(() =>
+      Effect.catch(() =>
         decodeLegacyManifest(raw).pipe(
           Effect.map(
             (manifest) =>
@@ -576,7 +575,7 @@ const make = Effect.gen(function* () {
               )
             )
           ),
-          Effect.either
+          Effect.result
         )
       },
       { concurrency: 1 }
@@ -617,7 +616,7 @@ const make = Effect.gen(function* () {
           ? new UnknownAct({ id })
           : fsError("stat hold act", actDir(id))(error)
       ),
-      Effect.zipRight(loadRecoverableJournal(id))
+      Effect.andThen(loadRecoverableJournal(id))
     )
 
   const pathExists = (target: string) =>
@@ -1158,7 +1157,7 @@ const make = Effect.gen(function* () {
       Effect.exit,
       Effect.flatMap((recorded) => {
         if (Exit.isSuccess(recorded)) return Effect.void
-        return Cause.isInterruptedOnly(recorded.cause)
+        return Cause.hasInterruptsOnly(recorded.cause)
           ? Effect.fail(
               new HoldRecoveryRequired({
                 id: manifest.id,
@@ -1350,7 +1349,7 @@ const make = Effect.gen(function* () {
         const manifest = existing === undefined
           ? yield* prepareCreation(target)
           : yield* holdTarget(target, "overwrite", existing)
-        const installed = yield* installStaged(manifest, content).pipe(Effect.either)
+        const installed = yield* installStaged(manifest, content).pipe(Effect.result)
         if (installed._tag === "Left") {
           if (
             installed.left instanceof HoldRecoveryRequired &&
@@ -1358,7 +1357,7 @@ const make = Effect.gen(function* () {
           ) {
             return yield* installed.left
           }
-          const recovered = yield* recoverFailedInstall(manifest).pipe(Effect.either)
+          const recovered = yield* recoverFailedInstall(manifest).pipe(Effect.result)
           if (recovered._tag === "Left") {
             if (
               recovered.left instanceof HoldRecoveryRequired &&
@@ -1462,7 +1461,7 @@ const make = Effect.gen(function* () {
               target,
               sourceEntry.kind === "directory" ? "directory" : "file"
             )
-        const installed = yield* installSource(manifest, source).pipe(Effect.either)
+        const installed = yield* installSource(manifest, source).pipe(Effect.result)
         if (installed._tag === "Left") {
           if (
             installed.left instanceof HoldRecoveryRequired &&
@@ -1470,7 +1469,7 @@ const make = Effect.gen(function* () {
           ) {
             return yield* installed.left
           }
-          const recovered = yield* recoverFailedInstall(manifest).pipe(Effect.either)
+          const recovered = yield* recoverFailedInstall(manifest).pipe(Effect.result)
           if (recovered._tag === "Left") {
             if (
               recovered.left instanceof HoldRecoveryRequired &&
@@ -1622,7 +1621,7 @@ const make = Effect.gen(function* () {
     if (retirement !== undefined) expired.push(retirement)
     for (const journal of all) {
       if (journal.snapshotRetirementId !== undefined) continue
-      if (journal.checkedPinned === true || !DateTime.lessThanOrEqualTo(journal.manifest.at, cutoff)) continue
+      if (journal.checkedPinned === true || !DateTime.isLessThanOrEqualTo(journal.manifest.at, cutoff)) continue
       if (journal.checkedKey !== undefined) {
         // Correlated receipts are the release authority. Even a stale staged
         // unpin journal must not make a newer unresolved undo collectible.
@@ -1706,7 +1705,7 @@ const make = Effect.gen(function* () {
             )
           ).pipe(Effect.exit)
           if (Exit.isSuccess(recorded)) return
-          return yield* Cause.isInterruptedOnly(recorded.cause)
+          return yield* Cause.hasInterruptsOnly(recorded.cause)
             ? new HoldReapRecoveryRequired({
                 reaped,
                 current: id,
@@ -1727,15 +1726,15 @@ const make = Effect.gen(function* () {
   const checkedFile = (key: string) => path.join(checkedRoot, `${key}.json`)
   const checkedError = (cause: unknown) => new ChangeError({ operation: "checked Hold", reason: reasonOf(cause) })
   const readChecked = Effect.fnUntraced(function* (raw: string) {
-    const key = yield* Schema.decodeUnknown(OperationKey)(raw)
+    const key = yield* Schema.decodeUnknownEffect(OperationKey)(raw)
     if (!(yield* pathExists(checkedFile(key)))) return undefined
     const json = yield* fs.readFileString(checkedFile(key))
-    const record = yield* Schema.decode(Schema.parseJson(CheckedRecord))(json)
+    const record = yield* Schema.decodeEffect(Schema.fromJsonString(CheckedRecord))(json)
     if (record.request.operationKey !== key) return yield* checkedError("operation key mismatch")
     return record
   })
   const writeChecked = Effect.fnUntraced(function* (record: CheckedRecord, initial = false) {
-    const json = yield* Schema.encode(Schema.parseJson(CheckedRecord))(record)
+    const json = yield* Schema.encodeEffect(Schema.fromJsonString(CheckedRecord))(record)
     if (initial) {
       yield* fs.makeDirectory(checkedRoot, { recursive: true, mode: 0o700 })
       yield* syncDirectory(home.holdDir, "checked root sync")
@@ -1763,7 +1762,7 @@ const make = Effect.gen(function* () {
     return outcome
   })
   const failedChecked = (record: CheckedRecord, state: "rejected" | "recovery-required", cause: unknown) =>
-    finishChecked(record, state, reasonOf(cause)).pipe(Effect.catchAll(publication => Effect.succeed({
+    finishChecked(record, state, reasonOf(cause)).pipe(Effect.catch(publication => Effect.succeed({
       ...outcomeOf({ ...record, outcome: undefined }),
       reason: `${reasonOf(cause)}; outcome publication failed (${reasonOf(publication)}); durable claim requires recovery`
     })))
@@ -1788,7 +1787,7 @@ const make = Effect.gen(function* () {
    * The correlation record and pinned act precede every live rename. No
    * callback supplied by a caller can substitute for these checks. */
   const replaceChecked = Effect.fnUntraced(function* (raw: CheckedRequest) {
-    const request = yield* Schema.decodeUnknown(CheckedRequest)(raw)
+    const request = yield* Schema.decodeUnknownEffect(CheckedRequest)(raw)
     const prior = yield* readChecked(request.operationKey)
     if (prior !== undefined) return outcomeOf(prior)
     let record: CheckedRecord = { request, phase: "claimed", claim: observeClaim() }
@@ -1824,13 +1823,13 @@ const make = Effect.gen(function* () {
       yield* renameExclusiveDurable(stageFile(manifest.id), request.target, "checked install")
       yield* attempt("verify checked installation", () => checkTree(request.target, candidate))
       return yield* finishChecked(record, "installed")
-    }).pipe(Effect.either)
+    }).pipe(Effect.result)
     if (execution._tag === "Right") return execution.right
     return yield* failedChecked(record, mutationPossible ? "recovery-required" : "rejected", execution.left)
   })
 
   const undoChecked = Effect.fnUntraced(function* (receiptId: string) {
-    yield* Schema.decodeUnknown(OperationKey)(receiptId)
+    yield* Schema.decodeUnknownEffect(OperationKey)(receiptId)
     const key = `undo_${receiptId}`
     const prior = yield* readChecked(key)
     if (prior !== undefined) return outcomeOf(prior)
@@ -1870,7 +1869,7 @@ const make = Effect.gen(function* () {
       }
       yield* attempt("verify checked undo", () => checkTree(request.target, original.request.expected))
       return yield* finishChecked(record, "undone")
-    }).pipe(Effect.either)
+    }).pipe(Effect.result)
     if (execution._tag === "Right") return execution.right
     return yield* failedChecked(record, mutationPossible ? "recovery-required" : "rejected", execution.left)
   })
@@ -1894,7 +1893,7 @@ const make = Effect.gen(function* () {
         await checkParent(current.request.target, current.request.parent, home.home)
         await checkTree(current.request.target, rollback.restored)
         if (await treeExists(payloadFile(rollback.sourceActId))) throw new Error("restoration source still present")
-      }).pipe(Effect.either)
+      }).pipe(Effect.result)
       if (restored._tag === "Right") {
         yield* syncRecovery
         return yield* finishChecked({ ...record, installed: rollback.restored }, "rolled-back")
@@ -1915,7 +1914,7 @@ const make = Effect.gen(function* () {
       })
       yield* syncRecovery
       return yield* finishChecked(current, current.undoOf === undefined ? "installed" : "undone")
-    }).pipe(Effect.either)
+    }).pipe(Effect.result)
     if (proven._tag === "Right") return proven.right
 
     // A source still at its bound live name and no retained payload proves
@@ -1927,7 +1926,7 @@ const make = Effect.gen(function* () {
         await checkTree(current.request.target, current.request.expected)
         if (await treeExists(payloadFile(sourceActId))) throw new Error("retained payload exists")
         if (current.undoOf === undefined && current.installed !== undefined) await checkTree(stageFile(current.actId!), current.installed)
-      }).pipe(Effect.either)
+      }).pipe(Effect.result)
       if (untouched._tag === "Right") return yield* finishChecked(record, "rejected", "interrupted before first live rename")
     }
     if (!restore || sourceActId === undefined || record.request.expected === null) return outcomeOf(record)
@@ -1948,7 +1947,7 @@ const make = Effect.gen(function* () {
       yield* renameExclusiveDurable(payloadFile(rollback.sourceActId), current.request.target, "checked recovery restoration")
       yield* attempt("verify recovery restoration", () => checkTree(current.request.target, rollback.restored))
       return yield* finishChecked({ ...record, installed: rollback.restored }, "rolled-back")
-    }).pipe(Effect.either)
+    }).pipe(Effect.result)
     return restored._tag === "Right" ? restored.right : yield* failedChecked(record, "recovery-required", restored.left)
   })
   const acknowledgeChecked = Effect.fnUntraced(function* (key: string) {
@@ -1973,7 +1972,7 @@ const make = Effect.gen(function* () {
     const file = snapshotRecordPath(home.home, record.plan.id)
     yield* fs.makeDirectory(path.dirname(file), { recursive: true, mode: 0o700 })
     yield* syncDirectory(home.holdDir, "snapshot retirement root sync")
-    const json = Schema.encodeSync(Schema.parseJson(SnapshotRecord))(record)
+    const json = Schema.encodeSync(Schema.fromJsonString(SnapshotRecord))(record)
     yield* writeNewDurable(`${file}.next`, json, "snapshot retirement replica", true)
     yield* renameJournalReplacingDurable(`${file}.next`, file, "snapshot retirement publication")
   })
@@ -2021,11 +2020,11 @@ const make = Effect.gen(function* () {
       record = { ...record, phase: "retired" }
       yield* writeSnapshotRecord(record)
       return snapshotReceipt(record)
-    }).pipe(Effect.either)
+    }).pipe(Effect.result)
     return result._tag === "Right" ? result.right : snapshotReceipt(record, reasonOf(result.left))
   })
   const collectChangeSnapshots = Effect.fnUntraced(function* (raw: string) {
-    const id = yield* Schema.decodeUnknown(ProposalId)(raw)
+    const id = yield* Schema.decodeUnknownEffect(ProposalId)(raw)
     let record = yield* attempt("read snapshot retirement", () => readSnapshotRecord(home.home, id))
     if (record === undefined || record.phase === "prepared") return yield* checkedError("explicit completed retirement required before collection")
     if (record.phase === "collected") {
@@ -2053,7 +2052,7 @@ const make = Effect.gen(function* () {
       record = { ...record!, phase: "collected" }
       yield* writeSnapshotRecord(record)
       return snapshotReceipt(record)
-    }).pipe(Effect.either)
+    }).pipe(Effect.result)
     return result._tag === "Right" ? result.right : snapshotReceipt(record!, reasonOf(result.left))
   })
 

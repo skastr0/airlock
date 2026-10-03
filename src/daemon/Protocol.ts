@@ -25,7 +25,7 @@ export class DaemonProtocolRejected
   extends Schema.TaggedError<DaemonProtocolRejected>()(
     "DaemonProtocolRejected",
     {
-      direction: Schema.Literal("request", "response"),
+      direction: Schema.Literals(["request", "response"]),
       reason: Schema.Literal("invalid-message")
     }
   ) {}
@@ -34,16 +34,16 @@ export class DaemonHealthCheckFailed
   extends Schema.TaggedError<DaemonHealthCheckFailed>()(
     "DaemonHealthCheckFailed",
     {
-      reason: Schema.Literal("not-ready", "grant-digest-mismatch"),
+      reason: Schema.Literals(["not-ready", "grant-digest-mismatch"]),
       expectedGrantDigest: BoxGrantSha256,
       actualGrantDigest: BoxGrantSha256
     }
   ) {}
 
-const decodeHealthRequest = Schema.decodeUnknown(DaemonHealthRequest, {
+const decodeHealthRequest = Schema.decodeUnknownEffect(DaemonHealthRequest, {
   onExcessProperty: "error"
 })
-const decodeHealthResponse = Schema.decodeUnknown(DaemonHealthResponse, {
+const decodeHealthResponse = Schema.decodeUnknownEffect(DaemonHealthResponse, {
   onExcessProperty: "error"
 })
 

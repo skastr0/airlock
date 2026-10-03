@@ -1,8 +1,7 @@
 #!/usr/bin/env bun
 import { Args, Command, HelpDoc, Options, ValidationError } from "@effect/cli"
-import { BunContext } from "@effect/platform-bun"
-import { FileSystem } from "@effect/platform"
-import { Cause, Console, Effect, Exit, JSONSchema, Layer, ManagedRuntime, Option, Schema } from "effect"
+import { BunServices } from "@effect/platform-bun"
+import { Cause, Console, Effect, Exit, FileSystem, JSONSchema, Layer, ManagedRuntime, Option, Schema } from "effect"
 import * as nodePath from "node:path"
 import * as nodeOs from "node:os"
 import { createInterface } from "node:readline"
@@ -99,9 +98,9 @@ const rendered = <A, E, R>(
 ) =>
   effect.pipe(
     Effect.flatMap(value => format === undefined ? emit(value) : Console.log(format(value))),
-    Effect.catchAll((error) =>
+    Effect.catch((error) =>
       Console.error(JSON.stringify(error)).pipe(
-        Effect.zipRight(Effect.sync(() => {
+        Effect.andThen(Effect.sync(() => {
           process.exitCode = 1
         }))
       )
@@ -124,9 +123,9 @@ const renderedProgram = <A extends {
             process.exitCode = 1
           })
     ),
-    Effect.catchAll((error) =>
+    Effect.catch((error) =>
       Console.error(JSON.stringify(error)).pipe(
-        Effect.zipRight(Effect.sync(() => {
+        Effect.andThen(Effect.sync(() => {
           process.exitCode = 1
         }))
       )
@@ -394,8 +393,8 @@ const parseBindings = (raw: Option.Option<string>): Effect.Effect<Readonly<Recor
       reason: cause instanceof Error ? cause.message : String(cause)
     })
   }).pipe(
-    Effect.flatMap(Schema.decodeUnknown(
-      Schema.Record({ key: Schema.String, value: LanguageValueSchema })
+    Effect.flatMap(Schema.decodeUnknownEffect(
+      Schema.Record(Schema.String, LanguageValueSchema)
     )),
     Effect.mapError((cause) => new CliInputError({
       field: "bindings",
@@ -479,7 +478,7 @@ const bindPolicyPathScopes = (
           ),
           // A future or otherwise unusable trusted scope remains an inert
           // lexical policy spelling; it never becomes requested authority.
-          Effect.catchAll(() => Effect.succeed(scope))
+          Effect.catch(() => Effect.succeed(scope))
         )
       },
       { concurrency: 1 }
@@ -561,7 +560,7 @@ const supervisorPolicy = (
   }
   return Effect.flatMap(FileSystem.FileSystem, (fs) => fs.readFileString(policyFile).pipe(
     Effect.mapError((error) => new CliInputError({ field: "AIRLOCK_POLICY_FILE", reason: String(error) })),
-    Effect.flatMap(Schema.decodeUnknown(Schema.parseJson(AdmissionPolicyDocument))),
+    Effect.flatMap(Schema.decodeUnknownEffect(Schema.fromJsonString(AdmissionPolicyDocument))),
     Effect.mapError((error) => new CliInputError({ field: "AIRLOCK_POLICY_FILE", reason: error.message })),
     Effect.flatMap((policy) => policy.profile === profile
       ? Effect.succeed(policy)
@@ -627,7 +626,7 @@ const renderedChangeOutcome = <A extends { readonly state: string }, E, R>(
   }))
 ))
 
-const confirmChange = () => Effect.async<boolean>((resume) => {
+const confirmChange = () => Effect.callback<boolean>((resume) => {
   const terminal = createInterface({ input: process.stdin, output: process.stderr, terminal: true })
   terminal.once("line", answer => {
     resume(Effect.succeed(answer === "APPLY"))
@@ -648,20 +647,20 @@ const makeChange = (seal: SealContext, agent = false) => {
   const id = Args.text({ name: "proposal-id" })
   const commands: Array<AnyCliCommand> = [
     Command.make("inbox", { human: Options.boolean("human") }, ({ human }) => rendered(local.pipe(
-      Effect.zipRight(Effect.flatMap(Change, change => change.inventory()))
+      Effect.andThen(Effect.flatMap(Change, change => change.inventory()))
     ), human ? formatInventory : undefined)).pipe(Command.withDescription("Discover proposals, operation outcomes, and retained storage")),
     Command.make("stage", {
       source: Options.text("source"),
       target: Options.text("target")
     }, (request) => rendered(local.pipe(
-      Effect.zipRight(Effect.flatMap(Change, (change) => change.stage(request)))
+      Effect.andThen(Effect.flatMap(Change, (change) => change.stage(request)))
     ))).pipe(Command.withDescription("Snapshot a target-specific replacement without changing the target")),
     Command.make("review", {
       id,
       diff: Options.boolean("diff"),
       human: Options.boolean("human")
     }, ({ id, diff, human }) => rendered(local.pipe(
-      Effect.zipRight(Effect.flatMap(Change, (change) => change.review(id, { diff: diff || human })))
+      Effect.andThen(Effect.flatMap(Change, (change) => change.review(id, { diff: diff || human })))
     ), human ? formatReview : undefined)).pipe(Command.withDescription("Inspect the frozen proposal; --human renders safe text, --diff adds JSON previews")),
     Command.make("content", {
       id,
@@ -671,14 +670,14 @@ const makeChange = (seal: SealContext, agent = false) => {
       limit: Options.integer("limit").pipe(Options.withDefault(8192)),
       human: Options.boolean("human")
     }, ({ human, ...request }) => rendered(local.pipe(
-      Effect.zipRight(Effect.flatMap(Change, change => change.content(request)))
+      Effect.andThen(Effect.flatMap(Change, change => change.content(request)))
     ), human ? formatContent : undefined)).pipe(Command.withDescription("Read a bounded page of frozen file bytes; root file uses --path ''")),
     Command.make("status", { id }, ({ id }) => rendered(local.pipe(
-      Effect.zipRight(Effect.flatMap(Change, (change) => change.status(id)))
+      Effect.andThen(Effect.flatMap(Change, (change) => change.status(id)))
     ))).pipe(Command.withDescription("Read durable proposal and recovery status"))
   ]
   if (!agent) commands.push(
-    Command.make("approve", { id }, ({ id }) => rendered(local.pipe(Effect.zipRight(Effect.gen(function* () {
+    Command.make("approve", { id }, ({ id }) => rendered(local.pipe(Effect.andThen(Effect.gen(function* () {
       if (!process.stdin.isTTY || !process.stderr.isTTY) return yield* failInput("approve", "interactive terminal required; automation must use apply with an explicitly reviewed full digest")
       const change = yield* Change
       const review = yield* change.review(id, { diff: true })
@@ -690,30 +689,30 @@ const makeChange = (seal: SealContext, agent = false) => {
       return outcome
     }))))).pipe(Command.withDescription("Review and approve the displayed digest on an interactive supervisor terminal")),
     Command.make("retire", { id, expectedDigest: Options.text("expect-digest") }, request => renderedChangeOutcome(local.pipe(
-      Effect.zipRight(Effect.flatMap(Change, change => change.retire(request)))
+      Effect.andThen(Effect.flatMap(Change, change => change.retire(request)))
     ), ["retired", "collected"])).pipe(Command.withDescription("Retire eligible review snapshots using the inbox retirement digest, preserving undo payloads")),
     Command.make("collect", { id }, ({ id }) => renderedChangeOutcome(local.pipe(
-      Effect.zipRight(Effect.flatMap(Change, change => change.collect(id)))
+      Effect.andThen(Effect.flatMap(Change, change => change.collect(id)))
     ), ["collected"])).pipe(Command.withDescription("Irreversibly reap only this proposal's retired snapshots; keep receipts and undo payloads")),
     Command.make("apply", {
       id,
       expectedDigest: Options.text("expect-digest")
     }, (request) => renderedChangeOutcome(local.pipe(
-      Effect.zipRight(Effect.flatMap(Change, (change) => change.apply(request)))
+      Effect.andThen(Effect.flatMap(Change, (change) => change.apply(request)))
     ))).pipe(Command.withDescription("Approve and apply this exact digest once, refusing baseline drift")),
     Command.make("undo", {
       receiptId: Args.text({ name: "receipt-id" })
     }, ({ receiptId }) => renderedChangeOutcome(local.pipe(
-      Effect.zipRight(Effect.flatMap(Change, (change) => change.undo(receiptId)))
+      Effect.andThen(Effect.flatMap(Change, (change) => change.undo(receiptId)))
     ))).pipe(Command.withDescription("Restore one exact apply receipt, refusing changes made since installation")),
     Command.make("cancel", { id }, ({ id }) => rendered(local.pipe(
-      Effect.zipRight(Effect.flatMap(Change, (change) => change.cancel(id)))
+      Effect.andThen(Effect.flatMap(Change, (change) => change.cancel(id)))
     ))).pipe(Command.withDescription("Cancel an unclaimed proposal; snapshots remain retained")),
     Command.make("recover", {
       id,
       restore: Options.boolean("restore")
     }, ({ id, restore }) => renderedChangeOutcome(local.pipe(
-      Effect.zipRight(Effect.flatMap(Change, (change) => change.recover(id, { restore })))
+      Effect.andThen(Effect.flatMap(Change, (change) => change.recover(id, { restore })))
     ), ["staged", "cancelled", "installed", "undone", "rolled-back"]))
       .pipe(Command.withDescription("Reconcile evidence; --restore restores retained prior state into an absent target, never retries installation"))
   )
@@ -733,7 +732,7 @@ const makeRm = (seal: SealContext) => Command.make(
   { target: Args.text({ name: "target" }), scope: scopeOption },
   ({ scope, target }) => rendered(
     requireVerb(seal, "rm").pipe(
-      Effect.zipRight(requireNativeAction(seal, "file.remove")),
+      Effect.andThen(requireNativeAction(seal, "file.remove")),
       Effect.flatMap(() => resolveWithin(scope, target)),
       Effect.flatMap((resolved) => admitSealedNativeAction(
         seal,
@@ -755,7 +754,7 @@ const makeWrite = (seal: SealContext) => Command.make(
   { target: Args.text({ name: "target" }), content: Args.text({ name: "content" }), scope: scopeOption },
   ({ content, scope, target }) => rendered(
     requireVerb(seal, "write").pipe(
-      Effect.zipRight(requireNativeAction(seal, "file.write")),
+      Effect.andThen(requireNativeAction(seal, "file.write")),
       Effect.flatMap(() => resolveWithin(scope, target)),
       Effect.flatMap((resolved) => admitSealedNativeAction(
         seal,
@@ -781,7 +780,7 @@ const makeUndo = (seal: SealContext) => Command.make(
       yield* requireVerb(seal, "undo")
       const hold = yield* Hold
       if (Option.isNone(id)) return yield* hold.undoLast
-      const actId = yield* Schema.decodeUnknown(ActId)(id.value).pipe(
+      const actId = yield* Schema.decodeUnknownEffect(ActId)(id.value).pipe(
         Effect.mapError((cause) =>
           new CliInputError({
             field: "act-id",
@@ -796,7 +795,7 @@ const makeUndo = (seal: SealContext) => Command.make(
 const makeHeld = (seal: SealContext) => Command.make("held", {}, () =>
   rendered(
     requireVerb(seal, "held").pipe(
-      Effect.zipRight(Effect.flatMap(Hold, (hold) => hold.held))
+      Effect.andThen(Effect.flatMap(Hold, (hold) => hold.held))
     )
   )
 ).pipe(Command.withDescription("List held (recoverable) mutations"))
@@ -806,7 +805,7 @@ const makeReap = (seal: SealContext) => Command.make(
   { olderThan: duration("older-than", "7d") },
   ({ olderThan }) => rendered(
     requireVerb(seal, "reap").pipe(
-      Effect.zipRight(parseDuration("older-than", olderThan)),
+      Effect.andThen(parseDuration("older-than", olderThan)),
       Effect.flatMap((millis) => Effect.flatMap(Hold, (hold) => hold.reap(millis)))
     )
   )
@@ -827,7 +826,7 @@ const makeSend = (seal: SealContext) => Command.make(
   },
   ({ body, hold, method, url }) => rendered(
     requireVerb(seal, "send").pipe(
-      Effect.zipRight(requireNativeAction(seal, "http.stage")),
+      Effect.andThen(requireNativeAction(seal, "http.stage")),
       Effect.flatMap(() => parseDuration("hold", hold)),
       Effect.flatMap((millis) => {
         const bodyValue = Option.getOrUndefined(body)
@@ -842,7 +841,7 @@ const makeSend = (seal: SealContext) => Command.make(
             holdMillis: millis
           }
         ).pipe(
-          Effect.zipRight(Effect.flatMap(Outbox, (outbox) => outbox.stage(
+          Effect.andThen(Effect.flatMap(Outbox, (outbox) => outbox.stage(
             new EmissionRequest({ url, method, body: bodyValue }),
             millis
           )))
@@ -855,7 +854,7 @@ const makeSend = (seal: SealContext) => Command.make(
 const makePending = (seal: SealContext) => Command.make("pending", {}, () =>
   rendered(
     requireVerb(seal, "pending").pipe(
-      Effect.zipRight(Effect.flatMap(Outbox, (outbox) => outbox.pending))
+      Effect.andThen(Effect.flatMap(Outbox, (outbox) => outbox.pending))
     )
   )
 ).pipe(Command.withDescription("List staged emissions"))
@@ -865,7 +864,7 @@ const makeCommit = (seal: SealContext) => Command.make(
   { id: Args.text({ name: "emission-id" }) },
   ({ id }) => rendered(
     requireVerb(seal, "commit").pipe(
-      Effect.zipRight(Effect.flatMap(Outbox, (outbox) => outbox.commit(EmissionId.make(id))))
+      Effect.andThen(Effect.flatMap(Outbox, (outbox) => outbox.commit(EmissionId.make(id))))
     )
   )
 ).pipe(Command.withDescription("Approve and send a staged emission now"))
@@ -875,7 +874,7 @@ const makeCancel = (seal: SealContext) => Command.make(
   { id: Args.text({ name: "emission-id" }) },
   ({ id }) => rendered(
     requireVerb(seal, "cancel").pipe(
-      Effect.zipRight(Effect.flatMap(Outbox, (outbox) => outbox.cancel(EmissionId.make(id))))
+      Effect.andThen(Effect.flatMap(Outbox, (outbox) => outbox.cancel(EmissionId.make(id))))
     )
   )
 ).pipe(Command.withDescription("Cancel a staged emission — it was never sent"))
@@ -883,7 +882,7 @@ const makeCancel = (seal: SealContext) => Command.make(
 const makeFlush = (seal: SealContext) => Command.make("flush", {}, () =>
   rendered(
     requireVerb(seal, "flush").pipe(
-      Effect.zipRight(Effect.flatMap(Outbox, (outbox) => outbox.flush))
+      Effect.andThen(Effect.flatMap(Outbox, (outbox) => outbox.flush))
     )
   )
 ).pipe(Command.withDescription("Send every staged emission whose hold expired"))
@@ -957,13 +956,13 @@ const capabilityPayload = Effect.suspend(
 
 const makeDoctor = (seal: SealContext) => Command.make("doctor", {}, () =>
   rendered(
-    requireVerb(seal, "doctor").pipe(Effect.zipRight(capabilityPayload))
+    requireVerb(seal, "doctor").pipe(Effect.andThen(capabilityPayload))
   )
 ).pipe(Command.withDescription("Report the exact host enforcement envelope"))
 
 const makeCapabilities = (seal: SealContext) => Command.make("capabilities", {}, () =>
   rendered(
-    requireVerb(seal, "capabilities").pipe(Effect.zipRight(capabilityPayload))
+    requireVerb(seal, "capabilities").pipe(Effect.andThen(capabilityPayload))
   )
 ).pipe(Command.withDescription("Machine-readable alias for doctor"))
 
@@ -983,7 +982,7 @@ const makeActions = (seal: SealContext) => Command.make("actions", {
   workspace: Options.text("workspace").pipe(Options.withDefault(process.cwd()))
 }, ({ workspace }) => rendered(
   requireVerb(seal, "actions").pipe(
-    Effect.zipRight(discoveredTools(seal, nodePath.resolve(workspace))),
+    Effect.andThen(discoveredTools(seal, nodePath.resolve(workspace))),
     Effect.map((tools) => {
       const nativeActions = allowedNativeActions(seal)
       return {
@@ -1208,7 +1207,7 @@ const makeExec = (seal: SealContext) => Command.make(
   },
   ({ profile, ...input }) => rendered(
     requireVerb(seal, "exec").pipe(
-      Effect.zipRight(requireNativeAction(seal, "process.run")),
+      Effect.andThen(requireNativeAction(seal, "process.run")),
       Effect.flatMap(() => executeRawProcess(input, profile))
     )
   )
@@ -1377,7 +1376,7 @@ const makeEvalProgram = (seal: SealContext) => Command.make(
   ({ source, bindings, profile, workspace }) =>
     renderedProgram(
       requireVerb(seal, "eval").pipe(
-        Effect.zipRight(executeProgram(
+        Effect.andThen(executeProgram(
           seal,
           source,
           bindings,
@@ -1515,7 +1514,7 @@ const makeSealedEvalProgram = (seal: SealContext) => Command.make(
 const makeLedger = (seal: SealContext) => Command.make("ledger", {}, () =>
   rendered(
     requireVerb(seal, "ledger").pipe(
-      Effect.zipRight(Effect.flatMap(Ledger, (ledger) => ledger.entries))
+      Effect.andThen(Effect.flatMap(Ledger, (ledger) => ledger.entries))
     )
   )
 ).pipe(Command.withDescription("The append-only record of every act"))
@@ -1752,7 +1751,7 @@ const startupSeal = async (): Promise<SealContext | undefined> => {
   )
   const result = await Effect.runPromiseExit(startup)
   if (Exit.isSuccess(result)) return result.value
-  const failureOption = Cause.failureOption(result.cause)
+  const failureOption = Cause.findErrorOption(result.cause)
   const failure = Option.isSome(failureOption) &&
       failureOption.value instanceof SealVerificationFailed
     ? failureOption.value
@@ -1778,7 +1777,7 @@ const runCli = async (seal: SealContext): Promise<void> => {
       : makeUnsealedSupervisorRoot(seal)
 
   const PlatformAndHomeLayer = layerFromEnv.pipe(
-    Layer.provideMerge(BunContext.layer)
+    Layer.provideMerge(BunServices.layer)
   )
   const LedgerLayer = LedgerLive.pipe(
     Layer.provideMerge(PlatformAndHomeLayer)

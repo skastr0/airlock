@@ -105,7 +105,7 @@ const CellProof = Schema.Struct({
     privateTempExcludedFromDelta: Schema.Literal(true),
     driftAbsent: Schema.Literal(true)
   }),
-  evidence: Schema.optional(Schema.Record({ key: Schema.String, value: Schema.Unknown }))
+  evidence: Schema.optional(Schema.Record(Schema.String, Schema.Unknown))
 })
 
 const ExecutableEdgesProof = Schema.Struct({

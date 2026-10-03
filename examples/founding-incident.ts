@@ -13,9 +13,8 @@
 //
 //   AIRLOCK_HOME=/tmp/airlock-demo bun run examples/founding-incident.ts
 
-import { FileSystem, Path } from "@effect/platform"
-import { BunContext, BunRuntime } from "@effect/platform-bun"
-import { Console, Effect, Layer } from "effect"
+import { Console, Effect, FileSystem, Layer, Path } from "effect"
+import { BunServices, BunRuntime } from "@effect/platform-bun"
 import * as AirlockHome from "../src/AirlockHome.ts"
 import { Hold } from "../src/Hold.ts"
 import { HoldLive } from "../src/HoldLive.ts"
@@ -61,7 +60,7 @@ const program = Effect.gen(function* () {
 const AirlockLive = HoldLive.pipe(
   Layer.provideMerge(LedgerLive),
   Layer.provideMerge(AirlockHome.layerFromEnv),
-  Layer.provideMerge(BunContext.layer)
+  Layer.provideMerge(BunServices.layer)
 )
 
 program.pipe(Effect.provide(AirlockLive), BunRuntime.runMain)

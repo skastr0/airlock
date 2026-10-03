@@ -1,14 +1,13 @@
-import { FileSystem, Path } from "@effect/platform"
-import { BunContext } from "@effect/platform-bun"
+import { DateTime, Effect, FileSystem, Path } from "effect"
+import { BunServices } from "@effect/platform-bun"
 import { describe, expect, it } from "@effect/vitest"
-import { DateTime, Effect } from "effect"
 import {
   makeFileRuntimeRunJournal,
   RuntimeRunSnapshot
 } from "../src/runtime/index.ts"
 
 const instant = (value: string) =>
-  DateTime.unsafeMake(new Date(value))
+  DateTime.makeUnsafe(new Date(value))
 
 const snapshot = (
   planId: string,
@@ -69,6 +68,6 @@ describe("RuntimeRunJournal", () => {
           state: "finalizing"
         })
       })
-    ).pipe(Effect.provide(BunContext.layer))
+    ).pipe(Effect.provide(BunServices.layer))
   )
 })

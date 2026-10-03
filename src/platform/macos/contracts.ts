@@ -79,7 +79,7 @@ export class PrivateWorkspaceReceipt extends Schema.Class<PrivateWorkspaceReceip
   destinationVolume: MacosVolume,
   sameVolume: Schema.Boolean,
   /** The actual preparation strategy, never a vague "clone-or-copy" claim. */
-  strategy: Schema.Literal("clone", "copy")
+  strategy: Schema.Literals(["clone", "copy"])
 }) {}
 
 export class MacosUnavailable extends Schema.TaggedError<MacosUnavailable>()(

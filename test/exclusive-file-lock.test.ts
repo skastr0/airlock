@@ -12,7 +12,7 @@ import { join } from "node:path"
 import { makeExclusiveFileLock } from "../src/platform/ExclusiveFileLock.ts"
 
 const realDelay = (milliseconds: number) =>
-  Effect.async<void>((resume) => {
+  Effect.callback<void>((resume) => {
     const timer = setTimeout(() => resume(Effect.void), milliseconds)
     return Effect.sync(() => clearTimeout(timer))
   })
@@ -41,12 +41,12 @@ describe("ExclusiveFileLock", () => {
         const releaseOwner = yield* Deferred.make<void>()
         const owner = yield* lock.withLock(
           Deferred.succeed(ownerReady, undefined).pipe(
-            Effect.zipRight(Deferred.await(releaseOwner))
+            Effect.andThen(Deferred.await(releaseOwner))
           )
-        ).pipe(Effect.fork)
+        ).pipe(Effect.forkChild)
         yield* Deferred.await(ownerReady)
         const before = yield* Effect.promise(() => readFile(active, "utf8"))
-        const waiter = yield* Effect.fork(lock.withLock(Effect.void))
+        const waiter = yield* Effect.forkChild(lock.withLock(Effect.void))
         yield* realDelay(40)
         yield* Fiber.interrupt(waiter)
         const after = yield* Effect.promise(() => readFile(active, "utf8"))
@@ -100,7 +100,7 @@ describe("ExclusiveFileLock", () => {
               cause: String(cause)
             })
           })
-        ).pipe(Effect.either)
+        ).pipe(Effect.result)
       )
 
       expect(result._tag).toBe("Left")
@@ -238,7 +238,7 @@ describe("ExclusiveFileLock", () => {
         Effect.all(
           Array.from(
             { length: 32 },
-            () => lock.withLock(criticalSection).pipe(Effect.either)
+            () => lock.withLock(criticalSection).pipe(Effect.result)
           ),
           { concurrency: "unbounded" }
         )

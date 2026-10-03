@@ -38,7 +38,7 @@ export type ExclusiveRenameError =
   | ExclusiveRenameUnavailable
   | ExclusiveRenameFailed
 
-export class ExclusiveRename extends Context.Tag("airlock/ExclusiveRename")<
+export class ExclusiveRename extends Context.Service<
   ExclusiveRename,
   {
     readonly moveNoReplace: (
@@ -46,4 +46,4 @@ export class ExclusiveRename extends Context.Tag("airlock/ExclusiveRename")<
       target: string
     ) => Effect.Effect<void, ExclusiveRenameError>
   }
->() {}
+>()("airlock/ExclusiveRename") {}

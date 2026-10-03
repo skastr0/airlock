@@ -1,4 +1,4 @@
-import { BunContext } from "@effect/platform-bun"
+import { BunServices } from "@effect/platform-bun"
 import { Effect, Layer, Schema } from "effect"
 import {
   existsSync,
@@ -342,7 +342,7 @@ export const runVouchProof = async (): Promise<VouchProofReport> => {
   })
 
   const homeLayer = AirlockHome.layer(fixture.home).pipe(
-    Layer.provideMerge(BunContext.layer)
+    Layer.provideMerge(BunServices.layer)
   )
   const ledgerLayer = LedgerLive.pipe(Layer.provideMerge(homeLayer))
   const stateLayer = Layer.mergeAll(

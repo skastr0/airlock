@@ -6,7 +6,7 @@ import { InventoryRow, Proposal, ProposalId, SnapshotReceipt, Staged, Status } f
 import { BoundTree, canonical, checkTree, Digest, exists, hash, Identity, identity, limits, sameIdentity, scan } from "./Tree.ts"
 
 export const SnapshotBinding = Schema.Struct({
-  side: Schema.Literal("candidate", "baseline", "apply-stage"), expected: BoundTree,
+  side: Schema.Literals(["candidate", "baseline", "apply-stage"]), expected: BoundTree,
   sourceActId: Schema.optional(Schema.String)
 })
 export type SnapshotBinding = typeof SnapshotBinding.Type
@@ -18,7 +18,7 @@ const PlanData = Schema.Struct({
 export const SnapshotPlan = Schema.Struct({ ...PlanData.fields, retirementDigest: ProposalDigest })
 export type SnapshotPlan = typeof SnapshotPlan.Type
 export const SnapshotRecord = Schema.Struct({
-  plan: SnapshotPlan, phase: Schema.Literal("prepared", "retired", "collecting", "collected"),
+  plan: SnapshotPlan, phase: Schema.Literals(["prepared", "retired", "collecting", "collected"]),
   actId: Schema.optional(Schema.String), bundle: Schema.optional(Identity)
 })
 export type SnapshotRecord = typeof SnapshotRecord.Type
@@ -33,13 +33,13 @@ const safeAct = (id: string) => {
 export const snapshotSource = (home: string, id: string, binding: SnapshotBinding) => binding.side === "apply-stage"
   ? path.join(home, "hold", safeAct(binding.sourceActId ?? ""), "stage")
   : path.join(home, "changes", Schema.decodeUnknownSync(ProposalId)(id), binding.side)
-export const planDigest = (plan: typeof PlanData.Type) => `sha256:${hash(Schema.encodeSync(Schema.parseJson(PlanData))(plan))}`
+export const planDigest = (plan: typeof PlanData.Type) => `sha256:${hash(Schema.encodeSync(Schema.fromJsonString(PlanData))(plan))}`
 export const readSnapshotRecord = async (home: string, id: string): Promise<SnapshotRecord | undefined> => {
   Schema.decodeUnknownSync(ProposalId)(id)
   const file = snapshotRecordPath(home, id)
   if (!(await exists(file))) return undefined
   await canonical(file)
-  const record = Schema.decodeUnknownSync(Schema.parseJson(SnapshotRecord))(await readFile(file, "utf8"))
+  const record = Schema.decodeUnknownSync(Schema.fromJsonString(SnapshotRecord))(await readFile(file, "utf8"))
   if (record.plan.id !== id || planDigest(record.plan) !== record.plan.retirementDigest) throw new Error("snapshot retirement record binding/digest mismatch")
   if (record.actId !== undefined) safeAct(record.actId)
   return record
@@ -69,7 +69,7 @@ export const inspectSnapshots = async (home: string, id: string): Promise<Snapsh
   }
   const decode = <A, I>(name: string, raw: string | undefined, schema: Schema.Schema<A, I>) => {
     if (raw === undefined) return undefined
-    try { return Schema.decodeUnknownSync(Schema.parseJson(schema))(raw) }
+    try { return Schema.decodeUnknownSync(Schema.fromJsonString(schema))(raw) }
     catch (cause) { errors.push({ operation: name, reason: String(cause) }); return undefined }
   }
   const proposalRaw = await read("proposal", path.join(directory, "proposal.json"))
@@ -80,7 +80,7 @@ export const inspectSnapshots = async (home: string, id: string): Promise<Snapsh
   const status = decode("workflow", statusRaw, Status)
   let safe = true
   if (proposal !== undefined && (proposal.id !== id || proposal.proposal.id !== id || proposal.proposal.storeId !== storeId ||
-    proposal.proposalDigest !== `sha256:${hash(Schema.encodeSync(Schema.parseJson(Proposal))(proposal.proposal))}`)) {
+    proposal.proposalDigest !== `sha256:${hash(Schema.encodeSync(Schema.fromJsonString(Proposal))(proposal.proposal))}`)) {
     errors.push({ operation: "proposal", reason: "proposal/store digest binding mismatch" }); proposal = undefined
   }
   if (proposalRaw !== undefined && proposal === undefined) safe = false

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest"
-import { BunContext } from "@effect/platform-bun"
+import { BunServices } from "@effect/platform-bun"
 import { Context, Effect, Layer, ManagedRuntime } from "effect"
 import { chmod, lstat, mkdir, mkdtemp, readFile, readdir, realpath, rename, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
@@ -14,7 +14,7 @@ import { ExclusiveRenameTestLive } from "./support/ExclusiveRenameTestLive.ts"
 
 const layersFor = (home: string, moves = ExclusiveRenameTestLive) => ChangeLive.pipe(
   Layer.provideMerge(HoldLayer), Layer.provideMerge(moves),
-  Layer.provideMerge(LedgerLive), Layer.provideMerge(AirlockHome.layer(home)), Layer.provideMerge(BunContext.layer)
+  Layer.provideMerge(LedgerLive), Layer.provideMerge(AirlockHome.layer(home)), Layer.provideMerge(BunServices.layer)
 )
 type Services = { change: Context.Tag.Service<typeof Change>, hold: Context.Tag.Service<typeof Hold> }
 const world = async (body: (w: Services & { root: string, home: string, restart: () => Promise<Services> }) => Promise<void>, moves = ExclusiveRenameTestLive) => {

@@ -19,7 +19,7 @@ const MAX_DAEMON_MESSAGE_BYTES = 4_096
 export class DaemonSocketFailed extends Schema.TaggedError<DaemonSocketFailed>()(
   "DaemonSocketFailed",
   {
-    operation: Schema.Literal("validate", "listen", "connect", "read", "write", "close"),
+    operation: Schema.Literals(["validate", "listen", "connect", "read", "write", "close"]),
     reason: Schema.String
   }
 ) {}
@@ -64,7 +64,7 @@ const validateServerOptions = (
 const readFrame = (
   socket: Socket
 ): Effect.Effect<unknown, DaemonSocketFailed> =>
-  Effect.async<unknown, DaemonSocketFailed>((resume) => {
+  Effect.callback<unknown, DaemonSocketFailed>((resume) => {
     let bytes = 0
     let text = ""
     let settled = false
@@ -119,7 +119,7 @@ const writeFrame = (
   value: unknown,
   closeAfterWrite = false
 ): Effect.Effect<void, DaemonSocketFailed> =>
-  Effect.async<void, DaemonSocketFailed>((resume) => {
+  Effect.callback<void, DaemonSocketFailed>((resume) => {
     const encoded = `${JSON.stringify(value)}\n`
     if (Buffer.byteLength(encoded) > MAX_DAEMON_MESSAGE_BYTES) {
       resume(Effect.fail(socketFailure("write", "response exceeds 4096 bytes")))
@@ -149,8 +149,8 @@ const serveConnection = (
   readFrame(socket).pipe(
     Effect.flatMap((request) => handleDaemonRequest(request, state)),
     Effect.flatMap((response) => writeFrame(socket, response, true)),
-    Effect.catchAll((error) => writeFrame(socket, error, true).pipe(
-      Effect.catchAll(() => Effect.sync(() => socket.destroy()))
+    Effect.catch((error) => writeFrame(socket, error, true).pipe(
+      Effect.catch(() => Effect.sync(() => socket.destroy()))
     )),
     Effect.asVoid
   )
@@ -159,7 +159,7 @@ const startServer = (
   options: DaemonHealthServerOptions
 ): Effect.Effect<Server, DaemonSocketFailed> =>
   validateServerOptions(options).pipe(
-    Effect.zipRight(Effect.async<Server, DaemonSocketFailed>((resume) => {
+    Effect.andThen(Effect.callback<Server, DaemonSocketFailed>((resume) => {
       let settled = false
       const server = createServer((socket) => {
         Effect.runFork(serveConnection(socket, options.state))
@@ -197,7 +197,7 @@ const startServer = (
   )
 
 const closeServer = (server: Server): Effect.Effect<void> =>
-  Effect.async<void>((resume) => {
+  Effect.callback<void>((resume) => {
     if (!server.listening) {
       resume(Effect.void)
       return
@@ -215,7 +215,7 @@ export const runDaemonHealthServer = (
 ): Effect.Effect<never, DaemonSocketFailed, never> =>
   Effect.scoped(
     Effect.acquireRelease(startServer(options), closeServer).pipe(
-      Effect.zipRight(Effect.never)
+      Effect.andThen(Effect.never)
     )
   )
 
@@ -241,8 +241,8 @@ export const unixDaemonHealthTransport = (
 ) => ({
   request: (request: unknown): Effect.Effect<unknown, DaemonSocketFailed> =>
     validateClientSocket(socketPath).pipe(
-      Effect.zipRight(Effect.acquireUseRelease(
-        Effect.async<Socket, DaemonSocketFailed>((resume) => {
+      Effect.andThen(Effect.acquireUseRelease(
+        Effect.callback<Socket, DaemonSocketFailed>((resume) => {
           const socket = createConnection(socketPath)
           const timer = setTimeout(() => {
             socket.destroy()
@@ -262,7 +262,7 @@ export const unixDaemonHealthTransport = (
           })
         }),
         (socket) => writeFrame(socket, request).pipe(
-          Effect.zipRight(readFrame(socket)),
+          Effect.andThen(readFrame(socket)),
           Effect.timeoutFail({
             duration: timeoutMillis,
             onTimeout: () => socketFailure("read", "response timed out")

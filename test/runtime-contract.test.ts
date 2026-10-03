@@ -1,4 +1,4 @@
-import { BunContext } from "@effect/platform-bun"
+import { BunServices } from "@effect/platform-bun"
 import { describe, expect, it } from "@effect/vitest"
 import { Context, DateTime, Effect, Layer } from "effect"
 import { tmpdir } from "node:os"
@@ -57,7 +57,7 @@ import {
   uncheckedRuntimeAuthority
 } from "./support/RuntimeAuthority.ts"
 
-const timestamp = DateTime.unsafeFromDate(new Date("2026-07-29T00:00:00.000Z"))
+const timestamp = DateTime.fromDateUnsafe(new Date("2026-07-29T00:00:00.000Z"))
 const encoder = new TextEncoder()
 const decoder = new TextDecoder()
 const nodeId = (value: string) => NodeId.make(value)
@@ -303,7 +303,7 @@ const runtimeLayer = (
       ),
       environment: { AIRLOCK_TEST: "present" }
     }))),
-    Layer.provideMerge(BunContext.layer)
+    Layer.provideMerge(BunServices.layer)
   )
 
 const execute = (

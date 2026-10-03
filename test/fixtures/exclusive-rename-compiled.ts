@@ -1,6 +1,5 @@
-import { BunContext, BunRuntime } from "@effect/platform-bun"
-import { FileSystem } from "@effect/platform"
-import { Console, Effect, Layer } from "effect"
+import { BunServices, BunRuntime } from "@effect/platform-bun"
+import { Console, Effect, FileSystem, Layer } from "effect"
 import * as AirlockHome from "../../src/AirlockHome.ts"
 import { Hold } from "../../src/Hold.ts"
 import { HoldLive } from "../../src/HoldLive.ts"
@@ -23,7 +22,7 @@ const PlatformExclusiveRenameLive = process.platform === "linux"
 const layer = HoldLive.pipe(
   Layer.provideMerge(LedgerLive),
   Layer.provideMerge(AirlockHome.layer(home)),
-  Layer.provideMerge(BunContext.layer)
+  Layer.provideMerge(BunServices.layer)
 )
 
 const proof = Effect.gen(function* () {

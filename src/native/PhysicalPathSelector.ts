@@ -1,5 +1,4 @@
-import { Error as PlatformError, FileSystem } from "@effect/platform"
-import { Effect, Schema } from "effect"
+import { Effect, FileSystem, PlatformError, Schema } from "effect"
 import { lstat } from "node:fs/promises"
 import * as nodePath from "node:path"
 
@@ -13,7 +12,7 @@ export class PhysicalPathSelectorBindingFailed extends Schema.TaggedError<Physic
   {
     workspace: Schema.String,
     requested: Schema.String,
-    operation: Schema.Literal("validate", "realpath", "inspect-prefix", "inspect-selector"),
+    operation: Schema.Literals(["validate", "realpath", "inspect-prefix", "inspect-selector"]),
     reason: Schema.String
   }
 ) {}
@@ -80,7 +79,7 @@ export const bindPhysicalPathSelector = (
       const selected = yield* Effect.tryPromise({
         try: () => lstat(requested),
         catch: (cause) => cause
-      }).pipe(Effect.either)
+      }).pipe(Effect.result)
       if (selected._tag === "Right" && selected.right.isSymbolicLink()) {
         return yield* new PhysicalPathSelectorBindingFailed({
           workspace: resolvedWorkspace,
@@ -109,7 +108,7 @@ export const bindPhysicalPathSelector = (
     let probe = requested
 
     while (true) {
-      const physical = yield* fs.realPath(probe).pipe(Effect.either)
+      const physical = yield* fs.realPath(probe).pipe(Effect.result)
       if (physical._tag === "Right") {
         if (suffix.length === 0) return physical.right
 

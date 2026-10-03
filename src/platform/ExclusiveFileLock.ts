@@ -62,7 +62,7 @@ const parseOwner = (raw: string): LockOwner | undefined => {
 }
 
 const realDelay = (milliseconds: number) =>
-  Effect.async<void>((resume) => {
+  Effect.callback<void>((resume) => {
     const timer = setTimeout(() => resume(Effect.void), milliseconds)
     return Effect.sync(() => clearTimeout(timer))
   })

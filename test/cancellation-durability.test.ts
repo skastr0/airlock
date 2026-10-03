@@ -1,15 +1,6 @@
-import { FileSystem, Path } from "@effect/platform"
-import { BunContext } from "@effect/platform-bun"
+import { Cause, Deferred, Effect, Exit, Fiber, FileSystem, Layer, Option, Path } from "effect"
+import { BunServices } from "@effect/platform-bun"
 import { describe, expect, it } from "@effect/vitest"
-import {
-  Cause,
-  Deferred,
-  Effect,
-  Exit,
-  Fiber,
-  Layer,
-  Option
-} from "effect"
 import * as http from "node:http"
 import type { AddressInfo } from "node:net"
 import * as AirlockHome from "../src/AirlockHome.ts"
@@ -40,7 +31,7 @@ const blockingLedger = (
       record: (entry) =>
         entry.act === act
           ? Deferred.succeed(started, undefined).pipe(
-              Effect.zipRight(Effect.never)
+              Effect.andThen(Effect.never)
             )
           : Effect.void,
       entries: Effect.succeed([])
@@ -50,11 +41,11 @@ const blockingLedger = (
 const typedFailure = <E>(exit: Exit.Exit<unknown, E>): E => {
   expect(Exit.isFailure(exit)).toBe(true)
   if (Exit.isSuccess(exit)) throw new Error("expected failure")
-  return Option.getOrThrow(Cause.failureOption(exit.cause))
+  return Option.getOrThrow(Cause.findErrorOption(exit.cause))
 }
 
 const realDelay = (milliseconds: number) =>
-  Effect.async<void>((resume) => {
+  Effect.callback<void>((resume) => {
     const timer = setTimeout(() => resume(Effect.void), milliseconds)
     return Effect.sync(() => clearTimeout(timer))
   })
@@ -90,7 +81,7 @@ describe("durable cancellation receipts", () => {
           Layer.provideMerge(ExclusiveRenameTestLive),
           Layer.provideMerge(noOpLedger),
           Layer.provideMerge(AirlockHome.layer(home)),
-          Layer.provideMerge(BunContext.layer)
+          Layer.provideMerge(BunServices.layer)
         )
         const expired = yield* Effect.gen(function* () {
           const hold = yield* Hold
@@ -104,20 +95,20 @@ describe("durable cancellation receipts", () => {
             blockingLedger("remove", ownerInLedger)
           ),
           Layer.provideMerge(AirlockHome.layer(home)),
-          Layer.provideMerge(BunContext.layer)
+          Layer.provideMerge(BunServices.layer)
         )
 
         yield* Effect.gen(function* () {
           const hold = yield* Hold
-          const owner = yield* hold.remove(lockOwnerTarget).pipe(Effect.fork)
+          const owner = yield* hold.remove(lockOwnerTarget).pipe(Effect.forkChild)
           yield* Deferred.await(ownerInLedger)
-          const reaper = yield* hold.reap(0).pipe(Effect.fork)
+          const reaper = yield* hold.reap(0).pipe(Effect.forkChild)
           yield* realDelay(40)
           const reaperExit = yield* Fiber.interrupt(reaper)
 
           expect(Exit.isFailure(reaperExit)).toBe(true)
           if (Exit.isFailure(reaperExit)) {
-            expect(Cause.isInterruptedOnly(reaperExit.cause)).toBe(true)
+            expect(Cause.hasInterruptsOnly(reaperExit.cause)).toBe(true)
             expect(Array.from(Cause.failures(reaperExit.cause))).toEqual([])
           }
           expect(yield* fs.exists(
@@ -129,7 +120,7 @@ describe("durable cancellation receipts", () => {
           yield* Fiber.interrupt(owner)
         }).pipe(Effect.provide(contendedLayer))
       })
-    ).pipe(Effect.provide(BunContext.layer))
+    ).pipe(Effect.provide(BunServices.layer))
   )
 
   it.effect("returns exact Reaper recovery when cancellation follows terminal removal", () =>
@@ -153,7 +144,7 @@ describe("durable cancellation receipts", () => {
           Layer.provideMerge(ExclusiveRenameTestLive),
           Layer.provideMerge(noOpLedger),
           Layer.provideMerge(AirlockHome.layer(home)),
-          Layer.provideMerge(BunContext.layer)
+          Layer.provideMerge(BunServices.layer)
         )
         const expired = yield* Effect.gen(function* () {
           const hold = yield* Hold
@@ -165,12 +156,12 @@ describe("durable cancellation receipts", () => {
           Layer.provideMerge(ExclusiveRenameTestLive),
           Layer.provideMerge(blockingLedger("reap", ledgerStarted)),
           Layer.provideMerge(AirlockHome.layer(home)),
-          Layer.provideMerge(BunContext.layer)
+          Layer.provideMerge(BunServices.layer)
         )
 
         yield* Effect.gen(function* () {
           const hold = yield* Hold
-          const fiber = yield* hold.reap(0).pipe(Effect.fork)
+          const fiber = yield* hold.reap(0).pipe(Effect.forkChild)
           yield* Deferred.await(ledgerStarted)
           expect(yield* fs.exists(
             path.join(home, "hold", expired.id)
@@ -191,7 +182,7 @@ describe("durable cancellation receipts", () => {
           })
         }).pipe(Effect.provide(reaperLayer))
       })
-    ).pipe(Effect.provide(BunContext.layer))
+    ).pipe(Effect.provide(BunServices.layer))
   )
 
   it.effect("returns a Hold recovery act when removal is interrupted during Ledger publication", () =>
@@ -208,12 +199,12 @@ describe("durable cancellation receipts", () => {
           Layer.provideMerge(ExclusiveRenameTestLive),
           Layer.provideMerge(blockingLedger("remove", started)),
           Layer.provideMerge(AirlockHome.layer(home)),
-          Layer.provideMerge(BunContext.layer)
+          Layer.provideMerge(BunServices.layer)
         )
 
         yield* Effect.gen(function* () {
           const hold = yield* Hold
-          const fiber = yield* hold.remove(target).pipe(Effect.fork)
+          const fiber = yield* hold.remove(target).pipe(Effect.forkChild)
           yield* Deferred.await(started)
           const exit = yield* Fiber.interrupt(fiber)
           const failure = typedFailure(exit)
@@ -234,7 +225,7 @@ describe("durable cancellation receipts", () => {
           ])
         }).pipe(Effect.provide(layer))
       })
-    ).pipe(Effect.provide(BunContext.layer))
+    ).pipe(Effect.provide(BunServices.layer))
   )
 
   it.effect("returns the generated Outbox id when staging is interrupted after publication", () =>
@@ -248,7 +239,7 @@ describe("durable cancellation receipts", () => {
         const layer = OutboxLive.pipe(
           Layer.provideMerge(blockingLedger("stage", started)),
           Layer.provideMerge(AirlockHome.layer(home)),
-          Layer.provideMerge(BunContext.layer)
+          Layer.provideMerge(BunServices.layer)
         )
 
         yield* Effect.gen(function* () {
@@ -256,7 +247,7 @@ describe("durable cancellation receipts", () => {
           const fiber = yield* outbox.stage(
             post("https://example.invalid/staged-only"),
             60_000
-          ).pipe(Effect.fork)
+          ).pipe(Effect.forkChild)
           yield* Deferred.await(started)
           const exit = yield* Fiber.interrupt(fiber)
           const failure = typedFailure(exit)
@@ -278,7 +269,7 @@ describe("durable cancellation receipts", () => {
           ])
         }).pipe(Effect.provide(layer))
       })
-    ).pipe(Effect.provide(BunContext.layer))
+    ).pipe(Effect.provide(BunServices.layer))
   )
 
   it.effect("returns a committed outcome on interruption and never redispatches it", () =>
@@ -291,7 +282,7 @@ describe("durable cancellation receipts", () => {
         const started = yield* Deferred.make<void>()
         let hits = 0
         const server = yield* Effect.acquireRelease(
-          Effect.async<http.Server>((resume) => {
+          Effect.callback<http.Server>((resume) => {
             const value = http.createServer((_request, response) => {
               hits += 1
               response.writeHead(200)
@@ -302,7 +293,7 @@ describe("durable cancellation receipts", () => {
             )
           }),
           (value) =>
-            Effect.async<void>((resume) => {
+            Effect.callback<void>((resume) => {
               value.close(() => resume(Effect.void))
             })
         )
@@ -310,7 +301,7 @@ describe("durable cancellation receipts", () => {
         const layer = OutboxLive.pipe(
           Layer.provideMerge(blockingLedger("commit", started)),
           Layer.provideMerge(AirlockHome.layer(home)),
-          Layer.provideMerge(BunContext.layer)
+          Layer.provideMerge(BunServices.layer)
         )
 
         yield* Effect.gen(function* () {
@@ -319,7 +310,7 @@ describe("durable cancellation receipts", () => {
             post(`http://127.0.0.1:${address.port}/hook`),
             0
           )
-          const fiber = yield* outbox.commit(staged.id).pipe(Effect.fork)
+          const fiber = yield* outbox.commit(staged.id).pipe(Effect.forkChild)
           yield* Deferred.await(started)
           const exit = yield* Fiber.interrupt(fiber)
           const failure = typedFailure(exit)
@@ -345,6 +336,6 @@ describe("durable cancellation receipts", () => {
           expect(hits).toBe(1)
         }).pipe(Effect.provide(layer))
       })
-    ).pipe(Effect.provide(BunContext.layer))
+    ).pipe(Effect.provide(BunServices.layer))
   )
 })

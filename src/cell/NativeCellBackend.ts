@@ -43,7 +43,7 @@ export type NativeCellBackendError = CellUnavailable | NativeWorkspaceError | Pr
  * Host glue below the shared Cell state machine. It may prepare disposable
  * bytes and launch a contained process, but never applies a delta to live state.
  */
-export class NativeCellBackend extends Context.Tag("airlock/NativeCellBackend")<
+export class NativeCellBackend extends Context.Service<
   NativeCellBackend,
   {
     readonly preparePrivateWorkspace: (
@@ -54,4 +54,4 @@ export class NativeCellBackend extends Context.Tag("airlock/NativeCellBackend")<
       options?: ProcessRunOptions
     ) => Effect.Effect<ProcessReceipt, CellUnavailable | ProcessError>
   }
->() {}
+>()("airlock/NativeCellBackend") {}

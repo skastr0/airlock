@@ -12,7 +12,7 @@ import { maximumReservation, readSnapshotRecord } from "./Snapshots.ts"
 export { ChangeError } from "./Tree.ts"
 export * from "./Contracts.ts"
 
-export class Change extends Context.Tag("airlock/Change")<Change, {
+export class Change extends Context.Service<Change, {
   readonly stage: (input: { source: string, target: string }) => Effect.Effect<Staged, ChangeError>
   readonly review: (id: string, options?: { diff: boolean }) => Effect.Effect<Review, ChangeError>
   readonly status: (id: string) => Effect.Effect<Status, ChangeError>
@@ -24,7 +24,7 @@ export class Change extends Context.Tag("airlock/Change")<Change, {
   readonly content: (input: ContentRequest) => Effect.Effect<ContentPage, ChangeError>
   readonly retire: (input: { id: string, expectedDigest: string }) => Effect.Effect<SnapshotReceipt, ChangeError>
   readonly collect: (id: string) => Effect.Effect<SnapshotReceipt, ChangeError>
-}>() {}
+}>()("airlock/Change") {}
 
 const make = Effect.gen(function* () {
   const home = yield* AirlockHome
@@ -44,17 +44,17 @@ const make = Effect.gen(function* () {
       await mkdir(root, { recursive: true, mode: 0o700 })
       await validateStore()
       await sync(home.home)
-    }).pipe(Effect.zipRight(lock.withLock(Effect.uninterruptible(effect))), Effect.mapError(error))
+    }).pipe(Effect.andThen(lock.withLock(Effect.uninterruptible(effect))), Effect.mapError(error))
   const directory = (id: string) => path.join(root, id)
   const candidatePath = (id: string) => path.join(directory(id), "candidate")
   const baselinePath = (id: string) => path.join(directory(id), "baseline")
-  const validateId = (id: string) => Schema.decodeUnknown(ProposalId)(id).pipe(Effect.mapError(error))
-  const proposalJson = Schema.encodeSync(Schema.parseJson(Proposal))
+  const validateId = (id: string) => Schema.decodeUnknownEffect(ProposalId)(id).pipe(Effect.mapError(error))
+  const proposalJson = Schema.encodeSync(Schema.fromJsonString(Proposal))
   const proposalDigest = (proposal: Proposal) => `sha256:${hash(proposalJson(proposal))}`
   const readProposal = Effect.fnUntraced(function* (id: string) {
     yield* validateId(id)
     const raw = yield* attempt("read proposal", () => readFile(path.join(directory(id), "proposal.json"), "utf8"))
-    const stored = yield* Schema.decode(Schema.parseJson(Staged))(raw).pipe(Effect.mapError(error))
+    const stored = yield* Schema.decodeEffect(Schema.fromJsonString(Staged))(raw).pipe(Effect.mapError(error))
     const storeId = yield* attempt("read store binding", () => readFile(path.join(root, "store-id"), "utf8"))
     if (stored.id !== id || stored.proposal.id !== id || stored.proposal.storeId !== storeId || proposalDigest(stored.proposal) !== stored.proposalDigest) return yield* error("proposal digest/store binding mismatch")
     return stored
@@ -68,14 +68,14 @@ const make = Effect.gen(function* () {
     yield* validateId(id)
     const file = path.join(directory(id), "status.json")
     const raw = yield* attempt("read workflow status", () => readFile(file, "utf8"))
-    const value = yield* Schema.decode(Schema.parseJson(Status))(raw).pipe(Effect.mapError(error))
+    const value = yield* Schema.decodeEffect(Schema.fromJsonString(Status))(raw).pipe(Effect.mapError(error))
     if (value.id !== id) return yield* error("status binding mismatch")
     return value
   })
   const writeStatus = (status: Status) => attempt("publish workflow status", async () => {
     const file = path.join(directory(status.id), "status.json")
     const next = `${file}.next`
-    await writeNew(next, Schema.encodeSync(Schema.parseJson(Status))(status), true)
+    await writeNew(next, Schema.encodeSync(Schema.fromJsonString(Status))(status), true)
     await rename(next, file)
     await sync(directory(status.id))
   })
@@ -90,14 +90,14 @@ const make = Effect.gen(function* () {
     // outcome. Only final durable receipts release Hold's pins.
     yield* attempt("publish exact workflow receipt", async () => {
       const next = `${file}.next`
-      await writeNew(next, Schema.encodeSync(Schema.parseJson(CheckedOutcome))(receipt), true)
+      await writeNew(next, Schema.encodeSync(Schema.fromJsonString(CheckedOutcome))(receipt), true)
       await rename(next, file)
       await sync(directory(id))
     })
     yield* writeStatus({ ...status, state: receipt.state, ...(undo ? { undoReceipt: receipt } : { receipt }) })
     if (receipt.state !== "recovery-required") yield* hold.acknowledgeChecked(receipt.operationKey)
     return receipt
-  }).pipe(Effect.catchAll(cause => Effect.succeed({
+  }).pipe(Effect.catch(cause => Effect.succeed({
     ...receipt, state: "recovery-required" as const,
     reason: `workflow receipt/acknowledgement publication failed: ${String(cause)}; durable Hold claim retained`
   })))
@@ -106,7 +106,7 @@ const make = Effect.gen(function* () {
     const names = yield* attempt("list change inventory", async () => await exists(root) ? (await readdir(root)).filter(n => n.startsWith("change_")).sort() : [])
     const rows: InventoryRow[] = []
     for (const id of names) {
-      const inspected = yield* hold.inspectChangeSnapshots(id).pipe(Effect.either)
+      const inspected = yield* hold.inspectChangeSnapshots(id).pipe(Effect.result)
       rows.push(inspected._tag === "Right" ? inspected.right.row : {
         id, workflowState: "corrupt", applyState: "unknown", undoState: "unknown", snapshots: { state: "recovery-required", bytes: 0, holdActIds: [] },
         reservationBytes: maximumReservation, active: true, errors: [{ operation: "inventory", reason: String(inspected.left) }]
@@ -119,7 +119,7 @@ const make = Effect.gen(function* () {
   })
   const readLocked = <A>(effect: Effect.Effect<A, ChangeError>) => attempt("check change store", () => exists(root)).pipe(
     Effect.flatMap(present => present
-      ? attempt("validate read lease store", validateStore).pipe(Effect.zipRight(lock.withLock(effect)))
+      ? attempt("validate read lease store", validateStore).pipe(Effect.andThen(lock.withLock(effect)))
       : effect), Effect.mapError(error))
   const stage = (input: { source: string, target: string }) => locked(Effect.gen(function* () {
     const budget = yield* inventory()
@@ -159,7 +159,7 @@ const make = Effect.gen(function* () {
     await writeNew(path.join(directory(id), "status.json"), JSON.stringify({ version: "change/v1", id, state: "staged" }))
     // Publication is last, after independent snapshots and directory syncs.
     const prepared = path.join(directory(id), "proposal.prepared")
-    await writeNew(prepared, Schema.encodeSync(Schema.parseJson(Staged))(staged))
+    await writeNew(prepared, Schema.encodeSync(Schema.fromJsonString(Staged))(staged))
     await rename(prepared, path.join(directory(id), "proposal.json"))
     await sync(directory(id))
     return staged
@@ -217,7 +217,7 @@ const make = Effect.gen(function* () {
     yield* writeStatus({ version: "change/v1", id: input.id, state: "claimed", claim })
     // Tampering after claim consumes the attempt too. Hold revalidates its
     // independent install stage and the live baseline inside its own lease.
-    const valid = yield* validateSnapshots(stored).pipe(Effect.either)
+    const valid = yield* validateSnapshots(stored).pipe(Effect.result)
     if (valid._tag === "Left") {
       const receipt: CheckedOutcome = { version: "checked-hold/v1", receiptId: input.id, operationKey: input.id, target: stored.proposal.target,
         proposalDigest: stored.proposalDigest, claim, state: "rejected", reason: valid.left.reason }
@@ -238,7 +238,7 @@ const make = Effect.gen(function* () {
     return cancelled
   }))
   const undo = (receiptId: string) => locked(Effect.gen(function* () {
-    yield* Schema.decodeUnknown(OperationKey)(receiptId)
+    yield* Schema.decodeUnknownEffect(OperationKey)(receiptId)
     // Apply receipt IDs are proposal IDs, never an implicit latest pointer.
     const status = yield* readStatus(receiptId)
     if (status.receipt?.receiptId !== receiptId || status.receipt.state !== "installed") return yield* error("exact apply receipt required")
@@ -267,7 +267,7 @@ const make = Effect.gen(function* () {
     return yield* readStatus(id)
   }))
   const content = (raw: ContentRequest) => readLocked(Effect.gen(function* () {
-    const input = yield* Schema.decodeUnknown(ContentRequest)(raw).pipe(Effect.mapError(error))
+    const input = yield* Schema.decodeUnknownEffect(ContentRequest)(raw).pipe(Effect.mapError(error))
     const stored = yield* readProposal(input.id)
     const retired = yield* attempt("read snapshot lifecycle", () => readSnapshotRecord(home.home, input.id))
     if (retired !== undefined) return yield* error("snapshots retired; frozen content unavailable")

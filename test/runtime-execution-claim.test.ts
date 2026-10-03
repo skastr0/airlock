@@ -1,4 +1,4 @@
-import { BunContext } from "@effect/platform-bun"
+import { BunServices } from "@effect/platform-bun"
 import { describe, expect, it } from "@effect/vitest"
 import { DateTime, Deferred, Effect, Fiber, Layer } from "effect"
 import { createHash } from "node:crypto"
@@ -40,7 +40,7 @@ import { ExclusiveRenameTestLive } from "./support/ExclusiveRenameTestLive.ts"
 import { runtimeAuthority } from "./support/RuntimeAuthority.ts"
 
 const realDelay = (milliseconds: number) =>
-  Effect.async<void>((resume) => {
+  Effect.callback<void>((resume) => {
     const timer = setTimeout(() => resume(Effect.void), milliseconds)
     return Effect.sync(() => clearTimeout(timer))
   })
@@ -100,7 +100,7 @@ const runtimeLayer = (
           : { runJournalDirectory })
       }))
     ),
-    Layer.provideMerge(BunContext.layer)
+    Layer.provideMerge(BunServices.layer)
   )
 
 const authority = (workspace: string, label: string) =>
@@ -140,7 +140,7 @@ describe("Runtime execution claim contract", () => {
           run: (request) =>
             Effect.sync(() => {
               calls += 1
-            }).pipe(Effect.zipRight(processReceipt(request)))
+            }).pipe(Effect.andThen(processReceipt(request)))
         })
         const execution = authority(workspace, "persistent-journal-required")
 
@@ -175,19 +175,19 @@ describe.skipIf(process.platform !== "darwin" && process.platform !== "linux")(
                 Effect.sync(() => {
                   calls += 1
                 }).pipe(
-                  Effect.zipRight(Deferred.succeed(entered, undefined)),
-                  Effect.zipRight(Deferred.await(release)),
-                  Effect.zipRight(processReceipt(request))
+                  Effect.andThen(Deferred.succeed(entered, undefined)),
+                  Effect.andThen(Deferred.await(release)),
+                  Effect.andThen(processReceipt(request))
                 )
             })
             const execution = authority(workspace, "concurrent-single-use")
 
             yield* Effect.gen(function* () {
               const runtime = yield* Runtime
-              const owner = yield* runtime.execute(execution).pipe(Effect.fork)
+              const owner = yield* runtime.execute(execution).pipe(Effect.forkChild)
               yield* Deferred.await(entered)
               const duplicate = yield* runtime.execute(execution).pipe(
-                Effect.fork
+                Effect.forkChild
               )
               yield* realDelay(40)
 
@@ -225,16 +225,16 @@ describe.skipIf(process.platform !== "darwin" && process.platform !== "linux")(
                 Effect.sync(() => {
                   calls += 1
                 }).pipe(
-                  Effect.zipRight(Deferred.succeed(entered, undefined)),
-                  Effect.zipRight(Deferred.await(release)),
-                  Effect.zipRight(processReceipt(request))
+                  Effect.andThen(Deferred.succeed(entered, undefined)),
+                  Effect.andThen(Deferred.await(release)),
+                  Effect.andThen(processReceipt(request))
                 )
             })
             const execution = authority(workspace, "cancelled-claim-waiter")
 
             yield* Effect.gen(function* () {
               const runtime = yield* Runtime
-              const owner = yield* runtime.execute(execution).pipe(Effect.fork)
+              const owner = yield* runtime.execute(execution).pipe(Effect.forkChild)
               yield* Deferred.await(entered)
 
               const claimFile = join(
@@ -245,7 +245,7 @@ describe.skipIf(process.platform !== "darwin" && process.platform !== "linux")(
                   .digest("hex")}.lock`
               )
               const ownerBefore = readFileSync(claimFile, "utf8")
-              const waiter = yield* runtime.execute(execution).pipe(Effect.fork)
+              const waiter = yield* runtime.execute(execution).pipe(Effect.forkChild)
               yield* realDelay(40)
               const waiterExit = yield* Fiber.interrupt(waiter)
               const ownerAfter = readFileSync(claimFile, "utf8")
@@ -275,7 +275,7 @@ describe.skipIf(process.platform !== "darwin" && process.platform !== "linux")(
             run: (request) =>
               Effect.sync(() => {
                 calls += 1
-              }).pipe(Effect.zipRight(processReceipt(request)))
+              }).pipe(Effect.andThen(processReceipt(request)))
           })
           const execution = authority(workspace, "terminal-single-use")
 
@@ -305,7 +305,7 @@ describe.skipIf(process.platform !== "darwin" && process.platform !== "linux")(
             run: (request) =>
               Effect.sync(() => {
                 calls += 1
-              }).pipe(Effect.zipRight(processReceipt(request)))
+              }).pipe(Effect.andThen(processReceipt(request)))
           })
           const cases = (["running", "finalizing"] as const).map(
             (state, index) => ({

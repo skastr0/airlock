@@ -74,7 +74,7 @@ describe.skipIf(process.platform !== "darwin")(
           .toBe(true)
 
         const expectedCaseIds = new Set(
-          Schema.Literal(
+          Schema.Literals([
             "capture-observe",
             "managed-files",
             "structured-argv",
@@ -85,7 +85,7 @@ describe.skipIf(process.platform !== "darwin")(
             "bounded-control",
             "native-rewrite",
             "native-create"
-          ).literals
+          ]).literals
         )
         const observedCaseIds = new Set(
           evidence.outcomes.map(({ caseId }) =>

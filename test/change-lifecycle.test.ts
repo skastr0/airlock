@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest"
-import { BunContext } from "@effect/platform-bun"
+import { BunServices } from "@effect/platform-bun"
 import { Context, Effect, Layer, ManagedRuntime } from "effect"
 import { mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
@@ -16,7 +16,7 @@ type ChangeService = Context.Tag.Service<typeof Change>
 const world = async (body: (w: { root: string, home: string, change: ChangeService, hold: Context.Tag.Service<typeof Hold> }) => Promise<void>) => {
   const root = await realpath(await mkdtemp(path.join(tmpdir(), "change-lifecycle-"))), home = path.join(root, "home")
   const runtime = ManagedRuntime.make(ChangeLive.pipe(Layer.provideMerge(HoldLayer), Layer.provideMerge(ExclusiveRenameTestLive),
-    Layer.provideMerge(LedgerLive), Layer.provideMerge(AirlockHome.layer(home)), Layer.provideMerge(BunContext.layer)))
+    Layer.provideMerge(LedgerLive), Layer.provideMerge(AirlockHome.layer(home)), Layer.provideMerge(BunServices.layer)))
   try { await body({ root, home, ...await runtime.runPromise(Effect.all({ change: Change, hold: Hold })) }) }
   finally { await runtime.dispose(); await rm(root, { recursive: true, force: true }) }
 }
@@ -73,7 +73,7 @@ describe("explicit snapshot lifecycle", () => {
     const p = await proposal(root, change); await run(change.cancel(p.id))
     const digest = (await run(change.inventory())).rows[0]!.retirementDigest!
     const [page, a, b] = await Promise.all([
-      run(change.content({ id: p.id, side: "after", path: "" }).pipe(Effect.either)),
+      run(change.content({ id: p.id, side: "after", path: "" }).pipe(Effect.result)),
       run(change.retire({ id: p.id, expectedDigest: digest })), run(change.retire({ id: p.id, expectedDigest: digest }))
     ])
     if (page._tag === "Right") expect(Buffer.from(page.right.dataBase64, "base64").toString()).toBe("new")

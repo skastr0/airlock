@@ -1,4 +1,4 @@
-import { Context, Effect, Either, Layer, Schema } from "effect"
+import { Context, Effect, Layer, Result, Schema, Semaphore } from "effect"
 import { createHash, randomUUID } from "node:crypto"
 import { constants } from "node:fs"
 import {
@@ -19,15 +19,15 @@ import { makeExclusiveFileLock } from "./platform/ExclusiveFileLock.ts"
  * A realm-wide macOS descriptor lease serializes both readers and writers
  * across runtimes and processes.
  */
-export class Ledger extends Context.Tag("airlock/Ledger")<
+export class Ledger extends Context.Service<
   Ledger,
   {
     readonly record: (entry: LedgerEntry) => Effect.Effect<void, LedgerError>
     readonly entries: Effect.Effect<ReadonlyArray<LedgerEntry>, LedgerError>
   }
->() {}
+>()("airlock/Ledger") {}
 
-const LedgerFilesystemOperation = Schema.Literal(
+const LedgerFilesystemOperation = Schema.Literals([
   "lock",
   "append",
   "close",
@@ -37,7 +37,7 @@ const LedgerFilesystemOperation = Schema.Literal(
   "sync-directory",
   "sync-file",
   "truncate"
-)
+])
 type LedgerFilesystemOperation = typeof LedgerFilesystemOperation.Type
 
 export class LedgerFilesystemError extends Schema.TaggedError<LedgerFilesystemError>()(
@@ -94,10 +94,10 @@ export type LedgerError =
   | LedgerDecodeError
   | LedgerTailQuarantined
 
-const encodeEntry = Schema.encode(Schema.parseJson(LedgerEntry))
-const decodeEntry = Schema.decode(Schema.parseJson(LedgerEntry))
-const encodeQuarantine = Schema.encode(
-  Schema.parseJson(LedgerQuarantineEvidence)
+const encodeEntry = Schema.encodeEffect(Schema.fromJsonString(LedgerEntry))
+const decodeEntry = Schema.decodeEffect(Schema.fromJsonString(LedgerEntry))
+const encodeQuarantine = Schema.encodeEffect(
+  Schema.fromJsonString(LedgerQuarantineEvidence)
 )
 
 const reasonOf = (cause: unknown) =>
@@ -426,9 +426,9 @@ const normalizeTail = Effect.fnUntraced(function* (ledgerFile: string) {
     ledgerFile,
     split.tail,
     split.completeLines.length + 1
-  ).pipe(Effect.either)
+  ).pipe(Effect.result)
 
-  if (Either.isRight(tail)) {
+  if (Result.isSuccess(tail)) {
     yield* appendDurably(ledgerFile, Buffer.from("\n"))
     return
   }
@@ -442,7 +442,7 @@ export const LedgerLive = Layer.effect(
     const { ledgerFile } = yield* AirlockHome
     const lockRoot = dirname(ledgerFile)
     const lockFile = `${ledgerFile}.lock`
-    const localMutex = yield* Effect.makeSemaphore(1)
+    const localMutex = yield* Semaphore.make(1)
     const lock = makeExclusiveFileLock<LedgerFilesystemError>({
       root: lockRoot,
       active: lockFile,
@@ -483,8 +483,8 @@ export const LedgerLive = Layer.effect(
         ledgerFile,
         split.tail,
         split.completeLines.length + 1
-      ).pipe(Effect.either)
-      if (Either.isRight(tail)) {
+      ).pipe(Effect.result)
+      if (Result.isSuccess(tail)) {
         yield* appendDurably(ledgerFile, Buffer.from("\n"))
         return [...entries, tail.right]
       }

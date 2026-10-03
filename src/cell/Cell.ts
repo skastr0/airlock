@@ -33,14 +33,14 @@ import {
  * closure. The active capability report names the backend's exact limits.
  */
 
-export const CellNetwork = Schema.Literal("deny", "allow")
+export const CellNetwork = Schema.Literals(["deny", "allow"])
 export type CellNetwork = typeof CellNetwork.Type
 
 /** Host-native profiles fence writes but deliberately retain ambient host reads. */
 export const CellReadAuthority = Schema.Literal("ambient-host-read")
 export type CellReadAuthority = typeof CellReadAuthority.Type
 
-export const WorkspaceEntryKind = Schema.Literal("file", "directory", "symlink", "other")
+export const WorkspaceEntryKind = Schema.Literals(["file", "directory", "symlink", "other"])
 export type WorkspaceEntryKind = typeof WorkspaceEntryKind.Type
 
 export class WorkspaceEntryFingerprint extends Schema.Class<WorkspaceEntryFingerprint>(
@@ -62,7 +62,7 @@ export class WorkspaceFingerprint extends Schema.Class<WorkspaceFingerprint>(
   digest: Schema.String
 }) {}
 
-export const WorkspaceDeltaKind = Schema.Literal("created", "modified", "deleted")
+export const WorkspaceDeltaKind = Schema.Literals(["created", "modified", "deleted"])
 export type WorkspaceDeltaKind = typeof WorkspaceDeltaKind.Type
 
 /** A proposal only. Cell never applies it to the live workspace. */
@@ -96,7 +96,7 @@ export class CellRequest extends Schema.Class<CellRequest>("CellRequest")({
 export class CellExecutableBinding extends Schema.Class<CellExecutableBinding>(
   "CellExecutableBinding"
 )({
-  role: Schema.Literal("root", "descendant"),
+  role: Schema.Literals(["root", "descendant"]),
   requested: Schema.String,
   launch: Schema.String,
   allowedPaths: Schema.Array(Schema.String),
@@ -149,7 +149,7 @@ export interface CellRunOptions extends ProcessRunOptions {}
  * A native-contained execution candidate. Its only output is a private delta
  * proposal and drift evidence; Hold remains the unique live mutation owner.
  */
-export class Cell extends Context.Tag("airlock/Cell")<
+export class Cell extends Context.Service<
   Cell,
   {
     readonly run: (
@@ -161,7 +161,7 @@ export class Cell extends Context.Tag("airlock/Cell")<
       receipt: CellReceipt
     ) => Effect.Effect<ReadonlyArray<WorkspaceDrift>, WorkspaceFingerprintFailed>
   }
->() {}
+>()("airlock/Cell") {}
 
 const hash = (parts: ReadonlyArray<string | Uint8Array>) => {
   const digest = createHash("sha256")

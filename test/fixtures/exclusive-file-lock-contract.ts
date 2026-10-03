@@ -1,6 +1,6 @@
 import { Schema } from "effect"
 
-export const LockContenderPhase = Schema.Literal("enter", "exit")
+export const LockContenderPhase = Schema.Literals(["enter", "exit"])
 export type LockContenderPhase = typeof LockContenderPhase.Type
 
 export class LockContenderEvent extends Schema.Class<LockContenderEvent>(
@@ -30,8 +30,8 @@ export class LockContenderFailed extends Schema.TaggedClass<LockContenderFailed>
   reason: Schema.String
 }) {}
 
-export const LockContenderResult = Schema.Union(
+export const LockContenderResult = Schema.Union([
   LockContenderCompleted,
   LockContenderFailed
-)
+])
 export type LockContenderResult = typeof LockContenderResult.Type

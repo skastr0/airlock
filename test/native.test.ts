@@ -1,7 +1,6 @@
-import { FileSystem, Path } from "@effect/platform"
-import { BunContext } from "@effect/platform-bun"
+import { Effect, FileSystem, Layer, Path } from "effect"
+import { BunServices } from "@effect/platform-bun"
 import { describe, expect, it } from "@effect/vitest"
-import { Effect, Layer } from "effect"
 import { readFile } from "node:fs/promises"
 import * as AirlockHome from "../src/AirlockHome.ts"
 import { ActId } from "../src/domain.ts"
@@ -23,7 +22,7 @@ const layersFor = (home: string, workspace: string) =>
     Layer.provideMerge(HoldTestLive),
     Layer.provideMerge(LedgerLive),
     Layer.provideMerge(AirlockHome.layer(home)),
-    Layer.provideMerge(BunContext.layer)
+    Layer.provideMerge(BunServices.layer)
   )
 
 const world = <A, E>(body: (args: {
@@ -46,7 +45,7 @@ const world = <A, E>(body: (args: {
       const hold = yield* Effect.provide(Hold, layer)
       return yield* body({ fs, path, workspace, native, hold })
     })
-  ).pipe(Effect.provide(BunContext.layer))
+  ).pipe(Effect.provide(BunServices.layer))
 
 describe("NativeFileSystem — scoped native actions", () => {
   it.effect("denies lexical traversal before touching the filesystem", () =>

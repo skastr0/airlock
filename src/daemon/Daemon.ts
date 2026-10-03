@@ -48,7 +48,7 @@ export class DaemonConfigurationInvalid
   extends Schema.TaggedError<DaemonConfigurationInvalid>()(
     "DaemonConfigurationInvalid",
     {
-      field: Schema.Literal("intervalMillis", "reapOlderThanMillis"),
+      field: Schema.Literals(["intervalMillis", "reapOlderThanMillis"]),
       reason: Schema.String
     }
   ) {}
@@ -71,11 +71,11 @@ export class DaemonOperationSkipped
   extends Schema.TaggedClass<DaemonOperationSkipped>()(
     "DaemonOperationSkipped",
     {
-      operation: Schema.Literal("reap", "hold-expiry"),
-      reason: Schema.Literal(
+      operation: Schema.Literals(["reap", "hold-expiry"]),
+      reason: Schema.Literals([
         "reap-retention-not-configured",
         "no-independent-terminal-authority"
-      )
+      ])
     }
   ) {}
 
@@ -89,7 +89,7 @@ export class DaemonTickReport extends Schema.Class<DaemonTickReport>(
   attempted: Schema.Array(EmissionId),
   committed: Schema.Array(EmissionId),
   failed: Schema.Array(DaemonDispatchFailure),
-  waiting: Schema.NonNegativeInt,
+  waiting: Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
   reaped: Schema.Array(ActId),
   skipped: Schema.optionalWith(Schema.Array(DaemonOperationSkipped), {
     default: () => []
@@ -138,7 +138,7 @@ const validateRunConfig = (
   config: DaemonRunConfig
 ): Effect.Effect<void, DaemonConfigurationInvalid> =>
   validateTickConfig(config).pipe(
-    Effect.zipRight(
+    Effect.andThen(
       Number.isSafeInteger(config.intervalMillis) && config.intervalMillis > 0
         ? Effect.void
         : Effect.fail(new DaemonConfigurationInvalid({
@@ -232,7 +232,7 @@ const tickWithServices = (
       if (scheduleDue) {
         const now = yield* DateTime.now
         selected = authorized.filter((emission) =>
-          DateTime.lessThanOrEqualTo(emission.holdUntil, now)
+          DateTime.isLessThanOrEqualTo(emission.holdUntil, now)
         )
       }
       state.waiting = authorized.length - selected.length
@@ -260,7 +260,7 @@ const tickWithServices = (
         yield* verify(config.seal)
         const result = yield* outbox
           .commit(emission.id, provenance)
-          .pipe(Effect.either)
+          .pipe(Effect.result)
         if (result._tag === "Right") {
           state.committed.push(emission.id)
         } else {
@@ -315,9 +315,9 @@ const runWithServices = (
   hold: HoldService
 ): Effect.Effect<never, DaemonTickError> =>
   validateRunConfig(config).pipe(
-    Effect.zipRight(
+    Effect.andThen(
       tickWithServices(config, outbox, hold).pipe(
-        Effect.zipRight(Effect.sleep(config.intervalMillis)),
+        Effect.andThen(Effect.sleep(config.intervalMillis)),
         Effect.forever
       )
     )
@@ -341,7 +341,7 @@ export const startDaemon = (config: DaemonRunConfig) =>
   Effect.forkScoped(runDaemon(config))
 
 /** A reusable in-process service for integrations that already own one Layer. */
-export class Daemon extends Context.Tag("airlock/Daemon")<
+export class Daemon extends Context.Service<
   Daemon,
   {
     readonly tick: (
@@ -351,7 +351,7 @@ export class Daemon extends Context.Tag("airlock/Daemon")<
       config: DaemonRunConfig
     ) => Effect.Effect<never, DaemonTickError>
   }
->() {}
+>()("airlock/Daemon") {}
 
 const makeDaemon = Effect.gen(function* () {
   const outbox = yield* Outbox

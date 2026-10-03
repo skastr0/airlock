@@ -1,5 +1,4 @@
-import { Path } from "@effect/platform"
-import { Cause, Context, DateTime, Effect, Exit, Layer, Schema } from "effect"
+import { Cause, Context, DateTime, Effect, Exit, Layer, Path, Schema } from "effect"
 import { createHash } from "node:crypto"
 import {
   lstat,
@@ -71,14 +70,14 @@ import { makeExclusiveFileLock } from "../platform/ExclusiveFileLock.ts"
  * an endpoint. The only live writes are delegated to Hold.
  */
 
-export const RuntimeProfile = Schema.Literal("compatibility", "native-contained", "vm-enclosed")
+export const RuntimeProfile = Schema.Literals(["compatibility", "native-contained", "vm-enclosed"])
 export type RuntimeProfile = typeof RuntimeProfile.Type
 
 export class RuntimeConfig extends Schema.Class<RuntimeConfig>("RuntimeConfig")({
   workspace: Schema.String,
   profile: Schema.optionalWith(RuntimeProfile, { default: () => "compatibility" as const }),
   runJournalDirectory: Schema.optional(Schema.String),
-  environment: Schema.optionalWith(Schema.Record({ key: Schema.String, value: Schema.String }), {
+  environment: Schema.optionalWith(Schema.Record(Schema.String, Schema.String), {
     default: () => ({})
   })
 }) {}
@@ -139,7 +138,7 @@ export class RuntimeCellWorkspaceHeld extends Schema.TaggedClass<RuntimeCellWork
     nodeId: Schema.String,
     privateWorkspace: Schema.String,
     actId: ActId,
-    at: Schema.DateTimeUtc
+    at: Schema.DateTimeUtcFromString
   }
 ) {}
 
@@ -149,7 +148,7 @@ export class RuntimeCellWorkspaceAbsent extends Schema.TaggedClass<RuntimeCellWo
     state: Schema.Literal("absent"),
     nodeId: Schema.String,
     privateWorkspace: Schema.String,
-    at: Schema.DateTimeUtc
+    at: Schema.DateTimeUtcFromString
   }
 ) {}
 
@@ -161,23 +160,23 @@ export class RuntimeCellWorkspaceRetentionFailed extends Schema.TaggedClass<Runt
     privateWorkspace: Schema.String,
     errorTag: Schema.String,
     reason: Schema.String,
-    at: Schema.DateTimeUtc
+    at: Schema.DateTimeUtcFromString
   }
 ) {}
 
-export const RuntimeLifecycleReceipt = Schema.Union(
+export const RuntimeLifecycleReceipt = Schema.Union([
   RuntimeCellWorkspaceHeld,
   RuntimeCellWorkspaceAbsent,
   RuntimeCellWorkspaceRetentionFailed
-)
+])
 export type RuntimeLifecycleReceipt = typeof RuntimeLifecycleReceipt.Type
 
-export const RuntimeProcessOutcome = Schema.Literal(
+export const RuntimeProcessOutcome = Schema.Literals([
   "exited",
   "timed-out",
   "output-limit",
   "cancelled"
-)
+])
 export type RuntimeProcessOutcome = typeof RuntimeProcessOutcome.Type
 
 /**
@@ -246,12 +245,12 @@ export class RuntimeOutboxRecoveryEvidence extends Schema.TaggedClass<RuntimeOut
   }
 ) {}
 
-export const RuntimeRecoveryEvidence = Schema.Union(
+export const RuntimeRecoveryEvidence = Schema.Union([
   RuntimeHoldRecoveryEvidence,
   RuntimeMoveRecoveryEvidence,
   RuntimeMkdirRecoveryEvidence,
   RuntimeOutboxRecoveryEvidence
-)
+])
 export type RuntimeRecoveryEvidence = typeof RuntimeRecoveryEvidence.Type
 
 export class RuntimeRun extends Schema.Class<RuntimeRun>("RuntimeRun")({
@@ -260,9 +259,9 @@ export class RuntimeRun extends Schema.Class<RuntimeRun>("RuntimeRun")({
     { default: () => "airlock/runtime-run/v1" as const }
   ),
   planId: Schema.String,
-  state: Schema.Literal("succeeded", "failed", "partial"),
-  startedAt: Schema.DateTimeUtc,
-  finishedAt: Schema.DateTimeUtc,
+  state: Schema.Literals(["succeeded", "failed", "partial"]),
+  startedAt: Schema.DateTimeUtcFromString,
+  finishedAt: Schema.DateTimeUtcFromString,
   receipts: Schema.Array(Receipt),
   artifacts: Schema.Array(RuntimeArtifact),
   processes: Schema.optionalWith(Schema.Array(RuntimeProcessEvidence), {
@@ -281,16 +280,16 @@ export class RuntimeRunSnapshot extends Schema.Class<RuntimeRunSnapshot>(
 )({
   schemaVersion: Schema.Literal("airlock/runtime-run-snapshot/v1"),
   planId: Schema.String,
-  state: Schema.Literal(
+  state: Schema.Literals([
     "running",
     "finalizing",
     "succeeded",
     "failed",
     "partial",
     "cancelled"
-  ),
-  startedAt: Schema.DateTimeUtc,
-  observedAt: Schema.DateTimeUtc,
+  ]),
+  startedAt: Schema.DateTimeUtcFromString,
+  observedAt: Schema.DateTimeUtcFromString,
   sequence: Schema.Number,
   receipts: Schema.Array(Receipt),
   artifacts: Schema.Array(Artifact),
@@ -301,7 +300,7 @@ export class RuntimeRunSnapshot extends Schema.Class<RuntimeRunSnapshot>(
 export class RuntimeRunJournalError extends Schema.TaggedError<RuntimeRunJournalError>()(
   "RuntimeRunJournalError",
   {
-    operation: Schema.Literal("record", "inspect", "list", "decode"),
+    operation: Schema.Literals(["record", "inspect", "list", "decode"]),
     path: Schema.String,
     reason: Schema.String
   }
@@ -312,7 +311,7 @@ export class RuntimeRunNotFound extends Schema.TaggedError<RuntimeRunNotFound>()
   { planId: Schema.String }
 ) {}
 
-export class RuntimeRunJournal extends Context.Tag("airlock/RuntimeRunJournal")<
+export class RuntimeRunJournal extends Context.Service<
   RuntimeRunJournal,
   {
     readonly record: (
@@ -326,7 +325,7 @@ export class RuntimeRunJournal extends Context.Tag("airlock/RuntimeRunJournal")<
       RuntimeRunJournalError
     >
   }
->() {}
+>()("airlock/RuntimeRunJournal") {}
 
 export class RuntimePlanInvalid extends Schema.TaggedError<RuntimePlanInvalid>()(
   "RuntimePlanInvalid",
@@ -371,11 +370,11 @@ export class RuntimeExecutionClaimRejected extends Schema.TaggedError<RuntimeExe
   "RuntimeExecutionClaimRejected",
   {
     planId: Schema.String,
-    operation: Schema.Literal(
+    operation: Schema.Literals([
       "persistent-journal-required",
       "acquire",
       "replay"
-    ),
+    ]),
     priorState: Schema.optional(RuntimeRunSnapshot.fields.state),
     priorSequence: Schema.optional(Schema.Number),
     reason: Schema.String
@@ -386,13 +385,13 @@ export class RuntimeProcessFailure extends Schema.TaggedError<RuntimeProcessFail
   "RuntimeProcessFailure",
   {
     nodeId: Schema.String,
-    outcome: Schema.Literal(
+    outcome: Schema.Literals([
       "nonzero-exit",
       "signal",
       "timed-out",
       "output-limit",
       "cancelled"
-    ),
+    ]),
     receipt: ProcessReceipt,
     outputArtifacts: Schema.Array(ArtifactId)
   }
@@ -438,7 +437,7 @@ export type RuntimeError =
   | RuntimeArtifactClaimMismatch
   | RuntimeRecoveryRequired
 
-export class Runtime extends Context.Tag("airlock/Runtime")<
+export class Runtime extends Context.Service<
   Runtime,
   {
     readonly execute: (
@@ -461,7 +460,7 @@ export class Runtime extends Context.Tag("airlock/Runtime")<
       RuntimeRunJournalError
     >
   }
->() {}
+>()("airlock/Runtime") {}
 
 export const RuntimeConfigLive = (config: RuntimeConfig) =>
   Layer.succeed(Context.GenericTag<RuntimeConfig>("airlock/RuntimeConfig"), config)
@@ -469,11 +468,11 @@ export const RuntimeConfigLive = (config: RuntimeConfig) =>
 const RuntimeConfigTag = Context.GenericTag<RuntimeConfig>("airlock/RuntimeConfig")
 const text = new TextEncoder()
 const textDecoder = new TextDecoder("utf-8", { fatal: true })
-const encodeRunSnapshot = Schema.encode(
-  Schema.parseJson(RuntimeRunSnapshot)
+const encodeRunSnapshot = Schema.encodeEffect(
+  Schema.fromJsonString(RuntimeRunSnapshot)
 )
-const decodeRunSnapshot = Schema.decode(
-  Schema.parseJson(RuntimeRunSnapshot)
+const decodeRunSnapshot = Schema.decodeEffect(
+  Schema.fromJsonString(RuntimeRunSnapshot)
 )
 
 const journalReason = (cause: unknown) =>
@@ -841,7 +840,7 @@ const encodeStructured = <A, I>(
   nodeId: NodeId,
   operation: string
 ) =>
-  Schema.encode(Schema.parseJson(schema))(value).pipe(
+  Schema.encodeEffect(Schema.fromJsonString(schema))(value).pipe(
     Effect.map((json) => text.encode(json)),
     Effect.mapError((cause) => new RuntimeNodeFailure({
       nodeId,
@@ -1616,7 +1615,7 @@ const make = Effect.gen(function* () {
         )
       }
 
-      const executed = yield* execution.pipe(Effect.either)
+      const executed = yield* execution.pipe(Effect.result)
       if (executed._tag === "Left") {
         const evidenced = evidencedProcessFailure(executed.left)
         if (evidenced !== undefined) {
@@ -2024,7 +2023,7 @@ const make = Effect.gen(function* () {
             method: node.method,
             headers: node.headers,
             ...(body === undefined ? {} : { body })
-          }), node.holdMillis, dispatch?.stagedAuthorization).pipe(Effect.either)
+          }), node.holdMillis, dispatch?.stagedAuthorization).pipe(Effect.result)
           if (stagedResult._tag === "Left") {
             if (stagedResult.left._tag === "OutboxRecoveryRequired") {
               recovery.push(new RuntimeOutboxRecoveryEvidence({
@@ -2069,7 +2068,7 @@ const make = Effect.gen(function* () {
               dispatchClass: dispatch.dispatchClass,
               endpoint: dispatch.endpoint
             })
-          ).pipe(Effect.either)
+          ).pipe(Effect.result)
           if (committedResult._tag === "Left") {
             if (committedResult.left._tag === "OutboxRecoveryRequired") {
               recovery.push(new RuntimeOutboxRecoveryEvidence({
@@ -2131,7 +2130,7 @@ const make = Effect.gen(function* () {
       cellWorkspaces.values(),
       (registration) =>
         hold.retireRuntimePrivate(registration.privateWorkspace).pipe(
-          Effect.either,
+          Effect.result,
           Effect.flatMap((result) => {
             if (result._tag === "Right") {
               return Effect.succeed(new RuntimeCellWorkspaceHeld({
@@ -2283,7 +2282,7 @@ const make = Effect.gen(function* () {
         const retainedBinding = yield* retainedBindingFor(
           authority,
           node
-        ).pipe(Effect.either)
+        ).pipe(Effect.result)
         if (retainedBinding._tag === "Left") {
           receipts.push(yield* nodeReceipt(
             plan,
@@ -2333,7 +2332,7 @@ const make = Effect.gen(function* () {
             causeTag: error._tag,
             reason: errorReason(error)
           })),
-          Effect.either
+          Effect.result
         )
         const handles = revalidated._tag === "Right"
           ? revalidated.right.handles
@@ -2349,7 +2348,7 @@ const make = Effect.gen(function* () {
             recovery,
             handles,
             dispatchByNode.get(node.id)
-          ).pipe(Effect.either)
+          ).pipe(Effect.result)
         const materialized = [...artifacts.keys()].filter(
           (id) => !artifactsBefore.has(id)
         )
@@ -2447,7 +2446,7 @@ const make = Effect.gen(function* () {
         )
         if (Exit.isFailure(runExit)) {
           if (
-            Cause.isInterruptedOnly(runExit.cause) &&
+            Cause.hasInterruptsOnly(runExit.cause) &&
             startedAt !== undefined
           ) {
             for (const node of ordered) {

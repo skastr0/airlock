@@ -1,4 +1,4 @@
-import { BunContext } from "@effect/platform-bun"
+import { BunServices } from "@effect/platform-bun"
 import { describe, expect, it } from "@effect/vitest"
 import { DateTime, Deferred, Effect, Fiber, Layer } from "effect"
 import { createHash } from "node:crypto"
@@ -46,7 +46,7 @@ const HoldTestLive = HoldLayer.pipe(
 
 const node = (id: string) => NodeId.make(id)
 const artifact = (id: string) => ArtifactId.make(id)
-const now = () => DateTime.unsafeMake(new Date("2026-07-29T00:00:00.000Z"))
+const now = () => DateTime.makeUnsafe(new Date("2026-07-29T00:00:00.000Z"))
 const impossibleCell = Layer.succeed(Cell, Cell.of({
   run: () => Effect.die("compatibility never calls Cell.run"),
   revalidate: () => Effect.die("compatibility never calls Cell.revalidate")
@@ -77,7 +77,7 @@ const compatibilityLayer = (
     workspace,
     runJournalDirectory: join(home, "runs")
   }))),
-  Layer.provideMerge(BunContext.layer)
+  Layer.provideMerge(BunServices.layer)
 )
 
 const nativeLayer = (
@@ -95,7 +95,7 @@ const nativeLayer = (
     profile: "native-contained",
     runJournalDirectory: join(home, "runs")
   }))),
-  Layer.provideMerge(BunContext.layer)
+  Layer.provideMerge(BunServices.layer)
 )
 
 const execute = (
@@ -361,7 +361,7 @@ describe("runtime Plan interpreter", () => {
             ProcessRunner.of({
               run: () =>
                 Deferred.succeed(started, undefined).pipe(
-                  Effect.zipRight(Effect.never)
+                  Effect.andThen(Effect.never)
                 )
             })
           )
@@ -406,7 +406,7 @@ describe("runtime Plan interpreter", () => {
           yield* Effect.gen(function* () {
             const runtime = yield* Runtime
             const fiber = yield* runtime.execute(authority, [input]).pipe(
-              Effect.fork
+              Effect.forkChild
             )
             yield* Deferred.await(started)
             const exit = yield* Fiber.interrupt(fiber)
@@ -825,8 +825,8 @@ describe("native-contained runtime", () => {
             overwrite: unused,
             retireRuntimePrivate: (target) =>
               Deferred.succeed(retentionStarted, target).pipe(
-                Effect.zipRight(Deferred.await(releaseRetention)),
-                Effect.zipRight(
+                Effect.andThen(Deferred.await(releaseRetention)),
+                Effect.andThen(
                   Effect.fail(
                     new HoldFilesystemError({
                       operation: "retain runtime-private workspace",
@@ -875,7 +875,7 @@ describe("native-contained runtime", () => {
                 cellProfile: "native-contained"
               })
             ])
-            const fiber = yield* runtime.execute(authority).pipe(Effect.fork)
+            const fiber = yield* runtime.execute(authority).pipe(Effect.forkChild)
             const privateWorkspace = yield* Deferred.await(retentionStarted)
             const during = yield* runtime.inspect(
               authority.admission.plan.id
@@ -976,7 +976,7 @@ describe("native-contained runtime", () => {
               cellProfile: "native-contained"
             })
           ])
-          const fiber = yield* runtime.execute(authority).pipe(Effect.fork)
+          const fiber = yield* runtime.execute(authority).pipe(Effect.forkChild)
           const privateWorkspace = yield* Deferred.await(ready)
           const exit = yield* Fiber.interrupt(fiber)
           const hold = yield* Hold

@@ -41,7 +41,7 @@ export class SealedCatalogExportFailed
     "SealedCatalogExportFailed",
     {
       name: Schema.String,
-      reason: Schema.Literal("duplicate-export", "native-shadow")
+      reason: Schema.Literals(["duplicate-export", "native-shadow"])
     }
   ) {}
 
@@ -56,12 +56,12 @@ export class LegacyToolDefinitionTamper
     }
   ) {}
 
-export const LegacyToolDefinitionPathReason = Schema.Literal(
+export const LegacyToolDefinitionPathReason = Schema.Literals([
   "symlink",
   "not-directory",
   "path-component-not-directory",
   "changed-during-scan"
-)
+])
 export type LegacyToolDefinitionPathReason =
   typeof LegacyToolDefinitionPathReason.Type
 
@@ -81,7 +81,7 @@ export class LegacyToolDefinitionReadFailed
     "LegacyToolDefinitionReadFailed",
     {
       location: ToolDefinitionLocation,
-      operation: Schema.Literal("inspect", "list", "reinspect"),
+      operation: Schema.Literals(["inspect", "list", "reinspect"]),
       reason: Schema.String
     }
   ) {}
@@ -371,7 +371,7 @@ export const sealedTools = (
   LegacyToolDefinitionError | SealedCatalogLoadError
 > =>
   assertNoLegacyToolDefinitions(workspace, options).pipe(
-    Effect.zipRight(loadVerifiedCatalog(
+    Effect.andThen(loadVerifiedCatalog(
       seal,
       options.nativeActionNames ?? new Set(
         NativeActionCatalog.map((action) => action.name)

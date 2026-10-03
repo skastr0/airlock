@@ -1,7 +1,6 @@
-import { FileSystem, Path } from "@effect/platform"
-import { BunContext } from "@effect/platform-bun"
+import { DateTime, Effect, FileSystem, Layer, Path, Schema } from "effect"
+import { BunServices } from "@effect/platform-bun"
 import { describe, expect, it } from "@effect/vitest"
-import { DateTime, Effect, Layer, Schema } from "effect"
 import { spawn, type ChildProcess } from "node:child_process"
 import { existsSync } from "node:fs"
 import {
@@ -26,7 +25,7 @@ import { LedgerEntry } from "../src/domain.ts"
 const layerFor = (home: string) =>
   LedgerLive.pipe(
     Layer.provideMerge(AirlockHome.layer(home)),
-    Layer.provideMerge(BunContext.layer)
+    Layer.provideMerge(BunServices.layer)
   )
 
 const world = <A, E>(
@@ -46,7 +45,7 @@ const world = <A, E>(
       const ledger = yield* Effect.provide(Ledger, layerFor(home))
       return yield* body({ ledger, fs, path, home })
     })
-  ).pipe(Effect.provide(BunContext.layer))
+  ).pipe(Effect.provide(BunServices.layer))
 
 const receipt = (ref: string) =>
   Effect.map(DateTime.now, (at) =>
@@ -58,9 +57,9 @@ const receipt = (ref: string) =>
     })
   )
 
-const encodeReceipt = Schema.encode(Schema.parseJson(LedgerEntry))
-const decodeQuarantine = Schema.decode(
-  Schema.parseJson(LedgerQuarantineEvidence)
+const encodeReceipt = Schema.encodeEffect(Schema.fromJsonString(LedgerEntry))
+const decodeQuarantine = Schema.decodeEffect(
+  Schema.fromJsonString(LedgerQuarantineEvidence)
 )
 
 const encodedReceipt = (ref: string) =>
@@ -290,16 +289,15 @@ describe("Ledger — cross-process serialization", () => {
       await handle.close()
     `
     const writerSource = `
-      import { BunContext } from "@effect/platform-bun"
-      import { DateTime, Effect, Layer } from "effect"
-      import { writeFile } from "node:fs/promises"
+      import { BunServices } from "@effect/platform-bun"
+            import { writeFile } from "node:fs/promises"
       import * as AirlockHome from ${JSON.stringify(new URL("../src/AirlockHome.ts", import.meta.url).href)}
       import { Ledger, LedgerLive } from ${JSON.stringify(new URL("../src/Ledger.ts", import.meta.url).href)}
       import { LedgerEntry } from ${JSON.stringify(new URL("../src/domain.ts", import.meta.url).href)}
       const [home, readyFile] = process.argv.slice(1)
       const layer = LedgerLive.pipe(
         Layer.provideMerge(AirlockHome.layer(home)),
-        Layer.provideMerge(BunContext.layer)
+        Layer.provideMerge(BunServices.layer)
       )
       await Effect.runPromise(
         Effect.gen(function* () {
@@ -402,6 +400,6 @@ describe("AirlockHome — typed lifecycle", () => {
         expect(yield* fs.exists(home.holdDir)).toBe(true)
         expect(yield* fs.exists(home.outboxDir)).toBe(true)
       })
-    ).pipe(Effect.provide(BunContext.layer))
+    ).pipe(Effect.provide(BunServices.layer))
   )
 })

@@ -21,14 +21,14 @@ export class ProcessInputBytes extends Schema.Class<ProcessInputBytes>(
   bytes: Schema.Uint8Array
 }) {}
 
-export const ProcessInput = Schema.Union(
-  Schema.Literal("discard", "inherit"),
+export const ProcessInput = Schema.Union([
+  Schema.Literals(["discard", "inherit"]),
   ProcessInputText,
   ProcessInputBytes
-)
+])
 export type ProcessInput = typeof ProcessInput.Type
 
-export const ProcessOutput = Schema.Literal("capture", "inherit", "discard")
+export const ProcessOutput = Schema.Literals(["capture", "inherit", "discard"])
 export type ProcessOutput = typeof ProcessOutput.Type
 
 /** The stable command contract. `outputLimitBytes` is a combined capture cap. */
@@ -36,7 +36,7 @@ export class ProcessRequest extends Schema.Class<ProcessRequest>("ProcessRequest
   executable: Schema.String,
   args: Schema.Array(Schema.String),
   cwd: Schema.String,
-  env: Schema.Record({ key: Schema.String, value: Schema.String }),
+  env: Schema.Record(Schema.String, Schema.String),
   stdin: Schema.optionalWith(ProcessInput, { default: () => "discard" as const }),
   stdout: Schema.optionalWith(ProcessOutput, { default: () => "capture" as const }),
   stderr: Schema.optionalWith(ProcessOutput, { default: () => "capture" as const }),
@@ -55,8 +55,8 @@ export class ProcessReceipt extends Schema.Class<ProcessReceipt>("ProcessReceipt
   signal: Schema.NullOr(Schema.String),
   stdout: Schema.Uint8Array,
   stderr: Schema.Uint8Array,
-  startedAt: Schema.DateTimeUtc,
-  finishedAt: Schema.DateTimeUtc
+  startedAt: Schema.DateTimeUtcFromString,
+  finishedAt: Schema.DateTimeUtcFromString
 }) {}
 
 export class ProcessContractViolation extends Schema.TaggedError<ProcessContractViolation>()(
@@ -104,7 +104,7 @@ export interface ProcessRunOptions {
 }
 
 /** The typed process seam; Bun is confined to the adapter below. */
-export class ProcessRunner extends Context.Tag("airlock/ProcessRunner")<
+export class ProcessRunner extends Context.Service<
   ProcessRunner,
   {
     readonly run: (
@@ -112,7 +112,7 @@ export class ProcessRunner extends Context.Tag("airlock/ProcessRunner")<
       options?: ProcessRunOptions
     ) => Effect.Effect<ProcessReceipt, ProcessError>
   }
->() {}
+>()("airlock/ProcessRunner") {}
 
 const encoder = new TextEncoder()
 
@@ -171,7 +171,7 @@ const runNativeProcess = async (
 ): Promise<ProcessReceipt> => {
   assertRequest(request)
   if (options.signal?.aborted) {
-    const now = DateTime.unsafeMake(new Date())
+    const now = DateTime.makeUnsafe(new Date())
     const receipt = new ProcessReceipt({
       executable: request.executable,
       args: request.args,
@@ -187,7 +187,7 @@ const runNativeProcess = async (
     throw new ProcessCancelled({ receipt })
   }
 
-  const startedAt = DateTime.unsafeMake(new Date())
+  const startedAt = DateTime.makeUnsafe(new Date())
   const stdin =
     request.stdin === "inherit"
       ? "inherit"
@@ -401,7 +401,7 @@ const runNativeProcess = async (
     stdout,
     stderr,
     startedAt,
-    finishedAt: DateTime.unsafeMake(new Date())
+    finishedAt: DateTime.makeUnsafe(new Date())
   })
   switch (stopReason) {
     case "timeout":

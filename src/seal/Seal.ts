@@ -96,10 +96,10 @@ export class VerifiedSeal extends Schema.TaggedClass<VerifiedSeal>()(
   }
 ) {}
 
-export const SealContext = Schema.Union(UnsealedSeal, VerifiedSeal)
+export const SealContext = Schema.Union([UnsealedSeal, VerifiedSeal])
 export type SealContext = typeof SealContext.Type
 
-export const SealVerificationPhase = Schema.Literal(
+export const SealVerificationPhase = Schema.Literals([
   "environment",
   "seal",
   "identity",
@@ -109,11 +109,11 @@ export const SealVerificationPhase = Schema.Literal(
   "signature",
   "catalog",
   "reverify"
-)
+])
 export type SealVerificationPhase = typeof SealVerificationPhase.Type
 
 /** Fixed machine-readable reasons; raw OS/parser/crypto errors never escape. */
-export const SealVerificationReason = Schema.Literal(
+export const SealVerificationReason = Schema.Literals([
   "seal-path-blank",
   "seal-path-invalid",
   "source-mode",
@@ -144,7 +144,7 @@ export const SealVerificationReason = Schema.Literal(
   "tool-id-mismatch",
   "snapshot-mismatch",
   "installation-not-ready"
-)
+])
 export type SealVerificationReason = typeof SealVerificationReason.Type
 
 export class SealVerificationFailed
@@ -616,10 +616,10 @@ export const loadStartupSeal = (
   })
 
 
-export const InstalledGenerationMode = Schema.Literal(
+export const InstalledGenerationMode = Schema.Literals([
   "root-tenant",
   "local-same-user"
-)
+])
 export type InstalledGenerationMode = typeof InstalledGenerationMode.Type
 
 /** Required sealed entrypoints accept only their compile-bound publication mode. */

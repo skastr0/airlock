@@ -125,7 +125,7 @@ class ProofFailed extends Schema.TaggedClass<ProofFailed>("ProofFailed")(
   }
 ) {}
 
-const ProofResult = Schema.Union(ProofSucceeded, ProofFailed)
+const ProofResult = Schema.Union([ProofSucceeded, ProofFailed])
 type ProofResult = typeof ProofResult.Type
 
 class ProofUnavailable extends Schema.TaggedError<ProofUnavailable>(

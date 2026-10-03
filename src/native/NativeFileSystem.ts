@@ -1,5 +1,4 @@
-import { FileSystem } from "@effect/platform"
-import { Context, Effect, Either, Layer, Schema } from "effect"
+import { Context, Effect, FileSystem, Layer, Result, Schema } from "effect"
 import { lstat } from "node:fs/promises"
 import * as nodePath from "node:path"
 import {
@@ -38,7 +37,7 @@ export class NativeFilesystemConfig extends Schema.Class<NativeFilesystemConfig>
   "NativeFilesystemConfig"
 )({
   workspace: Schema.String,
-  maxGlobResults: Schema.optionalWith(Schema.Positive, { default: () => 1_000 })
+  maxGlobResults: Schema.optionalWith(Schema.Number.check(Schema.isGreaterThan(0)), { default: () => 1_000 })
 }) {}
 
 export class NativeFilesystemError extends Schema.TaggedError<NativeFilesystemError>()(
@@ -54,7 +53,7 @@ export class NativePathUnsupported extends Schema.TaggedError<NativePathUnsuppor
   "NativePathUnsupported",
   {
     path: Schema.String,
-    kind: Schema.Literal("symlink", "special"),
+    kind: Schema.Literals(["symlink", "special"]),
     reason: Schema.String
   }
 ) {}
@@ -83,7 +82,7 @@ export class NativeJsonInvalid extends Schema.TaggedError<NativeJsonInvalid>()(
   { path: Schema.String, reason: Schema.String }
 ) {}
 
-export const NativeEntryKind = Schema.Literal("file", "directory")
+export const NativeEntryKind = Schema.Literals(["file", "directory"])
 export type NativeEntryKind = typeof NativeEntryKind.Type
 
 export class NativeStat extends Schema.Class<NativeStat>("NativeStat")({
@@ -107,7 +106,7 @@ export class NativeWriteReceipt extends Schema.Class<NativeWriteReceipt>("Native
     target: Schema.String,
     kind: NativeEntryKind,
     previousHeld: Schema.Boolean,
-    at: Schema.DateTimeUtc,
+    at: Schema.DateTimeUtcFromString,
     metadata: Schema.Struct({
       device: Schema.Number,
       inode: Schema.optional(Schema.Number),
@@ -124,7 +123,7 @@ export class NativeMoveReceipt extends Schema.Class<NativeMoveReceipt>("NativeMo
     id: Schema.String,
     target: Schema.String,
     kind: NativeEntryKind,
-    at: Schema.DateTimeUtc
+    at: Schema.DateTimeUtcFromString
   })
 }) {}
 
@@ -176,7 +175,7 @@ export type NativeFilesystemErrorUnion =
   | LedgerError
   | TargetNotFound
 
-export class NativeFileSystem extends Context.Tag("airlock/NativeFileSystem")<
+export class NativeFileSystem extends Context.Service<
   NativeFileSystem,
   {
     readonly workspace: string
@@ -194,7 +193,7 @@ export class NativeFileSystem extends Context.Tag("airlock/NativeFileSystem")<
     readonly move: (source: string, destination: string) => Effect.Effect<NativeMoveReceipt, NativeFilesystemErrorUnion>
     readonly mkdir: (path: string, options?: { readonly parents?: boolean }) => Effect.Effect<NativeMkdirReceipt, NativeFilesystemErrorUnion>
   }
->() {}
+>()("airlock/NativeFileSystem") {}
 
 const reasonOf = (cause: unknown) => cause instanceof Error ? cause.message : String(cause)
 
@@ -256,8 +255,8 @@ const make = (config: NativeFilesystemConfig) =>
           // Preserve the host error long enough to distinguish a proposed
           // absent suffix from a permission or I/O failure.
           catch: (cause) => cause
-        }).pipe(Effect.either)
-        if (Either.isLeft(entry)) {
+        }).pipe(Effect.result)
+        if (Result.isFailure(entry)) {
           if (!isNotFound(entry.left)) {
             return yield* new NativeFilesystemError({
               operation: "lstat path",
@@ -518,8 +517,8 @@ const make = (config: NativeFilesystemConfig) =>
       Effect.all([checked(rawSource), mutationPath(rawDestination)]).pipe(
         Effect.flatMap(([source, destination]) => {
           return rejectOverlap(source.path, destination).pipe(
-            Effect.zipRight(admitDestinationParent(destination)),
-            Effect.zipRight(verifyTree(source)),
+            Effect.andThen(admitDestinationParent(destination)),
+            Effect.andThen(verifyTree(source)),
             Effect.flatMap((bytes) =>
               install(
                 destination,
@@ -539,8 +538,8 @@ const make = (config: NativeFilesystemConfig) =>
       Effect.all([checked(rawSource), mutationPath(rawDestination)]).pipe(
         Effect.flatMap(([source, destination]) => {
           return rejectOverlap(source.path, destination).pipe(
-            Effect.zipRight(admitDestinationParent(destination)),
-            Effect.zipRight(verifyTree(source)),
+            Effect.andThen(admitDestinationParent(destination)),
+            Effect.andThen(verifyTree(source)),
             Effect.flatMap((bytes) =>
               install(
                 destination,
@@ -600,8 +599,8 @@ const make = (config: NativeFilesystemConfig) =>
                 fs.makeDirectory(stage).pipe(
                   Effect.mapError(error("make private staged directory", stage))
                 )
-            ).pipe(Effect.either)
-            if (Either.isLeft(installed)) {
+            ).pipe(Effect.result)
+            if (Result.isFailure(installed)) {
               return yield* new NativeMkdirPartiallyApplied({
                 path: target,
                 failedDirectory: directory,

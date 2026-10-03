@@ -66,7 +66,7 @@ export const ResultExpectation = Schema.Struct({
 
 export const SuccessPredicate = Schema.Struct({
   programState: Schema.optionalWith(
-    Schema.Literal("succeeded", "failed", "partial"),
+    Schema.Literals(["succeeded", "failed", "partial"]),
     { default: () => "succeeded" as const }
   ),
   files: Schema.optionalWith(Schema.Array(FileExpectation), {
@@ -92,7 +92,7 @@ export const CorpusTaskSpec = Schema.Struct({
    * always overwritten with the canonical isolated workspace.
    */
   bindings: Schema.optionalWith(
-    Schema.Record({ key: Schema.String, value: Schema.Unknown }),
+    Schema.Record(Schema.String, Schema.Unknown),
     { default: () => ({}) }
   ),
   notes: Schema.optionalWith(Schema.Array(Schema.String), { default: () => [] }),
@@ -117,24 +117,24 @@ const CompactPlan = Schema.Struct({
 
 const ProgramFailure = Schema.Struct({
   action: Schema.String,
-  phase: Schema.Literal(
+  phase: Schema.Literals([
     "language",
     "admission",
     "native-filesystem",
     "runtime",
     "outbox",
     "contract"
-  ),
+  ]),
   causeTag: Schema.optional(Schema.String),
   reason: Schema.String
 })
 
 const AgentProgramReport = Schema.Struct({
   schemaVersion: Schema.Literal("airlock/program-run/v1"),
-  profile: Schema.Literal("compatibility", "native-contained", "vm-enclosed"),
+  profile: Schema.Literals(["compatibility", "native-contained", "vm-enclosed"]),
   workspace: Schema.String,
   result: Schema.Struct({
-    state: Schema.Literal("succeeded", "failed", "partial"),
+    state: Schema.Literals(["succeeded", "failed", "partial"]),
     result: Schema.Unknown,
     plans: Schema.Array(CompactPlan),
     counts: Schema.Struct({
@@ -156,7 +156,7 @@ type AgentProgramReport = typeof AgentProgramReport.Type
  * seams, `predicate` means the program ran clean but did not satisfy the task,
  * and `cli`/`harness` cover the two ways the measurement itself can fail.
  */
-export const FailureTaxonomy = Schema.Literal(
+export const FailureTaxonomy = Schema.Literals([
   "none",
   "parse",
   "contract",
@@ -167,7 +167,7 @@ export const FailureTaxonomy = Schema.Literal(
   "predicate",
   "cli",
   "harness"
-)
+])
 export type FailureTaxonomy = typeof FailureTaxonomy.Type
 
 export const PredicateCheck = Schema.Struct({
@@ -202,7 +202,7 @@ export class CorpusAttempt extends Schema.Class<CorpusAttempt>("CorpusAttempt")(
     workspace: Schema.String,
     airlockHome: Schema.String
   }),
-  outcome: Schema.Literal("passed", "failed"),
+  outcome: Schema.Literals(["passed", "failed"]),
   taxonomy: FailureTaxonomy,
   failure: Schema.optional(
     Schema.Struct({
@@ -220,7 +220,7 @@ export class CorpusAttempt extends Schema.Class<CorpusAttempt>("CorpusAttempt")(
     checks: Schema.Array(PredicateCheck)
   }),
   cli: Schema.Struct({
-    exitCode: Schema.Union(Schema.Number, Schema.Null),
+    exitCode: Schema.Union([Schema.Number, Schema.Null]),
     stdoutBytes: Schema.Number,
     stderrExcerpt: Schema.String
   })
@@ -252,7 +252,7 @@ export class CorpusReport extends Schema.Class<CorpusReport>("CorpusReport")({
       taskId: Schema.String,
       attempts: Schema.Number,
       passed: Schema.Number,
-      firstPassAttempt: Schema.Union(Schema.Number, Schema.Null),
+      firstPassAttempt: Schema.Union([Schema.Number, Schema.Null]),
       taxonomy: Schema.Array(
         Schema.Struct({ taxonomy: FailureTaxonomy, attempts: Schema.Number })
       ),
@@ -264,7 +264,7 @@ export class CorpusReport extends Schema.Class<CorpusReport>("CorpusReport")({
 export class CorpusHarnessFailed extends Schema.TaggedError<CorpusHarnessFailed>()(
   "CorpusHarnessFailed",
   {
-    phase: Schema.Literal("arguments", "task-spec", "fixture", "report"),
+    phase: Schema.Literals(["arguments", "task-spec", "fixture", "report"]),
     reason: Schema.String
   }
 ) {}

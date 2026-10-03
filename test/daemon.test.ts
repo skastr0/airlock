@@ -38,7 +38,7 @@ import {
 
 const sealDigest = `sha256:${"a".repeat(64)}` as BoxGrantSha256
 const otherDigest = `sha256:${"b".repeat(64)}` as BoxGrantSha256
-const instant = (value: string) => DateTime.unsafeMake(new Date(value))
+const instant = (value: string) => DateTime.makeUnsafe(new Date(value))
 const at = instant("2026-01-01T00:00:00.000Z")
 
 const seal = (daemonOps: ReadonlyArray<BoxGrantDaemonOp>) =>

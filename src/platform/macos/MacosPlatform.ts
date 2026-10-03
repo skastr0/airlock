@@ -1,4 +1,4 @@
-import { Context, Effect, Either, Layer } from "effect"
+import { Context, Effect, Layer, Result } from "effect"
 import { execFileSync } from "node:child_process"
 import {
   existsSync,
@@ -83,7 +83,7 @@ const mountedDevice = (path: string) =>
 
 const inspectVolume = (rawPath: string) =>
   requireMacos.pipe(
-    Effect.zipRight(
+    Effect.andThen(
       mountedDevice(rawPath).pipe(
         Effect.flatMap((device) => command(diskutil, ["info", "-plist", device])),
         Effect.flatMap((plist) => command(plutil, ["-convert", "json", "-o", "-", "-"], plist)),
@@ -133,7 +133,7 @@ const sameVolume = (left: string, right: string) =>
   )
 
 const vmEnclosureAvailability = requireMacos.pipe(
-  Effect.zipRight(
+  Effect.andThen(
     command(sysctl, ["-n", "kern.hv_support"]).pipe(
       Effect.match({
         onFailure: () => "unavailable" as const,
@@ -165,7 +165,7 @@ const vmEnclosureAvailability = requireMacos.pipe(
 )
 
 const capabilityReport = requireMacos.pipe(
-  Effect.zipRight(
+  Effect.andThen(
     vmEnclosureAvailability.pipe(
       Effect.map(
         (vmEnclosure) =>
@@ -286,9 +286,9 @@ const populateWorkspace = (
   if (!cloneEligible) return workspaceCommand(source, destination, "copy").pipe(Effect.as("copy" as const))
 
   return workspaceCommand(source, destination, "clone").pipe(
-    Effect.either,
+    Effect.result,
     Effect.flatMap((result) => {
-      if (Either.isRight(result)) return Effect.succeed("clone" as const)
+      if (Result.isSuccess(result)) return Effect.succeed("clone" as const)
       if (existsSync(destination)) return Effect.fail(result.left)
       return workspaceCommand(source, destination, "copy").pipe(Effect.as("copy" as const))
     })
@@ -354,7 +354,7 @@ const preparePrivateWorkspace = (request: PrivateWorkspaceRequest) =>
     )
   )
 
-export class MacosPlatform extends Context.Tag("airlock/MacosPlatform")<
+export class MacosPlatform extends Context.Service<
   MacosPlatform,
   {
     readonly capabilityReport: Effect.Effect<MacosCapabilityReport, MacosUnavailable>
@@ -372,7 +372,7 @@ export class MacosPlatform extends Context.Tag("airlock/MacosPlatform")<
       | WorkspacePreparationFailed
     >
   }
->() {}
+>()("airlock/MacosPlatform") {}
 
 export const MacosPlatformLive = Layer.succeed(MacosPlatform, {
   capabilityReport,

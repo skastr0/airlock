@@ -439,7 +439,7 @@ const preparePrivateWorkspace = (request: PrivateWorkspaceRequest): Effect.Effec
         })
 })
 
-export class LinuxPlatform extends Context.Tag("airlock/LinuxPlatform")<
+export class LinuxPlatform extends Context.Service<
   LinuxPlatform,
   {
     readonly runtime: Effect.Effect<LinuxRuntime, LinuxUnavailable>
@@ -448,7 +448,7 @@ export class LinuxPlatform extends Context.Tag("airlock/LinuxPlatform")<
       request: PrivateWorkspaceRequest
     ) => Effect.Effect<PreparedPrivateWorkspace, LinuxUnavailable | NativeWorkspaceError>
   }
->() {}
+>()("airlock/LinuxPlatform") {}
 
 export const LinuxPlatformLiveWith = (
   config: LinuxPlatformConfig = {}

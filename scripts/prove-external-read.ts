@@ -18,7 +18,7 @@ import { mkdtempSync, readFileSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { fileURLToPath } from "node:url"
-import { BunContext } from "@effect/platform-bun"
+import { BunServices } from "@effect/platform-bun"
 import { Effect, Layer, ManagedRuntime } from "effect"
 import {
   AdmissionPolicyV2,
@@ -132,7 +132,7 @@ const runProgram = async (
   const home = mkdtempSync(join(tmpdir(), "airlock-external-read-"))
   const workspace = mkdtempSync(join(tmpdir(), "airlock-external-work-"))
   const PlatformAndHome = airlockHomeLayer(home).pipe(
-    Layer.provideMerge(BunContext.layer)
+    Layer.provideMerge(BunServices.layer)
   )
   const LedgerLayer = LedgerLive.pipe(Layer.provideMerge(PlatformAndHome))
   const StateLayer = Layer.mergeAll(
@@ -173,7 +173,7 @@ const runProgram = async (
         ).pipe(Layer.provideMerge(runtimeLayer))
         const runner = yield* ProgramRunner.pipe(Effect.provide(programLayer))
         const run = yield* runner.run(new ProgramRequest({ source })).pipe(
-          Effect.either
+          Effect.result
         )
         const outbox = yield* Outbox
         const staged = yield* outbox.pending
@@ -373,7 +373,7 @@ const main = async () => {
               ]
             })
           })
-        ).pipe(Effect.flip, Effect.either)
+        ).pipe(Effect.flip, Effect.result)
       )
       const tag = smuggled._tag === "Right" ? smuggled.right._tag : "no-refusal"
       check(

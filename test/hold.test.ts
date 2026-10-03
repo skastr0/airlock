@@ -1,8 +1,7 @@
-import { FileSystem, Path } from "@effect/platform"
-import type { PlatformError } from "@effect/platform/Error"
-import { BunContext } from "@effect/platform-bun"
+import { Context, Effect, FileSystem, Layer, Path } from "effect"
+import type { PlatformError } from "effect/PlatformError"
+import { BunServices } from "@effect/platform-bun"
 import { describe, expect, it } from "@effect/vitest"
-import { Context, Effect, Layer } from "effect"
 import { utimes } from "node:fs/promises"
 import { fileURLToPath } from "node:url"
 import * as AirlockHome from "../src/AirlockHome.ts"
@@ -23,7 +22,7 @@ const layersFor = (home: string) =>
     Layer.provideMerge(ExclusiveRenameTestLive),
     Layer.provideMerge(LedgerLive),
     Layer.provideMerge(AirlockHome.layer(home)),
-    Layer.provideMerge(BunContext.layer)
+    Layer.provideMerge(BunServices.layer)
   )
 
 interface World {
@@ -44,7 +43,7 @@ const world = <A, E>(body: (ctx: World) => Effect.Effect<A, E>) =>
       const hold = yield* Effect.provide(Hold, layersFor(home))
       return yield* body({ tmp, fs, path, hold })
     })
-  ).pipe(Effect.provide(BunContext.layer))
+  ).pipe(Effect.provide(BunServices.layer))
 
 describe("Hold — undoable mutations", () => {
   it.effect("remove then undo restores the exact bytes", () =>
@@ -241,7 +240,7 @@ describe("Hold — undoable mutations", () => {
             Layer.provideMerge(ExclusiveRenameTestLive),
             Layer.provideMerge(failingLedger),
             Layer.provideMerge(AirlockHome.layer(home)),
-            Layer.provideMerge(BunContext.layer)
+            Layer.provideMerge(BunServices.layer)
           )
         )
 
@@ -635,7 +634,7 @@ describe("Hold — undoable mutations", () => {
           "file",
           (stage) =>
             fs.writeFileString(stage, "partial private stage").pipe(
-              Effect.zipRight(Effect.fail("populate failed" as const))
+              Effect.andThen(Effect.fail("populate failed" as const))
             )
         ).pipe(Effect.flip)
         expect(failed).toBe("populate failed")
@@ -752,6 +751,6 @@ describe("construction invariant", () => {
         unlinkSites += (source.match(/\bfs\s*\.remove\(/g) ?? []).length
       }
       expect(unlinkSites).toBe(1)
-    }).pipe(Effect.provide(BunContext.layer))
+    }).pipe(Effect.provide(BunServices.layer))
   )
 })

@@ -136,7 +136,7 @@ describe("reviewed change CLI", () => {
     const { home, source, target } = fixture()
     const staged = successful(run(home, ["stage", "--source", source, "--target", target]))
     const child = spawnSync("bun", ["-e", `
-      import { BunContext } from "@effect/platform-bun"
+      import { BunServices } from "@effect/platform-bun"
       import { Effect, Layer, ManagedRuntime } from "effect"
       import * as AirlockHome from "./src/AirlockHome.ts"
       import { Change, ChangeLive } from "./src/change/Change.ts"
@@ -154,7 +154,7 @@ describe("reviewed change CLI", () => {
       const runtime = ManagedRuntime.make(ChangeLive.pipe(
         Layer.provideMerge(HoldLayer), Layer.provideMerge(moves),
         Layer.provideMerge(LedgerLive), Layer.provideMerge(AirlockHome.layer(${JSON.stringify(home)})),
-        Layer.provideMerge(BunContext.layer)
+        Layer.provideMerge(BunServices.layer)
       ))
       const change = await runtime.runPromise(Change)
       await runtime.runPromise(change.apply(${JSON.stringify({ id: staged.id, expectedDigest: staged.proposalDigest })}))

@@ -577,7 +577,7 @@ const decodeAdmission = async (path: string): Promise<typeof AdmissionPolicyDocu
   const parsed = decodeJson("--admission", decodeUtf8("--admission", bytes))
   try {
     return await Effect.runPromise(
-      Schema.decodeUnknown(AdmissionPolicyDocument, { onExcessProperty: "error" })(parsed)
+      Schema.decodeUnknownEffect(AdmissionPolicyDocument, { onExcessProperty: "error" })(parsed)
     )
   } catch {
     return fail("--admission is not a strict AdmissionPolicyDocument", 65)

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest"
-import { BunContext } from "@effect/platform-bun"
-import { Effect, Layer, ManagedRuntime } from "effect"
+import { BunServices } from "@effect/platform-bun"
+import { Effect, FileSystem, Layer, ManagedRuntime } from "effect"
 import { spawnSync } from "node:child_process"
 import { mkdtemp, readFile, readdir, realpath, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
@@ -16,15 +16,13 @@ import { ExclusiveRenameTestLive } from "./support/ExclusiveRenameTestLive.ts"
 const repository = fileURLToPath(new URL("..", import.meta.url))
 const layers = (home: string) => ChangeLive.pipe(
   Layer.provideMerge(HoldLayer), Layer.provideMerge(ExclusiveRenameTestLive), Layer.provideMerge(LedgerLive),
-  Layer.provideMerge(AirlockHome.layer(home)), Layer.provideMerge(BunContext.layer)
+  Layer.provideMerge(AirlockHome.layer(home)), Layer.provideMerge(BunServices.layer)
 )
 const makeRuntime = (home: string) => ManagedRuntime.make(layers(home))
 const crash = (input: { home: string, id: string, digest: string, target: string, point: string, action: string }) => {
   const script = `
-    import { FileSystem } from "@effect/platform"
-    import { BunContext } from "@effect/platform-bun"
-    import { Effect, Layer, ManagedRuntime } from "effect"
-    import { readFileSync } from "node:fs"
+        import { BunServices } from "@effect/platform-bun"
+        import { readFileSync } from "node:fs"
     import * as AirlockHome from "./src/AirlockHome.ts"
     import { Change, ChangeLive } from "./src/change/Change.ts"
     import { Hold, HoldLayer } from "./src/Hold.ts"
@@ -51,9 +49,9 @@ const crash = (input: { home: string, id: string, digest: string, target: string
         if (input.point === "after-outcome" && checked && JSON.parse(content).phase === "finished") process.exit(86)
         if (input.point === "after-acknowledgement" && checked && JSON.parse(content).acknowledged) process.exit(86)
       }) }
-    })).pipe(Layer.provide(BunContext.layer))
+    })).pipe(Layer.provide(BunServices.layer))
     const base = HoldLayer.pipe(Layer.provideMerge(moves), Layer.provideMerge(LedgerLive),
-      Layer.provideMerge(AirlockHome.layer(input.home)), Layer.provideMerge(fileSystem), Layer.provideMerge(BunContext.layer))
+      Layer.provideMerge(AirlockHome.layer(input.home)), Layer.provideMerge(fileSystem), Layer.provideMerge(BunServices.layer))
     const hooked = Layer.effect(Hold, Effect.gen(function* () {
       const real = yield* Hold
       return { ...real,

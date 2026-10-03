@@ -25,7 +25,7 @@ describe("CLI failure finalization", () => {
         import { writeFileSync } from "node:fs"
 
         const runtime = ManagedRuntime.make(
-          Layer.scopedDiscard(
+          Layer.effectDiscard(
             Effect.acquireRelease(
               Effect.void,
               () => Effect.sync(() => {

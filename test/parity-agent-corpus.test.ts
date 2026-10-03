@@ -56,10 +56,10 @@ const ProcessResult = Schema.Struct({
 
 const ProgramReport = Schema.Struct({
   schemaVersion: Schema.Literal("airlock/program-run/v1"),
-  profile: Schema.Literal("compatibility", "native-contained", "vm-enclosed"),
+  profile: Schema.Literals(["compatibility", "native-contained", "vm-enclosed"]),
   workspace: Schema.String,
   result: Schema.Struct({
-    state: Schema.Literal("succeeded", "failed", "partial"),
+    state: Schema.Literals(["succeeded", "failed", "partial"]),
     result: Schema.Unknown,
     plans: Schema.Array(Schema.Struct({
       actionReference: Schema.String,

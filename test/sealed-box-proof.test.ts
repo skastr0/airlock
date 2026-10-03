@@ -1,4 +1,4 @@
-import { BunContext } from "@effect/platform-bun"
+import { BunServices } from "@effect/platform-bun"
 import { createHash, generateKeyPairSync, sign } from "node:crypto"
 import { spawn, spawnSync, type ChildProcess } from "node:child_process"
 import { createServer, type Server } from "node:http"
@@ -47,7 +47,7 @@ let provider: Server
 let origin = ""
 let hits = 0
 let grant: BoxGrant
-let healthFiber: Fiber.RuntimeFiber<never, unknown> | undefined
+let healthFiber: Fiber.Fiber<never, unknown> | undefined
 
 const sha256 = (bytes: Uint8Array) =>
   `sha256:${createHash("sha256").update(bytes).digest("hex")}` as const
@@ -154,12 +154,12 @@ const waitFor = async (predicate: () => boolean, failure: string) => {
 const stateLayer = OutboxLive.pipe(
   Layer.provideMerge(LedgerLive),
   Layer.provideMerge(AirlockHome.layer(home)),
-  Layer.provideMerge(BunContext.layer)
+  Layer.provideMerge(BunServices.layer)
 ).pipe(Layer.provideMerge(
   HoldLive.pipe(
     Layer.provideMerge(LedgerLive),
     Layer.provideMerge(AirlockHome.layer(home)),
-    Layer.provideMerge(BunContext.layer)
+    Layer.provideMerge(BunServices.layer)
   )
 ))
 

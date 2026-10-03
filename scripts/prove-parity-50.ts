@@ -17,7 +17,7 @@ const repository = realpathSync(fileURLToPath(new URL("../", import.meta.url)))
 const agentEntrypoint = join(repository, "src", "agent-cli.ts")
 const repetitions = 5
 
-export const ParityCaseId = Schema.Literal(
+export const ParityCaseId = Schema.Literals([
   "capture-observe",
   "managed-files",
   "structured-argv",
@@ -28,17 +28,17 @@ export const ParityCaseId = Schema.Literal(
   "bounded-control",
   "native-rewrite",
   "native-create"
-)
+])
 export type ParityCaseId = typeof ParityCaseId.Type
 
-const AgentProfile = Schema.Literal("compatibility", "native-contained")
+const AgentProfile = Schema.Literals(["compatibility", "native-contained"])
 type AgentProfile = typeof AgentProfile.Type
 
 const GitCommitSha = Schema.String.pipe(
-  Schema.pattern(/^[0-9a-f]{40}$/)
+  Schema.check(Schema.isPattern(/^[0-9a-f]{40}$/))
 )
 
-export const ParitySourceProvenance = Schema.Union(
+export const ParitySourceProvenance = Schema.Union([
   Schema.Struct({
     kind: Schema.Literal("git-checkout"),
     root: Schema.String,
@@ -54,7 +54,7 @@ export const ParitySourceProvenance = Schema.Union(
       "repository-local .git metadata is absent; no commit identity or worktree state is claimed"
     )
   })
-)
+])
 export type ParitySourceProvenance = typeof ParitySourceProvenance.Type
 
 const CompactArtifact = Schema.Struct({
@@ -75,7 +75,7 @@ const AgentProgramReport = Schema.Struct({
   profile: AgentProfile,
   workspace: Schema.String,
   result: Schema.Struct({
-    state: Schema.Literal("succeeded", "failed", "partial"),
+    state: Schema.Literals(["succeeded", "failed", "partial"]),
     result: Schema.Unknown,
     plans: Schema.Array(CompactPlan),
     counts: Schema.Struct({
@@ -161,14 +161,14 @@ export class Parity50Evidence extends Schema.Class<Parity50Evidence>(
 class ParityProofFailed extends Schema.TaggedError<ParityProofFailed>()(
   "ParityProofFailed",
   {
-    phase: Schema.Literal(
+    phase: Schema.Literals([
       "preflight",
       "fixture",
       "agent-subprocess",
       "report-decode",
       "assertion",
       "evidence"
-    ),
+    ]),
     caseId: Schema.optional(ParityCaseId),
     repetition: Schema.optional(Schema.Number),
     reason: Schema.String

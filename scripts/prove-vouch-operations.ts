@@ -35,7 +35,7 @@ const tarDescendants = process.platform === "linux"
   ? ["/bin/sh", "/usr/bin/gzip"]
   : []
 
-const NodeSummary = Schema.Union(
+const NodeSummary = Schema.Union([
   Schema.Struct({
     id: Schema.String,
     kind: Schema.String,
@@ -46,7 +46,7 @@ const NodeSummary = Schema.Union(
     _tag: Schema.String,
     dependsOn: Schema.Array(Schema.String)
   })
-)
+])
 
 const PlanSummary = Schema.Struct({
   id: Schema.String,

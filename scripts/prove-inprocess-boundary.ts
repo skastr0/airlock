@@ -47,7 +47,7 @@ class BoundaryAssertions extends Schema.Class<BoundaryAssertions>(
 class ExecutableBindingEvidence extends Schema.Class<ExecutableBindingEvidence>(
   "ExecutableBindingEvidence"
 )({
-  role: Schema.Literal("root", "descendant"),
+  role: Schema.Literals(["root", "descendant"]),
   requested: Schema.String,
   launch: Schema.String,
   allowedPaths: Schema.Array(Schema.String),
@@ -70,7 +70,7 @@ class BoundaryEvidence extends Schema.Class<BoundaryEvidence>(
   delta: Schema.Array(
     Schema.Struct({
       path: Schema.String,
-      kind: Schema.Literal("created", "modified", "deleted")
+      kind: Schema.Literals(["created", "modified", "deleted"])
     })
   ),
   drift: Schema.Array(Schema.String)
@@ -99,7 +99,7 @@ class ProofFailed extends Schema.TaggedClass<ProofFailed>("ProofFailed")(
   }
 ) {}
 
-const ProofResult = Schema.Union(ProofSucceeded, ProofFailed)
+const ProofResult = Schema.Union([ProofSucceeded, ProofFailed])
 type ProofResult = typeof ProofResult.Type
 
 class ProofUnavailable extends Schema.TaggedError<ProofUnavailable>(

@@ -1,5 +1,4 @@
-import { FileSystem, Path } from "@effect/platform"
-import { Context, Effect, Layer, Schema } from "effect"
+import { Context, Effect, FileSystem, Layer, Path, Schema } from "effect"
 import * as os from "node:os"
 import * as nodePath from "node:path"
 
@@ -8,7 +7,7 @@ import * as nodePath from "node:path"
  * object: callers receive locations, while components retain authority over
  * how data at those locations is interpreted.
  */
-export class AirlockHome extends Context.Tag("airlock/AirlockHome")<
+export class AirlockHome extends Context.Service<
   AirlockHome,
   {
     readonly home: string
@@ -16,12 +15,12 @@ export class AirlockHome extends Context.Tag("airlock/AirlockHome")<
     readonly outboxDir: string
     readonly ledgerFile: string
   }
->() {}
+>()("airlock/AirlockHome") {}
 
 export class AirlockHomeError extends Schema.TaggedError<AirlockHomeError>()(
   "AirlockHomeError",
   {
-    operation: Schema.Literal("validate", "create-directory"),
+    operation: Schema.Literals(["validate", "create-directory"]),
     path: Schema.String,
     reason: Schema.String
   }

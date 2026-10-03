@@ -1,7 +1,6 @@
-import { FileSystem, Path } from "@effect/platform"
-import { BunContext } from "@effect/platform-bun"
+import { Effect, FileSystem, Layer, Path } from "effect"
+import { BunServices } from "@effect/platform-bun"
 import { describe, expect, it } from "@effect/vitest"
-import { Effect, Layer } from "effect"
 import { spawnSync } from "node:child_process"
 import {
   lstatSync,
@@ -25,7 +24,7 @@ const holdLayer = (
     Layer.provideMerge(rename),
     Layer.provideMerge(LedgerLive),
     Layer.provideMerge(AirlockHome.layer(home)),
-    Layer.provideMerge(BunContext.layer)
+    Layer.provideMerge(BunServices.layer)
   )
 
 const racingLayer = (
@@ -47,7 +46,7 @@ const racingLayer = (
                 })
               : Effect.void
           return race.pipe(
-            Effect.zipRight(base.moveNoReplace(source, destination))
+            Effect.andThen(base.moveNoReplace(source, destination))
           )
         }
       })
@@ -105,7 +104,7 @@ const world = <A, E>(
       )
       return yield* body({ fs, path, root, home, base })
     })
-  ).pipe(Effect.provide(BunContext.layer))
+  ).pipe(Effect.provide(BunServices.layer))
 
 describe("ExclusiveRename — host Hold boundary", () => {
   it.effect("reports a confirmed rename and exact recovery evidence when directory sync fails", () =>
@@ -329,7 +328,7 @@ describe("ExclusiveRename — host Hold boundary", () => {
       ]) {
         expect(source).toContain(`"${operation}"`)
       }
-    }).pipe(Effect.provide(BunContext.layer))
+    }).pipe(Effect.provide(BunServices.layer))
   )
 
   it.effect(
@@ -370,7 +369,7 @@ describe("ExclusiveRename — host Hold boundary", () => {
               "compiled-original"
             )
           })
-        ).pipe(Effect.provide(BunContext.layer)),
+        ).pipe(Effect.provide(BunServices.layer)),
     30_000
   )
 })

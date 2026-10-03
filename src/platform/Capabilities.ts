@@ -1,14 +1,14 @@
 import { Schema } from "effect"
 
 /** A capability claim always names the mechanism and the boundary of its evidence. */
-export const CapabilityPosture = Schema.Literal(
+export const CapabilityPosture = Schema.Literals([
   "enforced",
   "available",
   "allowed",
   "bounded",
   "unavailable",
   "not-provided"
-)
+])
 export type CapabilityPosture = typeof CapabilityPosture.Type
 
 export class CapabilityClaim extends Schema.Class<CapabilityClaim>("CapabilityClaim")({
