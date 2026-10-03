@@ -104,12 +104,12 @@ describe("durable cancellation receipts", () => {
           yield* Deferred.await(ownerInLedger)
           const reaper = yield* hold.reap(0).pipe(Effect.forkChild)
           yield* realDelay(40)
-          const reaperExit = yield* Fiber.interrupt(reaper)
+          const reaperExit = yield* Fiber.interrupt(reaper).pipe(Effect.andThen(Fiber.await(reaper)))
 
           expect(Exit.isFailure(reaperExit)).toBe(true)
           if (Exit.isFailure(reaperExit)) {
             expect(Cause.hasInterruptsOnly(reaperExit.cause)).toBe(true)
-            expect(Array.from(Cause.failures(reaperExit.cause))).toEqual([])
+            expect(reaperExit.cause.reasons.filter(Cause.isFailReason).map((reason) => reason.error)).toEqual([])
           }
           expect(yield* fs.exists(
             path.join(home, "hold", expired.id)
@@ -167,7 +167,7 @@ describe("durable cancellation receipts", () => {
             path.join(home, "hold", expired.id)
           )).toBe(false)
 
-          const exit = yield* Fiber.interrupt(fiber)
+          const exit = yield* Fiber.interrupt(fiber).pipe(Effect.andThen(Fiber.await(fiber)))
           const failure = typedFailure(exit)
           expect(failure).toBeInstanceOf(HoldReapRecoveryRequired)
           if (!(failure instanceof HoldReapRecoveryRequired)) return
@@ -206,7 +206,7 @@ describe("durable cancellation receipts", () => {
           const hold = yield* Hold
           const fiber = yield* hold.remove(target).pipe(Effect.forkChild)
           yield* Deferred.await(started)
-          const exit = yield* Fiber.interrupt(fiber)
+          const exit = yield* Fiber.interrupt(fiber).pipe(Effect.andThen(Fiber.await(fiber)))
           const failure = typedFailure(exit)
 
           expect(failure).toBeInstanceOf(HoldRecoveryRequired)
@@ -249,7 +249,7 @@ describe("durable cancellation receipts", () => {
             60_000
           ).pipe(Effect.forkChild)
           yield* Deferred.await(started)
-          const exit = yield* Fiber.interrupt(fiber)
+          const exit = yield* Fiber.interrupt(fiber).pipe(Effect.andThen(Fiber.await(fiber)))
           const failure = typedFailure(exit)
 
           expect(failure).toBeInstanceOf(OutboxRecoveryRequired)
@@ -312,7 +312,7 @@ describe("durable cancellation receipts", () => {
           )
           const fiber = yield* outbox.commit(staged.id).pipe(Effect.forkChild)
           yield* Deferred.await(started)
-          const exit = yield* Fiber.interrupt(fiber)
+          const exit = yield* Fiber.interrupt(fiber).pipe(Effect.andThen(Fiber.await(fiber)))
           const failure = typedFailure(exit)
 
           expect(failure).toBeInstanceOf(OutboxRecoveryRequired)

@@ -233,7 +233,7 @@ const nodeKind = (node: typeof NodeSummary.Type): string =>
   "kind" in node ? node.kind : node._tag
 
 const json = <A, I>(
-  schema: Schema.Schema<A, I, never>,
+  schema: Schema.Codec<A, I>,
   raw: string
 ): A => Schema.decodeUnknownSync(schema)(JSON.parse(raw))
 

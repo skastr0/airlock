@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
-import { Args, Command, HelpDoc, Options, ValidationError } from "@effect/cli"
+import { Argument, CliError, Command, Flag } from "effect/unstable/cli"
 import { BunServices } from "@effect/platform-bun"
-import { Cause, Console, Effect, Exit, FileSystem, JSONSchema, Layer, ManagedRuntime, Option, Schema } from "effect"
+import { Cause, Console, Effect, Exit, FileSystem, Layer, ManagedRuntime, Option, Runtime as EffectRuntime, Schema } from "effect"
 import * as nodePath from "node:path"
 import * as nodeOs from "node:os"
 import { createInterface } from "node:readline"
@@ -311,7 +311,7 @@ const parseDuration = (field: string, raw: string): Effect.Effect<number, CliInp
 }
 
 const duration = (name: string, fallback: string) =>
-  Options.text(name).pipe(Options.withDefault(fallback))
+  Flag.String(name).pipe(Flag.withDefault(fallback))
 
 const daemonSocketPath = (): Effect.Effect<string, CliInputError> => {
   const value = process.env["AIRLOCK_DAEMON_SOCKET"]
@@ -335,13 +335,13 @@ const requireSealedDaemon = (seal: SealContext) =>
     )
   : Effect.void
 
-const scopeOption = Options.text("scope").pipe(Options.withDefault("/"))
+const scopeOption = Flag.String("scope").pipe(Flag.withDefault("/"))
 
-const profileOption = Options.choice("profile", [
+const profileOption = Flag.Literals("profile", [
   "compatibility",
   "native-contained",
   "vm-enclosed"
-]).pipe(Options.withDefault("compatibility" as const))
+]).pipe(Flag.withDefault("compatibility" as const))
 
 type ProgramProfile = "compatibility" | "native-contained" | "vm-enclosed"
 
@@ -644,31 +644,31 @@ const makeChange = (seal: SealContext, agent = false) => {
   const local = seal._tag === "VerifiedSeal"
     ? failInput("change", "reviewed changes are unavailable in sealed installations")
     : Effect.void
-  const id = Args.text({ name: "proposal-id" })
+  const id = Argument.String("proposal-id")
   const commands: Array<AnyCliCommand> = [
-    Command.make("inbox", { human: Options.boolean("human") }, ({ human }) => rendered(local.pipe(
+    Command.make("inbox", { human: Flag.Boolean("human").pipe(Flag.withDefault(false)) }, ({ human }) => rendered(local.pipe(
       Effect.andThen(Effect.flatMap(Change, change => change.inventory()))
     ), human ? formatInventory : undefined)).pipe(Command.withDescription("Discover proposals, operation outcomes, and retained storage")),
     Command.make("stage", {
-      source: Options.text("source"),
-      target: Options.text("target")
+      source: Flag.String("source"),
+      target: Flag.String("target")
     }, (request) => rendered(local.pipe(
       Effect.andThen(Effect.flatMap(Change, (change) => change.stage(request)))
     ))).pipe(Command.withDescription("Snapshot a target-specific replacement without changing the target")),
     Command.make("review", {
       id,
-      diff: Options.boolean("diff"),
-      human: Options.boolean("human")
+      diff: Flag.Boolean("diff").pipe(Flag.withDefault(false)),
+      human: Flag.Boolean("human").pipe(Flag.withDefault(false))
     }, ({ id, diff, human }) => rendered(local.pipe(
       Effect.andThen(Effect.flatMap(Change, (change) => change.review(id, { diff: diff || human })))
     ), human ? formatReview : undefined)).pipe(Command.withDescription("Inspect the frozen proposal; --human renders safe text, --diff adds JSON previews")),
     Command.make("content", {
       id,
-      side: Options.choice("side", ["before", "after"]),
-      path: Options.text("path"),
-      offset: Options.integer("offset").pipe(Options.withDefault(0)),
-      limit: Options.integer("limit").pipe(Options.withDefault(8192)),
-      human: Options.boolean("human")
+      side: Flag.Literals("side", ["before", "after"]),
+      path: Flag.String("path"),
+      offset: Flag.Int("offset").pipe(Flag.withDefault(0)),
+      limit: Flag.Int("limit").pipe(Flag.withDefault(8192)),
+      human: Flag.Boolean("human").pipe(Flag.withDefault(false))
     }, ({ human, ...request }) => rendered(local.pipe(
       Effect.andThen(Effect.flatMap(Change, change => change.content(request)))
     ), human ? formatContent : undefined)).pipe(Command.withDescription("Read a bounded page of frozen file bytes; root file uses --path ''")),
@@ -688,7 +688,7 @@ const makeChange = (seal: SealContext, agent = false) => {
       if (outcome.state !== "installed") yield* Effect.sync(() => { process.exitCode = 1 })
       return outcome
     }))))).pipe(Command.withDescription("Review and approve the displayed digest on an interactive supervisor terminal")),
-    Command.make("retire", { id, expectedDigest: Options.text("expect-digest") }, request => renderedChangeOutcome(local.pipe(
+    Command.make("retire", { id, expectedDigest: Flag.String("expect-digest") }, request => renderedChangeOutcome(local.pipe(
       Effect.andThen(Effect.flatMap(Change, change => change.retire(request)))
     ), ["retired", "collected"])).pipe(Command.withDescription("Retire eligible review snapshots using the inbox retirement digest, preserving undo payloads")),
     Command.make("collect", { id }, ({ id }) => renderedChangeOutcome(local.pipe(
@@ -696,12 +696,12 @@ const makeChange = (seal: SealContext, agent = false) => {
     ), ["collected"])).pipe(Command.withDescription("Irreversibly reap only this proposal's retired snapshots; keep receipts and undo payloads")),
     Command.make("apply", {
       id,
-      expectedDigest: Options.text("expect-digest")
+      expectedDigest: Flag.String("expect-digest")
     }, (request) => renderedChangeOutcome(local.pipe(
       Effect.andThen(Effect.flatMap(Change, (change) => change.apply(request)))
     ))).pipe(Command.withDescription("Approve and apply this exact digest once, refusing baseline drift")),
     Command.make("undo", {
-      receiptId: Args.text({ name: "receipt-id" })
+      receiptId: Argument.String("receipt-id")
     }, ({ receiptId }) => renderedChangeOutcome(local.pipe(
       Effect.andThen(Effect.flatMap(Change, (change) => change.undo(receiptId)))
     ))).pipe(Command.withDescription("Restore one exact apply receipt, refusing changes made since installation")),
@@ -710,7 +710,7 @@ const makeChange = (seal: SealContext, agent = false) => {
     ))).pipe(Command.withDescription("Cancel an unclaimed proposal; snapshots remain retained")),
     Command.make("recover", {
       id,
-      restore: Options.boolean("restore")
+      restore: Flag.Boolean("restore").pipe(Flag.withDefault(false))
     }, ({ id, restore }) => renderedChangeOutcome(local.pipe(
       Effect.andThen(Effect.flatMap(Change, (change) => change.recover(id, { restore })))
     ), ["staged", "cancelled", "installed", "undone", "rolled-back"]))
@@ -729,7 +729,7 @@ const makeAgentChange = (seal: SealContext) => makeChange(seal, true)
 
 const makeRm = (seal: SealContext) => Command.make(
   "rm",
-  { target: Args.text({ name: "target" }), scope: scopeOption },
+  { target: Argument.String("target"), scope: scopeOption },
   ({ scope, target }) => rendered(
     requireVerb(seal, "rm").pipe(
       Effect.andThen(requireNativeAction(seal, "file.remove")),
@@ -751,7 +751,7 @@ const makeRm = (seal: SealContext) => Command.make(
 
 const makeWrite = (seal: SealContext) => Command.make(
   "write",
-  { target: Args.text({ name: "target" }), content: Args.text({ name: "content" }), scope: scopeOption },
+  { target: Argument.String("target"), content: Argument.String("content"), scope: scopeOption },
   ({ content, scope, target }) => rendered(
     requireVerb(seal, "write").pipe(
       Effect.andThen(requireNativeAction(seal, "file.write")),
@@ -774,7 +774,7 @@ const makeWrite = (seal: SealContext) => Command.make(
 
 const makeUndo = (seal: SealContext) => Command.make(
   "undo",
-  { id: Args.text({ name: "act-id" }).pipe(Args.optional) },
+  { id: Argument.String("act-id").pipe(Argument.optional) },
   ({ id }) =>
     rendered(Effect.gen(function* () {
       yield* requireVerb(seal, "undo")
@@ -813,15 +813,15 @@ const makeReap = (seal: SealContext) => Command.make(
 
 // ── emission verbs ──────────────────────────────────────────────────────────
 
-const methodOption = Options.choice("method", ["GET", "POST", "PUT", "PATCH", "DELETE"])
-  .pipe(Options.withDefault("POST" as const))
+const methodOption = Flag.Literals("method", ["GET", "POST", "PUT", "PATCH", "DELETE"])
+  .pipe(Flag.withDefault("POST" as const))
 
 const makeSend = (seal: SealContext) => Command.make(
   "send",
   {
-    url: Args.text({ name: "url" }),
+    url: Argument.String("url"),
     method: methodOption,
-    body: Options.text("body").pipe(Options.optional),
+    body: Flag.String("body").pipe(Flag.optional),
     hold: duration("hold", "30s")
   },
   ({ body, hold, method, url }) => rendered(
@@ -861,7 +861,7 @@ const makePending = (seal: SealContext) => Command.make("pending", {}, () =>
 
 const makeCommit = (seal: SealContext) => Command.make(
   "commit",
-  { id: Args.text({ name: "emission-id" }) },
+  { id: Argument.String("emission-id") },
   ({ id }) => rendered(
     requireVerb(seal, "commit").pipe(
       Effect.andThen(Effect.flatMap(Outbox, (outbox) => outbox.commit(EmissionId.make(id))))
@@ -871,7 +871,7 @@ const makeCommit = (seal: SealContext) => Command.make(
 
 const makeCancel = (seal: SealContext) => Command.make(
   "cancel",
-  { id: Args.text({ name: "emission-id" }) },
+  { id: Argument.String("emission-id") },
   ({ id }) => rendered(
     requireVerb(seal, "cancel").pipe(
       Effect.andThen(Effect.flatMap(Outbox, (outbox) => outbox.cancel(EmissionId.make(id))))
@@ -979,7 +979,7 @@ const definitionActionIsVisible = (
   : nativeActions.has("http.stage")
 
 const makeActions = (seal: SealContext) => Command.make("actions", {
-  workspace: Options.text("workspace").pipe(Options.withDefault(process.cwd()))
+  workspace: Flag.String("workspace").pipe(Flag.withDefault(process.cwd()))
 }, ({ workspace }) => rendered(
   requireVerb(seal, "actions").pipe(
     Effect.andThen(discoveredTools(seal, nodePath.resolve(workspace))),
@@ -1002,27 +1002,39 @@ const makeActions = (seal: SealContext) => Command.make("actions", {
   )
 )).pipe(Command.withDescription("List built-in actions plus inert discovered tool definitions"))
 
+/**
+ * Draft 2020-12 JSON Schema for one discovery contract. Unmodeled properties
+ * are rejected, matching the decoder the CLI applies to action input.
+ */
+const discoveryJsonSchema = (schema: Schema.Top) => {
+  const document = Schema.toJsonSchemaDocument(schema, {
+    onExcessProperty: "error"
+  })
+  return {
+    $schema: "https://json-schema.org/draft/2020-12/schema",
+    ...(Object.keys(document.definitions).length === 0
+      ? {}
+      : { $defs: document.definitions }),
+    ...document.schema
+  }
+}
+
 const nativeActionInputSchema = (
   name: (typeof NativeActionCatalog)[number]["name"]
 ) => {
-  const canonical = JSONSchema.make(nativeActionSchema(name) as Schema.Schema.Any, {
-    target: "jsonSchema2020-12"
-  })
+  const canonical = discoveryJsonSchema(nativeActionSchema(name))
   if (!("properties" in canonical)) return canonical
-  const { action: _discriminator, ...properties } = canonical.properties
+  const { action: _discriminator, ...properties } = canonical.properties as Record<string, unknown>
   return {
     ...canonical,
-    required: canonical.required.filter((field) => field !== "action"),
+    required: ((canonical as { readonly required?: ReadonlyArray<string> }).required ?? []).filter((field) => field !== "action"),
     properties
   }
 }
 
 const nativeActionResultJsonSchema = (
   name: (typeof NativeActionCatalog)[number]["name"]
-) => JSONSchema.make(
-  nativeActionResultSchema(name) as Schema.Schema.Any,
-  { target: "jsonSchema2020-12" }
-)
+) => discoveryJsonSchema(nativeActionResultSchema(name))
 
 const nativeActionDiscoveryDescriptor = (
   action: (typeof NativeActionCatalog)[number]
@@ -1033,7 +1045,7 @@ const nativeActionDiscoveryDescriptor = (
 
 const makeSchema = (seal: SealContext) => Command.make(
   "schema",
-  { subject: Args.text({ name: "subject" }).pipe(Args.optional) },
+  { subject: Argument.String("subject").pipe(Argument.optional) },
   ({ subject }) => rendered(Effect.gen(function* () {
     yield* requireVerb(seal, "schema")
     const requested = Option.getOrElse(subject, () => "all")
@@ -1194,16 +1206,16 @@ const requireSealedExecAdmission = (
 const makeExec = (seal: SealContext) => Command.make(
   "exec",
   {
-    executable: Options.text("executable"),
-    arg: Options.text("arg").pipe(Options.repeated),
-    descendantExecutable: Options.text("descendant-executable").pipe(
-      Options.repeated
+    executable: Flag.String("executable"),
+    arg: Flag.String("arg").pipe(Flag.atLeast(0)),
+    descendantExecutable: Flag.String("descendant-executable").pipe(
+      Flag.atLeast(0)
     ),
-    cwd: Options.text("cwd"),
+    cwd: Flag.String("cwd"),
     profile: profileOption,
-    privateWorkspace: Options.text("private-workspace").pipe(Options.optional),
-    timeout: Options.text("timeout").pipe(Options.optional),
-    outputLimitBytes: Options.integer("output-limit-bytes").pipe(Options.withDefault(1_048_576))
+    privateWorkspace: Flag.String("private-workspace").pipe(Flag.optional),
+    timeout: Flag.String("timeout").pipe(Flag.optional),
+    outputLimitBytes: Flag.Int("output-limit-bytes").pipe(Flag.withDefault(1_048_576))
   },
   ({ profile, ...input }) => rendered(
     requireVerb(seal, "exec").pipe(
@@ -1216,15 +1228,15 @@ const makeExec = (seal: SealContext) => Command.make(
 const makeSealedExec = (seal: SealContext) => Command.make(
   "exec",
   {
-    executable: Options.text("executable"),
-    arg: Options.text("arg").pipe(Options.repeated),
-    descendantExecutable: Options.text("descendant-executable").pipe(
-      Options.repeated
+    executable: Flag.String("executable"),
+    arg: Flag.String("arg").pipe(Flag.atLeast(0)),
+    descendantExecutable: Flag.String("descendant-executable").pipe(
+      Flag.atLeast(0)
     ),
-    cwd: Options.text("cwd"),
-    privateWorkspace: Options.text("private-workspace").pipe(Options.optional),
-    timeout: Options.text("timeout").pipe(Options.optional),
-    outputLimitBytes: Options.integer("output-limit-bytes").pipe(Options.withDefault(1_048_576))
+    cwd: Flag.String("cwd"),
+    privateWorkspace: Flag.String("private-workspace").pipe(Flag.optional),
+    timeout: Flag.String("timeout").pipe(Flag.optional),
+    outputLimitBytes: Flag.Int("output-limit-bytes").pipe(Flag.withDefault(1_048_576))
   },
   (input) => rendered(Effect.gen(function* () {
     yield* requireVerb(seal, "exec")
@@ -1343,10 +1355,10 @@ const executeProgram = (
 const makeRun = (seal: SealContext) => Command.make(
   "run",
   {
-    program: Args.file({ name: "program.air" }),
-    bindings: Options.text("bindings").pipe(Options.optional),
+    program: Argument.File("program.air"),
+    bindings: Flag.String("bindings").pipe(Flag.optional),
     profile: profileOption,
-    workspace: Options.text("workspace").pipe(Options.withDefault(process.cwd()))
+    workspace: Flag.String("workspace").pipe(Flag.withDefault(process.cwd()))
   },
   ({ program, bindings, profile, workspace: requestedWorkspace }) =>
     renderedProgram(Effect.gen(function* () {
@@ -1368,10 +1380,10 @@ const makeRun = (seal: SealContext) => Command.make(
 const makeEvalProgram = (seal: SealContext) => Command.make(
   "eval",
   {
-    source: Options.text("source"),
-    bindings: Options.text("bindings").pipe(Options.optional),
+    source: Flag.String("source"),
+    bindings: Flag.String("bindings").pipe(Flag.optional),
     profile: profileOption,
-    workspace: Options.text("workspace").pipe(Options.withDefault(process.cwd()))
+    workspace: Flag.String("workspace").pipe(Flag.withDefault(process.cwd()))
   },
   ({ source, bindings, profile, workspace }) =>
     renderedProgram(
@@ -1390,10 +1402,10 @@ const makeEvalProgram = (seal: SealContext) => Command.make(
 const makeAgentRun = (seal: SealContext) => Command.make(
   "run",
   {
-    program: Args.file({ name: "program.air" }),
-    bindings: Options.text("bindings").pipe(Options.optional),
-    compact: Options.boolean("compact"),
-    workspace: Options.text("workspace").pipe(Options.withDefault(process.cwd()))
+    program: Argument.File("program.air"),
+    bindings: Flag.String("bindings").pipe(Flag.optional),
+    compact: Flag.Boolean("compact").pipe(Flag.withDefault(false)),
+    workspace: Flag.String("workspace").pipe(Flag.withDefault(process.cwd()))
   },
   ({ program, bindings, compact, workspace: requestedWorkspace }) =>
     renderedProgram(Effect.gen(function* () {
@@ -1426,10 +1438,10 @@ const makeAgentRun = (seal: SealContext) => Command.make(
 const makeAgentEvalProgram = (seal: SealContext) => Command.make(
   "eval",
   {
-    source: Options.text("source"),
-    bindings: Options.text("bindings").pipe(Options.optional),
-    compact: Options.boolean("compact"),
-    workspace: Options.text("workspace").pipe(Options.withDefault(process.cwd()))
+    source: Flag.String("source"),
+    bindings: Flag.String("bindings").pipe(Flag.optional),
+    compact: Flag.Boolean("compact").pipe(Flag.withDefault(false)),
+    workspace: Flag.String("workspace").pipe(Flag.withDefault(process.cwd()))
   },
   ({ source, bindings, compact, workspace }) =>
     renderedProgram(Effect.gen(function* () {
@@ -1454,10 +1466,10 @@ const makeAgentEvalProgram = (seal: SealContext) => Command.make(
 const makeSealedRun = (seal: SealContext) => Command.make(
   "run",
   {
-    program: Args.file({ name: "program.air" }),
-    bindings: Options.text("bindings").pipe(Options.optional),
-    compact: Options.boolean("compact"),
-    workspace: Options.text("workspace").pipe(Options.withDefault(process.cwd()))
+    program: Argument.File("program.air"),
+    bindings: Flag.String("bindings").pipe(Flag.optional),
+    compact: Flag.Boolean("compact").pipe(Flag.withDefault(false)),
+    workspace: Flag.String("workspace").pipe(Flag.withDefault(process.cwd()))
   },
   ({ program, bindings, compact, workspace: requestedWorkspace }) =>
     renderedProgram(Effect.gen(function* () {
@@ -1486,10 +1498,10 @@ const makeSealedRun = (seal: SealContext) => Command.make(
 const makeSealedEvalProgram = (seal: SealContext) => Command.make(
   "eval",
   {
-    source: Options.text("source"),
-    bindings: Options.text("bindings").pipe(Options.optional),
-    compact: Options.boolean("compact"),
-    workspace: Options.text("workspace").pipe(Options.withDefault(process.cwd()))
+    source: Flag.String("source"),
+    bindings: Flag.String("bindings").pipe(Flag.optional),
+    compact: Flag.Boolean("compact").pipe(Flag.withDefault(false)),
+    workspace: Flag.String("workspace").pipe(Flag.withDefault(process.cwd()))
   },
   ({ source, bindings, compact, workspace }) =>
     renderedProgram(Effect.gen(function* () {
@@ -1519,9 +1531,9 @@ const makeLedger = (seal: SealContext) => Command.make("ledger", {}, () =>
   )
 ).pipe(Command.withDescription("The append-only record of every act"))
 
-const recentRunLimit = Options.integer("limit").pipe(
-  Options.withDefault(10),
-  Options.withDescription("Latest Runtime Plans to return (1-100)")
+const recentRunLimit = Flag.Int("limit").pipe(
+  Flag.withDefault(10),
+  Flag.withDescription("Latest Runtime Plans to return (1-100)")
 )
 
 const makeRuns = (seal: SealContext) => Command.make(
@@ -1547,7 +1559,7 @@ const makeRuns = (seal: SealContext) => Command.make(
 const makeRunReceipt = (seal: SealContext) => Command.make(
   "run-receipt",
   {
-    planId: Options.text("plan-id")
+    planId: Flag.String("plan-id")
   },
   ({ planId }) => rendered(Effect.gen(function* () {
     yield* requireVerb(seal, "run-receipt")
@@ -1567,7 +1579,7 @@ const makeServe = (seal: SealContext) => Command.make(
   "serve",
   {
     interval: duration("interval", "1s"),
-    reapOlderThan: Options.text("reap-older-than").pipe(Options.optional)
+    reapOlderThan: Flag.String("reap-older-than").pipe(Flag.optional)
   },
   ({ interval, reapOlderThan }) => rendered(Effect.gen(function* () {
     yield* requireVerb(seal, "serve")
@@ -1603,7 +1615,7 @@ const makeServe = (seal: SealContext) => Command.make(
 ))
 
 type CurrentCommandVerb = BoxGrantVerb | "change"
-type AnyCliCommand = Command.Command<any, any, any, any>
+type AnyCliCommand = Command.Command<any, any, any, any, any>
 type CommandFactory = (seal: SealContext) => AnyCliCommand
 
 type CurrentCommandDescriptor = Readonly<{
@@ -1659,29 +1671,11 @@ const unsealedAgentVerbOrder: ReadonlyArray<CurrentCommandVerb> = [
   "change"
 ]
 
-/**
- * `withSubcommands([])` violates @effect/cli's runtime contract. A zero-grant
- * root consumes one candidate only to return the same CommandMismatch for
- * every spelling; its help has no subcommand descriptor to advertise.
- */
-const makeEmptyRoot = (name: string): AnyCliCommand => Command.make(
-  name,
-  { unavailable: Args.text({ name: "subcommand" }) },
-  () => Effect.fail(ValidationError.commandMismatch(
-    HelpDoc.p(`Invalid subcommand for ${name} - no subcommands are granted`)
-  ))
-)
-
+/** A zero-grant root has no subcommands; every candidate is refused by parsing. */
 const makeRoot = (
   name: string,
   subcommands: ReadonlyArray<AnyCliCommand>
-): AnyCliCommand => subcommands.length === 0
-  ? makeEmptyRoot(name)
-  : Command.make(name).pipe(
-      Command.withSubcommands(
-        subcommands as unknown as readonly [AnyCliCommand, ...Array<AnyCliCommand>]
-      )
-    )
+): AnyCliCommand => Command.make(name).pipe(Command.withSubcommands(subcommands))
 
 const makeUnsealedSupervisorRoot = (seal: SealContext) => makeRoot(
   "airlock",
@@ -1803,14 +1797,21 @@ const runCli = async (seal: SealContext): Promise<void> => {
   )
   const MainLayer = CellLive.pipe(Layer.provideMerge(ExecutionDependencies))
 
-  const main = Command.run(root, {
-    name: commandName,
-    version: AIRLOCK_VERSION
-  })(process.argv)
+  const main = Command.runWith(root, { version: AIRLOCK_VERSION })(
+    process.argv.slice(2)
+  )
 
   const runtime = ManagedRuntime.make(MainLayer)
   try {
-    await runtime.runPromise(main)
+    const exit = await runtime.runPromiseExit(main)
+    if (Exit.isSuccess(exit)) return
+    const failure = Cause.squash(exit.cause)
+    // Usage errors were already rendered by the command runner; only the
+    // exit status remains. Anything else is a defect and stays loud.
+    if (!CliError.isCliError(failure)) throw failure
+    process.exitCode = failure._tag === "ShowHelp"
+      ? failure[EffectRuntime.errorExitCode]
+      : 1
   } finally {
     await runtime.dispose()
   }

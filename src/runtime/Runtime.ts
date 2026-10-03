@@ -469,10 +469,14 @@ export class Runtime extends Context.Service<
   }
 >()("airlock/Runtime") {}
 
-export const RuntimeConfigLive = (config: RuntimeConfig) =>
-  Layer.succeed(Context.GenericTag<RuntimeConfig>("airlock/RuntimeConfig"), config)
+class RuntimeConfigService extends Context.Service<
+  RuntimeConfigService,
+  RuntimeConfig
+>()("airlock/RuntimeConfig") {}
 
-const RuntimeConfigTag = Context.GenericTag<RuntimeConfig>("airlock/RuntimeConfig")
+export const RuntimeConfigLive = (config: RuntimeConfig) =>
+  Layer.succeed(RuntimeConfigService, config)
+
 const text = new TextEncoder()
 const textDecoder = new TextDecoder("utf-8", { fatal: true })
 const encodeRunSnapshot = Schema.encodeEffect(
@@ -842,7 +846,7 @@ export const materializeInitialArtifact = (
   })
 
 const encodeStructured = <A, I>(
-  schema: Schema.Schema<A, I, never>,
+  schema: Schema.Codec<A, I>,
   value: A,
   nodeId: NodeId,
   operation: string
@@ -1307,7 +1311,7 @@ type RuntimeCellWorkspace = {
 
 const make = Effect.gen(function* () {
   const path = yield* Path.Path
-  const config = yield* RuntimeConfigTag
+  const config = yield* RuntimeConfigService
   const process = yield* ProcessRunner
   const cell = yield* Cell
   const hold = yield* Hold
@@ -1698,7 +1702,7 @@ const make = Effect.gen(function* () {
   const materializeStructuredResult = <A, I>(
     node: PlanNode,
     artifacts: Map<ArtifactId, RuntimeArtifact>,
-    schema: Schema.Schema<A, I, never>,
+    schema: Schema.Codec<A, I>,
     value: A,
     provenance: string
   ) =>

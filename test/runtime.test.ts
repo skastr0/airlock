@@ -409,7 +409,7 @@ describe("runtime Plan interpreter", () => {
               Effect.forkChild
             )
             yield* Deferred.await(started)
-            const exit = yield* Fiber.interrupt(fiber)
+            const exit = yield* Fiber.interrupt(fiber).pipe(Effect.andThen(Fiber.await(fiber)))
             const snapshot = yield* runtime.inspect(
               authority.admission.plan.id
             )
@@ -978,7 +978,7 @@ describe("native-contained runtime", () => {
           ])
           const fiber = yield* runtime.execute(authority).pipe(Effect.forkChild)
           const privateWorkspace = yield* Deferred.await(ready)
-          const exit = yield* Fiber.interrupt(fiber)
+          const exit = yield* Fiber.interrupt(fiber).pipe(Effect.andThen(Fiber.await(fiber)))
           const hold = yield* Hold
           const held = yield* hold.held
           const snapshot = yield* runtime.inspect(

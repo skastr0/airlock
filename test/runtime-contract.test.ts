@@ -258,7 +258,7 @@ const outboxLayer = (
           ...(request.body === undefined ? {} : { body: "[redacted]" })
         }),
         stagedAt: timestamp,
-        holdUntil: DateTime.add(timestamp, { millis: holdMillis }),
+        holdUntil: DateTime.add(timestamp, { milliseconds: holdMillis }),
         ...(authorization === undefined ? {} : { authorization })
       }))
     },
@@ -272,6 +272,7 @@ const outboxLayer = (
     cancel: () => Effect.die("unused"),
     response: () => Effect.die("unused"),
     pending: Effect.succeed([]),
+    pendingAuthorized: () => Effect.succeed([]),
     flush: Effect.die("Runtime never flushes Outbox")
   }))
 

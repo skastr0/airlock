@@ -612,7 +612,7 @@ const make = Effect.gen(function* () {
   const readJournal = (id: ActId) =>
     fs.stat(actDir(id)).pipe(
       Effect.mapError((error) =>
-        error._tag === "SystemError" && error.reason === "NotFound"
+        error.reason._tag === "NotFound"
           ? new UnknownAct({ id })
           : fsError("stat hold act", actDir(id))(error)
       ),
@@ -1615,7 +1615,7 @@ const make = Effect.gen(function* () {
 
   const reap = Effect.fn("Hold.reap")(function* (olderThanMillis: number, retirement?: HoldJournal) {
     const now = yield* DateTime.now
-    const cutoff = DateTime.subtract(now, { millis: olderThanMillis })
+    const cutoff = DateTime.subtract(now, { milliseconds: olderThanMillis })
     const all = retirement === undefined ? yield* listJournals : []
     const expired: HoldJournal[] = []
     if (retirement !== undefined) expired.push(retirement)

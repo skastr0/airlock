@@ -77,7 +77,7 @@ const processReceipt = (
 const runtimeLayer = (
   workspace: string,
   home: string,
-  runner: ProcessRunner["Type"],
+  runner: ProcessRunner["Service"],
   runJournalDirectory?: string
 ) =>
   RuntimeLive.pipe(
@@ -247,7 +247,7 @@ describe.skipIf(process.platform !== "darwin" && process.platform !== "linux")(
               const ownerBefore = readFileSync(claimFile, "utf8")
               const waiter = yield* runtime.execute(execution).pipe(Effect.forkChild)
               yield* realDelay(40)
-              const waiterExit = yield* Fiber.interrupt(waiter)
+              const waiterExit = yield* Fiber.interrupt(waiter).pipe(Effect.andThen(Fiber.await(waiter)))
               const ownerAfter = readFileSync(claimFile, "utf8")
 
               expect(waiterExit._tag).toBe("Failure")

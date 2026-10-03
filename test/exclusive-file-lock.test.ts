@@ -146,7 +146,7 @@ describe("ExclusiveFileLock", () => {
       )
       expect(Exit.isFailure(first)).toBe(true)
       if (Exit.isFailure(first)) {
-        expect(Array.from(Cause.failures(first.cause))).toEqual([
+        expect(first.cause.reasons.filter(Cause.isFailReason).map((reason) => reason.error)).toEqual([
           expect.objectContaining({
             _tag: "TestLockFailure",
             operation: "publish-lock-sync-directory",

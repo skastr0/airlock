@@ -431,7 +431,7 @@ const prepareCase = (
 }
 
 const decodeResult = <A, I>(
-  schema: Schema.Schema<A, I, never>,
+  schema: Schema.Codec<A, I>,
   report: AgentProgramReport
 ): A => Schema.decodeUnknownSync(schema)(report.result.result)
 
