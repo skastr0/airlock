@@ -2,7 +2,7 @@ import { describe, expect, it } from "@effect/vitest"
 import { Effect, Schema } from "effect"
 import { ActId } from "../src/domain.ts"
 
-const decodeActId = Schema.decodeUnknown(ActId)
+const decodeActId = Schema.decodeUnknownEffect(ActId)
 
 describe("domain identifiers", () => {
   it.effect("accepts generated and legacy path-component-safe act ids", () =>
@@ -24,8 +24,8 @@ describe("domain identifiers", () => {
         "act\u0000suffix",
         `act_${"x".repeat(125)}`
       ]) {
-        expect((yield* decodeActId(candidate).pipe(Effect.either))._tag).toBe(
-          "Left"
+        expect((yield* decodeActId(candidate).pipe(Effect.result))._tag).toBe(
+          "Failure"
         )
       }
     })

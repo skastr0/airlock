@@ -1,4 +1,4 @@
-import { Schema } from "effect"
+import { Effect, Schema } from "effect"
 
 // ── identifiers ─────────────────────────────────────────────────────────────
 
@@ -9,7 +9,7 @@ import { Schema } from "effect"
  * traversal.
  */
 export const ActId = Schema.String.pipe(
-  Schema.pattern(/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/),
+  Schema.check(Schema.isPattern(/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/)),
   Schema.brand("ActId")
 )
 export type ActId = typeof ActId.Type
@@ -19,12 +19,12 @@ export type EmissionId = typeof EmissionId.Type
 
 // ── the four effect classes (see DESIGN.md) ─────────────────────────────────
 
-export const EffectClass = Schema.Literal(
+export const EffectClass = Schema.Literals([
   "observation",
   "mutation",
   "emission",
   "computation"
-)
+])
 export type EffectClass = typeof EffectClass.Type
 
 // ── held mutations ──────────────────────────────────────────────────────────
@@ -37,9 +37,9 @@ export class HeldManifest extends Schema.Class<HeldManifest>("HeldManifest")({
   // remove: target renamed into the hold
   // overwrite: previous version renamed into the hold before the new write
   // displaced: current version renamed into the hold to make room for an undo
-  act: Schema.Literal("remove", "overwrite", "displaced"),
+  act: Schema.Literals(["remove", "overwrite", "displaced"]),
   target: Schema.String,
-  kind: Schema.Literal("file", "directory"),
+  kind: Schema.Literals(["file", "directory"]),
   // a manifest with no payload marks a creation: undoing it displaces the
   // created file rather than renaming a payload back
   hasPayload: Schema.Boolean,
@@ -47,15 +47,15 @@ export class HeldManifest extends Schema.Class<HeldManifest>("HeldManifest")({
   // every pre-purpose journal backward compatible while making runtime-private
   // retention explicit and non-undoable.
   purpose: Schema.optional(HoldPurpose),
-  status: Schema.Literal("held", "restored"),
-  at: Schema.DateTimeUtc
+  status: Schema.Literals(["held", "restored"]),
+  at: Schema.DateTimeUtcFromString
 }) {}
 
 export class RemoveReceipt extends Schema.Class<RemoveReceipt>("RemoveReceipt")({
   id: ActId,
   target: Schema.String,
-  kind: Schema.Literal("file", "directory"),
-  at: Schema.DateTimeUtc
+  kind: Schema.Literals(["file", "directory"]),
+  at: Schema.DateTimeUtcFromString
 }) {}
 
 export class RuntimePrivateRetentionReceipt extends Schema.Class<RuntimePrivateRetentionReceipt>(
@@ -63,47 +63,47 @@ export class RuntimePrivateRetentionReceipt extends Schema.Class<RuntimePrivateR
 )({
   id: ActId,
   target: Schema.String,
-  kind: Schema.Literal("file", "directory"),
-  at: Schema.DateTimeUtc
+  kind: Schema.Literals(["file", "directory"]),
+  at: Schema.DateTimeUtcFromString
 }) {}
 
 export class OverwriteReceipt extends Schema.Class<OverwriteReceipt>("OverwriteReceipt")({
   id: ActId,
   target: Schema.String,
   previousHeld: Schema.Boolean,
-  at: Schema.DateTimeUtc
+  at: Schema.DateTimeUtcFromString
 }) {}
 
 export class UndoReceipt extends Schema.Class<UndoReceipt>("UndoReceipt")({
   id: ActId,
   target: Schema.String,
   displaced: Schema.optional(ActId),
-  at: Schema.DateTimeUtc
+  at: Schema.DateTimeUtcFromString
 }) {}
 
 export class ReapReport extends Schema.Class<ReapReport>("ReapReport")({
   reaped: Schema.Array(ActId),
-  at: Schema.DateTimeUtc
+  at: Schema.DateTimeUtcFromString
 }) {}
 
 // ── staged emissions ────────────────────────────────────────────────────────
 
 export class EmissionRequest extends Schema.Class<EmissionRequest>("EmissionRequest")({
   url: Schema.String,
-  method: Schema.Literal("GET", "POST", "PUT", "PATCH", "DELETE"),
+  method: Schema.Literals(["GET", "POST", "PUT", "PATCH", "DELETE"]),
   body: Schema.optional(Schema.String),
-  headers: Schema.optionalWith(
-    Schema.Record({ key: Schema.String, value: Schema.String }),
-    { default: () => ({}) }
+  headers: Schema.Record(Schema.String, Schema.String).pipe(
+    Schema.withDecodingDefault(Effect.succeed({})),
+    Schema.withConstructorDefault(Effect.succeed({}))
   )
 }) {}
 
 export class StagedEmission extends Schema.Class<StagedEmission>("StagedEmission")({
   id: EmissionId,
   request: EmissionRequest,
-  status: Schema.Literal("staged", "committed", "cancelled"),
-  stagedAt: Schema.DateTimeUtc,
-  holdUntil: Schema.DateTimeUtc,
+  status: Schema.Literals(["staged", "committed", "cancelled"]),
+  stagedAt: Schema.DateTimeUtcFromString,
+  holdUntil: Schema.DateTimeUtcFromString,
   outcome: Schema.optional(
     Schema.Struct({ status: Schema.Number, body: Schema.String })
   )
@@ -112,9 +112,9 @@ export class StagedEmission extends Schema.Class<StagedEmission>("StagedEmission
 // ── ledger ──────────────────────────────────────────────────────────────────
 
 export class LedgerEntry extends Schema.Class<LedgerEntry>("LedgerEntry")({
-  at: Schema.DateTimeUtc,
+  at: Schema.DateTimeUtcFromString,
   effect: EffectClass,
-  act: Schema.Literal(
+  act: Schema.Literals([
     "remove",
     "overwrite",
     "undo",
@@ -123,7 +123,7 @@ export class LedgerEntry extends Schema.Class<LedgerEntry>("LedgerEntry")({
     "stage",
     "commit",
     "cancel"
-  ),
+  ]),
   ref: Schema.String,
   detail: Schema.optional(Schema.String)
 }) {}
