@@ -35,6 +35,7 @@ import {
   NativeStat,
   NativeWriteReceipt
 } from "../native/index.ts"
+import { reasonOf } from "../FailureText.ts"
 import { OutboxEmission, StagedDispatchAuthorization } from "../Outbox.ts"
 import { CommitAuthority, OutboxState } from "../outbox/Contract.ts"
 import { ActId, EmissionId, RemoveReceipt } from "../domain.ts"
@@ -246,18 +247,11 @@ const causeTag = (cause: unknown): string | undefined =>
     ? (cause as { readonly _tag: string })._tag
     : undefined
 
-/**
- * A Schema tagged error has no derived `message`: its evidence is its fields.
- * Render those so a report never loses the reason an authority gave.
- */
-const causeReason = (cause: unknown): string => {
-  if (typeof cause === "string") return cause
-  if (cause instanceof Error && cause.message !== "") return cause.message
-  const tag = causeTag(cause)
-  if (tag === undefined) return "operation failed"
-  const { _tag, ...fields } = cause as Record<string, unknown>
-  return Object.keys(fields).length === 0 ? tag : JSON.stringify(fields)
-}
+/** Untagged, non-Error causes carry no words of their own. */
+const causeReason = (cause: unknown): string =>
+  typeof cause === "string" || cause instanceof Error || causeTag(cause) !== undefined
+    ? reasonOf(cause)
+    : "operation failed"
 
 const executionFailure = (
   action: string,
