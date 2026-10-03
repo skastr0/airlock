@@ -50,7 +50,7 @@ export class ResourceNeed extends Schema.Class<ResourceNeed>("ResourceNeed")({
 }) {}
 
 const PathCall = { path: Schema.String, realm: Schema.String.pipe(
-    Schema.withDecodingDefault(Effect.succeed("local")),
+    Schema.withDecodingDefaultKey(Effect.succeed("local")),
     Schema.withConstructorDefault(Effect.succeed("local"))
   ) }
 
@@ -61,7 +61,7 @@ export const FileReadAction = Schema.Struct({
   action: Schema.Literal("file.read"),
   ...PathCall,
   format: Schema.Literals(["text", "bytes", "json"]).pipe(
-    Schema.withDecodingDefault(Effect.succeed("text" as const)),
+    Schema.withDecodingDefaultKey(Effect.succeed("text" as const)),
     Schema.withConstructorDefault(Effect.succeed("text" as const))
   )
 })
@@ -75,7 +75,7 @@ export const FileGlobAction = Schema.Struct({
   root: Schema.String,
   pattern: Schema.String,
   realm: Schema.String.pipe(
-    Schema.withDecodingDefault(Effect.succeed("local")),
+    Schema.withDecodingDefaultKey(Effect.succeed("local")),
     Schema.withConstructorDefault(Effect.succeed("local"))
   )
 })
@@ -85,7 +85,7 @@ export const FileStatAction = Schema.Struct({
   action: Schema.Literal("file.stat"),
   ...PathCall,
   followSymlinks: Schema.Boolean.pipe(
-    Schema.withDecodingDefault(Effect.succeed(false)),
+    Schema.withDecodingDefaultKey(Effect.succeed(false)),
     Schema.withConstructorDefault(Effect.succeed(false))
   )
 })
@@ -94,8 +94,8 @@ export type FileStatAction = typeof FileStatAction.Type
 export const FileWriteAction = Schema.Struct({
   action: Schema.Literal("file.write"),
   ...PathCall,
-  content: Schema.optional(Schema.String),
-  sourceArtifact: Schema.optional(ArtifactId)
+  content: Schema.optionalKey(Schema.String),
+  sourceArtifact: Schema.optionalKey(ArtifactId)
 })
 export type FileWriteAction = typeof FileWriteAction.Type
 
@@ -107,7 +107,7 @@ export const FileMoveAction = Schema.Struct({
   source: Schema.String,
   destination: Schema.String,
   realm: Schema.String.pipe(
-    Schema.withDecodingDefault(Effect.succeed("local")),
+    Schema.withDecodingDefaultKey(Effect.succeed("local")),
     Schema.withConstructorDefault(Effect.succeed("local"))
   )
 })
@@ -118,7 +118,7 @@ export const FileCopyAction = Schema.Struct({
   source: Schema.String,
   destination: Schema.String,
   realm: Schema.String.pipe(
-    Schema.withDecodingDefault(Effect.succeed("local")),
+    Schema.withDecodingDefaultKey(Effect.succeed("local")),
     Schema.withConstructorDefault(Effect.succeed("local"))
   )
 })
@@ -128,7 +128,7 @@ export const FileMkdirAction = Schema.Struct({
   action: Schema.Literal("file.mkdir"),
   ...PathCall,
   parents: Schema.Boolean.pipe(
-    Schema.withDecodingDefault(Effect.succeed(false)),
+    Schema.withDecodingDefaultKey(Effect.succeed(false)),
     Schema.withConstructorDefault(Effect.succeed(false))
   )
 })
@@ -156,46 +156,46 @@ export const ProcessRunAction = Schema.Struct({
    * root executable remains separate and is always the Invoke authority.
    */
   descendantExecutables: Schema.Array(Schema.String).pipe(
-    Schema.withDecodingDefault(Effect.succeed([])),
+    Schema.withDecodingDefaultKey(Effect.succeed([])),
     Schema.withConstructorDefault(Effect.succeed([]))
   ),
   cwd: Schema.String,
   env: Schema.Record(Schema.String, Schema.String).pipe(
-    Schema.withDecodingDefault(Effect.succeed({})),
+    Schema.withDecodingDefaultKey(Effect.succeed({})),
     Schema.withConstructorDefault(Effect.succeed({}))
   ),
   cellProfile: CellProfile.pipe(
-    Schema.withDecodingDefault(Effect.succeed("compatibility" as const)),
+    Schema.withDecodingDefaultKey(Effect.succeed("compatibility" as const)),
     Schema.withConstructorDefault(Effect.succeed("compatibility" as const))
   ),
-  timeoutMs: Schema.optional(Schema.Number),
+  timeoutMs: Schema.optionalKey(Schema.Finite),
   /** Text is frozen as an artifact before Plan lowering; artifact ids stay explicit. */
   stdin: ProcessStdin.pipe(
-    Schema.withDecodingDefault(Effect.succeed("discard" as const)),
+    Schema.withDecodingDefaultKey(Effect.succeed("discard" as const)),
     Schema.withConstructorDefault(Effect.succeed("discard" as const))
   ),
   stdout: Schema.Literals(["capture", "discard", "inherit"]).pipe(
-    Schema.withDecodingDefault(Effect.succeed("capture" as const)),
+    Schema.withDecodingDefaultKey(Effect.succeed("capture" as const)),
     Schema.withConstructorDefault(Effect.succeed("capture" as const))
   ),
   stderr: Schema.Literals(["capture", "discard", "inherit"]).pipe(
-    Schema.withDecodingDefault(Effect.succeed("capture" as const)),
+    Schema.withDecodingDefaultKey(Effect.succeed("capture" as const)),
     Schema.withConstructorDefault(Effect.succeed("capture" as const))
   ),
-  outputLimitBytes: Schema.Number.pipe(
-    Schema.withDecodingDefault(Effect.succeed(1_048_576)),
+  outputLimitBytes: Schema.Finite.pipe(
+    Schema.withDecodingDefaultKey(Effect.succeed(1_048_576)),
     Schema.withConstructorDefault(Effect.succeed(1_048_576))
   ),
   readable: Schema.Array(ResourceNeed).pipe(
-    Schema.withDecodingDefault(Effect.succeed([])),
+    Schema.withDecodingDefaultKey(Effect.succeed([])),
     Schema.withConstructorDefault(Effect.succeed([]))
   ),
   writable: Schema.Array(ResourceNeed).pipe(
-    Schema.withDecodingDefault(Effect.succeed([])),
+    Schema.withDecodingDefaultKey(Effect.succeed([])),
     Schema.withConstructorDefault(Effect.succeed([]))
   ),
   realm: Schema.String.pipe(
-    Schema.withDecodingDefault(Effect.succeed("local")),
+    Schema.withDecodingDefaultKey(Effect.succeed("local")),
     Schema.withConstructorDefault(Effect.succeed("local"))
   )
 })
@@ -206,17 +206,17 @@ export const HttpStageAction = Schema.Struct({
   endpoint: Schema.String,
   method: Schema.Literals(["GET", "POST", "PUT", "PATCH", "DELETE"]),
   headers: Schema.Record(Schema.String, Schema.String).pipe(
-    Schema.withDecodingDefault(Effect.succeed({})),
+    Schema.withDecodingDefaultKey(Effect.succeed({})),
     Schema.withConstructorDefault(Effect.succeed({}))
   ),
-  body: Schema.optional(Schema.String),
-  bodyArtifact: Schema.optional(ArtifactId),
-  holdMillis: Schema.Number.pipe(
-    Schema.withDecodingDefault(Effect.succeed(30_000)),
+  body: Schema.optionalKey(Schema.String),
+  bodyArtifact: Schema.optionalKey(ArtifactId),
+  holdMillis: Schema.Finite.pipe(
+    Schema.withDecodingDefaultKey(Effect.succeed(30_000)),
     Schema.withConstructorDefault(Effect.succeed(30_000))
   ),
   realm: Schema.String.pipe(
-    Schema.withDecodingDefault(Effect.succeed("external")),
+    Schema.withDecodingDefaultKey(Effect.succeed("external")),
     Schema.withConstructorDefault(Effect.succeed("external"))
   )
 })

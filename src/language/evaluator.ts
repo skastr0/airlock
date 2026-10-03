@@ -16,7 +16,7 @@ export type LanguageValue = LanguageScalar | LanguageList | LanguageRecord
 export const LanguageValueSchema: Schema.Codec<LanguageValue> = Schema.suspend(() =>
   Schema.Union([
     Schema.String,
-    Schema.Number,
+    Schema.Finite,
     Schema.Boolean,
     Schema.Null,
     DurationSchema,
