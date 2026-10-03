@@ -222,7 +222,7 @@ export const makeExclusiveFileLock = <E>(
       catch: (cause) => fail("close-unpublished-lock", options.active, cause)
     }).pipe(Effect.exit)
     return yield* Exit.isFailure(closed)
-      ? Effect.failCause(Cause.sequential(publication.cause, closed.cause))
+      ? Effect.failCause(Cause.combine(publication.cause, closed.cause))
       : Effect.failCause(publication.cause)
   })
 
@@ -269,7 +269,7 @@ export const makeExclusiveFileLock = <E>(
       if (Exit.isFailure(verified)) {
         return yield* Exit.isFailure(closed)
           ? Effect.failCause(
-              Cause.sequential(verified.cause, closed.cause)
+              Cause.combine(verified.cause, closed.cause)
             )
           : Effect.failCause(verified.cause)
       }
@@ -291,7 +291,7 @@ export const makeExclusiveFileLock = <E>(
                   if (Exit.isFailure(released)) {
                     return Exit.isFailure(use)
                       ? Effect.failCause(
-                          Cause.sequential(use.cause, released.cause)
+                          Cause.combine(use.cause, released.cause)
                         )
                       : Effect.failCause(released.cause)
                   }

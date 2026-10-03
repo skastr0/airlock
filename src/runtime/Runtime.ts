@@ -75,11 +75,15 @@ export type RuntimeProfile = typeof RuntimeProfile.Type
 
 export class RuntimeConfig extends Schema.Class<RuntimeConfig>("RuntimeConfig")({
   workspace: Schema.String,
-  profile: Schema.optionalWith(RuntimeProfile, { default: () => "compatibility" as const }),
+  profile: RuntimeProfile.pipe(
+    Schema.withDecodingDefault(Effect.succeed("compatibility" as const)),
+    Schema.withConstructorDefault(Effect.succeed("compatibility" as const))
+  ),
   runJournalDirectory: Schema.optional(Schema.String),
-  environment: Schema.optionalWith(Schema.Record(Schema.String, Schema.String), {
-    default: () => ({})
-  })
+  environment: Schema.Record(Schema.String, Schema.String).pipe(
+    Schema.withDecodingDefault(Effect.succeed(({}))),
+    Schema.withConstructorDefault(Effect.succeed(({})))
+  )
 }) {}
 
 /** A Cell receipt is carried only by its explicit delta artifact. */
@@ -190,9 +194,9 @@ export class RuntimeProcessEvidence extends Schema.Class<RuntimeProcessEvidence>
   nodeId: Schema.String,
   outcome: RuntimeProcessOutcome,
   receipt: ProcessReceipt,
-  executableBindings: Schema.optionalWith(
-    Schema.Array(CellExecutableBinding),
-    { default: () => [] }
+  executableBindings: Schema.Array(CellExecutableBinding).pipe(
+    Schema.withDecodingDefault(Effect.succeed([])),
+    Schema.withConstructorDefault(Effect.succeed([]))
   )
 }) {}
 
@@ -254,9 +258,9 @@ export const RuntimeRecoveryEvidence = Schema.Union([
 export type RuntimeRecoveryEvidence = typeof RuntimeRecoveryEvidence.Type
 
 export class RuntimeRun extends Schema.Class<RuntimeRun>("RuntimeRun")({
-  schemaVersion: Schema.optionalWith(
-    Schema.Literal("airlock/runtime-run/v1"),
-    { default: () => "airlock/runtime-run/v1" as const }
+  schemaVersion: Schema.Literal("airlock/runtime-run/v1").pipe(
+    Schema.withDecodingDefault(Effect.succeed("airlock/runtime-run/v1" as const)),
+    Schema.withConstructorDefault(Effect.succeed("airlock/runtime-run/v1" as const))
   ),
   planId: Schema.String,
   state: Schema.Literals(["succeeded", "failed", "partial"]),
@@ -264,15 +268,18 @@ export class RuntimeRun extends Schema.Class<RuntimeRun>("RuntimeRun")({
   finishedAt: Schema.DateTimeUtcFromString,
   receipts: Schema.Array(Receipt),
   artifacts: Schema.Array(RuntimeArtifact),
-  processes: Schema.optionalWith(Schema.Array(RuntimeProcessEvidence), {
-    default: () => []
-  }),
-  lifecycle: Schema.optionalWith(Schema.Array(RuntimeLifecycleReceipt), {
-    default: () => []
-  }),
-  recovery: Schema.optionalWith(Schema.Array(RuntimeRecoveryEvidence), {
-    default: () => []
-  })
+  processes: Schema.Array(RuntimeProcessEvidence).pipe(
+    Schema.withDecodingDefault(Effect.succeed([])),
+    Schema.withConstructorDefault(Effect.succeed([]))
+  ),
+  lifecycle: Schema.Array(RuntimeLifecycleReceipt).pipe(
+    Schema.withDecodingDefault(Effect.succeed([])),
+    Schema.withConstructorDefault(Effect.succeed([]))
+  ),
+  recovery: Schema.Array(RuntimeRecoveryEvidence).pipe(
+    Schema.withDecodingDefault(Effect.succeed([])),
+    Schema.withConstructorDefault(Effect.succeed([]))
+  )
 }) {}
 
 export class RuntimeRunSnapshot extends Schema.Class<RuntimeRunSnapshot>(
@@ -1616,8 +1623,8 @@ const make = Effect.gen(function* () {
       }
 
       const executed = yield* execution.pipe(Effect.result)
-      if (executed._tag === "Left") {
-        const evidenced = evidencedProcessFailure(executed.left)
+      if (executed._tag === "Failure") {
+        const evidenced = evidencedProcessFailure(executed.failure)
         if (evidenced !== undefined) {
           processes.set(node.id, new RuntimeProcessEvidence({
             nodeId: node.id,
@@ -1637,19 +1644,19 @@ const make = Effect.gen(function* () {
             outputArtifacts
           })
         }
-        const tag = typeof executed.left === "object" &&
-            executed.left !== null &&
-            "_tag" in executed.left
-          ? String(executed.left._tag)
+        const tag = typeof executed.failure === "object" &&
+            executed.failure !== null &&
+            "_tag" in executed.failure
+          ? String(executed.failure._tag)
           : "ProcessExecutionFailed"
         return yield* new RuntimeNodeFailure({
           nodeId: node.id,
           operation: "invoke",
-          reason: `${tag}: ${errorReason(executed.left)}`
+          reason: `${tag}: ${errorReason(executed.failure)}`
         })
       }
 
-      const outcome = executed.right
+      const outcome = executed.success
       processes.set(node.id, new RuntimeProcessEvidence({
         nodeId: node.id,
         outcome: "exited",
@@ -2024,27 +2031,27 @@ const make = Effect.gen(function* () {
             headers: node.headers,
             ...(body === undefined ? {} : { body })
           }), node.holdMillis, dispatch?.stagedAuthorization).pipe(Effect.result)
-          if (stagedResult._tag === "Left") {
-            if (stagedResult.left._tag === "OutboxRecoveryRequired") {
+          if (stagedResult._tag === "Failure") {
+            if (stagedResult.failure._tag === "OutboxRecoveryRequired") {
               recovery.push(new RuntimeOutboxRecoveryEvidence({
                 nodeId: node.id,
                 operation: "stage external",
-                recovery: stagedResult.left
+                recovery: stagedResult.failure
               }))
               return yield* new RuntimeRecoveryRequired({
                 nodeId: node.id,
                 operation: "stage external",
-                causeTag: stagedResult.left._tag,
-                reason: stagedResult.left.reason
+                causeTag: stagedResult.failure._tag,
+                reason: stagedResult.failure.reason
               })
             }
             return yield* new RuntimeNodeFailure({
               nodeId: node.id,
               operation: "stage external",
-              reason: `${stagedResult.left._tag}: ${errorReason(stagedResult.left)}`
+              reason: `${stagedResult.failure._tag}: ${errorReason(stagedResult.failure)}`
             })
           }
-          const staged = stagedResult.right
+          const staged = stagedResult.success
 
           // Staging has durably completed. Everything below is the ordinary
           // administrative commit path, entered only because the supervisor
@@ -2069,27 +2076,27 @@ const make = Effect.gen(function* () {
               endpoint: dispatch.endpoint
             })
           ).pipe(Effect.result)
-          if (committedResult._tag === "Left") {
-            if (committedResult.left._tag === "OutboxRecoveryRequired") {
+          if (committedResult._tag === "Failure") {
+            if (committedResult.failure._tag === "OutboxRecoveryRequired") {
               recovery.push(new RuntimeOutboxRecoveryEvidence({
                 nodeId: node.id,
                 operation: "policy auto-commit",
-                recovery: committedResult.left
+                recovery: committedResult.failure
               }))
               return yield* new RuntimeRecoveryRequired({
                 nodeId: node.id,
                 operation: "policy auto-commit",
-                causeTag: committedResult.left._tag,
-                reason: committedResult.left.reason
+                causeTag: committedResult.failure._tag,
+                reason: committedResult.failure.reason
               })
             }
             return yield* new RuntimeNodeFailure({
               nodeId: node.id,
               operation: "policy auto-commit",
-              reason: `${committedResult.left._tag}: ${errorReason(committedResult.left)}`
+              reason: `${committedResult.failure._tag}: ${errorReason(committedResult.failure)}`
             })
           }
-          const committed = committedResult.right
+          const committed = committedResult.success
           const emitted = yield* materializeStructuredResult(
             node,
             artifacts,
@@ -2132,18 +2139,18 @@ const make = Effect.gen(function* () {
         hold.retireRuntimePrivate(registration.privateWorkspace).pipe(
           Effect.result,
           Effect.flatMap((result) => {
-            if (result._tag === "Right") {
+            if (result._tag === "Success") {
               return Effect.succeed(new RuntimeCellWorkspaceHeld({
                 state: "held",
                 nodeId: registration.nodeId,
                 privateWorkspace: registration.privateWorkspace,
-                actId: result.right.id,
-                at: result.right.at
+                actId: result.success.id,
+                at: result.success.at
               }))
             }
             return DateTime.now.pipe(
               Effect.map((at): RuntimeLifecycleReceipt =>
-                result.left._tag === "TargetNotFound"
+                result.failure._tag === "TargetNotFound"
                   ? new RuntimeCellWorkspaceAbsent({
                       state: "absent",
                       nodeId: registration.nodeId,
@@ -2154,8 +2161,8 @@ const make = Effect.gen(function* () {
                       state: "failed",
                       nodeId: registration.nodeId,
                       privateWorkspace: registration.privateWorkspace,
-                      errorTag: result.left._tag,
-                      reason: errorReason(result.left),
+                      errorTag: result.failure._tag,
+                      reason: errorReason(result.failure),
                       at
                     })
               )
@@ -2283,7 +2290,7 @@ const make = Effect.gen(function* () {
           authority,
           node
         ).pipe(Effect.result)
-        if (retainedBinding._tag === "Left") {
+        if (retainedBinding._tag === "Failure") {
           receipts.push(yield* nodeReceipt(
             plan,
             node,
@@ -2292,7 +2299,7 @@ const make = Effect.gen(function* () {
             artifacts,
             [],
             [],
-            retainedBinding.left._tag
+            retainedBinding.failure._tag
           ))
           stateByNode.set(node.id, "failed")
           failed = true
@@ -2311,7 +2318,7 @@ const make = Effect.gen(function* () {
             "cancelled",
             artifacts,
             [],
-            retainedBinding.right.handles.map(
+            retainedBinding.success.handles.map(
               (handle) => handle.resourceIdentity
             ),
             "RuntimeDependencyFailed"
@@ -2334,10 +2341,10 @@ const make = Effect.gen(function* () {
           })),
           Effect.result
         )
-        const handles = revalidated._tag === "Right"
-          ? revalidated.right.handles
+        const handles = revalidated._tag === "Success"
+          ? revalidated.success.handles
           : []
-        const result = revalidated._tag === "Left"
+        const result = revalidated._tag === "Failure"
           ? revalidated
           : yield* runNode(
             plan,
@@ -2352,10 +2359,10 @@ const make = Effect.gen(function* () {
         const materialized = [...artifacts.keys()].filter(
           (id) => !artifactsBefore.has(id)
         )
-        const claimed = result._tag === "Right"
-          ? result.right
-          : result.left instanceof RuntimeProcessFailure
-            ? result.left.outputArtifacts
+        const claimed = result._tag === "Success"
+          ? result.success
+          : result.failure instanceof RuntimeProcessFailure
+            ? result.failure.outputArtifacts
             : []
         const claimMatches =
           claimed.length === materialized.length &&
@@ -2378,7 +2385,7 @@ const make = Effect.gen(function* () {
           ))
           stateByNode.set(node.id, "failed")
           failed = true
-        } else if (result._tag === "Left") {
+        } else if (result._tag === "Failure") {
           receipts.push(yield* nodeReceipt(
             plan,
             node,
@@ -2387,9 +2394,9 @@ const make = Effect.gen(function* () {
             artifacts,
             claimed,
             handles.map((handle) => handle.resourceIdentity),
-            result.left instanceof RuntimeRecoveryRequired
-              ? result.left.causeTag
-              : result.left._tag
+            result.failure instanceof RuntimeRecoveryRequired
+              ? result.failure.causeTag
+              : result.failure._tag
           ))
           stateByNode.set(node.id, "failed")
           failed = true
@@ -2400,7 +2407,7 @@ const make = Effect.gen(function* () {
             receipts.length + 1,
             "succeeded",
             artifacts,
-            result.right,
+            result.success,
             handles.map((handle) => handle.resourceIdentity)
           ))
           stateByNode.set(node.id, "succeeded")
@@ -2498,7 +2505,7 @@ const make = Effect.gen(function* () {
           if (retentionFailures.length === 0) {
             return yield* Effect.failCause(runExit.cause)
           }
-          return yield* Effect.failCause(Cause.sequential(
+          return yield* Effect.failCause(Cause.combine(
             runExit.cause,
             Cause.fail(new RuntimeLifecycleFailure({
               planId: plan.id,

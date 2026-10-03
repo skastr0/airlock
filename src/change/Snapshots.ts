@@ -67,7 +67,7 @@ export const inspectSnapshots = async (home: string, id: string): Promise<Snapsh
     metadata.push({ name, digest: hash(raw) })
     return raw
   }
-  const decode = <A, I>(name: string, raw: string | undefined, schema: Schema.Schema<A, I>) => {
+  const decode = <A, I>(name: string, raw: string | undefined, schema: Schema.Codec<A, I>) => {
     if (raw === undefined) return undefined
     try { return Schema.decodeUnknownSync(Schema.fromJsonString(schema))(raw) }
     catch (cause) { errors.push({ operation: name, reason: String(cause) }); return undefined }

@@ -486,7 +486,7 @@ export const LedgerLive = Layer.effect(
       ).pipe(Effect.result)
       if (Result.isSuccess(tail)) {
         yield* appendDurably(ledgerFile, Buffer.from("\n"))
-        return [...entries, tail.right]
+        return [...entries, tail.success]
       }
 
       return yield* Effect.fail(yield* quarantineTail(ledgerFile, split))
@@ -499,10 +499,10 @@ export const LedgerLive = Layer.effect(
       record: (entry) =>
         lock
           .withLock(Effect.uninterruptible(recordCritical(entry)))
-          .pipe(localMutex.withPermits(1)),
+          .pipe(Semaphore.withPermit(localMutex)),
       entries: lock
         .withLock(Effect.uninterruptible(entriesCritical()))
-        .pipe(localMutex.withPermits(1))
+        .pipe(Semaphore.withPermit(localMutex))
     })
   })
 )

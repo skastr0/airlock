@@ -405,14 +405,14 @@ const make = Effect.gen(function* () {
           directory,
           `${operation} directory sync`
         ).pipe(Effect.result)
-        if (synced._tag === "Left") {
+        if (synced._tag === "Failure") {
           return yield* new HoldPostRenameDirectorySyncFailed({
             source,
             destination: target,
             operation,
             syncedDirectories,
             failedDirectory: directory,
-            reason: synced.left.reason
+            reason: synced.failure.reason
           })
         }
         syncedDirectories.push(directory)
@@ -581,12 +581,12 @@ const make = Effect.gen(function* () {
       { concurrency: 1 }
     )
     const valid = decoded.flatMap((result) =>
-      result._tag === "Right" ? [result.right] : []
+      result._tag === "Success" ? [result.success] : []
     )
     if (valid.length === 0) {
-      const failure = decoded.find((result) => result._tag === "Left")
-      return yield* failure?._tag === "Left"
-        ? failure.left
+      const failure = decoded.find((result) => result._tag === "Failure")
+      return yield* failure?._tag === "Failure"
+        ? failure.failure
         : new HoldFilesystemError({
             operation: "decode hold journal",
             target: manifestFile(id),
@@ -1350,28 +1350,28 @@ const make = Effect.gen(function* () {
           ? yield* prepareCreation(target)
           : yield* holdTarget(target, "overwrite", existing)
         const installed = yield* installStaged(manifest, content).pipe(Effect.result)
-        if (installed._tag === "Left") {
+        if (installed._tag === "Failure") {
           if (
-            installed.left instanceof HoldRecoveryRequired &&
-            installed.left.recovery !== undefined
+            installed.failure instanceof HoldRecoveryRequired &&
+            installed.failure.recovery !== undefined
           ) {
-            return yield* installed.left
+            return yield* installed.failure
           }
           const recovered = yield* recoverFailedInstall(manifest).pipe(Effect.result)
-          if (recovered._tag === "Left") {
+          if (recovered._tag === "Failure") {
             if (
-              recovered.left instanceof HoldRecoveryRequired &&
-              recovered.left.recovery !== undefined
+              recovered.failure instanceof HoldRecoveryRequired &&
+              recovered.failure.recovery !== undefined
             ) {
-              return yield* recovered.left
+              return yield* recovered.failure
             }
             return yield* failedInstallRecoveryRequired(
               manifest,
-              installed.left,
-              recovered.left
+              installed.failure,
+              recovered.failure
             )
           }
-          return yield* installed.left
+          return yield* installed.failure
         }
         yield* recordAfterDurableMutation(
           restore,
@@ -1462,28 +1462,28 @@ const make = Effect.gen(function* () {
               sourceEntry.kind === "directory" ? "directory" : "file"
             )
         const installed = yield* installSource(manifest, source).pipe(Effect.result)
-        if (installed._tag === "Left") {
+        if (installed._tag === "Failure") {
           if (
-            installed.left instanceof HoldRecoveryRequired &&
-            installed.left.recovery !== undefined
+            installed.failure instanceof HoldRecoveryRequired &&
+            installed.failure.recovery !== undefined
           ) {
-            return yield* installed.left
+            return yield* installed.failure
           }
           const recovered = yield* recoverFailedInstall(manifest).pipe(Effect.result)
-          if (recovered._tag === "Left") {
+          if (recovered._tag === "Failure") {
             if (
-              recovered.left instanceof HoldRecoveryRequired &&
-              recovered.left.recovery !== undefined
+              recovered.failure instanceof HoldRecoveryRequired &&
+              recovered.failure.recovery !== undefined
             ) {
-              return yield* recovered.left
+              return yield* recovered.failure
             }
             return yield* failedInstallRecoveryRequired(
               manifest,
-              installed.left,
-              recovered.left
+              installed.failure,
+              recovered.failure
             )
           }
-          return yield* installed.left
+          return yield* installed.failure
         }
         yield* recordAfterDurableMutation(
           restore,
@@ -1500,8 +1500,8 @@ const make = Effect.gen(function* () {
           id: manifest.id,
           source,
           target,
-          kind: installed.right.kind,
-          metadata: installed.right.metadata,
+          kind: installed.success.kind,
+          metadata: installed.success.metadata,
           previousHeld: manifest.hasPayload,
           at: manifest.at
         })
@@ -1824,8 +1824,8 @@ const make = Effect.gen(function* () {
       yield* attempt("verify checked installation", () => checkTree(request.target, candidate))
       return yield* finishChecked(record, "installed")
     }).pipe(Effect.result)
-    if (execution._tag === "Right") return execution.right
-    return yield* failedChecked(record, mutationPossible ? "recovery-required" : "rejected", execution.left)
+    if (execution._tag === "Success") return execution.success
+    return yield* failedChecked(record, mutationPossible ? "recovery-required" : "rejected", execution.failure)
   })
 
   const undoChecked = Effect.fnUntraced(function* (receiptId: string) {
@@ -1870,8 +1870,8 @@ const make = Effect.gen(function* () {
       yield* attempt("verify checked undo", () => checkTree(request.target, original.request.expected))
       return yield* finishChecked(record, "undone")
     }).pipe(Effect.result)
-    if (execution._tag === "Right") return execution.right
-    return yield* failedChecked(record, mutationPossible ? "recovery-required" : "rejected", execution.left)
+    if (execution._tag === "Success") return execution.success
+    return yield* failedChecked(record, mutationPossible ? "recovery-required" : "rejected", execution.failure)
   })
 
   const recoverChecked = Effect.fnUntraced(function* (key: string, restore = false) {
@@ -1894,7 +1894,7 @@ const make = Effect.gen(function* () {
         await checkTree(current.request.target, rollback.restored)
         if (await treeExists(payloadFile(rollback.sourceActId))) throw new Error("restoration source still present")
       }).pipe(Effect.result)
-      if (restored._tag === "Right") {
+      if (restored._tag === "Success") {
         yield* syncRecovery
         return yield* finishChecked({ ...record, installed: rollback.restored }, "rolled-back")
       }
@@ -1915,7 +1915,7 @@ const make = Effect.gen(function* () {
       yield* syncRecovery
       return yield* finishChecked(current, current.undoOf === undefined ? "installed" : "undone")
     }).pipe(Effect.result)
-    if (proven._tag === "Right") return proven.right
+    if (proven._tag === "Success") return proven.success
 
     // A source still at its bound live name and no retained payload proves
     // that the first rename did not occur. This consumes, never resumes, it.
@@ -1927,7 +1927,7 @@ const make = Effect.gen(function* () {
         if (await treeExists(payloadFile(sourceActId))) throw new Error("retained payload exists")
         if (current.undoOf === undefined && current.installed !== undefined) await checkTree(stageFile(current.actId!), current.installed)
       }).pipe(Effect.result)
-      if (untouched._tag === "Right") return yield* finishChecked(record, "rejected", "interrupted before first live rename")
+      if (untouched._tag === "Success") return yield* finishChecked(record, "rejected", "interrupted before first live rename")
     }
     if (!restore || sourceActId === undefined || record.request.expected === null) return outcomeOf(record)
     const rollback = record.rollback ?? { sourceActId, restored: record.request.expected }
@@ -1948,7 +1948,7 @@ const make = Effect.gen(function* () {
       yield* attempt("verify recovery restoration", () => checkTree(current.request.target, rollback.restored))
       return yield* finishChecked({ ...record, installed: rollback.restored }, "rolled-back")
     }).pipe(Effect.result)
-    return restored._tag === "Right" ? restored.right : yield* failedChecked(record, "recovery-required", restored.left)
+    return restored._tag === "Success" ? restored.success : yield* failedChecked(record, "recovery-required", restored.failure)
   })
   const acknowledgeChecked = Effect.fnUntraced(function* (key: string) {
     const record = yield* readChecked(key)
@@ -2021,7 +2021,7 @@ const make = Effect.gen(function* () {
       yield* writeSnapshotRecord(record)
       return snapshotReceipt(record)
     }).pipe(Effect.result)
-    return result._tag === "Right" ? result.right : snapshotReceipt(record, reasonOf(result.left))
+    return result._tag === "Success" ? result.success : snapshotReceipt(record, reasonOf(result.failure))
   })
   const collectChangeSnapshots = Effect.fnUntraced(function* (raw: string) {
     const id = yield* Schema.decodeUnknownEffect(ProposalId)(raw)
@@ -2053,7 +2053,7 @@ const make = Effect.gen(function* () {
       yield* writeSnapshotRecord(record)
       return snapshotReceipt(record)
     }).pipe(Effect.result)
-    return result._tag === "Right" ? result.right : snapshotReceipt(record!, reasonOf(result.left))
+    return result._tag === "Success" ? result.success : snapshotReceipt(record!, reasonOf(result.failure))
   })
 
   return Hold.of({

@@ -104,8 +104,8 @@ describe("ExclusiveFileLock", () => {
       )
 
       expect(result._tag).toBe("Left")
-      if (result._tag === "Left") {
-        expect(result.left).toMatchObject({
+      if (result._tag === "Failure") {
+        expect(result.failure).toMatchObject({
           _tag: "TestLockFailure",
           operation: "verify-lock-owner",
           target: active
@@ -244,7 +244,7 @@ describe("ExclusiveFileLock", () => {
         )
       )
 
-      expect(results.every((result) => result._tag === "Right")).toBe(true)
+      expect(results.every((result) => result._tag === "Success")).toBe(true)
       expect(entered).toBe(32)
       expect(maximumInside).toBe(1)
       expect(inside).toBe(0)

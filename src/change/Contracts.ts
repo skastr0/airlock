@@ -57,8 +57,8 @@ export const SnapshotReceipt = Schema.Struct({
 export type SnapshotReceipt = typeof SnapshotReceipt.Type
 export const ContentRequest = Schema.Struct({
   id: ProposalId, side: Schema.Literals(["before", "after"]), path: Schema.String,
-  offset: Schema.optional(Schema.Number.pipe(Schema.int(), Schema.nonNegative())),
-  limit: Schema.optional(Schema.Number.pipe(Schema.int(), Schema.between(1, 65536)))
+  offset: Schema.optional(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))),
+  limit: Schema.optional(Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 65536 })))
 })
 export type ContentRequest = typeof ContentRequest.Type
 export const ContentPage = Schema.Struct({

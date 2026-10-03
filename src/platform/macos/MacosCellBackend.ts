@@ -59,9 +59,9 @@ const preparationError = (
       : error
 
 const launchContained = (
-  runner: Context.Tag.Service<typeof ProcessRunner>,
+  runner: ProcessRunner["Service"],
   request: NativeCellLaunchRequest,
-  options: Parameters<Context.Tag.Service<typeof ProcessRunner>["run"]>[1]
+  options: Parameters<ProcessRunner["Service"]["run"]>[1]
 ) => {
   if (process.platform !== "darwin") {
     return Effect.fail(

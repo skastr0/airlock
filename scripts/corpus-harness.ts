@@ -39,16 +39,23 @@ export const FixtureFile = Schema.Struct({
 })
 
 export const WorkspaceFixture = Schema.Struct({
-  directories: Schema.optionalWith(Schema.Array(Schema.String), {
-    default: () => []
-  }),
-  files: Schema.optionalWith(Schema.Array(FixtureFile), { default: () => [] })
+  directories: Schema.Array(Schema.String).pipe(
+    Schema.withDecodingDefault(Effect.succeed([])),
+    Schema.withConstructorDefault(Effect.succeed([]))
+  ),
+  files: Schema.Array(FixtureFile).pipe(
+    Schema.withDecodingDefault(Effect.succeed([])),
+    Schema.withConstructorDefault(Effect.succeed([]))
+  )
 })
 
 /** Every expectation is decidable from bytes on disk or a decoded receipt. */
 export const FileExpectation = Schema.Struct({
   path: Schema.String,
-  exists: Schema.optionalWith(Schema.Boolean, { default: () => true }),
+  exists: Schema.Boolean.pipe(
+    Schema.withDecodingDefault(Effect.succeed(true)),
+    Schema.withConstructorDefault(Effect.succeed(true))
+  ),
   equals: Schema.optional(Schema.String),
   contains: Schema.optional(Schema.Array(Schema.String)),
   notContains: Schema.optional(Schema.Array(Schema.String)),
@@ -65,19 +72,22 @@ export const ResultExpectation = Schema.Struct({
 })
 
 export const SuccessPredicate = Schema.Struct({
-  programState: Schema.optionalWith(
-    Schema.Literals(["succeeded", "failed", "partial"]),
-    { default: () => "succeeded" as const }
+  programState: Schema.Literals(["succeeded", "failed", "partial"]).pipe(
+    Schema.withDecodingDefault(Effect.succeed("succeeded" as const)),
+    Schema.withConstructorDefault(Effect.succeed("succeeded" as const))
   ),
-  files: Schema.optionalWith(Schema.Array(FileExpectation), {
-    default: () => []
-  }),
-  absent: Schema.optionalWith(Schema.Array(Schema.String), {
-    default: () => []
-  }),
-  result: Schema.optionalWith(Schema.Array(ResultExpectation), {
-    default: () => []
-  }),
+  files: Schema.Array(FileExpectation).pipe(
+    Schema.withDecodingDefault(Effect.succeed([])),
+    Schema.withConstructorDefault(Effect.succeed([]))
+  ),
+  absent: Schema.Array(Schema.String).pipe(
+    Schema.withDecodingDefault(Effect.succeed([])),
+    Schema.withConstructorDefault(Effect.succeed([]))
+  ),
+  result: Schema.Array(ResultExpectation).pipe(
+    Schema.withDecodingDefault(Effect.succeed([])),
+    Schema.withConstructorDefault(Effect.succeed([]))
+  ),
   outboxStagedCount: Schema.optional(Schema.Number),
   heldCountAtLeast: Schema.optional(Schema.Number)
 })
@@ -91,11 +101,14 @@ export const CorpusTaskSpec = Schema.Struct({
    * Bindings the supervisor supplies to the candidate program. `workspace` is
    * always overwritten with the canonical isolated workspace.
    */
-  bindings: Schema.optionalWith(
-    Schema.Record(Schema.String, Schema.Unknown),
-    { default: () => ({}) }
+  bindings: Schema.Record(Schema.String, Schema.Unknown).pipe(
+    Schema.withDecodingDefault(Effect.succeed(({}))),
+    Schema.withConstructorDefault(Effect.succeed(({})))
   ),
-  notes: Schema.optionalWith(Schema.Array(Schema.String), { default: () => [] }),
+  notes: Schema.Array(Schema.String).pipe(
+    Schema.withDecodingDefault(Effect.succeed([])),
+    Schema.withConstructorDefault(Effect.succeed([]))
+  ),
   successPredicate: SuccessPredicate
 })
 export type CorpusTaskSpec = typeof CorpusTaskSpec.Type

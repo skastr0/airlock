@@ -29,10 +29,8 @@ const platformFailure = (
     reason: cause.message
   })
 
-const isNotFound = (
-  cause: PlatformError.PlatformError
-): cause is PlatformError.SystemError =>
-  cause._tag === "SystemError" && cause.reason === "NotFound"
+const isNotFound = (cause: PlatformError.PlatformError) =>
+  cause.reason._tag === "NotFound"
 
 /**
  * Resolve a selector relative to a trusted workspace and bind it to a physical
@@ -80,7 +78,7 @@ export const bindPhysicalPathSelector = (
         try: () => lstat(requested),
         catch: (cause) => cause
       }).pipe(Effect.result)
-      if (selected._tag === "Right" && selected.right.isSymbolicLink()) {
+      if (selected._tag === "Success" && selected.success.isSymbolicLink()) {
         return yield* new PhysicalPathSelectorBindingFailed({
           workspace: resolvedWorkspace,
           requested: raw,
@@ -88,8 +86,8 @@ export const bindPhysicalPathSelector = (
           reason: `selected existing path is a symlink: ${requested}`
         })
       }
-      if (selected._tag === "Left") {
-        const cause = selected.left
+      if (selected._tag === "Failure") {
+        const cause = selected.failure
         if (
           typeof cause !== "object" || cause === null ||
           !("code" in cause) || cause.code !== "ENOENT"
@@ -109,10 +107,10 @@ export const bindPhysicalPathSelector = (
 
     while (true) {
       const physical = yield* fs.realPath(probe).pipe(Effect.result)
-      if (physical._tag === "Right") {
-        if (suffix.length === 0) return physical.right
+      if (physical._tag === "Success") {
+        if (suffix.length === 0) return physical.success
 
-        const prefix = yield* fs.stat(physical.right).pipe(
+        const prefix = yield* fs.stat(physical.success).pipe(
           Effect.mapError(
             platformFailure(resolvedWorkspace, raw, "inspect-prefix")
           )
@@ -122,18 +120,18 @@ export const bindPhysicalPathSelector = (
             workspace: resolvedWorkspace,
             requested: raw,
             operation: "inspect-prefix",
-            reason: `longest existing prefix is not a directory: ${physical.right}`
+            reason: `longest existing prefix is not a directory: ${physical.success}`
           })
         }
-        return nodePath.join(physical.right, ...suffix)
+        return nodePath.join(physical.success, ...suffix)
       }
 
-      if (!isNotFound(physical.left)) {
+      if (!isNotFound(physical.failure)) {
         return yield* platformFailure(
           resolvedWorkspace,
           raw,
           "realpath"
-        )(physical.left)
+        )(physical.failure)
       }
       const parent = nodePath.dirname(probe)
       if (parent === probe) {

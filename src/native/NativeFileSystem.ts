@@ -37,7 +37,10 @@ export class NativeFilesystemConfig extends Schema.Class<NativeFilesystemConfig>
   "NativeFilesystemConfig"
 )({
   workspace: Schema.String,
-  maxGlobResults: Schema.optionalWith(Schema.Number.check(Schema.isGreaterThan(0)), { default: () => 1_000 })
+  maxGlobResults: Schema.Number.check(Schema.isGreaterThan(0)).pipe(
+    Schema.withDecodingDefault(Effect.succeed(1_000)),
+    Schema.withConstructorDefault(Effect.succeed(1_000))
+  )
 }) {}
 
 export class NativeFilesystemError extends Schema.TaggedError<NativeFilesystemError>()(
@@ -257,11 +260,11 @@ const make = (config: NativeFilesystemConfig) =>
           catch: (cause) => cause
         }).pipe(Effect.result)
         if (Result.isFailure(entry)) {
-          if (!isNotFound(entry.left)) {
+          if (!isNotFound(entry.failure)) {
             return yield* new NativeFilesystemError({
               operation: "lstat path",
               path: current,
-              reason: reasonOf(entry.left)
+              reason: reasonOf(entry.failure)
             })
           }
           // A missing suffix is legitimate for a proposed write. The parent
@@ -269,7 +272,7 @@ const make = (config: NativeFilesystemConfig) =>
           // physical directory.
           break
         }
-        const info = entry.right
+        const info = entry.success
         if (info.isSymbolicLink()) {
           return yield* new NativePathUnsupported({
             path: current,
@@ -605,10 +608,10 @@ const make = (config: NativeFilesystemConfig) =>
                 path: target,
                 failedDirectory: directory,
                 installs,
-                reason: `${installed.left._tag}: ${reasonOf(installed.left)}`
+                reason: `${installed.failure._tag}: ${reasonOf(installed.failure)}`
               })
             }
-            installs.push(installed.right)
+            installs.push(installed.success)
           }
           return new NativeMkdirReceipt({ path: target, installs })
         }))

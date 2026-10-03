@@ -86,11 +86,18 @@ export class CellRequest extends Schema.Class<CellRequest>("CellRequest")({
   sourceWorkspace: Schema.String,
   privateWorkspace: Schema.String,
   process: ProcessRequest,
-  descendantExecutables: Schema.optionalWith(Schema.Array(Schema.String), {
-    default: () => []
-  }),
-  tempPaths: Schema.optionalWith(Schema.Array(Schema.String), { default: () => [] }),
-  network: Schema.optionalWith(CellNetwork, { default: () => "deny" as const })
+  descendantExecutables: Schema.Array(Schema.String).pipe(
+    Schema.withDecodingDefault(Effect.succeed([])),
+    Schema.withConstructorDefault(Effect.succeed([]))
+  ),
+  tempPaths: Schema.Array(Schema.String).pipe(
+    Schema.withDecodingDefault(Effect.succeed([])),
+    Schema.withConstructorDefault(Effect.succeed([]))
+  ),
+  network: CellNetwork.pipe(
+    Schema.withDecodingDefault(Effect.succeed("deny" as const)),
+    Schema.withConstructorDefault(Effect.succeed("deny" as const))
+  )
 }) {}
 
 export class CellExecutableBinding extends Schema.Class<CellExecutableBinding>(
@@ -111,9 +118,9 @@ export class CellReceipt extends Schema.Class<CellReceipt>("CellReceipt")({
   readAuthority: CellReadAuthority,
   process: ProcessRequest,
   processReceipt: ProcessReceipt,
-  executableBindings: Schema.optionalWith(
-    Schema.Array(CellExecutableBinding),
-    { default: () => [] }
+  executableBindings: Schema.Array(CellExecutableBinding).pipe(
+    Schema.withDecodingDefault(Effect.succeed([])),
+    Schema.withConstructorDefault(Effect.succeed([]))
   ),
   baseline: WorkspaceFingerprint,
   live: WorkspaceFingerprint,
@@ -353,7 +360,7 @@ export const validateCellRequest = (request: CellRequest) =>
   })
 
 const runCell = (
-  backend: Context.Tag.Service<typeof NativeCellBackend>,
+  backend: NativeCellBackend["Service"],
   request: CellRequest,
   options: CellRunOptions = {}
 ) =>

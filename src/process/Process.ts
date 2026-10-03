@@ -37,12 +37,22 @@ export class ProcessRequest extends Schema.Class<ProcessRequest>("ProcessRequest
   args: Schema.Array(Schema.String),
   cwd: Schema.String,
   env: Schema.Record(Schema.String, Schema.String),
-  stdin: Schema.optionalWith(ProcessInput, { default: () => "discard" as const }),
-  stdout: Schema.optionalWith(ProcessOutput, { default: () => "capture" as const }),
-  stderr: Schema.optionalWith(ProcessOutput, { default: () => "capture" as const }),
-  outputLimitBytes: Schema.optionalWith(Schema.Number, {
-    default: () => 1024 * 1024
-  }),
+  stdin: ProcessInput.pipe(
+    Schema.withDecodingDefault(Effect.succeed("discard" as const)),
+    Schema.withConstructorDefault(Effect.succeed("discard" as const))
+  ),
+  stdout: ProcessOutput.pipe(
+    Schema.withDecodingDefault(Effect.succeed("capture" as const)),
+    Schema.withConstructorDefault(Effect.succeed("capture" as const))
+  ),
+  stderr: ProcessOutput.pipe(
+    Schema.withDecodingDefault(Effect.succeed("capture" as const)),
+    Schema.withConstructorDefault(Effect.succeed("capture" as const))
+  ),
+  outputLimitBytes: Schema.Number.pipe(
+    Schema.withDecodingDefault(Effect.succeed(1024 * 1024)),
+    Schema.withConstructorDefault(Effect.succeed(1024 * 1024))
+  ),
   timeoutMs: Schema.optional(Schema.Number)
 }) {}
 

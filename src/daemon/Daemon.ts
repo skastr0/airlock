@@ -91,9 +91,10 @@ export class DaemonTickReport extends Schema.Class<DaemonTickReport>(
   failed: Schema.Array(DaemonDispatchFailure),
   waiting: Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
   reaped: Schema.Array(ActId),
-  skipped: Schema.optionalWith(Schema.Array(DaemonOperationSkipped), {
-    default: () => []
-  })
+  skipped: Schema.Array(DaemonOperationSkipped).pipe(
+    Schema.withDecodingDefault(Effect.succeed([])),
+    Schema.withConstructorDefault(Effect.succeed([]))
+  )
 }) {}
 
 export type DaemonTickError =
@@ -104,8 +105,8 @@ export type DaemonTickError =
   | HoldFilesystemError
   | HoldReapRecoveryRequired
 
-type OutboxService = Context.Tag.Service<typeof Outbox>
-type HoldService = Context.Tag.Service<typeof Hold>
+type OutboxService = Outbox["Service"]
+type HoldService = Hold["Service"]
 
 type TickState = {
   readonly attempted: Array<EmissionId>
@@ -261,12 +262,12 @@ const tickWithServices = (
         const result = yield* outbox
           .commit(emission.id, provenance)
           .pipe(Effect.result)
-        if (result._tag === "Right") {
+        if (result._tag === "Success") {
           state.committed.push(emission.id)
         } else {
           state.failed.push(new DaemonDispatchFailure({
             id: emission.id,
-            errorTag: terminalErrorTag(result.left)
+            errorTag: terminalErrorTag(result.failure)
           }))
         }
       }

@@ -263,9 +263,9 @@ export const unixDaemonHealthTransport = (
         }),
         (socket) => writeFrame(socket, request).pipe(
           Effect.andThen(readFrame(socket)),
-          Effect.timeoutFail({
+          Effect.timeoutOrElse({
             duration: timeoutMillis,
-            onTimeout: () => socketFailure("read", "response timed out")
+            orElse: () => Effect.fail(socketFailure("read", "response timed out"))
           })
         ),
         (socket) => Effect.sync(() => socket.destroy())

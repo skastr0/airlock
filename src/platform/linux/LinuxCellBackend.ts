@@ -149,8 +149,8 @@ const launcherArguments = (
 ]
 
 const launchContained = (
-  platform: Context.Tag.Service<typeof LinuxPlatform>,
-  runner: Context.Tag.Service<typeof ProcessRunner>,
+  platform: LinuxPlatform["Service"],
+  runner: ProcessRunner["Service"],
   request: NativeCellLaunchRequest,
   options: ProcessRunOptions = {}
 ) => Effect.gen(function* () {

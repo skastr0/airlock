@@ -62,7 +62,7 @@ const encoder = new TextEncoder()
 const decoder = new TextDecoder()
 const nodeId = (value: string) => NodeId.make(value)
 const artifactId = (value: string) => ArtifactId.make(value)
-type ProcessRun = Context.Tag.Service<typeof ProcessRunner>["run"]
+type ProcessRun = ProcessRunner["Service"]["run"]
 
 const processReceipt = (
   request: ProcessRequest,

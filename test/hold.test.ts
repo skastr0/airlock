@@ -29,7 +29,7 @@ interface World {
   readonly tmp: string
   readonly fs: FileSystem.FileSystem
   readonly path: Path.Path
-  readonly hold: Context.Tag.Service<typeof Hold>
+  readonly hold: Hold["Service"]
 }
 
 // each test gets a fresh temp world: workspace + airlock home

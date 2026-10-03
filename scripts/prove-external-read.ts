@@ -188,12 +188,12 @@ const runProgram = async (
           catch: () => new Error("ledger unreadable")
         }).pipe(Effect.orElseSucceed(() => ""))
         return {
-          ok: run._tag === "Right",
-          result: run._tag === "Right" ? run.right.result : undefined,
-          state: run._tag === "Right" ? run.right.state : "failed",
-          diagnostics: run._tag === "Right"
-            ? { state: run.right.state, failure: run.right.failure }
-            : run.left,
+          ok: run._tag === "Success",
+          result: run._tag === "Success" ? run.success.result : undefined,
+          state: run._tag === "Success" ? run.success.state : "failed",
+          diagnostics: run._tag === "Success"
+            ? { state: run.success.state, failure: run.success.failure }
+            : run.failure,
           ledger: ledgerText.split("\n").filter((line) => line.length > 0),
           outboxStates: staged.map((emission) => emission.status)
         } satisfies ProgramOutcome
@@ -375,7 +375,7 @@ const main = async () => {
           })
         ).pipe(Effect.flip, Effect.result)
       )
-      const tag = smuggled._tag === "Right" ? smuggled.right._tag : "no-refusal"
+      const tag = smuggled._tag === "Success" ? smuggled.success._tag : "no-refusal"
       check(
         "definition-class/typed refusal",
         tag === "ToolGrantAssertionRejected",

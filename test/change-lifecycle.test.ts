@@ -12,8 +12,8 @@ import { LedgerLive } from "../src/Ledger.ts"
 import { ExclusiveRenameTestLive } from "./support/ExclusiveRenameTestLive.ts"
 
 const run = Effect.runPromise
-type ChangeService = Context.Tag.Service<typeof Change>
-const world = async (body: (w: { root: string, home: string, change: ChangeService, hold: Context.Tag.Service<typeof Hold> }) => Promise<void>) => {
+type ChangeService = Change["Service"]
+const world = async (body: (w: { root: string, home: string, change: ChangeService, hold: Hold["Service"] }) => Promise<void>) => {
   const root = await realpath(await mkdtemp(path.join(tmpdir(), "change-lifecycle-"))), home = path.join(root, "home")
   const runtime = ManagedRuntime.make(ChangeLive.pipe(Layer.provideMerge(HoldLayer), Layer.provideMerge(ExclusiveRenameTestLive),
     Layer.provideMerge(LedgerLive), Layer.provideMerge(AirlockHome.layer(home)), Layer.provideMerge(BunServices.layer)))
@@ -76,8 +76,8 @@ describe("explicit snapshot lifecycle", () => {
       run(change.content({ id: p.id, side: "after", path: "" }).pipe(Effect.result)),
       run(change.retire({ id: p.id, expectedDigest: digest })), run(change.retire({ id: p.id, expectedDigest: digest }))
     ])
-    if (page._tag === "Right") expect(Buffer.from(page.right.dataBase64, "base64").toString()).toBe("new")
-    else expect(page.left.reason).toContain("retired")
+    if (page._tag === "Success") expect(Buffer.from(page.success.dataBase64, "base64").toString()).toBe("new")
+    else expect(page.failure.reason).toContain("retired")
     expect(a.holdActIds).toEqual(b.holdActIds)
     const collected = await Promise.all([run(change.collect(p.id)), run(change.collect(p.id))])
     expect(collected.every(r => r.state === "collected")).toBe(true)

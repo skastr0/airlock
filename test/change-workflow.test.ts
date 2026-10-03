@@ -16,7 +16,7 @@ const layersFor = (home: string, moves = ExclusiveRenameTestLive) => ChangeLive.
   Layer.provideMerge(HoldLayer), Layer.provideMerge(moves),
   Layer.provideMerge(LedgerLive), Layer.provideMerge(AirlockHome.layer(home)), Layer.provideMerge(BunServices.layer)
 )
-type Services = { change: Context.Tag.Service<typeof Change>, hold: Context.Tag.Service<typeof Hold> }
+type Services = { change: Change["Service"], hold: Hold["Service"] }
 const world = async (body: (w: Services & { root: string, home: string, restart: () => Promise<Services> }) => Promise<void>, moves = ExclusiveRenameTestLive) => {
   const root = await realpath(await mkdtemp(path.join(tmpdir(), "change-workflow-"))), home = path.join(root, "home")
   const runtimes: Array<{ dispose: () => Promise<void> }> = []

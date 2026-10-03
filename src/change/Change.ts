@@ -107,9 +107,9 @@ const make = Effect.gen(function* () {
     const rows: InventoryRow[] = []
     for (const id of names) {
       const inspected = yield* hold.inspectChangeSnapshots(id).pipe(Effect.result)
-      rows.push(inspected._tag === "Right" ? inspected.right.row : {
+      rows.push(inspected._tag === "Success" ? inspected.success.row : {
         id, workflowState: "corrupt", applyState: "unknown", undoState: "unknown", snapshots: { state: "recovery-required", bytes: 0, holdActIds: [] },
-        reservationBytes: maximumReservation, active: true, errors: [{ operation: "inventory", reason: String(inspected.left) }]
+        reservationBytes: maximumReservation, active: true, errors: [{ operation: "inventory", reason: String(inspected.failure) }]
       })
     }
     return { version: "change-inventory/v1" as const, rows,
@@ -218,9 +218,9 @@ const make = Effect.gen(function* () {
     // Tampering after claim consumes the attempt too. Hold revalidates its
     // independent install stage and the live baseline inside its own lease.
     const valid = yield* validateSnapshots(stored).pipe(Effect.result)
-    if (valid._tag === "Left") {
+    if (valid._tag === "Failure") {
       const receipt: CheckedOutcome = { version: "checked-hold/v1", receiptId: input.id, operationKey: input.id, target: stored.proposal.target,
-        proposalDigest: stored.proposalDigest, claim, state: "rejected", reason: valid.left.reason }
+        proposalDigest: stored.proposalDigest, claim, state: "rejected", reason: valid.failure.reason }
       yield* writeStatus({ version: "change/v1", id: input.id, state: "rejected", receipt, claim })
       return receipt
     }

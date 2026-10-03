@@ -289,7 +289,7 @@ const populateWorkspace = (
     Effect.result,
     Effect.flatMap((result) => {
       if (Result.isSuccess(result)) return Effect.succeed("clone" as const)
-      if (existsSync(destination)) return Effect.fail(result.left)
+      if (existsSync(destination)) return Effect.fail(result.failure)
       return workspaceCommand(source, destination, "copy").pipe(Effect.as("copy" as const))
     })
   )
