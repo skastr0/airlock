@@ -1,4 +1,4 @@
-import { Effect, Either, Schema } from "effect"
+import { Effect, Result, Schema } from "effect"
 import { refuseGrantAssertion } from "../admission/DispatchPolicy.ts"
 import { HandleKind, Right } from "../plan/index.ts"
 
@@ -11,12 +11,12 @@ import { HandleKind, Right } from "../plan/index.ts"
 export const ToolDefinitionId = Schema.String.pipe(Schema.brand("ToolDefinitionId"))
 export type ToolDefinitionId = typeof ToolDefinitionId.Type
 
-export const ToolDefinitionLocationKind = Schema.Literal(
+export const ToolDefinitionLocationKind = Schema.Literals([
   "builtin",
   "installed",
   "user",
   "project"
-)
+])
 export type ToolDefinitionLocationKind = typeof ToolDefinitionLocationKind.Type
 
 export class ToolDefinitionLocation extends Schema.Class<ToolDefinitionLocation>(
@@ -64,12 +64,12 @@ export class SecretTemplate extends Schema.TaggedClass<SecretTemplate>()("Secret
   path: Schema.Array(Schema.String)
 }) {}
 
-export const TemplateValue = Schema.Union(
+export const TemplateValue = Schema.Union([
   LiteralTemplate,
   InputTemplate,
   ArtifactTemplate,
   SecretTemplate
-)
+])
 export type TemplateValue = typeof TemplateValue.Type
 
 export class ToolResourceRequirement extends Schema.Class<ToolResourceRequirement>(
@@ -81,13 +81,13 @@ export class ToolResourceRequirement extends Schema.Class<ToolResourceRequiremen
   rights: Schema.Array(Right)
 }) {}
 
-export const ToolLoweringKind = Schema.Literal("invoke", "enqueue")
+export const ToolLoweringKind = Schema.Literals(["invoke", "enqueue"])
 export type ToolLoweringKind = typeof ToolLoweringKind.Type
 
-export const ToolEffect = Schema.Literal("capture", "invoke", "apply", "enqueue")
+export const ToolEffect = Schema.Literals(["capture", "invoke", "apply", "enqueue"])
 export type ToolEffect = typeof ToolEffect.Type
 
-const ToolRequestMethod = Schema.Literal("GET", "POST", "PUT", "PATCH", "DELETE")
+const ToolRequestMethod = Schema.Literals(["GET", "POST", "PUT", "PATCH", "DELETE"])
 
 /**
  * The inert mapping from a Schema-validated action input onto the fields of a
@@ -101,33 +101,36 @@ export class ToolRequestTemplate extends Schema.Class<ToolRequestTemplate>(
 )({
   method: ToolRequestMethod,
   endpoint: TemplateValue,
-  headers: Schema.optionalWith(
-    Schema.Record({ key: Schema.String, value: TemplateValue }),
-    { default: () => ({}) }
+  headers: Schema.Record(Schema.String, TemplateValue).pipe(
+    Schema.withDecodingDefault(Effect.succeed({})),
+    Schema.withConstructorDefault(Effect.succeed({}))
   ),
   body: Schema.optional(TemplateValue),
-  holdMillis: Schema.optionalWith(Schema.Number, { default: () => 30_000 })
+  holdMillis: Schema.Number.pipe(
+    Schema.withDecodingDefault(Effect.succeed(30_000)),
+    Schema.withConstructorDefault(Effect.succeed(30_000))
+  )
 }) {}
 
 /** Deliberately finite: result parsing cannot smuggle a callback into loading. */
-export const ToolResultDecoder = Schema.Literal(
+export const ToolResultDecoder = Schema.Literals([
   "exit-status",
   "json-stdout",
   "json-stderr",
   "none"
-)
+])
 export type ToolResultDecoder = typeof ToolResultDecoder.Type
 
-export const ToolStreamPolicy = Schema.Literal("capture", "inherit", "discard")
+export const ToolStreamPolicy = Schema.Literals(["capture", "inherit", "discard"])
 export type ToolStreamPolicy = typeof ToolStreamPolicy.Type
 
-export const ToolExecutableRole = Schema.Literal("root", "descendant")
+export const ToolExecutableRole = Schema.Literals(["root", "descendant"])
 export type ToolExecutableRole = typeof ToolExecutableRole.Type
 
-export const ToolStdin = Schema.Union(
-  Schema.Literal("discard", "inherit"),
+export const ToolStdin = Schema.Union([
+  Schema.Literals(["discard", "inherit"]),
   ArtifactTemplate
-)
+])
 export type ToolStdin = typeof ToolStdin.Type
 
 export class ToolExecutableConstraint extends Schema.Class<ToolExecutableConstraint>(
@@ -135,9 +138,10 @@ export class ToolExecutableConstraint extends Schema.Class<ToolExecutableConstra
 )({
   realm: Schema.String,
   selector: Schema.String,
-  role: Schema.optionalWith(ToolExecutableRole, {
-    default: () => "root" as const
-  })
+  role: ToolExecutableRole.pipe(
+    Schema.withDecodingDefault(Effect.succeed("root" as const)),
+    Schema.withConstructorDefault(Effect.succeed("root" as const))
+  )
 }) {}
 
 export class ToolActionDefinition extends Schema.Class<ToolActionDefinition>(
@@ -151,18 +155,31 @@ export class ToolActionDefinition extends Schema.Class<ToolActionDefinition>(
   args: Schema.Array(TemplateValue),
   /** Resolves to an explicit working directory; no ambient cwd is implied. */
   cwd: TemplateValue,
-  environment: Schema.optionalWith(
-    Schema.Record({ key: Schema.String, value: TemplateValue }),
-    { default: () => ({}) }
+  environment: Schema.Record(Schema.String, TemplateValue).pipe(
+    Schema.withDecodingDefault(Effect.succeed({})),
+    Schema.withConstructorDefault(Effect.succeed({}))
   ),
-  stdin: Schema.optionalWith(ToolStdin, { default: () => "discard" as const }),
-  stdout: Schema.optionalWith(ToolStreamPolicy, { default: () => "capture" as const }),
-  stderr: Schema.optionalWith(ToolStreamPolicy, { default: () => "capture" as const }),
+  stdin: ToolStdin.pipe(
+    Schema.withDecodingDefault(Effect.succeed("discard" as const)),
+    Schema.withConstructorDefault(Effect.succeed("discard" as const))
+  ),
+  stdout: ToolStreamPolicy.pipe(
+    Schema.withDecodingDefault(Effect.succeed("capture" as const)),
+    Schema.withConstructorDefault(Effect.succeed("capture" as const))
+  ),
+  stderr: ToolStreamPolicy.pipe(
+    Schema.withDecodingDefault(Effect.succeed("capture" as const)),
+    Schema.withConstructorDefault(Effect.succeed("capture" as const))
+  ),
   timeoutMs: Schema.optional(Schema.Number),
-  outputLimitBytes: Schema.optionalWith(Schema.Number, { default: () => 1_048_576 }),
-  resources: Schema.optionalWith(Schema.Array(ToolResourceRequirement), {
-    default: () => []
-  }),
+  outputLimitBytes: Schema.Number.pipe(
+    Schema.withDecodingDefault(Effect.succeed(1_048_576)),
+    Schema.withConstructorDefault(Effect.succeed(1_048_576))
+  ),
+  resources: Schema.Array(ToolResourceRequirement).pipe(
+    Schema.withDecodingDefault(Effect.succeed([])),
+    Schema.withConstructorDefault(Effect.succeed([]))
+  ),
   lowering: ToolLoweringKind,
   effectFootprint: Schema.Array(ToolEffect),
   resultDecoder: ToolResultDecoder
@@ -191,15 +208,15 @@ export class ToolEnqueueActionDefinition extends Schema.Class<ToolEnqueueActionD
    * consequence at the supervisor's auto-commit decision, never widen it, and
    * no definition field may name a grant property (see the assertion scan).
    */
-  emissionEffect: Schema.optional(Schema.Literal("read", "mutate")),
+  emissionEffect: Schema.optional(Schema.Literals(["read", "mutate"])),
   effectFootprint: Schema.Array(ToolEffect),
   resultDecoder: ToolResultDecoder
 }) {}
 
-export const ToolV2ActionDefinition = Schema.Union(
+export const ToolV2ActionDefinition = Schema.Union([
   ToolEnqueueActionDefinition,
   ToolActionDefinition
-)
+])
 export type ToolV2ActionDefinition = typeof ToolV2ActionDefinition.Type
 
 export class ToolDefinition extends Schema.Class<ToolDefinition>("ToolDefinition")({
@@ -225,7 +242,7 @@ export class ToolDefinitionV2 extends Schema.Class<ToolDefinitionV2>("ToolDefini
   actions: Schema.Array(ToolV2ActionDefinition)
 }) {}
 
-export const AnyToolDefinition = Schema.Union(ToolDefinition, ToolDefinitionV2)
+export const AnyToolDefinition = Schema.Union([ToolDefinition, ToolDefinitionV2])
 export type AnyToolDefinition = typeof AnyToolDefinition.Type
 
 export const isEnqueueAction = (
@@ -264,7 +281,7 @@ export class ExportedToolAction extends Schema.Class<ExportedToolAction>("Export
 
 export class ToolActionNameCollision extends Schema.TaggedError<ToolActionNameCollision>()(
   "ToolActionNameCollision",
-  { name: Schema.String, reason: Schema.Literal("duplicate-export", "native-shadow") }
+  { name: Schema.String, reason: Schema.Literals(["duplicate-export", "native-shadow"]) }
 ) {}
 
 export class ToolDefinitionReadFailed extends Schema.TaggedError<ToolDefinitionReadFailed>()(
@@ -294,7 +311,7 @@ export class DuplicateToolDefinition extends Schema.TaggedError<DuplicateToolDef
 
 export class ToolSchemaRejected extends Schema.TaggedError<ToolSchemaRejected>()(
   "ToolSchemaRejected",
-  { id: Schema.String, action: Schema.String, schema: Schema.Literal("input", "output"), path: Schema.String, reason: Schema.String }
+  { id: Schema.String, action: Schema.String, schema: Schema.Literals(["input", "output"]), path: Schema.String, reason: Schema.String }
 ) {}
 
 export class ToolInputRejected extends Schema.TaggedError<ToolInputRejected>()(
@@ -865,12 +882,12 @@ const refuseGrantSideAssertion = (
       : {})
   }
   const refusal = refuseGrantAssertion(scanned, "definition")
-  return Either.isLeft(refusal)
+  return Result.isFailure(refusal)
     ? Effect.fail(
       new ToolGrantAssertionRejected({
         id,
-        field: refusal.left.field,
-        reason: refusal.left.reason
+        field: refusal.failure.field,
+        reason: refusal.failure.reason
       })
     )
     : Effect.void
@@ -949,7 +966,7 @@ export const decodeToolDefinition = (
     Effect.tap(refuseVersionMismatchedFields),
     Effect.tap(refuseWidenedEmissionEffect),
     Effect.flatMap((parsed) =>
-      Schema.decodeUnknown(AnyToolDefinition)(parsed).pipe(
+      Schema.decodeUnknownEffect(AnyToolDefinition)(parsed).pipe(
         Effect.mapError(
           (error) => new ToolDefinitionDecodeFailed({ file: document.file, message: error.message })
         )

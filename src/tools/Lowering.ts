@@ -48,7 +48,10 @@ export class ToolActionLoweringRequest extends Schema.Class<ToolActionLoweringRe
    */
   input: Schema.Unknown,
   /** Required by invoke lowering only; an enqueue action binds no executable. */
-  executable: Schema.optionalWith(Schema.String, { default: () => "" }),
+  executable: Schema.String.pipe(
+    Schema.withDecodingDefault(Effect.succeed("")),
+    Schema.withConstructorDefault(Effect.succeed(""))
+  ),
   cellProfile: CellProfile
 }) {}
 
@@ -73,8 +76,8 @@ export class ToolActionLoweringResult extends Schema.Class<ToolActionLoweringRes
    * supervisor plane takes the stricter of it and the grant's class. It can
    * never widen anything, and it never names a grant-side class or commit mode.
    */
-  emissionEffect: Schema.optional(Schema.Literal("read", "mutate")),
-  call: Schema.Union(ProcessRunAction, HttpStageAction),
+  emissionEffect: Schema.optional(Schema.Literals(["read", "mutate"])),
+  call: Schema.Union([ProcessRunAction, HttpStageAction]),
   lowering: NativeActionLowering
 }) {}
 
@@ -95,12 +98,12 @@ export class UnsupportedToolActionLowering extends Schema.TaggedError<Unsupporte
   }
 ) {}
 
-export const ToolExecutableRejectionReason = Schema.Literal(
+export const ToolExecutableRejectionReason = Schema.Literals([
   "must-be-absolute",
   "contains-nul",
   "not-declared",
   "ambiguous-realm"
-)
+])
 export type ToolExecutableRejectionReason = typeof ToolExecutableRejectionReason.Type
 
 export class ToolExecutableRejected extends Schema.TaggedError<ToolExecutableRejected>()(
@@ -113,12 +116,12 @@ export class ToolExecutableRejected extends Schema.TaggedError<ToolExecutableRej
   }
 ) {}
 
-export const ToolTemplateRejectionReason = Schema.Literal(
+export const ToolTemplateRejectionReason = Schema.Literals([
   "missing",
   "accessor-not-data",
   "non-scalar",
   "runtime-binding-required"
-)
+])
 export type ToolTemplateRejectionReason = typeof ToolTemplateRejectionReason.Type
 
 export class ToolTemplateRejected extends Schema.TaggedError<ToolTemplateRejected>()(
@@ -128,7 +131,7 @@ export class ToolTemplateRejected extends Schema.TaggedError<ToolTemplateRejecte
     action: Schema.String,
     field: Schema.String,
     path: Schema.Array(Schema.String),
-    template: Schema.Literal("Input", "Artifact", "Secret"),
+    template: Schema.Literals(["Input", "Artifact", "Secret"]),
     reason: ToolTemplateRejectionReason,
     actual: Schema.optional(Schema.String)
   }
@@ -475,7 +478,7 @@ const canonicalJson = (value: unknown): string => {
 const digestDefinition = (
   loaded: LoadedToolDefinition
 ): Effect.Effect<Digest, ToolDefinitionDigestFailed> =>
-  Schema.encode(AnyToolDefinition)(loaded.definition).pipe(
+  Schema.encodeEffect(AnyToolDefinition)(loaded.definition).pipe(
     Effect.mapError(
       () =>
         new ToolDefinitionDigestFailed({

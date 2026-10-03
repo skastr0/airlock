@@ -85,7 +85,7 @@ const processCall = (call: ToolActionLoweringResult["call"]) => {
 }
 
 const request = (
-  loaded: Effect.Effect.Success<ReturnType<typeof load>>,
+  loaded: Effect.Success<ReturnType<typeof load>>,
   input: Readonly<Record<string, unknown>>,
   overrides: Partial<ToolActionLoweringRequest> = {}
 ) =>

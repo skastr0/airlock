@@ -90,7 +90,7 @@ const invokeAction = {
 }
 
 const request = (
-  loaded: Effect.Effect.Success<ReturnType<typeof load>>,
+  loaded: Effect.Success<ReturnType<typeof load>>,
   input: Readonly<Record<string, unknown>>,
   action = "tasks.create"
 ) =>
