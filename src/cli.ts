@@ -78,6 +78,7 @@ import {
   sealedTools,
   verifyInstalledReadiness
 } from "./seal/index.ts"
+import { describeFailure, reasonOf } from "./FailureText.ts"
 
 /**
  * CLI is deliberately an adapter: it parses agent-facing atoms, invokes typed
@@ -329,7 +330,7 @@ const requireSealedDaemon = (seal: SealContext) =>
       )),
       Effect.mapError((error) => new CliInputError({
         field: "daemon",
-        reason: error instanceof Error ? error.message : String(error)
+        reason: reasonOf(error)
       })),
       Effect.asVoid
     )
@@ -390,7 +391,7 @@ const parseBindings = (raw: Option.Option<string>): Effect.Effect<Readonly<Recor
     },
     catch: (cause) => new CliInputError({
       field: "bindings",
-      reason: cause instanceof Error ? cause.message : String(cause)
+      reason: reasonOf(cause)
     })
   }).pipe(
     Effect.flatMap(Schema.decodeUnknownEffect(
@@ -398,7 +399,7 @@ const parseBindings = (raw: Option.Option<string>): Effect.Effect<Readonly<Recor
     )),
     Effect.mapError((cause) => new CliInputError({
       field: "bindings",
-      reason: cause instanceof Error ? cause.message : String(cause)
+      reason: reasonOf(cause)
     }))
   )
 }
@@ -425,7 +426,7 @@ const definitionDirectories = (workspace: string) => new ToolDefinitionDirectori
 const toolDefinitionFailure = (error: { readonly _tag: string }): CliInputError =>
   new CliInputError({
     field: "tool-definitions",
-    reason: "message" in error && typeof error.message === "string"
+    reason: "message" in error && typeof error.message === "string" && error.message !== ""
       ? error.message
       : "reason" in error && typeof error.reason === "string"
         ? error.reason
@@ -494,13 +495,7 @@ const sealedAdmissionFailure = (
   cause: unknown
 ) => new CliInputError({
   field: "admission",
-  reason: `${action}: ${
-    cause instanceof Error
-      ? cause.message
-      : typeof cause === "object" && cause !== null && "_tag" in cause
-        ? String(cause._tag)
-        : String(cause)
-  }`
+  reason: `${action}: ${reasonOf(cause)}`
 })
 
 /**
@@ -559,9 +554,9 @@ const supervisorPolicy = (
       : failInput("AIRLOCK_POLICY_FILE", "is required for native-contained program execution")
   }
   return Effect.flatMap(FileSystem.FileSystem, (fs) => fs.readFileString(policyFile).pipe(
-    Effect.mapError((error) => new CliInputError({ field: "AIRLOCK_POLICY_FILE", reason: String(error) })),
+    Effect.mapError((error) => new CliInputError({ field: "AIRLOCK_POLICY_FILE", reason: describeFailure(error) })),
     Effect.flatMap(Schema.decodeUnknownEffect(Schema.fromJsonString(AdmissionPolicyDocument))),
-    Effect.mapError((error) => new CliInputError({ field: "AIRLOCK_POLICY_FILE", reason: error.message })),
+    Effect.mapError((error) => new CliInputError({ field: "AIRLOCK_POLICY_FILE", reason: reasonOf(error) })),
     Effect.flatMap((policy) => policy.profile === profile
       ? Effect.succeed(policy)
       : failInput("AIRLOCK_POLICY_FILE", `policy profile ${policy.profile} does not match selected ${profile}`)
@@ -591,7 +586,7 @@ const bindProgramWorkspace = (
       Effect.mapError((cause) =>
         new CliInputError({
           field: "workspace",
-          reason: `cannot resolve native-contained workspace ${requested}: ${String(cause)}`
+          reason: `cannot resolve native-contained workspace ${requested}: ${describeFailure(cause)}`
         })
       )
     )
@@ -599,7 +594,7 @@ const bindProgramWorkspace = (
       Effect.mapError((cause) =>
         new CliInputError({
           field: "workspace",
-          reason: `cannot inspect native-contained workspace ${workspace}: ${String(cause)}`
+          reason: `cannot inspect native-contained workspace ${workspace}: ${describeFailure(cause)}`
         })
       )
     )
@@ -784,7 +779,7 @@ const makeUndo = (seal: SealContext) => Command.make(
         Effect.mapError((cause) =>
           new CliInputError({
             field: "act-id",
-            reason: cause.message
+            reason: reasonOf(cause)
           })
         )
       )
@@ -1316,7 +1311,7 @@ const executeProgram = (
       ? (action, selector) => bindPhysicalPathSelector(workspace, selector).pipe(
           Effect.mapError((cause) => new ProgramActionDecodeFailed({
             action,
-            reason: cause.message
+            reason: reasonOf(cause)
           })),
           Effect.provideService(FileSystem.FileSystem, fs)
         )
@@ -1365,7 +1360,7 @@ const makeRun = (seal: SealContext) => Command.make(
       yield* requireVerb(seal, "run")
       const fs = yield* FileSystem.FileSystem
       const source = yield* fs.readFileString(program).pipe(
-        Effect.mapError((error) => new CliInputError({ field: "program.air", reason: String(error) }))
+        Effect.mapError((error) => new CliInputError({ field: "program.air", reason: describeFailure(error) }))
       )
       return yield* executeProgram(
         seal,
@@ -1416,7 +1411,7 @@ const makeAgentRun = (seal: SealContext) => Command.make(
         Effect.mapError((error) =>
           new CliInputError({
             field: "program.air",
-            reason: String(error)
+            reason: describeFailure(error)
           })
         )
       )
@@ -1481,7 +1476,7 @@ const makeSealedRun = (seal: SealContext) => Command.make(
       const fs = yield* FileSystem.FileSystem
       const source = yield* fs.readFileString(program).pipe(
         Effect.mapError((error) =>
-          new CliInputError({ field: "program.air", reason: String(error) })
+          new CliInputError({ field: "program.air", reason: describeFailure(error) })
         )
       )
       return yield* executeProgram(

@@ -28,6 +28,7 @@ import { CheckedOutcome, CheckedRecord, CheckedRequest, observeClaim, OperationK
 import { attempt, ChangeError, checkParent, checkTree, exists as treeExists, identity, sameIdentity, scan, snapshot } from "./change/Tree.ts"
 import { ProposalId, SnapshotReceipt } from "./change/Contracts.ts"
 import { inspectSnapshots, readSnapshotRecord, type SnapshotInspection, SnapshotRecord, snapshotReceipt, snapshotRecordPath, snapshotSource } from "./change/Snapshots.ts"
+import { reasonOf } from "./FailureText.ts"
 
 // The recovery floor, by construction: the destructive part of every mutation
 // is a rename. The single unlink site in this component is `reap` — the runner's
@@ -312,9 +313,6 @@ const decodeJournal = Schema.decodeEffect(Schema.fromJsonString(HoldJournal))
 const decodeLegacyManifest = Schema.decodeEffect(Schema.fromJsonString(HeldManifest))
 
 const newActId = () => ActId.make(`act_${crypto.randomUUID().slice(0, 13)}`)
-
-const reasonOf = (cause: unknown) =>
-  cause instanceof Error ? cause.message : String(cause)
 
 const isNotFound = (cause: unknown) =>
   typeof cause === "object" &&

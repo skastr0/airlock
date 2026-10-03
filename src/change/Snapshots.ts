@@ -4,6 +4,7 @@ import * as path from "node:path"
 import { CheckedRecord, ProposalDigest } from "./Checked.ts"
 import { InventoryRow, Proposal, ProposalId, SnapshotReceipt, Staged, Status } from "./Contracts.ts"
 import { BoundTree, canonical, checkTree, Digest, exists, hash, Identity, identity, limits, sameIdentity, scan } from "./Tree.ts"
+import { describeFailure } from "../FailureText.ts"
 
 export const SnapshotBinding = Schema.Struct({
   side: Schema.Literals(["candidate", "baseline", "apply-stage"]), expected: BoundTree,
@@ -70,7 +71,7 @@ export const inspectSnapshots = async (home: string, id: string): Promise<Snapsh
   const decode = <A, I>(name: string, raw: string | undefined, schema: Schema.Codec<A, I>) => {
     if (raw === undefined) return undefined
     try { return Schema.decodeUnknownSync(Schema.fromJsonString(schema))(raw) }
-    catch (cause) { errors.push({ operation: name, reason: String(cause) }); return undefined }
+    catch (cause) { errors.push({ operation: name, reason: describeFailure(cause) }); return undefined }
   }
   const proposalRaw = await read("proposal", path.join(directory, "proposal.json"))
   const statusRaw = await read("workflow", path.join(directory, "status.json"))
@@ -118,7 +119,7 @@ export const inspectSnapshots = async (home: string, id: string): Promise<Snapsh
     if (await exists(source)) {
       privateSourcePresent = true
       try { bindings.push({ side, expected: await scan(source) }) }
-      catch (cause) { errors.push({ operation: side, reason: String(cause) }); safe = false }
+      catch (cause) { errors.push({ operation: side, reason: describeFailure(cause) }); safe = false }
     }
   }
   if (apply?.actId !== undefined) {
@@ -131,7 +132,7 @@ export const inspectSnapshots = async (home: string, id: string): Promise<Snapsh
       if (journal?.checkedKey !== id || journal?.manifest?.id !== actId) { errors.push({ operation: "apply-stage", reason: "stage lacks correlated Hold authority" }); safe = false }
       else {
         try { bindings.push({ side: "apply-stage", sourceActId: actId, expected: await scan(stage) }) }
-        catch (cause) { errors.push({ operation: "apply-stage", reason: String(cause) }); safe = false }
+        catch (cause) { errors.push({ operation: "apply-stage", reason: describeFailure(cause) }); safe = false }
       }
     }
   }
@@ -149,7 +150,7 @@ export const inspectSnapshots = async (home: string, id: string): Promise<Snapsh
         if (!stat.isDirectory() || !sameIdentity(identity(stat), record.bundle)) throw new Error("retirement bundle identity drift")
         if ((await readdir(bundle)).length !== record.plan.bindings.length) throw new Error("retirement bundle entry drift")
         for (const b of record.plan.bindings) await checkTree(path.join(bundle, b.side), b.expected)
-      } catch (cause) { snapshotState = "recovery-required"; errors.push({ operation: "retired", reason: String(cause) }) }
+      } catch (cause) { snapshotState = "recovery-required"; errors.push({ operation: "retired", reason: describeFailure(cause) }) }
     }
     if (record.phase === "collected") {
       for (const binding of record.plan.bindings) if (await exists(snapshotSource(home, id, binding))) privateSourcePresent = true

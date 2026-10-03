@@ -10,6 +10,7 @@ import { dirname } from "node:path"
 import { AirlockHome } from "./AirlockHome.ts"
 import { LedgerEntry } from "./domain.ts"
 import { makeExclusiveFileLock } from "./platform/ExclusiveFileLock.ts"
+import { reasonOf } from "./FailureText.ts"
 
 /**
  * Append-only receipt history.
@@ -99,9 +100,6 @@ const decodeEntry = Schema.decodeEffect(Schema.fromJsonString(LedgerEntry))
 const encodeQuarantine = Schema.encodeEffect(
   Schema.fromJsonString(LedgerQuarantineEvidence)
 )
-
-const reasonOf = (cause: unknown) =>
-  cause instanceof Error ? cause.message : String(cause)
 
 const errorCode = (cause: unknown) =>
   typeof cause === "object" &&

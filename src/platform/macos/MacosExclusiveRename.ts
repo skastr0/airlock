@@ -1,3 +1,4 @@
+import { reasonOf } from "../../FailureText.ts"
 import { Effect, Layer } from "effect"
 import {
   ExclusiveRename,
@@ -25,9 +26,6 @@ type NativeLibrary = Readonly<{
 type NativeState =
   | Readonly<{ readonly _tag: "Available"; readonly library: NativeLibrary }>
   | Readonly<{ readonly _tag: "Unavailable"; readonly reason: string }>
-
-const reasonOf = (cause: unknown) =>
-  cause instanceof Error ? cause.message : String(cause)
 
 const errnoName = (errno: number) => {
   switch (errno) {

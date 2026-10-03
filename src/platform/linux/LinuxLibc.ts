@@ -13,6 +13,8 @@
  * replacing rename or to an advisory lock the kernel does not own.
  */
 
+import { reasonOf } from "../../FailureText.ts"
+
 /** glibc exports the C library as `libc.so.6`; `libc.so` is the linker name. */
 const LIBRARY_CANDIDATES = ["libc.so.6", "libc.so"] as const
 
@@ -49,9 +51,6 @@ export type LinuxLibc = Readonly<{
 export type LinuxLibcState =
   | Readonly<{ readonly _tag: "Available"; readonly libc: LinuxLibc }>
   | Readonly<{ readonly _tag: "Unavailable"; readonly reason: string }>
-
-const reasonOf = (cause: unknown) =>
-  cause instanceof Error ? cause.message : String(cause)
 
 type BunFfi = Readonly<{
   readonly FFIType: Readonly<Record<"cstring" | "i32" | "u32" | "ptr", unknown>>

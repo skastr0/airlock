@@ -1,6 +1,7 @@
 import { Effect, FileSystem, PlatformError, Schema } from "effect"
 import { lstat } from "node:fs/promises"
 import * as nodePath from "node:path"
+import { reasonOf } from "../FailureText.ts"
 
 /**
  * A path selector could not be bound to one physical spelling before
@@ -96,7 +97,7 @@ export const bindPhysicalPathSelector = (
             workspace: resolvedWorkspace,
             requested: raw,
             operation: "inspect-selector",
-            reason: cause instanceof Error ? cause.message : String(cause)
+            reason: reasonOf(cause)
           })
         }
       }

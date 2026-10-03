@@ -290,7 +290,8 @@ describe("Ledger — cross-process serialization", () => {
     `
     const writerSource = `
       import { BunServices } from "@effect/platform-bun"
-            import { writeFile } from "node:fs/promises"
+      import { DateTime, Effect, Layer } from "effect"
+      import { writeFile } from "node:fs/promises"
       import * as AirlockHome from ${JSON.stringify(new URL("../src/AirlockHome.ts", import.meta.url).href)}
       import { Ledger, LedgerLive } from ${JSON.stringify(new URL("../src/Ledger.ts", import.meta.url).href)}
       import { LedgerEntry } from ${JSON.stringify(new URL("../src/domain.ts", import.meta.url).href)}

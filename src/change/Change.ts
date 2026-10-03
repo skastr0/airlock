@@ -8,6 +8,7 @@ import { CheckedOutcome, observeClaim, OperationKey } from "./Checked.ts"
 import { attempt, bindTarget, canonical, ChangeError, checkParent, checkTree, Entry, exists, hash, limits, metadataPolicy, overlaps, scan, snapshot, sync, writeNew } from "./Tree.ts"
 import { ContentPage, ContentRequest, Difference, Inventory, InventoryRow, Proposal, ProposalId, Review, SnapshotReceipt, Staged, Status } from "./Contracts.ts"
 import { maximumReservation, readSnapshotRecord } from "./Snapshots.ts"
+import { describeFailure } from "../FailureText.ts"
 
 export { ChangeError } from "./Tree.ts"
 export * from "./Contracts.ts"
@@ -30,7 +31,7 @@ const make = Effect.gen(function* () {
   const home = yield* AirlockHome
   const hold = yield* Hold
   const root = path.join(home.home, "changes")
-  const error = (cause: unknown) => new ChangeError({ operation: "change workflow", reason: String(cause) })
+  const error = (cause: unknown) => new ChangeError({ operation: "change workflow", reason: describeFailure(cause) })
   // Construction has no store reads/writes; corrupt proposals cannot disable
   // unrelated commands. The lease serializes stage budgets, claim and cancel.
   const lock = makeExclusiveFileLock({ root, active: path.join(root, "lock"), released: path.join(root, "released"), abandoned: path.join(root, "abandoned"), onError: (_op, _p, cause) => error(cause) })
@@ -99,7 +100,7 @@ const make = Effect.gen(function* () {
     return receipt
   }).pipe(Effect.catch(cause => Effect.succeed({
     ...receipt, state: "recovery-required" as const,
-    reason: `workflow receipt/acknowledgement publication failed: ${String(cause)}; durable Hold claim retained`
+    reason: `workflow receipt/acknowledgement publication failed: ${describeFailure(cause)}; durable Hold claim retained`
   })))
 
   const inventory = Effect.fnUntraced(function* () {

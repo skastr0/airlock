@@ -1,3 +1,4 @@
+import { describeFailure, reasonOf } from "../FailureText.ts"
 import { Cause, Context, DateTime, Effect, Exit, Layer, Path, Schema } from "effect"
 import { createHash } from "node:crypto"
 import {
@@ -486,9 +487,6 @@ const decodeRunSnapshot = Schema.decodeEffect(
   Schema.fromJsonString(RuntimeRunSnapshot)
 )
 
-const journalReason = (cause: unknown) =>
-  cause instanceof Error ? cause.message : String(cause)
-
 const journalPathMissing = (cause: unknown) =>
   typeof cause === "object" &&
   cause !== null &&
@@ -516,7 +514,7 @@ const readRunSnapshot = (
       new RuntimeRunJournalError({
         operation,
         path: file,
-        reason: journalReason(cause)
+        reason: reasonOf(cause)
       })
   }).pipe(
     Effect.flatMap((encoded) =>
@@ -525,7 +523,7 @@ const readRunSnapshot = (
           new RuntimeRunJournalError({
             operation: "decode",
             path: file,
-            reason: String(cause)
+            reason: describeFailure(cause)
           })
         ),
         Effect.map((snapshot) => ({ file, snapshot }))
@@ -630,7 +628,7 @@ const latestRunSnapshot = (
           : new RuntimeRunJournalError({
               operation: "inspect",
               path: directory,
-              reason: journalReason(cause)
+              reason: reasonOf(cause)
             })
     })
     const latest = yield* latestSnapshotInDirectory(
@@ -653,7 +651,7 @@ export const makeFileRuntimeRunJournal = (root: string) => {
           new RuntimeRunJournalError({
             operation: "record",
             path: root,
-            reason: String(cause)
+            reason: describeFailure(cause)
           })
         ),
         Effect.flatMap((encoded) =>
@@ -688,7 +686,7 @@ export const makeFileRuntimeRunJournal = (root: string) => {
               new RuntimeRunJournalError({
                 operation: "record",
                 path: runJournalDirectory(root, snapshot.planId),
-                reason: journalReason(cause)
+                reason: reasonOf(cause)
               })
           })
         )
@@ -703,7 +701,7 @@ export const makeFileRuntimeRunJournal = (root: string) => {
         new RuntimeRunJournalError({
           operation: "list",
           path: root,
-          reason: journalReason(cause)
+          reason: reasonOf(cause)
         })
     }).pipe(
       Effect.flatMap((entries) =>
@@ -716,7 +714,7 @@ export const makeFileRuntimeRunJournal = (root: string) => {
                 new RuntimeRunJournalError({
                   operation: "list",
                   path: nodePath.join(root, entry.name),
-                  reason: journalReason(cause)
+                  reason: reasonOf(cause)
                 })
             }).pipe(
               Effect.flatMap((files) => {
@@ -856,13 +854,13 @@ const encodeStructured = <A, I>(
     Effect.mapError((cause) => new RuntimeNodeFailure({
       nodeId,
       operation,
-      reason: String(cause)
+      reason: describeFailure(cause)
     }))
   )
 
 const receiptId = (): ReceiptId => `receipt_${crypto.randomUUID()}` as ReceiptId
 const errorReason = (error: unknown) =>
-  error instanceof Error ? error.message : typeof error === "string" ? error : JSON.stringify(error)
+  error instanceof Error || typeof error === "string" ? reasonOf(error) : JSON.stringify(error)
 
 const handleMap = (plan: Plan) => new Map(plan.handles.map((handle) => [handle.id, handle]))
 const handlesFor = (plan: Plan, node: PlanNode): ReadonlyArray<Handle> => {

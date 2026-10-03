@@ -1,6 +1,6 @@
 import { expect, it } from "vitest"
 import { BunServices } from "@effect/platform-bun"
-import { Effect, FileSystem, Layer, ManagedRuntime } from "effect"
+import { Effect, Layer, ManagedRuntime } from "effect"
 import { spawnSync } from "node:child_process"
 import { mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
@@ -16,8 +16,9 @@ const layers = (home: string) => ChangeLive.pipe(Layer.provideMerge(HoldLayer), 
   Layer.provideMerge(LedgerLive), Layer.provideMerge(AirlockHome.layer(home)), Layer.provideMerge(BunServices.layer))
 const crash = (input: { home: string, id: string, digest: string, point: string, collect: boolean }) => {
   const script = `
-        import { BunServices } from "@effect/platform-bun"
-        import { readFileSync } from "node:fs"
+    import { BunServices } from "@effect/platform-bun"
+    import { Effect, FileSystem, Layer, ManagedRuntime } from "effect"
+    import { readFileSync } from "node:fs"
     import * as AirlockHome from "./src/AirlockHome.ts"
     import { Change, ChangeLive } from "./src/change/Change.ts"
     import { HoldLayer } from "./src/Hold.ts"

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest"
 import { BunServices } from "@effect/platform-bun"
-import { Effect, FileSystem, Layer, ManagedRuntime } from "effect"
+import { Effect, Layer, ManagedRuntime } from "effect"
 import { spawnSync } from "node:child_process"
 import { mkdtemp, readFile, readdir, realpath, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
@@ -21,8 +21,9 @@ const layers = (home: string) => ChangeLive.pipe(
 const makeRuntime = (home: string) => ManagedRuntime.make(layers(home))
 const crash = (input: { home: string, id: string, digest: string, target: string, point: string, action: string }) => {
   const script = `
-        import { BunServices } from "@effect/platform-bun"
-        import { readFileSync } from "node:fs"
+    import { BunServices } from "@effect/platform-bun"
+    import { Effect, FileSystem, Layer, ManagedRuntime } from "effect"
+    import { readFileSync } from "node:fs"
     import * as AirlockHome from "./src/AirlockHome.ts"
     import { Change, ChangeLive } from "./src/change/Change.ts"
     import { Hold, HoldLayer } from "./src/Hold.ts"
@@ -94,7 +95,7 @@ describe("checked operation process-exit boundaries (real no-replace renames)", 
       crash({ home, id: staged.id, digest: staged.proposalDigest, target, point, action: "apply" })
       if (point !== "after-acknowledgement") {
         expect((await runtime.runPromise(change.inventory())).rows[0]!.retirementDigest).toBeUndefined()
-        await expect(runtime.runPromise(change.retire({ id: staged.id, expectedDigest: staged.proposalDigest }))).rejects.toThrow("unsettled")
+        await expect(runtime.runPromise(change.retire({ id: staged.id, expectedDigest: staged.proposalDigest }))).rejects.toMatchObject({ _tag: "ChangeError", reason: expect.stringContaining("unsettled") })
       }
       expect((await runtime.runPromise(hold.reap(0))).reaped).toEqual([])
       const restarted = ManagedRuntime.make(layers(home))

@@ -25,6 +25,7 @@ import {
   type ProcessError,
   type ProcessRunOptions
 } from "../process/Process.ts"
+import { reasonOf } from "../FailureText.ts"
 
 /**
  * Shared host-native Cell seam. Contracts, workspace identity, delta, and drift
@@ -232,7 +233,7 @@ export const fingerprintWorkspace = (
     catch: (cause) =>
       new WorkspaceFingerprintFailed({
         root,
-        cause: cause instanceof Error ? cause.message : String(cause)
+        cause: reasonOf(cause)
       })
   })
 
@@ -371,7 +372,7 @@ const runCell = (
       catch: (cause) =>
         new WorkspaceFingerprintFailed({
           root: paths.source,
-          cause: cause instanceof Error ? cause.message : String(cause)
+          cause: reasonOf(cause)
         })
     })
     const baseline = yield* fingerprintWorkspace(paths.source)
@@ -385,7 +386,7 @@ const runCell = (
       catch: (cause) =>
         new WorkspaceFingerprintFailed({
           root: prepared.destination,
-          cause: cause instanceof Error ? cause.message : String(cause)
+          cause: reasonOf(cause)
         })
     })
     const canonicalTemps = yield* Effect.forEach(paths.tempPaths, (path, index) =>
@@ -400,7 +401,7 @@ const runCell = (
         catch: (cause) =>
           new CellContractViolation({
             field: `tempPaths[${index}]`,
-            reason: `${path} must resolve to an existing directory before it is granted: ${cause instanceof Error ? cause.message : String(cause)}`
+            reason: `${path} must resolve to an existing directory before it is granted: ${reasonOf(cause)}`
           })
       })
     )
@@ -413,7 +414,7 @@ const runCell = (
           field: "process.env",
           reason:
             `could not create private runtime temp directory: ` +
-            `${cause instanceof Error ? cause.message : String(cause)}`
+            `${reasonOf(cause)}`
         })
     })
     const executableBindings = yield* Effect.forEach(
@@ -477,7 +478,7 @@ const runCell = (
               field: "descendantExecutables",
               reason:
                 `${executable} must resolve before execution: ` +
-                `${cause instanceof Error ? cause.message : String(cause)}`
+                `${reasonOf(cause)}`
             })
         })
     )

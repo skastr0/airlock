@@ -3,6 +3,7 @@ import { constants, type Stats } from "node:fs"
 import { chmod, lstat, mkdir, open, opendir, readFile, realpath } from "node:fs/promises"
 import * as path from "node:path"
 import { Effect, Schema } from "effect"
+import { describeFailure } from "../FailureText.ts"
 
 export class ChangeError extends Schema.TaggedError<ChangeError>()("ChangeError", {
   operation: Schema.String,
@@ -10,7 +11,7 @@ export class ChangeError extends Schema.TaggedError<ChangeError>()("ChangeError"
 }) {}
 
 export const attempt = <A>(operation: string, run: () => Promise<A>) =>
-  Effect.tryPromise({ try: run, catch: (cause) => new ChangeError({ operation, reason: String(cause) }) })
+  Effect.tryPromise({ try: run, catch: (cause) => new ChangeError({ operation, reason: describeFailure(cause) }) })
 
 export const Digest = Schema.String.pipe(Schema.check(Schema.isPattern(/^[a-f0-9]{64}$/)))
 export const Identity = Schema.Struct({ device: Schema.Number, inode: Schema.Number, birthtime: Schema.Number })

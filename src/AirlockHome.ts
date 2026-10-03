@@ -1,6 +1,7 @@
 import { Context, Effect, FileSystem, Layer, Path, Schema } from "effect"
 import * as os from "node:os"
 import * as nodePath from "node:path"
+import { reasonOf } from "./FailureText.ts"
 
 /**
  * The persisted realm layout. This is an interaction seam, not a policy
@@ -25,9 +26,6 @@ export class AirlockHomeError extends Schema.TaggedError<AirlockHomeError>()(
     reason: Schema.String
   }
 ) {}
-
-const reasonOf = (cause: unknown) =>
-  cause instanceof Error ? cause.message : String(cause)
 
 const validateHome = (home: string) => {
   const normalized = nodePath.resolve(home)

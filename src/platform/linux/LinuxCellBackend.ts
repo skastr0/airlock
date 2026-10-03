@@ -19,6 +19,7 @@ import {
 import { elfInterpreter } from "./Elf.ts"
 import { LinuxPlatform } from "./LinuxPlatform.ts"
 import { LinuxUnavailable } from "./contracts.ts"
+import { reasonOf } from "../../FailureText.ts"
 
 // Linux O_PATH is intentionally not exposed by Node's portable constants.
 const O_PATH = 0o10000000
@@ -165,14 +166,14 @@ const launchContained = (
     try: () => runtimeExecutableObjects(request),
     catch: (cause) => new CellUnavailable({
       capability: "Linux executable-object binding",
-      reason: cause instanceof Error ? cause.message : String(cause)
+      reason: reasonOf(cause)
     })
   })
   const bindings = yield* Effect.try({
     try: () => mountBindings(request, runtime.launcher, executableObjects),
     catch: (cause) => new CellUnavailable({
       capability: "Linux mount binding",
-      reason: cause instanceof Error ? cause.message : String(cause)
+      reason: reasonOf(cause)
     })
   })
 
@@ -181,7 +182,7 @@ const launchContained = (
       try: () => openMountBindings(bindings),
       catch: (cause) => new CellUnavailable({
         capability: "Linux pinned mount binding",
-        reason: cause instanceof Error ? cause.message : String(cause)
+        reason: reasonOf(cause)
       })
     }),
     (opened) => {

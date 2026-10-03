@@ -1,3 +1,4 @@
+import { describeFailure } from "../../FailureText.ts"
 import { Context, Effect, Layer, Result } from "effect"
 import { execFileSync } from "node:child_process"
 import {
@@ -40,7 +41,7 @@ const command = (binary: string, args: ReadonlyArray<string>, input?: string) =>
         stdio: ["pipe", "pipe", "pipe"]
       }),
     catch: (cause) =>
-      new MacosCommandFailed({ command: `${binary} ${args.join(" ")}`, cause: String(cause) })
+      new MacosCommandFailed({ command: `${binary} ${args.join(" ")}`, cause: describeFailure(cause) })
   })
 
 const requireMacos = Effect.suspend(() =>
@@ -76,7 +77,7 @@ const mountedDevice = (path: string) =>
           return device
         },
         catch: (cause) =>
-          new VolumeInspectionFailed({ path, cause: String(cause) })
+          new VolumeInspectionFailed({ path, cause: describeFailure(cause) })
       })
     )
   )
@@ -90,7 +91,7 @@ const inspectVolume = (rawPath: string) =>
         Effect.flatMap((json) =>
           Effect.try({
             try: () => JSON.parse(json) as DiskInfo,
-            catch: (cause) => new VolumeInspectionFailed({ path: rawPath, cause: String(cause) })
+            catch: (cause) => new VolumeInspectionFailed({ path: rawPath, cause: describeFailure(cause) })
           })
         ),
         Effect.map((info) => {
@@ -127,7 +128,7 @@ const sameVolume = (left: string, right: string) =>
             same: statSync(left).dev === statSync(right).dev
           }),
         catch: (cause) =>
-          new VolumeInspectionFailed({ path: `${left}, ${right}`, cause: String(cause) })
+          new VolumeInspectionFailed({ path: `${left}, ${right}`, cause: describeFailure(cause) })
       })
     )
   )
@@ -320,7 +321,7 @@ const preparePrivateWorkspace = (request: PrivateWorkspaceRequest) =>
             : new WorkspacePreparationFailed({
                 source: request.source,
                 destination: request.destination,
-                cause: String(cause)
+                cause: describeFailure(cause)
               })
       })
     ),

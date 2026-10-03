@@ -1,3 +1,4 @@
+import { reasonOf } from "../FailureText.ts"
 import { Context, DateTime, Effect, Layer, Schema } from "effect"
 
 /**
@@ -236,7 +237,7 @@ const runNativeProcess = async (
   } catch (cause) {
     throw new ProcessSpawnFailed({
       executable: request.executable,
-      cause: cause instanceof Error ? cause.message : String(cause)
+      cause: reasonOf(cause)
     })
   }
 
@@ -466,7 +467,7 @@ export const runProcess = (
         ? cause
         : new ProcessSpawnFailed({
             executable: request.executable,
-            cause: cause instanceof Error ? cause.message : String(cause)
+            cause: reasonOf(cause)
           })
   })
 

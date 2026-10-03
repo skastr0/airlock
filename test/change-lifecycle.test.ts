@@ -63,7 +63,7 @@ describe("explicit snapshot lifecycle", () => {
     await run(change.cancel(p.id))
     const digest = (await run(change.inventory())).rows[0]!.retirementDigest!
     await writeFile(path.join(home, "changes", p.id, "candidate"), "changed")
-    await expect(run(change.retire({ id: p.id, expectedDigest: digest }))).rejects.toThrow("digest")
+    await expect(run(change.retire({ id: p.id, expectedDigest: digest }))).rejects.toMatchObject({ _tag: "ChangeError", reason: expect.stringContaining("digest") })
     const retired = await retire(change, p.id)
     await writeFile(path.join(home, "hold", retired.holdActIds[0]!, "payload", "candidate"), "tampered")
     expect((await run(change.collect(p.id))).state).toBe("recovery-required")
@@ -100,7 +100,7 @@ describe("explicit snapshot lifecycle", () => {
     expect(inbox.totals.active).toBe(0); expect(inbox.totals.reservedBytes).toBe(0)
     expect(await exists(path.join(home, "changes", p.id, "proposal.json"))).toBe(true)
     expect((await run(change.review(p.id))).proposalDigest).toBe(p.proposalDigest)
-    await expect(run(change.content({ id: p.id, side: "after", path: "" }))).rejects.toThrow("retired")
+    await expect(run(change.content({ id: p.id, side: "after", path: "" }))).rejects.toMatchObject({ _tag: "ChangeError", reason: expect.stringContaining("retired") })
   }))
   it("collection preserves original apply payload and exact checked undo; rejected undo stays consumed", () => world(async ({ root, home, change }) => {
     const p = await proposal(root, change)

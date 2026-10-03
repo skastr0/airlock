@@ -167,7 +167,8 @@ const errorReason = (cause: unknown): string => {
   }
   if (
     typeof cause === "object" && cause !== null && "message" in cause &&
-    typeof (cause as { readonly message?: unknown }).message === "string"
+    typeof (cause as { readonly message?: unknown }).message === "string" &&
+    (cause as { readonly message: string }).message !== ""
   ) {
     return (cause as { readonly message: string }).message
   }

@@ -13,6 +13,7 @@ import {
   checkDaemonLiveness,
   handleDaemonRequest
 } from "./Protocol.ts"
+import { reasonOf } from "../FailureText.ts"
 
 const MAX_DAEMON_MESSAGE_BYTES = 4_096
 
@@ -36,10 +37,6 @@ const socketFailure = (
   operation: "validate" | "listen" | "connect" | "read" | "write" | "close",
   reason: string
 ) => new DaemonSocketFailed({ operation, reason })
-
-const reasonOf = (cause: unknown) => cause instanceof Error
-  ? cause.message
-  : String(cause)
 
 const validateServerOptions = (
   options: DaemonHealthServerOptions

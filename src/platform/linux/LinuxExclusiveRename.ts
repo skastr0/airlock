@@ -14,9 +14,7 @@ import {
   linuxLibc,
   RENAME_NOREPLACE
 } from "./LinuxLibc.ts"
-
-const reasonOf = (cause: unknown) =>
-  cause instanceof Error ? cause.message : String(cause)
+import { reasonOf } from "../../FailureText.ts"
 
 const errnoName = (errno: number) => {
   switch (errno) {

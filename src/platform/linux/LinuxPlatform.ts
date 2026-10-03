@@ -1,3 +1,4 @@
+import { reasonOf } from "../../FailureText.ts"
 import { Context, Effect, Layer } from "effect"
 import { spawnSync } from "node:child_process"
 import {
@@ -282,7 +283,7 @@ const inspectRuntime = (config: LinuxPlatformConfig) => Effect.try({
       ? cause
       : new LinuxUnavailable({
           capability: "Linux native containment",
-          reason: cause instanceof Error ? cause.message : String(cause)
+          reason: reasonOf(cause)
         })
 })
 
@@ -435,7 +436,7 @@ const preparePrivateWorkspace = (request: PrivateWorkspaceRequest): Effect.Effec
       : new WorkspacePreparationFailed({
           source: request.source,
           destination: request.destination,
-          cause: cause instanceof Error ? cause.message : String(cause)
+          cause: reasonOf(cause)
         })
 })
 

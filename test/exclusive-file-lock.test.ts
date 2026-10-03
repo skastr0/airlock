@@ -103,7 +103,7 @@ describe("ExclusiveFileLock", () => {
         ).pipe(Effect.result)
       )
 
-      expect(result._tag).toBe("Left")
+      expect(result._tag).toBe("Failure")
       if (result._tag === "Failure") {
         expect(result.failure).toMatchObject({
           _tag: "TestLockFailure",

@@ -21,6 +21,7 @@ import {
   type TargetNotFound
 } from "../domain.ts"
 import type { LedgerError } from "../Ledger.ts"
+import { reasonOf } from "../FailureText.ts"
 
 /**
  * NativeFileSystem is the small, Unix-shaped filesystem capability for an
@@ -197,8 +198,6 @@ export class NativeFileSystem extends Context.Service<
     readonly mkdir: (path: string, options?: { readonly parents?: boolean }) => Effect.Effect<NativeMkdirReceipt, NativeFilesystemErrorUnion>
   }
 >()("airlock/NativeFileSystem") {}
-
-const reasonOf = (cause: unknown) => cause instanceof Error ? cause.message : String(cause)
 
 const error = (operation: string, path: string) => (cause: unknown) =>
   new NativeFilesystemError({ operation, path, reason: reasonOf(cause) })
