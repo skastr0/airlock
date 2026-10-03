@@ -25,7 +25,7 @@ import {
   draftForAction
 } from "../src/program/index.ts"
 
-const ContractFamily = Schema.Literal(
+const ContractFamily = Schema.Literals([
   "observation",
   "file-mutation",
   "structured-invocation",
@@ -36,14 +36,14 @@ const ContractFamily = Schema.Literal(
   "language-toolchain",
   "artifact-stream",
   "staged-http"
-)
+])
 
-const PlanNodeKind = Schema.Literal(
+const PlanNodeKind = Schema.Literals([
   "Capture",
   "Invoke",
   "Apply",
   "RequestExternal"
-)
+])
 
 const ContractArtifact = Schema.Struct({
   id: Schema.String,
@@ -54,10 +54,11 @@ const ContractCase = Schema.Struct({
   id: Schema.String,
   family: ContractFamily,
   intent: Schema.String,
-  action: Schema.Record({ key: Schema.String, value: Schema.Unknown }),
-  artifacts: Schema.optionalWith(Schema.Array(ContractArtifact), {
-    default: () => []
-  }),
+  action: Schema.Record(Schema.String, Schema.Unknown),
+  artifacts: Schema.Array(ContractArtifact).pipe(
+    Schema.withDecodingDefault(Effect.succeed([])),
+    Schema.withConstructorDefault(Effect.succeed([]))
+  ),
   expectedPlanNodes: Schema.Array(PlanNodeKind)
 })
 
@@ -91,7 +92,7 @@ const loadCorpus = Effect.tryPromise({
       }`
     )
 }).pipe(
-  Effect.flatMap(Schema.decodeUnknown(Schema.parseJson(ShellContractCorpus)))
+  Effect.flatMap(Schema.decodeUnknownEffect(Schema.fromJsonString(ShellContractCorpus)))
 )
 
 const expectedFamilies: ReadonlyArray<typeof ContractFamily.Type> = [
@@ -220,7 +221,7 @@ describe("representative shell-to-Airlock contract corpus", () => {
         for (const [index, scenario] of corpus.cases.entries()) {
           const name = actionName(scenario.action)
           const input = actionInput(scenario.action)
-          const languageInput = yield* Schema.decodeUnknown(
+          const languageInput = yield* Schema.decodeUnknownEffect(
             LanguageValueSchema
           )(input)
           const decoded = yield* decodeProgramAction(name, [
@@ -332,10 +333,10 @@ describe("representative shell-to-Airlock contract corpus", () => {
           const language = yield* decodeProgramAction(
             scenario.programAction,
             []
-          ).pipe(Effect.either)
-          expect(language._tag, scenario.id).toBe("Left")
-          if (language._tag === "Left") {
-            expect(language.left, scenario.id).toBeInstanceOf(
+          ).pipe(Effect.result)
+          expect(language._tag, scenario.id).toBe("Failure")
+          if (language._tag === "Failure") {
+            expect(language.failure, scenario.id).toBeInstanceOf(
               UnknownProgramAction
             )
           }
@@ -343,10 +344,10 @@ describe("representative shell-to-Airlock contract corpus", () => {
           const native = yield* decodeAndLowerNativeAction(
             `unsupported:${scenario.id}`,
             { action: scenario.programAction }
-          ).pipe(Effect.either)
-          expect(native._tag, scenario.id).toBe("Left")
-          if (native._tag === "Left") {
-            expect(native.left, scenario.id).toBeInstanceOf(
+          ).pipe(Effect.result)
+          expect(native._tag, scenario.id).toBe("Failure")
+          if (native._tag === "Failure") {
+            expect(native.failure, scenario.id).toBeInstanceOf(
               ActionCallDecodeFailed
             )
           }

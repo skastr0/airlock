@@ -142,30 +142,30 @@ describe("ProgramRunner", () => {
   })
 
   it("rejects mutually exclusive alias timing fields", async () => {
-    const runConflict = await Effect.runPromise(Effect.either(decodeProgramAction("run", [{
+    const runConflict = await Effect.runPromise(Effect.result(decodeProgramAction("run", [{
       executable: "/usr/bin/true",
       args: [],
       cwd: "/tmp",
       timeout: { kind: "Duration", value: 1, unit: "s" },
       timeoutMs: 1_000
     }])))
-    expect(runConflict._tag).toBe("Left")
-    if (runConflict._tag === "Left") {
-      expect(runConflict.left).toMatchObject({
+    expect(runConflict._tag).toBe("Failure")
+    if (runConflict._tag === "Failure") {
+      expect(runConflict.failure).toMatchObject({
         action: "run",
         reason: "timeout and timeoutMs are mutually exclusive"
       })
     }
 
-    const stagedConflict = await Effect.runPromise(Effect.either(decodeProgramAction("request_external", [{
+    const stagedConflict = await Effect.runPromise(Effect.result(decodeProgramAction("request_external", [{
       method: "POST",
       endpoint: "https://example.test/collect",
       hold: { kind: "Duration", value: 1, unit: "s" },
       holdMillis: 1_000
     }])))
-    expect(stagedConflict._tag).toBe("Left")
-    if (stagedConflict._tag === "Left") {
-      expect(stagedConflict.left).toMatchObject({
+    expect(stagedConflict._tag).toBe("Failure")
+    if (stagedConflict._tag === "Failure") {
+      expect(stagedConflict.failure).toMatchObject({
         action: "request_external",
         reason: "hold and holdMillis are mutually exclusive"
       })
@@ -173,8 +173,8 @@ describe("ProgramRunner", () => {
   })
 
   it("fails unknown action names in the typed error channel", async () => {
-    const result = await Effect.runPromise(Effect.either(decodeProgramAction("shell", [])))
-    expect(result._tag).toBe("Left")
-    if (result._tag === "Left") expect(result.left).toBeInstanceOf(UnknownProgramAction)
+    const result = await Effect.runPromise(Effect.result(decodeProgramAction("shell", [])))
+    expect(result._tag).toBe("Failure")
+    if (result._tag === "Failure") expect(result.failure).toBeInstanceOf(UnknownProgramAction)
   })
 })

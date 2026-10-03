@@ -89,13 +89,13 @@ export class ProgramToolBinding extends Schema.Class<ProgramToolBinding>("Progra
   name: Schema.String,
   definitionId: Schema.String,
   definitionDigest: Digest,
-  resultDecoder: Schema.Literal("exit-status", "json-stdout", "json-stderr", "none"),
+  resultDecoder: Schema.Literals(["exit-status", "json-stdout", "json-stderr", "none"]),
   /**
    * The definition author's declared consequence, carried forward so the
    * supervisor plane can take the stricter of it and the grant's class. A
    * definition can only narrow with it; it never selects or widens anything.
    */
-  emissionEffect: Schema.optional(Schema.Literal("read", "mutate")),
+  emissionEffect: Schema.optional(Schema.Literals(["read", "mutate"])),
   outputSchema: Schema.optional(Schema.Unknown)
 }) {}
 
@@ -108,10 +108,14 @@ export class InlineArtifact extends Schema.Class<InlineArtifact>("InlineArtifact
 
 export class ProgramRequest extends Schema.Class<ProgramRequest>("ProgramRequest")({
   source: Schema.String,
-  bindings: Schema.optionalWith(Schema.Record({ key: Schema.String, value: LanguageValueSchema }), {
-    default: () => ({})
-  }),
-  artifacts: Schema.optionalWith(Schema.Array(InlineArtifact), { default: () => [] }),
+  bindings: Schema.Record(Schema.String, LanguageValueSchema).pipe(
+    Schema.withDecodingDefault(Effect.succeed({})),
+    Schema.withConstructorDefault(Effect.succeed({}))
+  ),
+  artifacts: Schema.Array(InlineArtifact).pipe(
+    Schema.withDecodingDefault(Effect.succeed([])),
+    Schema.withConstructorDefault(Effect.succeed([]))
+  ),
   maxLoopIterations: Schema.optional(Schema.Number)
 }) {}
 
@@ -136,14 +140,14 @@ export class ProgramActionRecord extends Schema.Class<ProgramActionRecord>("Prog
 
 export class ProgramRunFailure extends Schema.Class<ProgramRunFailure>("ProgramRunFailure")({
   action: Schema.String,
-  phase: Schema.Literal("language", "admission", "native-filesystem", "runtime", "outbox", "contract"),
+  phase: Schema.Literals(["language", "admission", "native-filesystem", "runtime", "outbox", "contract"]),
   causeTag: Schema.optional(Schema.String),
   reason: Schema.String,
   runtime: Schema.optional(RuntimeRun)
 }) {}
 
 export class ProgramRunResult extends Schema.Class<ProgramRunResult>("ProgramRunResult")({
-  state: Schema.Literal("succeeded", "failed", "partial"),
+  state: Schema.Literals(["succeeded", "failed", "partial"]),
   result: LanguageValueSchema,
   plans: Schema.Array(PlanDraft),
   actions: Schema.Array(ProgramActionRecord),
@@ -165,10 +169,10 @@ export class ProgramActionExecutionFailed extends Schema.TaggedError<ProgramActi
   "ProgramActionExecutionFailed",
   {
     action: Schema.String,
-    phase: Schema.optionalWith(
-      Schema.Literal("admission", "native-filesystem", "runtime", "outbox", "contract"),
-      { default: () => "runtime" as const }
-    ),
+    phase: Schema.Literals(["admission", "native-filesystem", "runtime", "outbox", "contract"]).pipe(
+    Schema.withDecodingDefault(Effect.succeed("runtime" as const)),
+    Schema.withConstructorDefault(Effect.succeed("runtime" as const))
+  ),
     causeTag: Schema.optional(Schema.String),
     reason: Schema.String,
     runtime: Schema.optional(RuntimeRun)
@@ -199,34 +203,34 @@ export const unchangedProgramPathSelector: ProgramPathSelectorBinder = (
  * must admit the draft and run it through Runtime or a native action adapter;
  * this service deliberately cannot expose raw filesystem/process/network APIs.
  */
-export class ProgramActionExecutor extends Context.Tag("airlock/ProgramActionExecutor")<
+export class ProgramActionExecutor extends Context.Service<
   ProgramActionExecutor,
   {
     readonly execute: (
       request: ProgramActionRequest
     ) => Effect.Effect<ProgramActionResult, ProgramActionExecutionFailed>
   }
->() {}
+>()("airlock/ProgramActionExecutor") {}
 
 /**
  * Admission adapter: a bare Plan is deliberately not part of this seam.
  * Grants and resolved handles remain attached through execution.
  */
-export class ProgramAdmission extends Context.Tag("airlock/ProgramAdmission")<
+export class ProgramAdmission extends Context.Service<
   ProgramAdmission,
   {
     readonly admit: (
       draft: PlanDraft
     ) => Effect.Effect<ExecutionAuthority, ProgramActionExecutionFailed>
   }
->() {}
+>()("airlock/ProgramAdmission") {}
 
 /**
  * Runtime/native-filesystem adapter. Inline artifacts make text writes and
  * future process stdin explicit; the adapter is the only place allowed to
  * materialize them for a concrete Runtime implementation.
  */
-export class ProgramPlanRuntime extends Context.Tag("airlock/ProgramPlanRuntime")<
+export class ProgramPlanRuntime extends Context.Service<
   ProgramPlanRuntime,
   {
     readonly execute: (
@@ -234,7 +238,7 @@ export class ProgramPlanRuntime extends Context.Tag("airlock/ProgramPlanRuntime"
       authority: ExecutionAuthority
     ) => Effect.Effect<ProgramActionResult, ProgramActionExecutionFailed>
   }
->() {}
+>()("airlock/ProgramPlanRuntime") {}
 
 const causeTag = (cause: unknown): string | undefined =>
   typeof cause === "object" && cause !== null && "_tag" in cause &&
@@ -307,12 +311,12 @@ export const ProgramPlanExecutorLive = Layer.effect(
   })
 )
 
-export class ProgramRunner extends Context.Tag("airlock/ProgramRunner")<
+export class ProgramRunner extends Context.Service<
   ProgramRunner,
   {
     readonly run: (request: ProgramRequest) => Effect.Effect<ProgramRunResult, ProgramError>
   }
->() {}
+>()("airlock/ProgramRunner") {}
 
 /**
  * The native verbs one Program runner may expose. The selected surface is a
@@ -338,7 +342,7 @@ export const ALL_NATIVE_ACTIONS: NativeActionSurface = new Set<NativeActionName>
 
 const nativeNames = new Set<NativeActionName>(NativeActionCatalog.map((action) => action.name))
 const encoder = new TextEncoder()
-const decodeStrictNativeActionCall = Schema.decodeUnknown(NativeActionCall, {
+const decodeStrictNativeActionCall = Schema.decodeUnknownEffect(NativeActionCall, {
   onExcessProperty: "error"
 })
 
@@ -1019,17 +1023,17 @@ const NativeStatActionResult = Schema.Struct({
   inode: Schema.Number
 })
 
-const FileReadActionResult = Schema.Union(
-  Schema.String.annotations({
+const FileReadActionResult = Schema.Union([
+  Schema.String.annotate({
     title: "text",
     description: "format=text returns decoded UTF-8 text."
   }),
-  Schema.Array(Schema.Number).annotations({
+  Schema.Array(Schema.Number).annotate({
     title: "bytes",
     description: "format=bytes returns byte values as a number array."
   }),
   LanguageValueSchema
-).annotations({
+]).annotate({
   description: "file.read returns text, a number array of bytes, or the recursive Airlock language-value union for format=json."
 })
 
@@ -1089,10 +1093,10 @@ const ProcessArtifactResult = Schema.NullOr(Schema.Struct({
   media_type: Schema.String,
   byte_length: Schema.Number,
   provenance: Schema.String
-})).annotations({ identifier: "NativeProcessArtifactResult" })
+})).annotate({ identifier: "NativeProcessArtifactResult" })
 
 const ProcessRunActionResult = Schema.Struct({
-  state: Schema.Literal("succeeded", "failed", "partial"),
+  state: Schema.Literals(["succeeded", "failed", "partial"]),
   plan_id: PlanId,
   process_outcome: Schema.NullOr(RuntimeProcessOutcome),
   exit_code: Schema.NullOr(Schema.Number),
@@ -1102,7 +1106,7 @@ const ProcessRunActionResult = Schema.Struct({
   stdout_artifact: ProcessArtifactResult,
   stderr_artifact: ProcessArtifactResult,
   delta_artifact: ProcessArtifactResult,
-  recovery: Schema.Array(Schema.encodedSchema(RuntimeRecoveryEvidence)),
+  recovery: Schema.Array(Schema.toEncoded(RuntimeRecoveryEvidence)),
   receipts: Schema.Array(Schema.Struct({
     node_id: NodeId,
     sequence: Schema.Number,
@@ -1116,7 +1120,7 @@ const HttpStageActionResult = Schema.Struct({
   state: OutboxState,
   action: Schema.Literal("http.stage"),
   emission_id: EmissionId,
-  method: Schema.Literal("GET", "POST", "PUT", "PATCH", "DELETE"),
+  method: Schema.Literals(["GET", "POST", "PUT", "PATCH", "DELETE"]),
   endpoint: Schema.String,
   hold_millis: Schema.Number,
   committed_by: Schema.optional(CommitAuthority),
@@ -1146,7 +1150,7 @@ export const NativeActionResultSchemas = {
   "file.mkdir": FileMkdirActionResult,
   "process.run": ProcessRunActionResult,
   "http.stage": HttpStageActionResult
-} as const satisfies Record<NativeActionName, Schema.Schema.Any>
+} as const satisfies Record<NativeActionName, Schema.Top>
 
 export const nativeActionResultSchema = (
   name: NativeActionName
@@ -1192,7 +1196,7 @@ const nativeActionResult = (
   artifacts: ReadonlyArray<InlineArtifact> = []
 ) => actionResult(
   Schema.decodeUnknownSync(
-    nativeActionResultSchema(action) as unknown as Schema.Schema<LanguageValue>,
+    nativeActionResultSchema(action) as unknown as Schema.Codec<LanguageValue>,
     { onExcessProperty: "error" }
   )(value),
   artifacts
@@ -1328,7 +1332,7 @@ const externalArtifactSlot = (
 const decodeRuntimeJson = <A, I>(
   run: RuntimeRun,
   item: RuntimeArtifact,
-  schema: Schema.Schema<A, I, never>,
+  schema: Schema.Codec<A, I>,
   action: string
 ): Effect.Effect<A, ProgramActionExecutionFailed> =>
   Effect.try({
@@ -1336,7 +1340,7 @@ const decodeRuntimeJson = <A, I>(
     catch: (cause) => executionFailure(action, "contract", run)(cause)
   }).pipe(
     Effect.flatMap((json) =>
-      Schema.decode(Schema.parseJson(schema))(json).pipe(
+      Schema.decodeEffect(Schema.fromJsonString(schema))(json).pipe(
         Effect.mapError(executionFailure(action, "contract", run))
       )
     )
@@ -1415,7 +1419,7 @@ const validateRuntimeRequest = (
   plan: Plan
 ): Effect.Effect<NativeActionCallValue, ProgramActionExecutionFailed> =>
   Effect.gen(function* () {
-    const call = yield* Schema.decodeUnknown(NativeActionCall)(request.call.input).pipe(
+    const call = yield* Schema.decodeUnknownEffect(NativeActionCall)(request.call.input).pipe(
       Effect.mapError(executionFailure(request.call.action, "contract"))
     )
     if (request.tool === undefined && request.call.action !== call.action) {
@@ -1805,7 +1809,7 @@ const makeProgramPlanRuntimeLive = (dispatch: ProgramDispatchAuthority) => Layer
                   stderr: decodedText.decode(evidence.receipt.stderr)
                 }).pipe(
                   Effect.mapError(executionFailure(request.tool.name, "contract", run)),
-                  Effect.flatMap((decoded) => Schema.decodeUnknown(LanguageValueSchema)(decoded).pipe(
+                  Effect.flatMap((decoded) => Schema.decodeUnknownEffect(LanguageValueSchema)(decoded).pipe(
                     Effect.mapError(executionFailure(request.tool!.name, "contract", run))
                   ))
                 )
@@ -2113,9 +2117,9 @@ const runProgram = (executor: {
       const evaluation = yield* evaluate(normalizeProgramActions(parsed, new Set(tools.actions.keys())), resolver, {
         ...(request.maxLoopIterations === undefined ? {} : { maxLoopIterations: request.maxLoopIterations }),
         bindings: request.bindings
-      }).pipe(Effect.either)
-      if (evaluation._tag === "Left") {
-        const failure = failureFromCause(evaluation.left)
+      }).pipe(Effect.result)
+      if (evaluation._tag === "Failure") {
+        const failure = failureFromCause(evaluation.failure)
         return new ProgramRunResult({
           state: actions.length > 0 ? "partial" : "failed",
           result: null,
@@ -2127,7 +2131,7 @@ const runProgram = (executor: {
       }
       return new ProgramRunResult({
         state: "succeeded",
-        result: evaluation.right.value,
+        result: evaluation.success.value,
         plans,
         actions,
         artifacts: [...artifacts.values()]

@@ -22,7 +22,7 @@ import {
   ResourceRequirement
 } from "../../src/plan/index.ts"
 
-const timestamp = DateTime.unsafeFromDate(
+const timestamp = DateTime.fromDateUnsafe(
   new Date("2026-07-29T00:00:00.000Z")
 )
 

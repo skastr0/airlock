@@ -40,7 +40,7 @@ import { ActId, EmissionId, RemoveReceipt } from "../src/domain.ts"
 import { HoldRecoveryRequired } from "../src/Hold.ts"
 import { ProcessReceipt } from "../src/process/Process.ts"
 
-const now = DateTime.unsafeFromDate(new Date("2026-07-29T00:00:00.000Z"))
+const now = DateTime.fromDateUnsafe(new Date("2026-07-29T00:00:00.000Z"))
 const encoder = new TextEncoder()
 const decoder = new TextDecoder()
 
@@ -68,12 +68,12 @@ const artifact = (
 
 const encodedArtifact = <A, I>(
   id: ArtifactId,
-  schema: Schema.Schema<A, I, never>,
+  schema: Schema.Codec<A, I>,
   value: A,
   provenance: string
 ) => artifact(
   id,
-  encoder.encode(Schema.encodeSync(Schema.parseJson(schema))(value)),
+  encoder.encode(Schema.encodeSync(Schema.fromJsonString(schema))(value)),
   provenance,
   "application/json"
 )
@@ -284,7 +284,7 @@ const RuntimeTest = Layer.succeed(Runtime, Runtime.of({
                 headers: {}
               }),
               stagedAt: now,
-              holdUntil: DateTime.add(now, { millis: node.holdMillis })
+              holdUntil: DateTime.add(now, { milliseconds: node.holdMillis })
             }),
             "test:external:stage"
           ))
