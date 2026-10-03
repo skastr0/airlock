@@ -321,16 +321,20 @@ describe("runtime Plan interpreter", () => {
         expect(existsSync(join(home, "outbox"))).toBe(true)
         const [stateDirectory] = readdirSync(join(home, "outbox"))
         expect(stateDirectory).toMatch(/^emi_.+\.staged$/)
-        const manifest = JSON.parse(
-          readFileSync(join(home, "outbox", stateDirectory!, "manifest.json"), "utf8")
-        ) as {
+        const manifestText = readFileSync(
+          join(home, "outbox", stateDirectory!, "manifest.json"),
+          "utf8"
+        )
+        const manifest = JSON.parse(manifestText) as {
           readonly intent: { readonly headerNames: ReadonlyArray<string>; readonly bodyBytes: number }
-          readonly request: { readonly headers: Record<string, string>; readonly body?: string }
         }
         expect(manifest.intent.headerNames).toEqual(["authorization", "content-type"])
         expect(manifest.intent.bodyBytes).toBe(new TextEncoder().encode("{\"phase\":\"stage-only\"}").byteLength)
-        expect(manifest.request.headers.authorization).toBe("[redacted]")
-        expect(manifest.request.body).not.toContain("stage-only")
+        // The manifest summarizes the request; no header value or body text
+        // reaches it in any field.
+        expect(manifest).not.toHaveProperty("request")
+        expect(manifestText).not.toContain("never-expose")
+        expect(manifestText).not.toContain("stage-only")
       }))
     )
   )

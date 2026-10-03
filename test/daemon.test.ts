@@ -28,8 +28,7 @@ import {
   type DispatchProvenance
 } from "../src/Outbox.ts"
 import {
-  HttpIntentSummary,
-  RedactedEmissionRequest
+  HttpIntentSummary
 } from "../src/outbox/Contract.ts"
 import {
   SealVerificationFailed,
@@ -92,11 +91,6 @@ const emission = (
       endpoint,
       headerNames: [],
       bodyBytes: 0
-    }),
-    request: new RedactedEmissionRequest({
-      method: "GET",
-      url: endpoint,
-      headers: {}
     }),
     stagedAt: at,
     holdUntil: options.holdUntil ?? at,

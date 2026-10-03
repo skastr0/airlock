@@ -26,7 +26,6 @@ import {
 } from "../src/Outbox.ts"
 import {
   HttpIntentSummary,
-  RedactedEmissionRequest
 } from "../src/outbox/Contract.ts"
 import {
   ApplyNode,
@@ -248,14 +247,6 @@ const outboxLayer = (
           endpoint: request.url,
           headerNames: Object.keys(request.headers).sort(),
           bodyBytes: encoder.encode(request.body ?? "").byteLength
-        }),
-        request: new RedactedEmissionRequest({
-          method: request.method,
-          url: request.url,
-          headers: Object.fromEntries(
-            Object.keys(request.headers).map((name) => [name, "[redacted]"])
-          ),
-          ...(request.body === undefined ? {} : { body: "[redacted]" })
         }),
         stagedAt: timestamp,
         holdUntil: DateTime.add(timestamp, { milliseconds: holdMillis }),
