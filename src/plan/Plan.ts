@@ -20,7 +20,7 @@ export type ReceiptId = typeof ReceiptId.Type
 export const Digest = Schema.String.pipe(Schema.brand("Digest"))
 export type Digest = typeof Digest.Type
 
-export const Right = Schema.Literal(
+export const Right = Schema.Literals([
   "read",
   "write",
   /** Authority to select this executable as the root of an Invoke. */
@@ -29,32 +29,32 @@ export const Right = Schema.Literal(
   "execute",
   "connect",
   "emit"
-)
+])
 export type Right = typeof Right.Type
 
-export const HandleKind = Schema.Literal(
+export const HandleKind = Schema.Literals([
   "path",
   "executable",
   "endpoint",
   "artifact",
   "secret",
   "stream"
-)
+])
 export type HandleKind = typeof HandleKind.Type
 
 /**
  * The Cell selected for an invocation. Compatibility preserves the ratchet;
  * the contained profiles are explicit authority reductions.
  */
-export const CellProfile = Schema.Literal(
+export const CellProfile = Schema.Literals([
   "compatibility",
   "native-contained",
   "vm-enclosed"
-)
+])
 export type CellProfile = typeof CellProfile.Type
 
 /** Stream disposition is part of the admitted process contract, never shell syntax. */
-export const StreamDisposition = Schema.Literal("capture", "inherit", "discard")
+export const StreamDisposition = Schema.Literals(["capture", "inherit", "discard"])
 export type StreamDisposition = typeof StreamDisposition.Type
 
 export class Grant extends Schema.Class<Grant>("Grant")({
@@ -63,9 +63,9 @@ export class Grant extends Schema.Class<Grant>("Grant")({
   realm: Schema.String,
   selector: Schema.String,
   rights: Schema.Array(Right),
-  constraints: Schema.Record({ key: Schema.String, value: Schema.String }),
+  constraints: Schema.Record(Schema.String, Schema.String),
   issuedBy: Schema.String,
-  validUntil: Schema.optional(Schema.DateTimeUtc)
+  validUntil: Schema.optional(Schema.DateTimeUtcFromString)
 }) {}
 
 export class Handle extends Schema.Class<Handle>("Handle")({
@@ -74,7 +74,7 @@ export class Handle extends Schema.Class<Handle>("Handle")({
   realm: Schema.String,
   resourceIdentity: Schema.String,
   rights: Schema.Array(Right),
-  constraints: Schema.Record({ key: Schema.String, value: Schema.String }),
+  constraints: Schema.Record(Schema.String, Schema.String),
   grantId: GrantId,
   publicProvenance: Schema.String
 }) {}
@@ -96,17 +96,17 @@ const NodeBase = {
 
 export class CaptureNode extends Schema.TaggedClass<CaptureNode>("CaptureNode")("Capture", {
   ...NodeBase,
-  source: Schema.Literal("file", "environment", "clock", "process-output"),
+  source: Schema.Literals(["file", "environment", "clock", "process-output"]),
   locator: Schema.String,
   /** Unix-shaped observation interpreted by the native filesystem service. */
-  operation: Schema.optionalWith(
-    Schema.Literal("read", "inspect", "stat", "list", "glob"),
-    { default: () => "read" as const }
+  operation: Schema.Literals(["read", "inspect", "stat", "list", "glob"]).pipe(
+    Schema.withDecodingDefault(Effect.succeed("read" as const)),
+    Schema.withConstructorDefault(Effect.succeed("read" as const))
   ),
   /** File-read decoding requested by the program; runtime still preserves bytes. */
-  format: Schema.optionalWith(
-    Schema.Literal("text", "bytes", "json"),
-    { default: () => "bytes" as const }
+  format: Schema.Literals(["text", "bytes", "json"]).pipe(
+    Schema.withDecodingDefault(Effect.succeed("bytes" as const)),
+    Schema.withConstructorDefault(Effect.succeed("bytes" as const))
   ),
   /** Required only by file.glob; it remains a bounded native pattern. */
   pattern: Schema.optional(Schema.String)
@@ -123,24 +123,26 @@ export class InvokeNode extends Schema.TaggedClass<InvokeNode>("InvokeNode")("In
    * invocation. The root executable is admitted independently with `invoke`.
    * Compatibility records this declaration but does not claim to enforce it.
    */
-  descendantExecutables: Schema.optionalWith(Schema.Array(Schema.String), {
-    default: () => []
-  }),
+  descendantExecutables: Schema.Array(Schema.String).pipe(
+    Schema.withDecodingDefault(Effect.succeed([])),
+    Schema.withConstructorDefault(Effect.succeed([]))
+  ),
   /** Omitted means the Cell's admitted working directory. */
   cwd: Schema.optional(Schema.String),
   /** An explicit environment overlay; no inherited ambient environment is implied. */
-  env: Schema.optionalWith(Schema.Record({ key: Schema.String, value: Schema.String }), {
-    default: () => ({})
-  }),
+  env: Schema.Record(Schema.String, Schema.String).pipe(
+    Schema.withDecodingDefault(Effect.succeed({})),
+    Schema.withConstructorDefault(Effect.succeed({}))
+  ),
   /** Stdin can only be a previously captured/staged artifact in Plan v1. */
   stdin: Schema.optional(ArtifactId),
   /**
    * Ambient stdin is explicit rather than encoded as absence. An artifact and
    * inherited stdin are mutually exclusive; omitted/discard is the default.
    */
-  stdinDisposition: Schema.optionalWith(
-    Schema.Literal("discard", "inherit"),
-    { default: () => "discard" as const }
+  stdinDisposition: Schema.Literals(["discard", "inherit"]).pipe(
+    Schema.withDecodingDefault(Effect.succeed("discard" as const)),
+    Schema.withConstructorDefault(Effect.succeed("discard" as const))
   ),
   /**
    * Captured process streams are named artifacts when later Plan nodes need
@@ -152,9 +154,18 @@ export class InvokeNode extends Schema.TaggedClass<InvokeNode>("InvokeNode")("In
   stderrArtifact: Schema.optional(ArtifactId),
   /** A private Cell workspace delta, consumable only by Apply.merge. */
   deltaArtifact: Schema.optional(ArtifactId),
-  stdout: Schema.optionalWith(StreamDisposition, { default: () => "capture" as const }),
-  stderr: Schema.optionalWith(StreamDisposition, { default: () => "capture" as const }),
-  outputLimitBytes: Schema.optionalWith(Schema.Number, { default: () => 1_048_576 }),
+  stdout: StreamDisposition.pipe(
+    Schema.withDecodingDefault(Effect.succeed("capture" as const)),
+    Schema.withConstructorDefault(Effect.succeed("capture" as const))
+  ),
+  stderr: StreamDisposition.pipe(
+    Schema.withDecodingDefault(Effect.succeed("capture" as const)),
+    Schema.withConstructorDefault(Effect.succeed("capture" as const))
+  ),
+  outputLimitBytes: Schema.Number.pipe(
+    Schema.withDecodingDefault(Effect.succeed(1_048_576)),
+    Schema.withConstructorDefault(Effect.succeed(1_048_576))
+  ),
   timeoutMs: Schema.optional(Schema.Number),
   cellProfile: CellProfile
 }) {}
@@ -166,13 +177,16 @@ export class ApplyNode extends Schema.TaggedClass<ApplyNode>("ApplyNode")("Apply
    * It remains Apply physics: the runtime must still transition live state
    * through Hold rather than installing the delta directly.
    */
-  operation: Schema.Literal("write", "remove", "copy", "move", "mkdir", "merge"),
+  operation: Schema.Literals(["write", "remove", "copy", "move", "mkdir", "merge"]),
   target: Schema.String,
   sourceArtifact: Schema.optional(ArtifactId),
   /** Filesystem source path for copy/move; never overloaded as artifact data. */
   source: Schema.optional(Schema.String),
   /** mkdir-only parent creation policy. */
-  parents: Schema.optionalWith(Schema.Boolean, { default: () => false })
+  parents: Schema.Boolean.pipe(
+    Schema.withDecodingDefault(Effect.succeed(false)),
+    Schema.withConstructorDefault(Effect.succeed(false))
+  )
 }) {}
 
 // RequestExternal is intent only. Its adapter must stage through Outbox before
@@ -181,11 +195,11 @@ export class RequestExternalNode extends Schema.TaggedClass<RequestExternalNode>
   "RequestExternalNode"
 )("RequestExternal", {
   ...NodeBase,
-  method: Schema.Literal("GET", "POST", "PUT", "PATCH", "DELETE"),
+  method: Schema.Literals(["GET", "POST", "PUT", "PATCH", "DELETE"]),
   endpoint: Schema.String,
-  headers: Schema.optionalWith(
-    Schema.Record({ key: Schema.String, value: Schema.String }),
-    { default: () => ({}) }
+  headers: Schema.Record(Schema.String, Schema.String).pipe(
+    Schema.withDecodingDefault(Effect.succeed({})),
+    Schema.withConstructorDefault(Effect.succeed({}))
   ),
   /** Inline request bytes and artifact-backed bytes are mutually exclusive. */
   body: Schema.optional(Schema.String),
@@ -193,12 +207,12 @@ export class RequestExternalNode extends Schema.TaggedClass<RequestExternalNode>
   holdMillis: Schema.Number
 }) {}
 
-export const PlanNode = Schema.Union(
+export const PlanNode = Schema.Union([
   CaptureNode,
   InvokeNode,
   ApplyNode,
   RequestExternalNode
-)
+])
 export type PlanNode = typeof PlanNode.Type
 
 export class PlanDraft extends Schema.Class<PlanDraft>("PlanDraft")({
@@ -214,7 +228,7 @@ export class PlanDraft extends Schema.Class<PlanDraft>("PlanDraft")({
 export class AuthorityAdmission extends Schema.Class<AuthorityAdmission>("AuthorityAdmission")({
   grantIds: Schema.Array(GrantId),
   admittedBy: Schema.String,
-  admittedAt: Schema.DateTimeUtc,
+  admittedAt: Schema.DateTimeUtcFromString,
   policyDigest: Schema.optional(Digest)
 }) {}
 
@@ -235,7 +249,7 @@ export class Plan extends Schema.Class<Plan>("Plan")({
   planDigest: Digest
 }) {}
 
-export const PlanState = Schema.Literal(
+export const PlanState = Schema.Literals([
   "draft",
   "admitted",
   "running",
@@ -245,10 +259,10 @@ export const PlanState = Schema.Literal(
   "partial",
   "uncertain",
   "recovery-required"
-)
+])
 export type PlanState = typeof PlanState.Type
 
-export const NodeState = Schema.Literal(
+export const NodeState = Schema.Literals([
   "planned",
   "running",
   "succeeded",
@@ -258,13 +272,13 @@ export const NodeState = Schema.Literal(
   "conflicted",
   "uncertain",
   "recovery-required"
-)
+])
 export type NodeState = typeof NodeState.Type
 
 export class PlanRuntime extends Schema.Class<PlanRuntime>("PlanRuntime")({
   planId: PlanId,
   state: PlanState,
-  nodeStates: Schema.Array(Schema.Tuple(NodeId, NodeState)),
+  nodeStates: Schema.Array(Schema.Tuple([NodeId, NodeState])),
   sequence: Schema.Number
 }) {}
 
@@ -277,16 +291,16 @@ export class Artifact extends Schema.Class<Artifact>("Artifact")({
 }) {}
 
 export class Receipt extends Schema.Class<Receipt>("Receipt")({
-  schemaVersion: Schema.optionalWith(
-    Schema.Literal("airlock/receipt/v1"),
-    { default: () => "airlock/receipt/v1" as const }
+  schemaVersion: Schema.Literal("airlock/receipt/v1").pipe(
+    Schema.withDecodingDefault(Effect.succeed("airlock/receipt/v1" as const)),
+    Schema.withConstructorDefault(Effect.succeed("airlock/receipt/v1" as const))
   ),
   id: ReceiptId,
   planId: PlanId,
   nodeId: NodeId,
   sequence: Schema.Number,
   state: NodeState,
-  at: Schema.DateTimeUtc,
+  at: Schema.DateTimeUtcFromString,
   inputDigests: Schema.Array(Digest),
   outputArtifacts: Schema.Array(ArtifactId),
   resourceIdentities: Schema.Array(Schema.String),
@@ -296,12 +310,12 @@ export class Receipt extends Schema.Class<Receipt>("Receipt")({
 // These codecs are the sole persistence/wire representation of Plan v1. They
 // intentionally preserve the declared array order (including canonical DAG
 // order after admission) instead of hiding it behind an object map.
-export const encodePlanDraftJson = Schema.encode(Schema.parseJson(PlanDraft))
-export const decodePlanDraftJson = Schema.decode(Schema.parseJson(PlanDraft))
-export const encodePlanJson = Schema.encode(Schema.parseJson(Plan))
-export const decodePlanJson = Schema.decode(Schema.parseJson(Plan))
-export const encodeReceiptJson = Schema.encode(Schema.parseJson(Receipt))
-export const decodeReceiptJson = Schema.decode(Schema.parseJson(Receipt))
+export const encodePlanDraftJson = Schema.encodeEffect(Schema.fromJsonString(PlanDraft))
+export const decodePlanDraftJson = Schema.decodeEffect(Schema.fromJsonString(PlanDraft))
+export const encodePlanJson = Schema.encodeEffect(Schema.fromJsonString(Plan))
+export const decodePlanJson = Schema.decodeEffect(Schema.fromJsonString(Plan))
+export const encodeReceiptJson = Schema.encodeEffect(Schema.fromJsonString(Receipt))
+export const decodeReceiptJson = Schema.decodeEffect(Schema.fromJsonString(Receipt))
 
 export class DuplicateNodeId extends Schema.TaggedError<DuplicateNodeId>()(
   "DuplicateNodeId",

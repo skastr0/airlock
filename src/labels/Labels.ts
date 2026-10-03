@@ -10,10 +10,10 @@ import { DateTime, Effect, Schema } from "effect"
  * establish its selector and revocation semantics.
  */
 
-export const Confidentiality = Schema.Literal("public", "project", "private", "secret")
+export const Confidentiality = Schema.Literals(["public", "project", "private", "secret"])
 export type Confidentiality = typeof Confidentiality.Type
 
-export const Integrity = Schema.Literal("untrusted", "project", "operator", "runtime")
+export const Integrity = Schema.Literals(["untrusted", "project", "operator", "runtime"])
 export type Integrity = typeof Integrity.Type
 
 export const LabelSubject = Schema.String.pipe(Schema.brand("LabelSubject"))
@@ -28,7 +28,7 @@ export type LabelReceiptId = typeof LabelReceiptId.Type
 export const SupervisorCapabilityId = Schema.String.pipe(Schema.brand("SupervisorCapabilityId"))
 export type SupervisorCapabilityId = typeof SupervisorCapabilityId.Type
 
-export const SupervisorOperation = Schema.Literal("declassify", "endorse")
+export const SupervisorOperation = Schema.Literals(["declassify", "endorse"])
 export type SupervisorOperation = typeof SupervisorOperation.Type
 
 export class InformationLabel extends Schema.Class<InformationLabel>("InformationLabel")({
@@ -56,7 +56,7 @@ export class SupervisorCapability extends Schema.Class<SupervisorCapability>("Su
   subject: LabelSubject,
   realm: LabelRealm,
   issuedBy: Schema.String,
-  validUntil: Schema.DateTimeUtc,
+  validUntil: Schema.DateTimeUtcFromString,
   /** Present only for a declassification capability and must equal its target. */
   declassifyTo: Schema.optional(Confidentiality),
   /** Present only for an endorsement capability and must equal its target. */
@@ -69,7 +69,7 @@ export class SinkPolicy extends Schema.Class<SinkPolicy>("SinkPolicy")({
   minimumIntegrity: Integrity
 }) {}
 
-export const LabelTransition = Schema.Literal("declassification", "endorsement")
+export const LabelTransition = Schema.Literals(["declassification", "endorsement"])
 export type LabelTransition = typeof LabelTransition.Type
 
 export class LabelTransitionReceipt extends Schema.Class<LabelTransitionReceipt>("LabelTransitionReceipt")({
@@ -81,17 +81,17 @@ export class LabelTransitionReceipt extends Schema.Class<LabelTransitionReceipt>
   supervisor: Schema.String,
   from: InformationLabel,
   to: InformationLabel,
-  at: Schema.DateTimeUtc
+  at: Schema.DateTimeUtcFromString
 }) {}
 
-export const encodeInformationLabelJson = Schema.encode(Schema.parseJson(InformationLabel))
-export const decodeInformationLabelJson = Schema.decode(Schema.parseJson(InformationLabel))
-export const encodeLabelTransitionReceiptJson = Schema.encode(Schema.parseJson(LabelTransitionReceipt))
-export const decodeLabelTransitionReceiptJson = Schema.decode(Schema.parseJson(LabelTransitionReceipt))
+export const encodeInformationLabelJson = Schema.encodeEffect(Schema.fromJsonString(InformationLabel))
+export const decodeInformationLabelJson = Schema.decodeEffect(Schema.fromJsonString(InformationLabel))
+export const encodeLabelTransitionReceiptJson = Schema.encodeEffect(Schema.fromJsonString(LabelTransitionReceipt))
+export const decodeLabelTransitionReceiptJson = Schema.decodeEffect(Schema.fromJsonString(LabelTransitionReceipt))
 
 export class LabelFlowDenied extends Schema.TaggedError<LabelFlowDenied>()("LabelFlowDenied", {
   sinkId: Schema.String,
-  reason: Schema.Literal("confidentiality", "integrity"),
+  reason: Schema.Literals(["confidentiality", "integrity"]),
   actual: Schema.String,
   required: Schema.String
 }) {}
@@ -100,7 +100,7 @@ export class SupervisorCapabilityInvalid extends Schema.TaggedError<SupervisorCa
   "SupervisorCapabilityInvalid",
   {
     capabilityId: Schema.String,
-    reason: Schema.Literal("operation", "scope", "expired", "target")
+    reason: Schema.Literals(["operation", "scope", "expired", "target"])
   }
 ) {}
 
@@ -108,7 +108,7 @@ export class LabelTransitionDenied extends Schema.TaggedError<LabelTransitionDen
   "LabelTransitionDenied",
   {
     transition: LabelTransition,
-    reason: Schema.Literal("not-a-lowering", "not-a-raise")
+    reason: Schema.Literals(["not-a-lowering", "not-a-raise"])
   }
 ) {}
 
@@ -235,7 +235,7 @@ export const declassify = (
       supervisor: capability.issuedBy,
       from: subject.label,
       to: label,
-      at: DateTime.unsafeFromDate(at)
+      at: DateTime.fromDateUnsafe(at)
     })] as const
   })
 
@@ -266,6 +266,6 @@ export const endorse = (
       supervisor: capability.issuedBy,
       from: subject.label,
       to: label,
-      at: DateTime.unsafeFromDate(at)
+      at: DateTime.fromDateUnsafe(at)
     })] as const
   })

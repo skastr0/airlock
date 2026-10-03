@@ -56,6 +56,6 @@ export type BinaryOperator = "||" | "&&" | "==" | "!=" | "<" | "<=" | ">" | ">="
 export interface Duration { readonly kind: "Duration"; readonly value: number; readonly unit: "ms" | "s" | "m" | "h" | "d" }
 
 export const SpanSchema = Schema.Struct({ start: Schema.Number, end: Schema.Number, line: Schema.Number, column: Schema.Number })
-export const DurationSchema = Schema.Struct({ kind: Schema.Literal("Duration"), value: Schema.Number, unit: Schema.Literal("ms", "s", "m", "h", "d") })
+export const DurationSchema = Schema.Struct({ kind: Schema.Literal("Duration"), value: Schema.Number, unit: Schema.Literals(["ms", "s", "m", "h", "d"]) })
 /** Stable runtime schemas for values shared with a future lowering layer. */
 export const AstSchemas = { Span: SpanSchema, Duration: DurationSchema } as const

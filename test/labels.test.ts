@@ -20,8 +20,8 @@ import {
 } from "../src/labels/index.ts"
 
 const at = new Date("2026-07-29T12:00:00.000Z")
-const future = DateTime.unsafeFromDate(new Date("2026-07-30T12:00:00.000Z"))
-const past = DateTime.unsafeFromDate(new Date("2026-07-28T12:00:00.000Z"))
+const future = DateTime.fromDateUnsafe(new Date("2026-07-30T12:00:00.000Z"))
+const past = DateTime.fromDateUnsafe(new Date("2026-07-28T12:00:00.000Z"))
 
 const label = (confidentiality: InformationLabel["confidentiality"], integrity: InformationLabel["integrity"], provenance: ReadonlyArray<string>) =>
   new InformationLabel({ confidentiality, integrity, provenance: [...provenance] })

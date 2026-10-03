@@ -13,17 +13,17 @@ export interface LanguageList extends ReadonlyArray<LanguageValue> {}
 export interface LanguageRecord { readonly [key: string]: LanguageValue }
 export type LanguageValue = LanguageScalar | LanguageList | LanguageRecord
 
-export const LanguageValueSchema: Schema.Schema<LanguageValue> = Schema.suspend(() =>
-  Schema.Union(
+export const LanguageValueSchema: Schema.Codec<LanguageValue> = Schema.suspend(() =>
+  Schema.Union([
     Schema.String,
     Schema.Number,
     Schema.Boolean,
     Schema.Null,
     DurationSchema,
     Schema.Array(LanguageValueSchema),
-    Schema.Record({ key: Schema.String, value: LanguageValueSchema })
-  )
-).annotations({
+    Schema.Record(Schema.String, LanguageValueSchema)
+  ])
+).annotate({
   identifier: "AirlockLanguageValue",
   description: "A recursive Airlock language value."
 })
