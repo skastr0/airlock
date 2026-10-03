@@ -34,7 +34,6 @@ import {
 import { OutboxEmission } from "../src/Outbox.ts"
 import {
   HttpIntentSummary,
-  RedactedEmissionRequest
 } from "../src/outbox/Contract.ts"
 import { ActId, EmissionId, RemoveReceipt } from "../src/domain.ts"
 import { HoldRecoveryRequired } from "../src/Hold.ts"
@@ -277,11 +276,6 @@ const RuntimeTest = Layer.succeed(Runtime, Runtime.of({
                 endpoint: node.endpoint,
                 headerNames: Object.keys(node.headers),
                 bodyBytes: encoder.encode(node.body ?? "").byteLength
-              }),
-              request: new RedactedEmissionRequest({
-                method: node.method,
-                url: node.endpoint,
-                headers: {}
               }),
               stagedAt: now,
               holdUntil: DateTime.add(now, { milliseconds: node.holdMillis })

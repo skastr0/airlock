@@ -225,6 +225,53 @@ describe("Outbox — persisted daemon dispatch authority", () => {
     )
   )
 
+  it.effect("still reads and commits a manifest written with the removed request view", () =>
+    withWorld(({ fs, path, home, outbox, baseUrl, received }) =>
+      Effect.gen(function* () {
+        const endpoint = `${baseUrl}/read`
+        const staged = yield* outbox.stage(post(endpoint, "old-shape-body"), 60_000)
+        const manifestPath = path.join(
+          home,
+          "outbox",
+          `${staged.id}.staged`,
+          "manifest.json"
+        )
+        const current = JSON.parse(
+          yield* fs.readFileString(manifestPath)
+        ) as Record<string, unknown>
+        expect(current).not.toHaveProperty("request")
+
+        // The exact shape earlier Airlock versions persisted next to `intent`.
+        const oldShape = {
+          schemaVersion: current.schemaVersion,
+          id: current.id,
+          intent: current.intent,
+          request: {
+            method: "POST",
+            url: endpoint,
+            headers: {},
+            body: "[redacted:14 bytes]"
+          },
+          stagedAt: current.stagedAt,
+          holdUntil: current.holdUntil,
+          dispatchDigest: current.dispatchDigest
+        }
+        yield* fs.writeFileString(manifestPath, JSON.stringify(oldShape))
+
+        const restarted = yield* Effect.provide(Outbox, layersFor(home))
+        const inspected = yield* restarted.inspect(staged.id)
+        expect(inspected.status).toBe("staged")
+        expect(inspected.intent).toEqual(staged.intent)
+        expect(inspected).not.toHaveProperty("request")
+        expect((yield* restarted.pending).map((emission) => emission.id)).toEqual([staged.id])
+
+        const committed = yield* restarted.commit(staged.id)
+        expect(committed.status).toBe("committed")
+        expect(received()).toBe(1)
+      })
+    )
+  )
+
   it.effect("refuses an exact-byte dispatch substitution before terminal transition", () =>
     withWorld(({ fs, path, home, outbox, baseUrl, received }) =>
       Effect.gen(function* () {

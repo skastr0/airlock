@@ -63,15 +63,6 @@ export class HttpIntentSummary extends Schema.Class<HttpIntentSummary>(
   bodyBytes: Schema.Number
 }) {}
 
-export class RedactedEmissionRequest extends Schema.Class<RedactedEmissionRequest>(
-  "RedactedEmissionRequest"
-)({
-  method: HttpMethod,
-  url: Schema.String,
-  headers: Schema.Record(Schema.String, Schema.String),
-  body: Schema.optional(Schema.String)
-}) {}
-
 /** A supervisor seal identity, persisted verbatim rather than computed here. */
 export const StagedDispatchSealDigest = Schema.String.pipe(
   Schema.check(Schema.isPattern(/^sha256:[0-9a-f]{64}$/, {
@@ -193,10 +184,9 @@ export class OutboxEmission extends Schema.Class<OutboxEmission>(
 )({
   id: EmissionId,
   status: OutboxState,
+  // The only description of the request: names and sizes, never values.
+  // Dispatch material is never returned by pending/inspect.
   intent: HttpIntentSummary,
-  // Compatibility view for existing callers. Values are deliberately
-  // redacted; dispatch material is never returned by pending/inspect.
-  request: RedactedEmissionRequest,
   stagedAt: Schema.DateTimeUtcFromString,
   holdUntil: Schema.DateTimeUtcFromString,
   authorization: Schema.optional(StagedDispatchAuthorization),
@@ -209,7 +199,15 @@ export class PersistedOutboxManifest extends Schema.Class<PersistedOutboxManifes
   schemaVersion: Schema.Literal("airlock/outbox-manifest/v1"),
   id: EmissionId,
   intent: HttpIntentSummary,
-  request: RedactedEmissionRequest,
+  // Read-only: manifests staged before the redacted `request` view was removed
+  // carry it, and the manifest decoder rejects unknown keys. It is accepted so
+  // that state stays readable, never written, and never surfaced.
+  request: Schema.optionalKey(Schema.Struct({
+    method: HttpMethod,
+    url: Schema.String,
+    headers: Schema.Record(Schema.String, Schema.String),
+    body: Schema.optionalKey(Schema.String)
+  })),
   stagedAt: Schema.DateTimeUtcFromString,
   holdUntil: Schema.DateTimeUtcFromString,
   /** Exact digest of dispatch.json; commit refuses any post-stage substitution. */

@@ -26,7 +26,6 @@ import {
   PersistedOutboxOutcome,
   PrivateHttpDispatch,
   RedactedDispatchResponse,
-  RedactedEmissionRequest,
   StagedDispatchAuthorization,
   type StagedDispatchSealDigest,
   UnsupportedExternalIntent
@@ -319,9 +318,6 @@ const summarize = (intent: HttpExternalIntent) => {
       ? 0
       : textEncoder.encode(intent.body).byteLength
   const endpoint = redactUrl(intent.url)
-  const redactedHeaders = Object.fromEntries(
-    headerNames.map((name) => [name, "[redacted]"])
-  )
   return {
     intent: new HttpIntentSummary({
       kind: "http",
@@ -329,14 +325,6 @@ const summarize = (intent: HttpExternalIntent) => {
       endpoint,
       headerNames,
       bodyBytes
-    }),
-    request: new RedactedEmissionRequest({
-      method: intent.method,
-      url: endpoint,
-      headers: redactedHeaders,
-      ...(intent.body === undefined
-        ? {}
-        : { body: `[redacted:${bodyBytes} bytes]` })
     }),
     dispatch: new PrivateHttpDispatch({
       schemaVersion: "airlock/http-dispatch/v1",
@@ -357,7 +345,6 @@ const toEmission = (
     id: manifest.id,
     status,
     intent: manifest.intent,
-    request: manifest.request,
     stagedAt: manifest.stagedAt,
     holdUntil: manifest.holdUntil,
     ...(manifest.authorization === undefined
@@ -478,7 +465,6 @@ const make = Effect.gen(function* () {
       schemaVersion: "airlock/outbox-manifest/v1",
       id,
       intent: summary.intent,
-      request: summary.request,
       stagedAt,
       holdUntil: DateTime.add(stagedAt, { milliseconds: holdMillis }),
       dispatchDigest: sha256Text(dispatchJson),
