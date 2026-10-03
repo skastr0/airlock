@@ -246,12 +246,18 @@ const causeTag = (cause: unknown): string | undefined =>
     ? (cause as { readonly _tag: string })._tag
     : undefined
 
-const causeReason = (cause: unknown): string =>
-  cause instanceof Error
-    ? cause.message
-    : typeof cause === "string"
-      ? cause
-      : causeTag(cause) ?? "operation failed"
+/**
+ * A Schema tagged error has no derived `message`: its evidence is its fields.
+ * Render those so a report never loses the reason an authority gave.
+ */
+const causeReason = (cause: unknown): string => {
+  if (typeof cause === "string") return cause
+  if (cause instanceof Error && cause.message !== "") return cause.message
+  const tag = causeTag(cause)
+  if (tag === undefined) return "operation failed"
+  const { _tag, ...fields } = cause as Record<string, unknown>
+  return Object.keys(fields).length === 0 ? tag : JSON.stringify(fields)
+}
 
 const executionFailure = (
   action: string,
@@ -971,7 +977,7 @@ const draftForToolAction = (
         ? error
         : new ProgramActionDecodeFailed({
             action: name,
-            reason: error.message ?? error._tag
+            reason: causeReason(error)
           }))
     )
     if (lowered.call.action !== requiredNativeAction) {
@@ -1017,10 +1023,10 @@ const draftForToolAction = (
 const NativeStatActionResult = Schema.Struct({
   path: Schema.String,
   kind: NativeEntryKind,
-  bytes: Schema.Number,
-  mode: Schema.Number,
-  device: Schema.Number,
-  inode: Schema.Number
+  bytes: Schema.Finite,
+  mode: Schema.Finite,
+  device: Schema.Finite,
+  inode: Schema.Finite
 })
 
 const FileReadActionResult = Schema.Union([
@@ -1028,7 +1034,7 @@ const FileReadActionResult = Schema.Union([
     title: "text",
     description: "format=text returns decoded UTF-8 text."
   }),
-  Schema.Array(Schema.Number).annotate({
+  Schema.Array(Schema.Finite).annotate({
     title: "bytes",
     description: "format=bytes returns byte values as a number array."
   }),
@@ -1050,7 +1056,7 @@ const FileWriteActionResult = Schema.Struct({
   act_id: ActId,
   target: Schema.String,
   previous_held: Schema.Boolean,
-  bytes: Schema.Number
+  bytes: Schema.Finite
 })
 
 const FileRemoveActionResult = Schema.Struct({
@@ -1068,7 +1074,7 @@ const FileCopyActionResult = Schema.Struct({
   source: Schema.String,
   target: Schema.String,
   previous_held: Schema.Boolean,
-  bytes: Schema.Number
+  bytes: Schema.Finite
 })
 
 const FileMoveActionResult = Schema.Struct({
@@ -1091,7 +1097,7 @@ const ProcessArtifactResult = Schema.NullOr(Schema.Struct({
   id: ArtifactId,
   digest: Digest,
   media_type: Schema.String,
-  byte_length: Schema.Number,
+  byte_length: Schema.Finite,
   provenance: Schema.String
 })).annotate({ identifier: "NativeProcessArtifactResult" })
 
@@ -1099,7 +1105,7 @@ const ProcessRunActionResult = Schema.Struct({
   state: Schema.Literals(["succeeded", "failed", "partial"]),
   plan_id: PlanId,
   process_outcome: Schema.NullOr(RuntimeProcessOutcome),
-  exit_code: Schema.NullOr(Schema.Number),
+  exit_code: Schema.NullOr(Schema.Finite),
   signal: Schema.NullOr(Schema.String),
   stdout: Schema.NullOr(Schema.String),
   stderr: Schema.NullOr(Schema.String),
@@ -1109,7 +1115,7 @@ const ProcessRunActionResult = Schema.Struct({
   recovery: Schema.Array(Schema.toEncoded(RuntimeRecoveryEvidence)),
   receipts: Schema.Array(Schema.Struct({
     node_id: NodeId,
-    sequence: Schema.Number,
+    sequence: Schema.Finite,
     state: NodeState,
     error_tag: Schema.NullOr(Schema.String),
     output_artifacts: Schema.Array(ArtifactId)
@@ -1122,19 +1128,19 @@ const HttpStageActionResult = Schema.Struct({
   emission_id: EmissionId,
   method: Schema.Literals(["GET", "POST", "PUT", "PATCH", "DELETE"]),
   endpoint: Schema.String,
-  hold_millis: Schema.Number,
-  committed_by: Schema.optional(CommitAuthority),
-  dispatch_class: Schema.optional(Schema.Literal("read")),
-  grant_id: Schema.optional(Schema.String),
-  grant_selector: Schema.optional(Schema.String),
-  dispatched_endpoint: Schema.optional(Schema.String),
-  status: Schema.optional(Schema.Number),
-  response_bytes: Schema.optional(Schema.Number),
-  response_truncated: Schema.optional(Schema.Boolean),
-  response_limit_bytes: Schema.optional(Schema.Number),
-  response_content_type: Schema.optional(Schema.String),
-  response_artifact: Schema.optional(ArtifactId),
-  response_body: Schema.optional(Schema.String)
+  hold_millis: Schema.Finite,
+  committed_by: Schema.optionalKey(CommitAuthority),
+  dispatch_class: Schema.optionalKey(Schema.Literal("read")),
+  grant_id: Schema.optionalKey(Schema.String),
+  grant_selector: Schema.optionalKey(Schema.String),
+  dispatched_endpoint: Schema.optionalKey(Schema.String),
+  status: Schema.optionalKey(Schema.Finite),
+  response_bytes: Schema.optionalKey(Schema.Finite),
+  response_truncated: Schema.optionalKey(Schema.Boolean),
+  response_limit_bytes: Schema.optionalKey(Schema.Finite),
+  response_content_type: Schema.optionalKey(Schema.String),
+  response_artifact: Schema.optionalKey(ArtifactId),
+  response_body: Schema.optionalKey(Schema.String)
 })
 
 export const NativeActionResultSchemas = {
