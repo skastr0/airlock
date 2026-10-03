@@ -1,7 +1,7 @@
 import { readFileSync, readdirSync } from "node:fs"
 import { fileURLToPath } from "node:url"
 import { describe, expect, it } from "@effect/vitest"
-import { Effect, Either, Schema } from "effect"
+import { Effect, Result, Schema } from "effect"
 import {
   AdmissionContractInvalid,
   AdmissionDenied,
@@ -105,7 +105,7 @@ describe("admission policy v2: endpoint grants", () => {
         executableAllowlist: [],
         endpointAllowlist: [readSelector]
       }
-      const decoded = yield* Schema.decodeUnknown(AdmissionPolicyDocument)(document)
+      const decoded = yield* Schema.decodeUnknownEffect(AdmissionPolicyDocument)(document)
       expect(decoded).toBeInstanceOf(AdmissionPolicy)
       expect(endpointGrantsOf(decoded)).toEqual([])
 
@@ -128,7 +128,7 @@ describe("admission policy v2: endpoint grants", () => {
 
       // A v1 document that names v2 grants does not acquire them: the version
       // literal decides, and a v1 policy carries no class vocabulary.
-      const smuggled = yield* Schema.decodeUnknown(AdmissionPolicyDocument)({
+      const smuggled = yield* Schema.decodeUnknownEffect(AdmissionPolicyDocument)({
         ...document,
         endpointGrants: [{ selector: readSelector, class: "read", commit: "auto", methods: ["GET"] }]
       })
@@ -161,7 +161,7 @@ describe("admission policy v2: endpoint grants", () => {
 
   it.effect("decodes v2 documents and defaults an unclassified grant to the staged floor", () =>
     Effect.gen(function* () {
-      const decoded = yield* Schema.decodeUnknown(AdmissionPolicyDocument)({
+      const decoded = yield* Schema.decodeUnknownEffect(AdmissionPolicyDocument)({
         schemaVersion: "airlock/admission-policy/v2",
         profile: "native-contained",
         principal: "agent/test",
@@ -372,7 +372,7 @@ describe("dispatch class ratchet", () => {
 
   it.effect("gives a Plan node no field in which to name a class", () =>
     Effect.gen(function* () {
-      const smuggled = yield* Schema.decodeUnknown(RequestExternalNode)({
+      const smuggled = yield* Schema.decodeUnknownEffect(RequestExternalNode)({
         _tag: "RequestExternal",
         id: "external",
         dependsOn: [],
@@ -398,15 +398,15 @@ describe("dispatch class ratchet", () => {
     }
     const refused = refuseGrantAssertion(definition, "definition")
     expect(refused).toMatchObject({
-      _tag: "Left",
-      left: {
+      _tag: "Failure",
+      failure: {
         _tag: "DispatchClassAssertionRejected",
         field: "definition.actions[0].commit"
       }
     })
 
     const nested = refuseGrantAssertion({ a: { b: [{ dispatchClass: "read" }] } }, "input")
-    expect(nested).toMatchObject({ _tag: "Left", left: { field: "input.a.b[0].dispatchClass" } })
+    expect(nested).toMatchObject({ _tag: "Failure", failure: { field: "input.a.b[0].dispatchClass" } })
 
     const honest = refuseGrantAssertion(
       {
@@ -415,13 +415,13 @@ describe("dispatch class ratchet", () => {
       },
       "definition"
     )
-    expect(Either.isRight(honest)).toBe(true)
+    expect(Result.isSuccess(honest)).toBe(true)
   })
 
   it("canonicalizes endpoints the same way for every decision", () => {
     expect(canonicalizeEndpoint("https://STATUS.Internal.example/v1/health")).toMatchObject({
-      _tag: "Right",
-      right: { target: "https://status.internal.example/v1/health" }
+      _tag: "Success",
+      success: { target: "https://status.internal.example/v1/health" }
     })
     for (const [url, reason] of [
       ["https://status.internal.example/v1/../admin", "not-canonical"],
@@ -430,7 +430,7 @@ describe("dispatch class ratchet", () => {
       ["file:///etc/passwd", "unsupported-scheme"],
       ["not a url", "unparseable"]
     ] as const) {
-      expect(canonicalizeEndpoint(url)).toMatchObject({ _tag: "Left", left: { reason } })
+      expect(canonicalizeEndpoint(url)).toMatchObject({ _tag: "Failure", failure: { reason } })
     }
   })
 

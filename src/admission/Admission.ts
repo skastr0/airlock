@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto"
 import { posix } from "node:path"
-import { DateTime, Effect, Either, Schema } from "effect"
+import { DateTime, Effect, Result, Schema } from "effect"
 import {
   type Digest,
   Grant,
@@ -41,11 +41,11 @@ import {
  * identity. A platform Cell must re-bind it before use.
  */
 
-export const AdmissionProfile = Schema.Literal(
+export const AdmissionProfile = Schema.Literals([
   "compatibility",
   "native-contained",
   "vm-enclosed"
-)
+])
 export type AdmissionProfile = typeof AdmissionProfile.Type
 
 export const ExecutableEdgePolicy = Schema.Struct({
@@ -63,7 +63,7 @@ export class AdmissionPolicy extends Schema.Class<AdmissionPolicy>("AdmissionPol
   realm: Schema.String,
   admittedBy: Schema.String,
   /** A positive value issues expiring grants; omission means this policy does not set a TTL. */
-  grantTtlMillis: Schema.optional(Schema.Positive),
+  grantTtlMillis: Schema.optional(Schema.Number.check(Schema.isGreaterThan(0))),
   /** Explicit native-contained path selectors. Compatibility may bind declared paths directly. */
   pathAllowlist: Schema.Array(Schema.String),
   /** Explicit executable selectors. Entries must be absolute executable paths. */
@@ -73,9 +73,9 @@ export class AdmissionPolicy extends Schema.Class<AdmissionPolicy>("AdmissionPol
    * Keeping this distinct prevents a helper grant from becoming a new root
    * Invoke authority in a later agent-authored Plan.
    */
-  executableEdges: Schema.optionalWith(
-    Schema.Array(ExecutableEdgePolicy),
-    { default: () => [] }
+  executableEdges: Schema.Array(ExecutableEdgePolicy).pipe(
+    Schema.withDecodingDefault(Effect.succeed([])),
+    Schema.withConstructorDefault(Effect.succeed([]))
   ),
   /** Explicit endpoint selectors. Exact match or a trailing `*` prefix selector. */
   endpointAllowlist: Schema.Array(Schema.String),
@@ -100,12 +100,12 @@ export class AdmissionPolicyV2 extends Schema.Class<AdmissionPolicyV2>("Admissio
   principal: Schema.String,
   realm: Schema.String,
   admittedBy: Schema.String,
-  grantTtlMillis: Schema.optional(Schema.Positive),
+  grantTtlMillis: Schema.optional(Schema.Number.check(Schema.isGreaterThan(0))),
   pathAllowlist: Schema.Array(Schema.String),
   executableAllowlist: Schema.Array(Schema.String),
-  executableEdges: Schema.optionalWith(
-    Schema.Array(ExecutableEdgePolicy),
-    { default: () => [] }
+  executableEdges: Schema.Array(ExecutableEdgePolicy).pipe(
+    Schema.withDecodingDefault(Effect.succeed([])),
+    Schema.withConstructorDefault(Effect.succeed([]))
   ),
   /** Structured endpoint grants. Classes live here and nowhere else. */
   endpointGrants: Schema.Array(EndpointGrantPolicy)
@@ -115,7 +115,7 @@ export class AdmissionPolicyV2 extends Schema.Class<AdmissionPolicyV2>("Admissio
  * Either supervisor policy version. v1 documents keep decoding unchanged; the
  * union discriminates on the `schemaVersion` literal.
  */
-export const AdmissionPolicyDocument = Schema.Union(AdmissionPolicy, AdmissionPolicyV2)
+export const AdmissionPolicyDocument = Schema.Union([AdmissionPolicy, AdmissionPolicyV2])
 export type AdmissionPolicyDocument = typeof AdmissionPolicyDocument.Type
 
 export const isAdmissionPolicyV2 = (
@@ -161,7 +161,7 @@ export class NodeAuthorityBinding extends Schema.Class<NodeAuthorityBinding>(
 )({
   nodeId: NodeId,
   handles: Schema.Array(Handle),
-  boundAt: Schema.DateTimeUtc
+  boundAt: Schema.DateTimeUtcFromString
 }) {}
 
 /**
@@ -175,7 +175,7 @@ export class ExecutionAuthority extends Schema.Class<ExecutionAuthority>(
   schemaVersion: Schema.Literal("airlock/execution-authority/v1"),
   admission: AdmissionResult,
   bindings: Schema.Array(NodeAuthorityBinding),
-  boundAt: Schema.DateTimeUtc
+  boundAt: Schema.DateTimeUtcFromString
 }) {}
 
 export class AdmissionDenied extends Schema.TaggedError<AdmissionDenied>()("AdmissionDenied", {
@@ -199,7 +199,7 @@ export class HandleNotResolved extends Schema.TaggedError<HandleNotResolved>()("
 
 export class HandleExpired extends Schema.TaggedError<HandleExpired>()("HandleExpired", {
   handleId: Schema.String,
-  validUntil: Schema.DateTimeUtc
+  validUntil: Schema.DateTimeUtcFromString
 }) {}
 
 export class AdmissionContractInvalid extends Schema.TaggedError<AdmissionContractInvalid>()(
@@ -260,8 +260,8 @@ const endpointAdmitted = (policy: AdmissionPolicyDocument, selector: string) => 
     return policy.endpointAllowlist.some((scope) => endpointAllows(scope, selector))
   }
   const canonical = canonicalizeEndpoint(selector)
-  if (Either.isLeft(canonical)) return false
-  return fittingEndpointGrants(policy.endpointGrants, canonical.right).length > 0
+  if (Result.isFailure(canonical)) return false
+  return fittingEndpointGrants(policy.endpointGrants, canonical.success).length > 0
 }
 
 const allowedBy = (policy: AdmissionPolicyDocument, requirement: ResourceRequirement) => {
@@ -493,17 +493,17 @@ const validateEndpointGrantFit = (
       if (node._tag !== "RequestExternal") continue
       const requirementId = endpointRequirementId(draft, node, node.endpoint)
       const canonical = canonicalizeEndpoint(node.endpoint)
-      if (Either.isLeft(canonical)) {
+      if (Result.isFailure(canonical)) {
         return yield* new AdmissionDenied({
           requirementId,
-          reason: `endpoint ${node.endpoint} is not canonical (${canonical.left.reason}) and fits no endpoint grant`
+          reason: `endpoint ${node.endpoint} is not canonical (${canonical.failure.reason}) and fits no endpoint grant`
         })
       }
-      const fitting = fittingEndpointGrants(grants, canonical.right)
+      const fitting = fittingEndpointGrants(grants, canonical.success)
       if (fitting.length === 0) {
         return yield* new AdmissionDenied({
           requirementId,
-          reason: `endpoint ${canonical.right.target} fits no endpoint grant`
+          reason: `endpoint ${canonical.success.target} fits no endpoint grant`
         })
       }
       const withMethod = fitting.filter((grant) =>
@@ -512,7 +512,7 @@ const validateEndpointGrantFit = (
       if (withMethod.length === 0) {
         return yield* new AdmissionDenied({
           requirementId,
-          reason: `method ${node.method} is not granted for endpoint ${canonical.right.target}`
+          reason: `method ${node.method} is not granted for endpoint ${canonical.success.target}`
         })
       }
       const withHold = withMethod.filter((grant) =>
@@ -521,7 +521,7 @@ const validateEndpointGrantFit = (
       if (withHold.length === 0) {
         return yield* new AdmissionDenied({
           requirementId,
-          reason: `hold ${node.holdMillis}ms is outside the granted hold policy for ${canonical.right.target}`
+          reason: `hold ${node.holdMillis}ms is outside the granted hold policy for ${canonical.success.target}`
         })
       }
       const bodyBytes = node.body === undefined
@@ -530,7 +530,7 @@ const validateEndpointGrantFit = (
       if (!withHold.some((grant) => endpointGrantBodyFits(grant, bodyBytes))) {
         return yield* new AdmissionDenied({
           requirementId,
-          reason: `inline body of ${bodyBytes ?? 0} bytes exceeds the granted budget for ${canonical.right.target}`
+          reason: `inline body of ${bodyBytes ?? 0} bytes exceeds the granted budget for ${canonical.success.target}`
         })
       }
     }
@@ -641,7 +641,7 @@ export const admit = (
     })
     const validUntil = policy.grantTtlMillis === undefined
       ? undefined
-      : DateTime.unsafeFromDate(new Date(now.getTime() + policy.grantTtlMillis))
+      : DateTime.fromDateUnsafe(new Date(now.getTime() + policy.grantTtlMillis))
     for (const requirement of draft.requirements) {
       if (!allowedBy(policy, requirement)) {
         return yield* new AdmissionDenied({
@@ -737,7 +737,7 @@ export const admit = (
     const admission = new AuthorityAdmission({
       grantIds: grants.map((grant) => grant.id),
       admittedBy: policy.admittedBy,
-      admittedAt: DateTime.unsafeFromDate(now),
+      admittedAt: DateTime.fromDateUnsafe(now),
       policyDigest
     })
     const planDigest = digest({ draft, policyDigest, grants, handles, resolutions })
@@ -923,7 +923,7 @@ const bindNode = (
     return new NodeAuthorityBinding({
       nodeId: node.id,
       handles,
-      boundAt: DateTime.unsafeFromDate(now)
+      boundAt: DateTime.fromDateUnsafe(now)
     })
   })
 
@@ -948,7 +948,7 @@ export const bindAdmissionForUse = (
       schemaVersion: "airlock/execution-authority/v1",
       admission: result,
       bindings,
-      boundAt: DateTime.unsafeFromDate(now)
+      boundAt: DateTime.fromDateUnsafe(now)
     })
   })
 

@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs"
 import { describe, expect, it } from "@effect/vitest"
-import { Effect, Either } from "effect"
+import { Effect, Result } from "effect"
 import {
   AdmissionPolicy,
   AdmissionPolicyV2,
@@ -48,7 +48,7 @@ const document = (overrides: Record<string, unknown> = {}) => ({
 
 const decoded = (input: unknown) => Effect.runPromise(decodeBoxGrant(input))
 const rejected = async (input: unknown) =>
-  Either.isLeft(await Effect.runPromise(Effect.either(decodeBoxGrant(input))))
+  Result.isFailure(await Effect.runPromise(Effect.result(decodeBoxGrant(input))))
 
 describe("box grant v1", () => {
   it("nests either admission-policy wire version", async () => {

@@ -8,7 +8,7 @@ import { ArtifactId, CellProfile, HandleKind, Right } from "../plan/index.ts"
  * Authority is still only introduced by Plan admission.
  */
 
-export const NativeActionName = Schema.Literal(
+export const NativeActionName = Schema.Literals([
   "file.inspect",
   "file.read",
   "file.list",
@@ -21,25 +21,25 @@ export const NativeActionName = Schema.Literal(
   "file.mkdir",
   "process.run",
   "http.stage"
-)
+])
 export type NativeActionName = typeof NativeActionName.Type
 
-export const ObservationActionName = Schema.Literal(
+export const ObservationActionName = Schema.Literals([
   "file.inspect",
   "file.read",
   "file.list",
   "file.glob",
   "file.stat"
-)
+])
 export type ObservationActionName = typeof ObservationActionName.Type
 
-export const MutationActionName = Schema.Literal(
+export const MutationActionName = Schema.Literals([
   "file.write",
   "file.remove",
   "file.move",
   "file.copy",
   "file.mkdir"
-)
+])
 export type MutationActionName = typeof MutationActionName.Type
 
 export class ResourceNeed extends Schema.Class<ResourceNeed>("ResourceNeed")({
@@ -49,7 +49,10 @@ export class ResourceNeed extends Schema.Class<ResourceNeed>("ResourceNeed")({
   rights: Schema.Array(Right)
 }) {}
 
-const PathCall = { path: Schema.String, realm: Schema.optionalWith(Schema.String, { default: () => "local" }) }
+const PathCall = { path: Schema.String, realm: Schema.String.pipe(
+    Schema.withDecodingDefault(Effect.succeed("local")),
+    Schema.withConstructorDefault(Effect.succeed("local"))
+  ) }
 
 export const FileInspectAction = Schema.Struct({ action: Schema.Literal("file.inspect"), ...PathCall })
 export type FileInspectAction = typeof FileInspectAction.Type
@@ -57,7 +60,10 @@ export type FileInspectAction = typeof FileInspectAction.Type
 export const FileReadAction = Schema.Struct({
   action: Schema.Literal("file.read"),
   ...PathCall,
-  format: Schema.optionalWith(Schema.Literal("text", "bytes", "json"), { default: () => "text" as const })
+  format: Schema.Literals(["text", "bytes", "json"]).pipe(
+    Schema.withDecodingDefault(Effect.succeed("text" as const)),
+    Schema.withConstructorDefault(Effect.succeed("text" as const))
+  )
 })
 export type FileReadAction = typeof FileReadAction.Type
 
@@ -68,14 +74,20 @@ export const FileGlobAction = Schema.Struct({
   action: Schema.Literal("file.glob"),
   root: Schema.String,
   pattern: Schema.String,
-  realm: Schema.optionalWith(Schema.String, { default: () => "local" })
+  realm: Schema.String.pipe(
+    Schema.withDecodingDefault(Effect.succeed("local")),
+    Schema.withConstructorDefault(Effect.succeed("local"))
+  )
 })
 export type FileGlobAction = typeof FileGlobAction.Type
 
 export const FileStatAction = Schema.Struct({
   action: Schema.Literal("file.stat"),
   ...PathCall,
-  followSymlinks: Schema.optionalWith(Schema.Boolean, { default: () => false })
+  followSymlinks: Schema.Boolean.pipe(
+    Schema.withDecodingDefault(Effect.succeed(false)),
+    Schema.withConstructorDefault(Effect.succeed(false))
+  )
 })
 export type FileStatAction = typeof FileStatAction.Type
 
@@ -94,7 +106,10 @@ export const FileMoveAction = Schema.Struct({
   action: Schema.Literal("file.move"),
   source: Schema.String,
   destination: Schema.String,
-  realm: Schema.optionalWith(Schema.String, { default: () => "local" })
+  realm: Schema.String.pipe(
+    Schema.withDecodingDefault(Effect.succeed("local")),
+    Schema.withConstructorDefault(Effect.succeed("local"))
+  )
 })
 export type FileMoveAction = typeof FileMoveAction.Type
 
@@ -102,14 +117,20 @@ export const FileCopyAction = Schema.Struct({
   action: Schema.Literal("file.copy"),
   source: Schema.String,
   destination: Schema.String,
-  realm: Schema.optionalWith(Schema.String, { default: () => "local" })
+  realm: Schema.String.pipe(
+    Schema.withDecodingDefault(Effect.succeed("local")),
+    Schema.withConstructorDefault(Effect.succeed("local"))
+  )
 })
 export type FileCopyAction = typeof FileCopyAction.Type
 
 export const FileMkdirAction = Schema.Struct({
   action: Schema.Literal("file.mkdir"),
   ...PathCall,
-  parents: Schema.optionalWith(Schema.Boolean, { default: () => false })
+  parents: Schema.Boolean.pipe(
+    Schema.withDecodingDefault(Effect.succeed(false)),
+    Schema.withConstructorDefault(Effect.succeed(false))
+  )
 })
 export type FileMkdirAction = typeof FileMkdirAction.Type
 
@@ -118,11 +139,11 @@ export type FileMkdirAction = typeof FileMkdirAction.Type
  * with the "discard" and "inherit" literals at the wire boundary, while text
  * and artifact input have different provenance and lowering requirements.
  */
-export const ProcessStdin = Schema.Union(
-  Schema.Literal("discard", "inherit"),
+export const ProcessStdin = Schema.Union([
+  Schema.Literals(["discard", "inherit"]),
   Schema.Struct({ kind: Schema.Literal("text"), value: Schema.String }),
   Schema.Struct({ kind: Schema.Literal("artifact"), id: ArtifactId })
-)
+])
 export type ProcessStdin = typeof ProcessStdin.Type
 
 export const ProcessRunAction = Schema.Struct({
@@ -134,49 +155,74 @@ export const ProcessRunAction = Schema.Struct({
    * Exact executable identities this root may spawn as descendants. The
    * root executable remains separate and is always the Invoke authority.
    */
-  descendantExecutables: Schema.optionalWith(Schema.Array(Schema.String), {
-    default: () => []
-  }),
-  cwd: Schema.String,
-  env: Schema.optionalWith(
-    Schema.Record({ key: Schema.String, value: Schema.String }),
-    { default: () => ({}) }
+  descendantExecutables: Schema.Array(Schema.String).pipe(
+    Schema.withDecodingDefault(Effect.succeed([])),
+    Schema.withConstructorDefault(Effect.succeed([]))
   ),
-  cellProfile: Schema.optionalWith(CellProfile, { default: () => "compatibility" as const }),
+  cwd: Schema.String,
+  env: Schema.Record(Schema.String, Schema.String).pipe(
+    Schema.withDecodingDefault(Effect.succeed({})),
+    Schema.withConstructorDefault(Effect.succeed({}))
+  ),
+  cellProfile: CellProfile.pipe(
+    Schema.withDecodingDefault(Effect.succeed("compatibility" as const)),
+    Schema.withConstructorDefault(Effect.succeed("compatibility" as const))
+  ),
   timeoutMs: Schema.optional(Schema.Number),
   /** Text is frozen as an artifact before Plan lowering; artifact ids stay explicit. */
-  stdin: Schema.optionalWith(ProcessStdin, {
-    default: () => "discard" as const
-  }),
-  stdout: Schema.optionalWith(Schema.Literal("capture", "discard", "inherit"), {
-    default: () => "capture" as const
-  }),
-  stderr: Schema.optionalWith(Schema.Literal("capture", "discard", "inherit"), {
-    default: () => "capture" as const
-  }),
-  outputLimitBytes: Schema.optionalWith(Schema.Number, { default: () => 1_048_576 }),
-  readable: Schema.optionalWith(Schema.Array(ResourceNeed), { default: () => [] }),
-  writable: Schema.optionalWith(Schema.Array(ResourceNeed), { default: () => [] }),
-  realm: Schema.optionalWith(Schema.String, { default: () => "local" })
+  stdin: ProcessStdin.pipe(
+    Schema.withDecodingDefault(Effect.succeed("discard" as const)),
+    Schema.withConstructorDefault(Effect.succeed("discard" as const))
+  ),
+  stdout: Schema.Literals(["capture", "discard", "inherit"]).pipe(
+    Schema.withDecodingDefault(Effect.succeed("capture" as const)),
+    Schema.withConstructorDefault(Effect.succeed("capture" as const))
+  ),
+  stderr: Schema.Literals(["capture", "discard", "inherit"]).pipe(
+    Schema.withDecodingDefault(Effect.succeed("capture" as const)),
+    Schema.withConstructorDefault(Effect.succeed("capture" as const))
+  ),
+  outputLimitBytes: Schema.Number.pipe(
+    Schema.withDecodingDefault(Effect.succeed(1_048_576)),
+    Schema.withConstructorDefault(Effect.succeed(1_048_576))
+  ),
+  readable: Schema.Array(ResourceNeed).pipe(
+    Schema.withDecodingDefault(Effect.succeed([])),
+    Schema.withConstructorDefault(Effect.succeed([]))
+  ),
+  writable: Schema.Array(ResourceNeed).pipe(
+    Schema.withDecodingDefault(Effect.succeed([])),
+    Schema.withConstructorDefault(Effect.succeed([]))
+  ),
+  realm: Schema.String.pipe(
+    Schema.withDecodingDefault(Effect.succeed("local")),
+    Schema.withConstructorDefault(Effect.succeed("local"))
+  )
 })
 export type ProcessRunAction = typeof ProcessRunAction.Type
 
 export const HttpStageAction = Schema.Struct({
   action: Schema.Literal("http.stage"),
   endpoint: Schema.String,
-  method: Schema.Literal("GET", "POST", "PUT", "PATCH", "DELETE"),
-  headers: Schema.optionalWith(
-    Schema.Record({ key: Schema.String, value: Schema.String }),
-    { default: () => ({}) }
+  method: Schema.Literals(["GET", "POST", "PUT", "PATCH", "DELETE"]),
+  headers: Schema.Record(Schema.String, Schema.String).pipe(
+    Schema.withDecodingDefault(Effect.succeed({})),
+    Schema.withConstructorDefault(Effect.succeed({}))
   ),
   body: Schema.optional(Schema.String),
   bodyArtifact: Schema.optional(ArtifactId),
-  holdMillis: Schema.optionalWith(Schema.Number, { default: () => 30_000 }),
-  realm: Schema.optionalWith(Schema.String, { default: () => "external" })
+  holdMillis: Schema.Number.pipe(
+    Schema.withDecodingDefault(Effect.succeed(30_000)),
+    Schema.withConstructorDefault(Effect.succeed(30_000))
+  ),
+  realm: Schema.String.pipe(
+    Schema.withDecodingDefault(Effect.succeed("external")),
+    Schema.withConstructorDefault(Effect.succeed("external"))
+  )
 })
 export type HttpStageAction = typeof HttpStageAction.Type
 
-export const NativeActionCall = Schema.Union(
+export const NativeActionCall = Schema.Union([
   FileInspectAction,
   FileReadAction,
   FileListAction,
@@ -189,7 +235,7 @@ export const NativeActionCall = Schema.Union(
   FileMkdirAction,
   ProcessRunAction,
   HttpStageAction
-)
+])
 export type NativeActionCall = typeof NativeActionCall.Type
 
 /** A trusted adapter may bind filesystem selectors before inert lowering. */
@@ -319,12 +365,12 @@ export class InvokeLowering extends Schema.TaggedClass<InvokeLowering>()("Invoke
   args: Schema.Array(Schema.String),
   descendantExecutables: Schema.Array(Schema.String),
   cwd: Schema.String,
-  env: Schema.Record({ key: Schema.String, value: Schema.String }),
+  env: Schema.Record(Schema.String, Schema.String),
   cellProfile: CellProfile,
   timeoutMs: Schema.optional(Schema.Number),
   stdin: ProcessStdin,
-  stdout: Schema.Literal("capture", "discard", "inherit"),
-  stderr: Schema.Literal("capture", "discard", "inherit"),
+  stdout: Schema.Literals(["capture", "discard", "inherit"]),
+  stderr: Schema.Literals(["capture", "discard", "inherit"]),
   outputLimitBytes: Schema.Number,
   requirements: Schema.Array(ResourceNeed)
 }) {}
@@ -334,8 +380,8 @@ export class RequestExternalLowering extends Schema.TaggedClass<RequestExternalL
   {
     action: Schema.Literal("http.stage"),
     endpoint: Schema.String,
-    method: Schema.Literal("GET", "POST", "PUT", "PATCH", "DELETE"),
-    headers: Schema.Record({ key: Schema.String, value: Schema.String }),
+    method: Schema.Literals(["GET", "POST", "PUT", "PATCH", "DELETE"]),
+    headers: Schema.Record(Schema.String, Schema.String),
     body: Schema.optional(Schema.String),
     bodyArtifact: Schema.optional(ArtifactId),
     holdMillis: Schema.Number,
@@ -343,12 +389,12 @@ export class RequestExternalLowering extends Schema.TaggedClass<RequestExternalL
   }
 ) {}
 
-export const LoweredActionNode = Schema.Union(
+export const LoweredActionNode = Schema.Union([
   CaptureLowering,
   ApplyLowering,
   InvokeLowering,
   RequestExternalLowering
-)
+])
 export type LoweredActionNode = typeof LoweredActionNode.Type
 
 export class NativeActionLowering extends Schema.Class<NativeActionLowering>("NativeActionLowering")({
@@ -375,7 +421,7 @@ export type ActionLoweringError = InvalidActionInput
 
 export class NativeActionDescriptor extends Schema.Class<NativeActionDescriptor>("NativeActionDescriptor")({
   name: NativeActionName,
-  node: Schema.Literal("Capture", "Apply", "Invoke", "RequestExternal"),
+  node: Schema.Literals(["Capture", "Apply", "Invoke", "RequestExternal"]),
   summary: Schema.String
 }) {}
 
@@ -707,7 +753,7 @@ export const lowerNativeAction = (
   })
 
 export const decodeAndLowerNativeAction = (source: string, input: unknown) =>
-  Schema.decodeUnknown(NativeActionCall, { onExcessProperty: "error" })(input).pipe(
+  Schema.decodeUnknownEffect(NativeActionCall, { onExcessProperty: "error" })(input).pipe(
     Effect.mapError(
       (error) => new ActionCallDecodeFailed({ source, message: error.message })
     ),

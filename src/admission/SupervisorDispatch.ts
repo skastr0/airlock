@@ -1,4 +1,4 @@
-import { Either, Schema } from "effect"
+import { Result, Schema } from "effect"
 import { NodeId } from "../plan/index.ts"
 import {
   type AdmissionPolicyDocument,
@@ -76,7 +76,7 @@ export const supervisorAutoCommits = (
     if (decision._tag !== "AutoCommit") continue
     if (decision.effectiveClass !== "read") continue
     const canonical = canonicalizeEndpoint(node.endpoint)
-    if (Either.isLeft(canonical)) continue
+    if (Result.isFailure(canonical)) continue
     const grant = authority.admission.grants.find(
       (candidate) => candidate.selector === node.endpoint
     )
@@ -86,7 +86,7 @@ export const supervisorAutoCommits = (
       grantId: grant.id,
       grantSelector: decision.selector,
       effectiveClass: "read",
-      endpoint: canonical.right.target
+      endpoint: canonical.success.target
     }))
   }
   return authorized

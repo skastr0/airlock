@@ -1,4 +1,4 @@
-import { Either, Schema } from "effect"
+import { Effect, Result, Schema } from "effect"
 
 /**
  * Dispatch classes are supervisor-grant-side facts. They exist only inside a
@@ -22,7 +22,7 @@ import { Either, Schema } from "effect"
  *   Compensation is a provider claim, never an Airlock guarantee.
  * - `irreversible-send` — the default and the floor.
  */
-export const DispatchClass = Schema.Literal("read", "mutate", "irreversible-send")
+export const DispatchClass = Schema.Literals(["read", "mutate", "irreversible-send"])
 export type DispatchClass = typeof DispatchClass.Type
 
 const strictness: Record<DispatchClass, number> = {
@@ -43,16 +43,16 @@ export const stricterDispatchClass = (
  * trusted runtime to call the ordinary `Outbox.commit` once `StageExternal`
  * has durably completed.
  */
-export const CommitMode = Schema.Literal("auto", "supervisor")
+export const CommitMode = Schema.Literals(["auto", "supervisor"])
 export type CommitMode = typeof CommitMode.Type
 
-export const EndpointMethod = Schema.Literal("GET", "POST", "PUT", "PATCH", "DELETE")
+export const EndpointMethod = Schema.Literals(["GET", "POST", "PUT", "PATCH", "DELETE"])
 export type EndpointMethod = typeof EndpointMethod.Type
 
 /** Grant-side bounds on the staged hold window a `RequestExternal` may declare. */
 export const EndpointHoldPolicy = Schema.Struct({
-  minMillis: Schema.optional(Schema.NonNegativeInt),
-  maxMillis: Schema.optional(Schema.NonNegativeInt)
+  minMillis: Schema.optional(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))),
+  maxMillis: Schema.optional(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)))
 })
 export type EndpointHoldPolicy = typeof EndpointHoldPolicy.Type
 
@@ -61,12 +61,12 @@ export const EndpointBudget = Schema.Struct({
    * A per-run dispatch counter owned by the supervisor dispatch engine.
    * Admission does not count runs and therefore does not enforce this field.
    */
-  maxDispatchesPerRun: Schema.optional(Schema.NonNegativeInt),
+  maxDispatchesPerRun: Schema.optional(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))),
   /**
    * Enforced by admission against inline `RequestExternal` bodies only.
    * Artifact-backed bodies are unknown until staging resolves them.
    */
-  maxBodyBytes: Schema.optional(Schema.NonNegativeInt)
+  maxBodyBytes: Schema.optional(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)))
 })
 export type EndpointBudget = typeof EndpointBudget.Type
 
@@ -82,12 +82,14 @@ export class EndpointGrantPolicy extends Schema.Class<EndpointGrantPolicy>(
   selector: Schema.String,
   /** Omitted means method-agnostic, as in v1. `commit: "auto"` requires an explicit list. */
   methods: Schema.optional(Schema.Array(EndpointMethod)),
-  class: Schema.optionalWith(DispatchClass, {
-    default: (): DispatchClass => "irreversible-send"
-  }),
-  commit: Schema.optionalWith(CommitMode, {
-    default: (): CommitMode => "supervisor"
-  }),
+  class: DispatchClass.pipe(
+    Schema.withDecodingDefault(Effect.succeed("irreversible-send" as const)),
+    Schema.withConstructorDefault(Effect.succeed("irreversible-send" as const))
+  ),
+  commit: CommitMode.pipe(
+    Schema.withDecodingDefault(Effect.succeed("supervisor" as const)),
+    Schema.withConstructorDefault(Effect.succeed("supervisor" as const))
+  ),
   hold: Schema.optional(EndpointHoldPolicy),
   budget: Schema.optional(EndpointBudget)
 }) {}
@@ -96,12 +98,12 @@ export class EndpointNotCanonical extends Schema.TaggedError<EndpointNotCanonica
   "EndpointNotCanonical",
   {
     url: Schema.String,
-    reason: Schema.Literal(
+    reason: Schema.Literals([
       "unparseable",
       "unsupported-scheme",
       "userinfo-present",
       "not-canonical"
-    )
+    ])
   }
 ) {}
 
@@ -152,29 +154,29 @@ const rawAuthorityAndPath = (raw: string) => {
  */
 export const canonicalizeEndpoint = (
   raw: string
-): Either.Either<CanonicalEndpoint, EndpointNotCanonical> => {
+): Result.Result<CanonicalEndpoint, EndpointNotCanonical> => {
   const parts = rawAuthorityAndPath(raw)
   let url: URL
   try {
     url = new URL(raw)
   } catch {
-    return Either.left(new EndpointNotCanonical({ url: raw, reason: "unparseable" }))
+    return Result.fail(new EndpointNotCanonical({ url: raw, reason: "unparseable" }))
   }
   if (parts === undefined) {
-    return Either.left(new EndpointNotCanonical({ url: raw, reason: "unparseable" }))
+    return Result.fail(new EndpointNotCanonical({ url: raw, reason: "unparseable" }))
   }
   if (url.protocol !== "https:" && url.protocol !== "http:") {
-    return Either.left(new EndpointNotCanonical({ url: raw, reason: "unsupported-scheme" }))
+    return Result.fail(new EndpointNotCanonical({ url: raw, reason: "unsupported-scheme" }))
   }
   if (url.username !== "" || url.password !== "" || parts.authority.includes("@")) {
-    return Either.left(new EndpointNotCanonical({ url: raw, reason: "userinfo-present" }))
+    return Result.fail(new EndpointNotCanonical({ url: raw, reason: "userinfo-present" }))
   }
   const path = parts.path.length === 0 ? "/" : parts.path
   if (url.host !== parts.authority.toLowerCase() || url.pathname !== path) {
-    return Either.left(new EndpointNotCanonical({ url: raw, reason: "not-canonical" }))
+    return Result.fail(new EndpointNotCanonical({ url: raw, reason: "not-canonical" }))
   }
   const scheme = url.protocol.slice(0, -1)
-  return Either.right({
+  return Result.succeed({
     scheme,
     host: url.host,
     path: url.pathname,
@@ -196,17 +198,17 @@ type CanonicalSelector = Readonly<{
  */
 export const canonicalizeEndpointSelector = (
   selector: string
-): Either.Either<CanonicalSelector, EndpointNotCanonical> => {
+): Result.Result<CanonicalSelector, EndpointNotCanonical> => {
   const prefix = selector.endsWith("*")
   const base = prefix ? selector.slice(0, -1) : selector
   const canonical = canonicalizeEndpoint(base)
-  if (Either.isLeft(canonical)) {
-    return Either.left(new EndpointNotCanonical({ url: selector, reason: canonical.left.reason }))
+  if (Result.isFailure(canonical)) {
+    return Result.fail(new EndpointNotCanonical({ url: selector, reason: canonical.failure.reason }))
   }
-  if (canonical.right.hasQuery || canonical.right.hasFragment) {
-    return Either.left(new EndpointNotCanonical({ url: selector, reason: "not-canonical" }))
+  if (canonical.success.hasQuery || canonical.success.hasFragment) {
+    return Result.fail(new EndpointNotCanonical({ url: selector, reason: "not-canonical" }))
   }
-  return Either.right({ target: canonical.right.target, prefix })
+  return Result.succeed({ target: canonical.success.target, prefix })
 }
 
 /** Selector fit on the canonical `scheme://host/path` only. */
@@ -215,10 +217,10 @@ export const endpointGrantSelectorFits = (
   endpoint: CanonicalEndpoint
 ): boolean => {
   const selector = canonicalizeEndpointSelector(grant.selector)
-  if (Either.isLeft(selector)) return false
-  return selector.right.prefix
-    ? endpoint.target.startsWith(selector.right.target)
-    : endpoint.target === selector.right.target
+  if (Result.isFailure(selector)) return false
+  return selector.success.prefix
+    ? endpoint.target.startsWith(selector.success.target)
+    : endpoint.target === selector.success.target
 }
 
 export const endpointGrantMethodFits = (
@@ -284,10 +286,10 @@ export const validateEndpointGrants = (
   for (const [index, grant] of grants.entries()) {
     const at = `policy.endpointGrants[${index}]`
     const selector = canonicalizeEndpointSelector(grant.selector)
-    if (Either.isLeft(selector)) {
+    if (Result.isFailure(selector)) {
       return {
         field: `${at}.selector`,
-        reason: `must be a canonical http(s) endpoint selector without userinfo, query, or fragment (${selector.left.reason})`
+        reason: `must be a canonical http(s) endpoint selector without userinfo, query, or fragment (${selector.failure.reason})`
       }
     }
     if (grant.methods !== undefined) {
@@ -371,15 +373,15 @@ export const dispatchDecision = (
     return awaitSupervisor("policy endpoint grants are invalid")
   }
   const canonical = canonicalizeEndpoint(intent.url)
-  if (Either.isLeft(canonical)) {
-    return awaitSupervisor(`endpoint is not canonical: ${canonical.left.reason}`)
+  if (Result.isFailure(canonical)) {
+    return awaitSupervisor(`endpoint is not canonical: ${canonical.failure.reason}`)
   }
-  if (canonical.right.hasQuery || canonical.right.hasFragment) {
+  if (canonical.success.hasQuery || canonical.success.hasFragment) {
     return awaitSupervisor(
       "query and fragment never participate in a grant match; this intent awaits a supervisor commit"
     )
   }
-  const fitting = fittingEndpointGrants(grants, canonical.right).filter((grant) =>
+  const fitting = fittingEndpointGrants(grants, canonical.success).filter((grant) =>
     endpointGrantMethodFits(grant, intent.method)
   )
   if (fitting.length === 0) {
@@ -461,7 +463,7 @@ const scanForGrantAssertion = (
 export const refuseGrantAssertion = (
   source: unknown,
   at: string
-): Either.Either<void, DispatchClassAssertionRejected> => {
+): Result.Result<void, DispatchClassAssertionRejected> => {
   const found = scanForGrantAssertion(source, at, 0)
-  return found === undefined ? Either.right(undefined) : Either.left(found)
+  return found === undefined ? Result.succeed(undefined) : Result.fail(found)
 }

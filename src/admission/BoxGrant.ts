@@ -10,7 +10,7 @@ import { AdmissionPolicyDocument } from "./Admission.ts"
  */
 
 /** The complete current `airlock` command graph, plus the reserved PR5 verb. */
-export const BoxGrantVerb = Schema.Literal(
+export const BoxGrantVerb = Schema.Literals([
   "rm",
   "write",
   "undo",
@@ -32,23 +32,23 @@ export const BoxGrantVerb = Schema.Literal(
   "runs",
   "run-receipt",
   "serve"
-)
+])
 export type BoxGrantVerb = typeof BoxGrantVerb.Type
 
 /** Privileged daemon operations. The program and tool planes cannot add one. */
-export const BoxGrantDaemonOp = Schema.Literal(
+export const BoxGrantDaemonOp = Schema.Literals([
   "commit",
   "reap",
   "flush",
   "hold-expiry"
-)
+])
 export type BoxGrantDaemonOp = typeof BoxGrantDaemonOp.Type
 
 /** Digests are wire identities, never loose labels or platform path strings. */
 export const BoxGrantSha256 = Schema.String.pipe(
-  Schema.pattern(/^sha256:[0-9a-f]{64}$/, {
-    message: () => "must be sha256:<64 lowercase hex>"
-  })
+  Schema.check(Schema.isPattern(/^sha256:[0-9a-f]{64}$/, {
+    message: "must be sha256:<64 lowercase hex>"
+  }))
 )
 export type BoxGrantSha256 = typeof BoxGrantSha256.Type
 
@@ -70,21 +70,21 @@ const unique = <A>(
 }
 
 const UniqueBoxGrantVerbs = Schema.Array(BoxGrantVerb).pipe(
-  Schema.filter((verbs) => unique(verbs, (verb) => verb, "verbs"))
+  Schema.check(Schema.makeFilter((verbs) => unique(verbs, (verb) => verb, "verbs")))
 )
 const UniqueNativeActions = Schema.Array(NativeActionName).pipe(
-  Schema.filter((actions) => unique(actions, (action) => action, "native actions"))
+  Schema.check(Schema.makeFilter((actions) => unique(actions, (action) => action, "native actions")))
 )
 const UniqueCatalogPins = Schema.Array(BoxGrantCatalogPin).pipe(
-  Schema.filter((pins) => unique(pins, (pin) => pin.id, "catalog ids")),
-  Schema.filter((pins) => unique(pins, (pin) => pin.sha256, "catalog hashes"))
+  Schema.check(Schema.makeFilter((pins) => unique(pins, (pin) => pin.id, "catalog ids"))),
+  Schema.check(Schema.makeFilter((pins) => unique(pins, (pin) => pin.sha256, "catalog hashes")))
 )
 const UniqueDaemonOps = Schema.Array(BoxGrantDaemonOp).pipe(
-  Schema.filter((operations) => unique(
+  Schema.check(Schema.makeFilter((operations) => unique(
     operations,
     (operation) => operation,
     "daemon operations"
-  ))
+  )))
 )
 
 /**
@@ -104,7 +104,7 @@ export class BoxGrant extends Schema.Class<BoxGrant>("BoxGrant")({
 
 /** Strictly decode an untrusted JSON value into a Box Grant. */
 export const decodeBoxGrant = (input: unknown) =>
-  Schema.decodeUnknown(BoxGrant, { onExcessProperty: "error" })(input)
+  Schema.decodeUnknownEffect(BoxGrant, { onExcessProperty: "error" })(input)
 
 const canonical = (value: unknown): string => {
   if (value === null || typeof value !== "object") return JSON.stringify(value)
