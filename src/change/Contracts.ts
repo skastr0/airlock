@@ -37,22 +37,22 @@ export const InventoryRow = Schema.Struct({
   retirementDigest: Schema.optional(ProposalDigest),
   workflowState: Schema.Union([WorkflowState, Schema.Literals(["incomplete", "corrupt"])]),
   applyState: OperationState, undoState: OperationState,
-  snapshots: Schema.Struct({ state: SnapshotState, bytes: Schema.Number, holdActIds: Schema.Array(Schema.String) }),
-  reservationBytes: Schema.Number, active: Schema.Boolean,
+  snapshots: Schema.Struct({ state: SnapshotState, bytes: Schema.Finite, holdActIds: Schema.Array(Schema.String) }),
+  reservationBytes: Schema.Finite, active: Schema.Boolean,
   errors: Schema.Array(Schema.Struct({ operation: Schema.String, reason: Schema.String }))
 })
 export type InventoryRow = typeof InventoryRow.Type
 export const Inventory = Schema.Struct({
   version: Schema.Literal("change-inventory/v1"), rows: Schema.Array(InventoryRow),
-  totals: Schema.Struct({ rows: Schema.Number, active: Schema.Number, reservedBytes: Schema.Number,
-    snapshotBytes: Schema.Number, collected: Schema.Number, errors: Schema.Number }),
-  limits: Schema.Struct({ proposals: Schema.Number, storage: Schema.Number })
+  totals: Schema.Struct({ rows: Schema.Finite, active: Schema.Finite, reservedBytes: Schema.Finite,
+    snapshotBytes: Schema.Finite, collected: Schema.Finite, errors: Schema.Finite }),
+  limits: Schema.Struct({ proposals: Schema.Finite, storage: Schema.Finite })
 })
 export type Inventory = typeof Inventory.Type
 export const SnapshotReceipt = Schema.Struct({
   version: Schema.Literal("change-snapshots/v1"), id: ProposalId, retirementDigest: ProposalDigest,
   state: Schema.Literals(["retired", "collected", "recovery-required"]), holdActIds: Schema.Array(Schema.String),
-  retiredBytes: Schema.Number, releasedReservationBytes: Schema.Number, reason: Schema.optional(Schema.String)
+  retiredBytes: Schema.Finite, releasedReservationBytes: Schema.Finite, reason: Schema.optional(Schema.String)
 })
 export type SnapshotReceipt = typeof SnapshotReceipt.Type
 export const ContentRequest = Schema.Struct({
@@ -64,8 +64,8 @@ export type ContentRequest = typeof ContentRequest.Type
 export const ContentPage = Schema.Struct({
   version: Schema.Literal("change-content/v1"), id: ProposalId, proposalDigest: ProposalDigest,
   side: Schema.Literals(["before", "after"]), path: Schema.String, fileDigest: Schema.String,
-  offset: Schema.Number, limit: Schema.Number, bytes: Schema.Number, totalBytes: Schema.Number,
+  offset: Schema.Finite, limit: Schema.Finite, bytes: Schema.Finite, totalBytes: Schema.Finite,
   encoding: Schema.Literal("base64"), dataBase64: Schema.String,
-  nextOffset: Schema.NullOr(Schema.Number), eof: Schema.Boolean
+  nextOffset: Schema.NullOr(Schema.Finite), eof: Schema.Boolean
 })
 export type ContentPage = typeof ContentPage.Type

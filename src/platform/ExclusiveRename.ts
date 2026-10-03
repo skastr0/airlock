@@ -28,7 +28,7 @@ export class ExclusiveRenameFailed extends Schema.TaggedError<ExclusiveRenameFai
   {
     source: Schema.String,
     target: Schema.String,
-    errno: Schema.Number,
+    errno: Schema.Finite,
     reason: Schema.String
   }
 ) {}

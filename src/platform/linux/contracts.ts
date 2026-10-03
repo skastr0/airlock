@@ -9,7 +9,7 @@ export class LinuxRuntime extends Schema.Class<LinuxRuntime>("LinuxRuntime")({
   bubblewrapVersion: Schema.String,
   launcher: Schema.String,
   launcherVersion: Schema.String,
-  landlockAbi: Schema.Number
+  landlockAbi: Schema.Finite
 }) {}
 
 export class LinuxNativeContainment extends Schema.Class<LinuxNativeContainment>(

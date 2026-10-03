@@ -298,7 +298,7 @@ export class RuntimeRunSnapshot extends Schema.Class<RuntimeRunSnapshot>(
   ]),
   startedAt: Schema.DateTimeUtcFromString,
   observedAt: Schema.DateTimeUtcFromString,
-  sequence: Schema.Number,
+  sequence: Schema.Finite,
   receipts: Schema.Array(Receipt),
   artifacts: Schema.Array(Artifact),
   lifecycle: Schema.Array(RuntimeLifecycleReceipt),
@@ -384,7 +384,7 @@ export class RuntimeExecutionClaimRejected extends Schema.TaggedError<RuntimeExe
       "replay"
     ]),
     priorState: Schema.optional(RuntimeRunSnapshot.fields.state),
-    priorSequence: Schema.optional(Schema.Number),
+    priorSequence: Schema.optional(Schema.Finite),
     reason: Schema.String
   }
 ) {}

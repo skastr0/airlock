@@ -50,19 +50,19 @@ export class ProcessRequest extends Schema.Class<ProcessRequest>("ProcessRequest
     Schema.withDecodingDefault(Effect.succeed("capture" as const)),
     Schema.withConstructorDefault(Effect.succeed("capture" as const))
   ),
-  outputLimitBytes: Schema.Number.pipe(
+  outputLimitBytes: Schema.Finite.pipe(
     Schema.withDecodingDefault(Effect.succeed(1024 * 1024)),
     Schema.withConstructorDefault(Effect.succeed(1024 * 1024))
   ),
-  timeoutMs: Schema.optional(Schema.Number)
+  timeoutMs: Schema.optional(Schema.Finite)
 }) {}
 
 export class ProcessReceipt extends Schema.Class<ProcessReceipt>("ProcessReceipt")({
   executable: Schema.String,
   args: Schema.Array(Schema.String),
   cwd: Schema.String,
-  pid: Schema.Number,
-  exitCode: Schema.NullOr(Schema.Number),
+  pid: Schema.Finite,
+  exitCode: Schema.NullOr(Schema.Finite),
   signal: Schema.NullOr(Schema.String),
   stdout: Schema.Uint8Array,
   stderr: Schema.Uint8Array,
@@ -82,12 +82,12 @@ export class ProcessSpawnFailed extends Schema.TaggedError<ProcessSpawnFailed>()
 
 export class ProcessOutputLimitExceeded extends Schema.TaggedError<ProcessOutputLimitExceeded>()(
   "ProcessOutputLimitExceeded",
-  { limitBytes: Schema.Number, receipt: ProcessReceipt }
+  { limitBytes: Schema.Finite, receipt: ProcessReceipt }
 ) {}
 
 export class ProcessTimedOut extends Schema.TaggedError<ProcessTimedOut>()(
   "ProcessTimedOut",
-  { timeoutMs: Schema.Number, receipt: ProcessReceipt }
+  { timeoutMs: Schema.Finite, receipt: ProcessReceipt }
 ) {}
 
 export class ProcessCancelled extends Schema.TaggedError<ProcessCancelled>()(

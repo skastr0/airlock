@@ -13,7 +13,7 @@ export const SnapshotBinding = Schema.Struct({
 export type SnapshotBinding = typeof SnapshotBinding.Type
 const PlanData = Schema.Struct({
   version: Schema.Literal("snapshot-retirement-plan/v1"), id: ProposalId,
-  bindings: Schema.Array(SnapshotBinding), reservationBytes: Schema.Number,
+  bindings: Schema.Array(SnapshotBinding), reservationBytes: Schema.Finite,
   metadata: Schema.Array(Schema.Struct({ name: Schema.String, digest: Schema.NullOr(Digest) }))
 })
 export const SnapshotPlan = Schema.Struct({ ...PlanData.fields, retirementDigest: ProposalDigest })

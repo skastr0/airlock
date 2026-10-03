@@ -54,7 +54,7 @@ export class LedgerDecodeError extends Schema.TaggedError<LedgerDecodeError>()(
   "LedgerDecodeError",
   {
     path: Schema.String,
-    line: Schema.Number,
+    line: Schema.Finite,
     reason: Schema.String
   }
 ) {}
@@ -70,9 +70,9 @@ export class LedgerTailQuarantined extends Schema.TaggedError<LedgerTailQuaranti
   {
     path: Schema.String,
     quarantinePath: Schema.String,
-    line: Schema.Number,
-    offset: Schema.Number,
-    bytes: Schema.Number,
+    line: Schema.Finite,
+    offset: Schema.Finite,
+    bytes: Schema.Finite,
     sha256: Schema.String,
     reason: Schema.String
   }
@@ -83,9 +83,9 @@ export class LedgerQuarantineEvidence extends Schema.Class<LedgerQuarantineEvide
 )({
   schemaVersion: Schema.Literal("airlock/ledger-quarantine/v1"),
   path: Schema.String,
-  line: Schema.Number,
-  offset: Schema.Number,
-  bytes: Schema.Number,
+  line: Schema.Finite,
+  offset: Schema.Finite,
+  bytes: Schema.Finite,
   sha256: Schema.String,
   rawBase64: Schema.String
 }) {}

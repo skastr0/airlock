@@ -38,7 +38,7 @@ export class NativeFilesystemConfig extends Schema.Class<NativeFilesystemConfig>
   "NativeFilesystemConfig"
 )({
   workspace: Schema.String,
-  maxGlobResults: Schema.Number.check(Schema.isGreaterThan(0)).pipe(
+  maxGlobResults: Schema.Finite.check(Schema.isGreaterThan(0)).pipe(
     Schema.withDecodingDefault(Effect.succeed(1_000)),
     Schema.withConstructorDefault(Effect.succeed(1_000))
   )
@@ -69,7 +69,7 @@ export class NativeGlobInvalid extends Schema.TaggedError<NativeGlobInvalid>()(
 
 export class NativeGlobLimitExceeded extends Schema.TaggedError<NativeGlobLimitExceeded>()(
   "NativeGlobLimitExceeded",
-  { root: Schema.String, pattern: Schema.String, limit: Schema.Number }
+  { root: Schema.String, pattern: Schema.String, limit: Schema.Finite }
 ) {}
 
 export class NativePathOverlap extends Schema.TaggedError<NativePathOverlap>()(
@@ -92,10 +92,10 @@ export type NativeEntryKind = typeof NativeEntryKind.Type
 export class NativeStat extends Schema.Class<NativeStat>("NativeStat")({
   path: Schema.String,
   kind: NativeEntryKind,
-  bytes: Schema.Number,
-  mode: Schema.Number,
-  device: Schema.Number,
-  inode: Schema.Number
+  bytes: Schema.Finite,
+  mode: Schema.Finite,
+  device: Schema.Finite,
+  inode: Schema.Finite
 }) {}
 
 export class NativeListEntry extends Schema.Class<NativeListEntry>("NativeListEntry")({
@@ -112,13 +112,13 @@ export class NativeWriteReceipt extends Schema.Class<NativeWriteReceipt>("Native
     previousHeld: Schema.Boolean,
     at: Schema.DateTimeUtcFromString,
     metadata: Schema.Struct({
-      device: Schema.Number,
-      inode: Schema.optional(Schema.Number),
-      mode: Schema.Number,
-      bytes: Schema.Number
+      device: Schema.Finite,
+      inode: Schema.optionalKey(Schema.Finite),
+      mode: Schema.Finite,
+      bytes: Schema.Finite
     })
   }),
-  bytes: Schema.Number
+  bytes: Schema.Finite
 }) {}
 
 export class NativeMoveReceipt extends Schema.Class<NativeMoveReceipt>("NativeMoveReceipt")({

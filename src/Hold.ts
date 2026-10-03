@@ -75,9 +75,9 @@ export class SourceVolumeMismatch extends Schema.TaggedError<SourceVolumeMismatc
     source: Schema.String,
     target: Schema.String,
     holdDir: Schema.String,
-    sourceDevice: Schema.Number,
-    targetDevice: Schema.Number,
-    holdDevice: Schema.Number
+    sourceDevice: Schema.Finite,
+    targetDevice: Schema.Finite,
+    holdDevice: Schema.Finite
   }
 ) {}
 
@@ -105,7 +105,7 @@ export class HoldRecoveryRequired extends Schema.TaggedError<HoldRecoveryRequire
     id: ActId,
     target: Schema.String,
     phase: Schema.Literals(["retain", "install", "restore", "undo", "ledger"]),
-    recovery: Schema.optional(
+    recovery: Schema.optionalKey(
       Schema.Struct({
         act: Schema.Literals(["remove", "overwrite", "displaced"]),
         journalState: Schema.Literals(["prepared", "held"]),
@@ -138,10 +138,10 @@ type HoldRecoveryError = HoldFilesystemError | HoldRecoveryIndeterminate
 type HoldMutationError = HoldIoError | LedgerError | HoldRecoveryRequired
 
 export class ReplaceMetadata extends Schema.Class<ReplaceMetadata>("ReplaceMetadata")({
-  device: Schema.Number,
-  inode: Schema.optional(Schema.Number),
-  mode: Schema.Number,
-  bytes: Schema.Number
+  device: Schema.Finite,
+  inode: Schema.optionalKey(Schema.Finite),
+  mode: Schema.Finite,
+  bytes: Schema.Finite
 }) {}
 
 export class ReplaceReceipt extends Schema.Class<ReplaceReceipt>("ReplaceReceipt")({
@@ -260,19 +260,19 @@ export class Hold extends Context.Service<
 // internal prepared state so a crash between rename and receipt can be
 // reconciled on the next construction without widening the public contract.
 class RetainedMetadata extends Schema.Class<RetainedMetadata>("RetainedMetadata")({
-  device: Schema.Number,
-  inode: Schema.optional(Schema.Number),
-  mode: Schema.Number,
-  bytes: Schema.Number
+  device: Schema.Finite,
+  inode: Schema.optionalKey(Schema.Finite),
+  mode: Schema.Finite,
+  bytes: Schema.Finite
 }) {}
 
 class InstalledIdentity extends Schema.Class<InstalledIdentity>("InstalledIdentity")({
   kind: Schema.Literals(["file", "directory"]),
-  device: Schema.Number,
-  inode: Schema.Number,
-  birthtimeMillis: Schema.Number,
-  mode: Schema.Number,
-  bytes: Schema.Number
+  device: Schema.Finite,
+  inode: Schema.Finite,
+  birthtimeMillis: Schema.Finite,
+  mode: Schema.Finite,
+  bytes: Schema.Finite
 }) {}
 
 class HoldJournal extends Schema.Class<HoldJournal>("HoldJournal")({

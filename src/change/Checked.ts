@@ -4,7 +4,7 @@ import { BoundTree, Parent, Tree } from "./Tree.ts"
 export const OperationKey = Schema.String.pipe(Schema.check(Schema.isPattern(/^[a-zA-Z0-9_-]{1,100}$/)))
 export const ProposalDigest = Schema.String.pipe(Schema.check(Schema.isPattern(/^sha256:[a-f0-9]{64}$/)))
 /** Local diagnostics only: neither a signature nor authenticated human identity. */
-export const ClaimObservation = Schema.Struct({ observedAt: Schema.String, localUid: Schema.NullOr(Schema.Number) })
+export const ClaimObservation = Schema.Struct({ observedAt: Schema.String, localUid: Schema.NullOr(Schema.Finite) })
 export const observeClaim = () => ({ observedAt: new Date().toISOString(), localUid: process.getuid?.() ?? null })
 export const CheckedRequest = Schema.Struct({
   operationKey: OperationKey,

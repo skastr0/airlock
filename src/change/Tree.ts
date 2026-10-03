@@ -14,15 +14,15 @@ export const attempt = <A>(operation: string, run: () => Promise<A>) =>
   Effect.tryPromise({ try: run, catch: (cause) => new ChangeError({ operation, reason: describeFailure(cause) }) })
 
 export const Digest = Schema.String.pipe(Schema.check(Schema.isPattern(/^[a-f0-9]{64}$/)))
-export const Identity = Schema.Struct({ device: Schema.Number, inode: Schema.Number, birthtime: Schema.Number })
+export const Identity = Schema.Struct({ device: Schema.Finite, inode: Schema.Finite, birthtime: Schema.Finite })
 export type Identity = typeof Identity.Type
 export const Entry = Schema.Struct({
-  path: Schema.String, kind: Schema.Literals(["file", "directory"]), mode: Schema.Number,
-  bytes: Schema.Number, digest: Digest
+  path: Schema.String, kind: Schema.Literals(["file", "directory"]), mode: Schema.Finite,
+  bytes: Schema.Finite, digest: Digest
 })
 export const Tree = Schema.Struct({
   version: Schema.Literal("regular-tree/v1"), digest: Digest,
-  kind: Schema.Literals(["file", "directory"]), entries: Schema.Array(Entry), bytes: Schema.Number
+  kind: Schema.Literals(["file", "directory"]), entries: Schema.Array(Entry), bytes: Schema.Finite
 })
 export type Tree = typeof Tree.Type
 export const BoundTree = Schema.Struct({ tree: Tree, identity: Identity })

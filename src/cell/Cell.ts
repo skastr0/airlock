@@ -49,8 +49,8 @@ export class WorkspaceEntryFingerprint extends Schema.Class<WorkspaceEntryFinger
 )({
   path: Schema.String,
   kind: WorkspaceEntryKind,
-  bytes: Schema.Number,
-  mode: Schema.Number,
+  bytes: Schema.Finite,
+  mode: Schema.Finite,
   digest: Schema.String
 }) {}
 
