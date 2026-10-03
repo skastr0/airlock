@@ -7,8 +7,9 @@
  * retains its explicit proof scripts. A green generic test command cannot
  * silently substitute for either boundary.
  */
-import { existsSync } from "node:fs"
-import { resolve } from "node:path"
+import { existsSync, mkdtempSync, readFileSync } from "node:fs"
+import { tmpdir } from "node:os"
+import { join, resolve } from "node:path"
 import { Schema } from "effect"
 
 const repository = resolve(import.meta.dir, "..")
@@ -55,17 +56,30 @@ console.log(
 
 if (process.platform === "linux") {
   const expectedNativeTests = 13
+  // The count is read from Vitest's JSON report, not from its terminal
+  // summary: that text carries colour codes and changes between releases.
+  const reportDirectory = mkdtempSync(join(tmpdir(), "airlock-linux-native-"))
+  const reportFile = join(reportDirectory, "report.json")
   const nativeResult = run([
     "scripts/run-tests.ts",
-    "test/linux-native.test.ts"
+    "test/linux-native.test.ts",
+    "--reporter=json",
+    `--outputFile=${reportFile}`
   ])
-  const nativeOutput = `${nativeResult.stdout}\n${nativeResult.stderr}`
+  const report = Schema.decodeUnknownSync(Schema.fromJsonString(Schema.Struct({
+    success: Schema.Boolean,
+    numPassedTests: Schema.Number,
+    numFailedTests: Schema.Number
+  })))(readFileSync(reportFile, "utf8"))
   if (
-    !nativeOutput.includes(`Tests  ${expectedNativeTests} passed`) &&
-    !nativeOutput.includes(`Tests   ${expectedNativeTests} passed`)
+    !report.success ||
+    report.numFailedTests !== 0 ||
+    report.numPassedTests !== expectedNativeTests
   ) {
     throw new Error(
-      `Linux native evidence was incomplete; expected exactly ${expectedNativeTests} passing tests.\n${nativeOutput}`
+      `Linux native evidence was incomplete; expected exactly ${expectedNativeTests} passing tests, ` +
+      `saw ${report.numPassedTests} passed and ${report.numFailedTests} failed.\n` +
+      `${nativeResult.stdout}\n${nativeResult.stderr}`
     )
   }
   console.log(JSON.stringify({
