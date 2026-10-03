@@ -1,7 +1,6 @@
-import { FileSystem, Path } from "@effect/platform"
-import { BunContext } from "@effect/platform-bun"
+import { Context, Effect, FileSystem, Layer, Path } from "effect"
+import { BunServices } from "@effect/platform-bun"
 import { describe, expect, it } from "@effect/vitest"
-import { Context, Effect, Layer } from "effect"
 import * as http from "node:http"
 import type { AddressInfo } from "node:net"
 import * as AirlockHome from "../src/AirlockHome.ts"
@@ -21,15 +20,15 @@ const layersFor = (home: string) =>
   OutboxLive.pipe(
     Layer.provideMerge(LedgerLive),
     Layer.provideMerge(AirlockHome.layer(home)),
-    Layer.provideMerge(BunContext.layer)
+    Layer.provideMerge(BunServices.layer)
   )
 
 const withWorld = <A, E>(
   body: (context: {
-    readonly fs: Context.Tag.Service<typeof FileSystem.FileSystem>
-    readonly path: Context.Tag.Service<typeof Path.Path>
+    readonly fs: Context.Service.Shape<typeof FileSystem.FileSystem>
+    readonly path: Context.Service.Shape<typeof Path.Path>
     readonly home: string
-    readonly outbox: Context.Tag.Service<typeof Outbox>
+    readonly outbox: Context.Service.Shape<typeof Outbox>
     readonly baseUrl: string
     readonly received: () => number
   }) => Effect.Effect<A, E>
@@ -43,7 +42,7 @@ const withWorld = <A, E>(
       const outbox = yield* Effect.provide(Outbox, layersFor(home))
       let hits = 0
       const server = yield* Effect.acquireRelease(
-        Effect.async<http.Server>((resume) => {
+        Effect.callback<http.Server>((resume) => {
           const value = http.createServer((_request, response) => {
             hits += 1
             response.writeHead(200)
@@ -54,7 +53,7 @@ const withWorld = <A, E>(
           )
         }),
         (value) =>
-          Effect.async<void>((resume) => {
+          Effect.callback<void>((resume) => {
             value.close(() => resume(Effect.void))
           })
       )
@@ -68,7 +67,7 @@ const withWorld = <A, E>(
         received: () => hits
       })
     })
-  ).pipe(Effect.provide(BunContext.layer))
+  ).pipe(Effect.provide(BunServices.layer))
 
 const authorizationFor = (endpoint: string) =>
   new StagedDispatchAuthorization({

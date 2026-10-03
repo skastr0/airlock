@@ -100,18 +100,18 @@ export class OutboxRecoveryRequired extends Schema.TaggedError<OutboxRecoveryReq
   "OutboxRecoveryRequired",
   {
     id: EmissionId,
-    phase: Schema.Literal(
+    phase: Schema.Literals([
       "ledger-after-stage",
       "ledger-after-commit",
       "ledger-after-cancel"
-    ),
-    status: Schema.Literal("staged", "committed", "cancelled"),
+    ]),
+    status: Schema.Literals(["staged", "committed", "cancelled"]),
     emission: OutboxEmission,
     reason: Schema.String
   }
 ) {}
 
-export class Outbox extends Context.Tag("airlock/Outbox")<
+export class Outbox extends Context.Service<
   Outbox,
   {
     readonly stage: (
@@ -166,51 +166,22 @@ export class Outbox extends Context.Tag("airlock/Outbox")<
       OutboxStorageFailed | OutboxStateCorrupt | OutboxRecoveryRequired
     >
   }
->() {
-  /** Keep handwritten pre-authorization service fixtures source-compatible. */
-  static of(
-    service: Omit<typeof Outbox.Service, "pendingAuthorized"> & {
-      readonly pendingAuthorized?:
-        typeof Outbox.Service["pendingAuthorized"]
-    }
-  ): typeof Outbox.Service
-  static of(service: typeof Outbox.Service): typeof Outbox.Service
-  static of(
-    service: Omit<typeof Outbox.Service, "pendingAuthorized"> & {
-      readonly pendingAuthorized?:
-        typeof Outbox.Service["pendingAuthorized"]
-    }
-  ): typeof Outbox.Service {
-    return {
-      ...service,
-      pendingAuthorized: service.pendingAuthorized ?? ((sealDigest) =>
-        service.pending.pipe(
-          Effect.map((emissions) =>
-            emissions.filter(
-              (emission) =>
-                emission.authorization?.dispatchClass === "read" &&
-                emission.authorization.sealDigest === sealDigest
-            )
-          )
-        ))
-    }
-  }
-}
+>()("airlock/Outbox") {}
 
-const encodeManifest = Schema.encode(
-  Schema.parseJson(PersistedOutboxManifest)
+const encodeManifest = Schema.encodeEffect(
+  Schema.fromJsonString(PersistedOutboxManifest)
 )
-const decodeManifest = Schema.decode(
-  Schema.parseJson(PersistedOutboxManifest),
+const decodeManifest = Schema.decodeEffect(
+  Schema.fromJsonString(PersistedOutboxManifest),
   { onExcessProperty: "error" }
 )
-const encodeDispatch = Schema.encode(Schema.parseJson(PrivateHttpDispatch))
-const decodeDispatch = Schema.decode(Schema.parseJson(PrivateHttpDispatch))
-const encodeOutcome = Schema.encode(
-  Schema.parseJson(PersistedOutboxOutcome)
+const encodeDispatch = Schema.encodeEffect(Schema.fromJsonString(PrivateHttpDispatch))
+const decodeDispatch = Schema.decodeEffect(Schema.fromJsonString(PrivateHttpDispatch))
+const encodeOutcome = Schema.encodeEffect(
+  Schema.fromJsonString(PersistedOutboxOutcome)
 )
-const decodeOutcome = Schema.decode(
-  Schema.parseJson(PersistedOutboxOutcome)
+const decodeOutcome = Schema.decodeEffect(
+  Schema.fromJsonString(PersistedOutboxOutcome)
 )
 
 const textEncoder = new TextEncoder()
@@ -449,8 +420,8 @@ const make = Effect.gen(function* () {
     from: OutboxState,
     to: OutboxState
   ) {
-    const moved = yield* store.transition(id, from, to).pipe(Effect.either)
-    if (moved._tag === "Right") return
+    const moved = yield* store.transition(id, from, to).pipe(Effect.result)
+    if (moved._tag === "Success") return
 
     const state = yield* store.findState(id)
     if (state === undefined) {
@@ -459,7 +430,7 @@ const make = Effect.gen(function* () {
     if (state !== from) {
       return yield* new EmissionNotPending({ id, status: state })
     }
-    return yield* moved.left
+    return yield* moved.failure
   })
 
   const markUncertainIfCommitting = (id: EmissionId) =>
@@ -509,7 +480,7 @@ const make = Effect.gen(function* () {
       intent: summary.intent,
       request: summary.request,
       stagedAt,
-      holdUntil: DateTime.add(stagedAt, { millis: holdMillis }),
+      holdUntil: DateTime.add(stagedAt, { milliseconds: holdMillis }),
       dispatchDigest: sha256Text(dispatchJson),
       ...(authorization === undefined ? {} : { authorization })
     })
@@ -547,7 +518,7 @@ const make = Effect.gen(function* () {
           )
         ).pipe(Effect.exit)
         if (Exit.isFailure(recorded)) {
-          return yield* Cause.isInterruptedOnly(recorded.cause)
+          return yield* Cause.hasInterruptsOnly(recorded.cause)
             ? stageRecovery("ledger append interrupted after durable stage")
             : Effect.failCause(recorded.cause)
         }
@@ -621,20 +592,20 @@ const make = Effect.gen(function* () {
               reason: "transport-failed"
             })
         }).pipe(
-          Effect.timeoutFail({
+          Effect.timeoutOrElse({
             duration: OUTBOX_DISPATCH_TIMEOUT_MILLIS,
-            onTimeout: () => new EmissionDispatchUncertain({
+            orElse: () => Effect.fail(new EmissionDispatchUncertain({
               id,
               reason: "transport-failed"
-            })
+            }))
           }),
-          Effect.either
+          Effect.result
         )
       ).pipe(Effect.exit)
 
       if (Exit.isFailure(deliveredExit)) {
         yield* markUncertainIfCommitting(id)
-        return yield* Cause.isInterruptedOnly(deliveredExit.cause)
+        return yield* Cause.hasInterruptsOnly(deliveredExit.cause)
           ? new EmissionDispatchUncertain({
               id,
               reason: "interrupted"
@@ -643,22 +614,22 @@ const make = Effect.gen(function* () {
       }
       const delivered = deliveredExit.value
 
-      if (delivered._tag === "Left") {
+      if (delivered._tag === "Failure") {
         yield* markUncertainIfCommitting(id)
-        return yield* delivered.left
+        return yield* delivered.failure
       }
 
       const completedAt = yield* DateTime.now
       const outcome = new OutboxOutcome({
-        status: delivered.right.status,
-        responseBytes: delivered.right.bytes.byteLength,
+        status: delivered.success.status,
+        responseBytes: delivered.success.bytes.byteLength,
         response: new RedactedDispatchResponse({
-          status: delivered.right.status,
-          ...(delivered.right.contentType === undefined
+          status: delivered.success.status,
+          ...(delivered.success.contentType === undefined
             ? {}
-            : { contentType: delivered.right.contentType }),
-          retainedBytes: delivered.right.bytes.byteLength,
-          truncated: delivered.right.truncated,
+            : { contentType: delivered.success.contentType }),
+          retainedBytes: delivered.success.bytes.byteLength,
+          truncated: delivered.success.truncated,
           limitBytes: DISPATCH_RESPONSE_LIMIT_BYTES
         }),
         provenance,
@@ -680,15 +651,15 @@ const make = Effect.gen(function* () {
       )
 
       const finalized = yield* store
-        .writeResponse(id, "committing", delivered.right.bytes)
+        .writeResponse(id, "committing", delivered.success.bytes)
         .pipe(
-          Effect.zipRight(store.writeOutcome(id, "committing", outcomeJson)),
-          Effect.zipRight(
+          Effect.andThen(store.writeOutcome(id, "committing", outcomeJson)),
+          Effect.andThen(
             store.transition(id, "committing", "committed")
           ),
-          Effect.either
+          Effect.result
         )
-      if (finalized._tag === "Left") {
+      if (finalized._tag === "Failure") {
         yield* markUncertainIfCommitting(id)
         return yield* new EmissionDispatchUncertain({
           id,
@@ -729,7 +700,7 @@ const make = Effect.gen(function* () {
         )
       ).pipe(Effect.exit)
       if (Exit.isFailure(recorded)) {
-        return yield* Cause.isInterruptedOnly(recorded.cause)
+        return yield* Cause.hasInterruptsOnly(recorded.cause)
           ? commitRecovery("ledger append interrupted after durable commit")
           : Effect.failCause(recorded.cause)
       }
@@ -768,7 +739,7 @@ const make = Effect.gen(function* () {
           )
         ).pipe(Effect.exit)
         if (Exit.isFailure(recorded)) {
-          return yield* Cause.isInterruptedOnly(recorded.cause)
+          return yield* Cause.hasInterruptsOnly(recorded.cause)
             ? cancelRecovery("ledger append interrupted after durable cancel")
             : Effect.failCause(recorded.cause)
         }
@@ -814,16 +785,16 @@ const make = Effect.gen(function* () {
     const now = yield* DateTime.now
     const staged = yield* pending
     const due = staged.filter((emission) =>
-      DateTime.lessThanOrEqualTo(emission.holdUntil, now)
+      DateTime.isLessThanOrEqualTo(emission.holdUntil, now)
     )
     const committed: Array<OutboxEmission> = []
     const failed: Array<string> = []
     for (const emission of due) {
-      const result = yield* commit(emission.id).pipe(Effect.either)
-      if (result._tag === "Right") {
-        committed.push(result.right)
-      } else if (result.left._tag === "OutboxRecoveryRequired") {
-        return yield* result.left
+      const result = yield* commit(emission.id).pipe(Effect.result)
+      if (result._tag === "Success") {
+        committed.push(result.success)
+      } else if (result.failure._tag === "OutboxRecoveryRequired") {
+        return yield* result.failure
       } else {
         failed.push(emission.id)
       }

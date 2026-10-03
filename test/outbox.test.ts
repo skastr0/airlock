@@ -1,7 +1,6 @@
-import { FileSystem, Path } from "@effect/platform"
-import { BunContext } from "@effect/platform-bun"
+import { Context, Effect, Fiber, FileSystem, Layer, Path } from "effect"
+import { BunServices } from "@effect/platform-bun"
 import { describe, expect, it } from "@effect/vitest"
-import { Context, Effect, Fiber, Layer } from "effect"
 import * as http from "node:http"
 import type { AddressInfo } from "node:net"
 import * as AirlockHome from "../src/AirlockHome.ts"
@@ -13,11 +12,11 @@ const layersFor = (home: string) =>
   OutboxLive.pipe(
     Layer.provideMerge(LedgerLive),
     Layer.provideMerge(AirlockHome.layer(home)),
-    Layer.provideMerge(BunContext.layer)
+    Layer.provideMerge(BunServices.layer)
   )
 
 interface World {
-  readonly outbox: Context.Tag.Service<typeof Outbox>
+  readonly outbox: Context.Service.Shape<typeof Outbox>
   readonly received: () => number
   readonly home: string
   readonly url: string
@@ -36,7 +35,7 @@ const world = <A, E>(body: (ctx: World) => Effect.Effect<A, E>) =>
       )
       let hits = 0
       const server = yield* Effect.acquireRelease(
-        Effect.async<http.Server>((resume) => {
+        Effect.callback<http.Server>((resume) => {
           const s = http.createServer((req, res) => {
             hits += 1
             const respond = () => {
@@ -65,7 +64,7 @@ const world = <A, E>(body: (ctx: World) => Effect.Effect<A, E>) =>
         url: `http://127.0.0.1:${address.port}/hook`
       })
     })
-  ).pipe(Effect.provide(BunContext.layer))
+  ).pipe(Effect.provide(BunServices.layer))
 
 const post = (url: string) =>
   new EmissionRequest({ url, method: "POST", body: "payload" })
@@ -133,8 +132,8 @@ describe("Outbox — cancellable emissions", () => {
     world(({ home, outbox, received, url }) =>
       Effect.gen(function* () {
         const staged = yield* outbox.stage(post(url.replace("/hook", "/slow")), 0)
-        const committing = yield* Effect.fork(outbox.commit(staged.id))
-        yield* Effect.async<void>((resume) => {
+        const committing = yield* Effect.forkChild(outbox.commit(staged.id))
+        yield* Effect.callback<void>((resume) => {
           const timer = setTimeout(() => resume(Effect.void), 25)
           return Effect.sync(() => clearTimeout(timer))
         })

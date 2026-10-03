@@ -1,5 +1,4 @@
-import { FileSystem, Path } from "@effect/platform"
-import { Effect } from "effect"
+import { Effect, FileSystem, Path } from "effect"
 import { AirlockHome } from "../AirlockHome.ts"
 import { EmissionId } from "../domain.ts"
 import { makeExclusiveFileLock } from "../platform/ExclusiveFileLock.ts"
@@ -149,7 +148,7 @@ export const makeFileOutboxStore = Effect.gen(function* () {
           // is created and synced without one.
           return (bytes.byteLength === 0
             ? Effect.void
-            : file.writeAll(bytes)).pipe(Effect.zipRight(file.sync))
+            : file.writeAll(bytes)).pipe(Effect.andThen(file.sync))
         }),
         Effect.mapError((cause) => fail(operation, cause, id))
       )
@@ -224,7 +223,7 @@ export const makeFileOutboxStore = Effect.gen(function* () {
 
   const findState = (id: EmissionId) =>
     validateId(id).pipe(
-      Effect.zipRight(entries),
+      Effect.andThen(entries),
       Effect.flatMap((items) => {
         const matches = items
           .map(parseEntry)
@@ -314,7 +313,7 @@ export const makeFileOutboxStore = Effect.gen(function* () {
     to: OutboxState
   ) =>
     validateId(id).pipe(
-      Effect.zipRight(
+      Effect.andThen(
         fs
           .rename(statePath(id, from), statePath(id, to))
           .pipe(
@@ -323,12 +322,12 @@ export const makeFileOutboxStore = Effect.gen(function* () {
             )
           )
       ),
-      Effect.zipRight(syncPath(home.outboxDir, "sync-transition", id))
+      Effect.andThen(syncPath(home.outboxDir, "sync-transition", id))
     )
 
   const readDispatch = (id: EmissionId, state: OutboxState) =>
     validateId(id).pipe(
-      Effect.zipRight(
+      Effect.andThen(
         fs
           .readFileString(path.join(statePath(id, state), "dispatch.json"))
           .pipe(
@@ -343,7 +342,7 @@ export const makeFileOutboxStore = Effect.gen(function* () {
     outcomeJson: string
   ) =>
     validateId(id).pipe(
-      Effect.zipRight(
+      Effect.andThen(
         writeReplaceDurable(
           statePath(id, state),
           "outcome.json",
@@ -360,7 +359,7 @@ export const makeFileOutboxStore = Effect.gen(function* () {
     bytes: Uint8Array
   ) =>
     validateId(id).pipe(
-      Effect.zipRight(
+      Effect.andThen(
         writeReplaceDurable(
           statePath(id, state),
           "response.bin",

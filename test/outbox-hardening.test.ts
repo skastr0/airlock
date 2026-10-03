@@ -1,7 +1,6 @@
-import { FileSystem, Path } from "@effect/platform"
-import { BunContext } from "@effect/platform-bun"
+import { Context, Effect, FileSystem, Layer, Path } from "effect"
+import { BunServices } from "@effect/platform-bun"
 import { describe, expect, it } from "@effect/vitest"
-import { Context, Effect, Layer } from "effect"
 import * as http from "node:http"
 import type { AddressInfo } from "node:net"
 import * as AirlockHome from "../src/AirlockHome.ts"
@@ -17,16 +16,16 @@ const layersFor = (home: string) =>
   OutboxLive.pipe(
     Layer.provideMerge(LedgerLive),
     Layer.provideMerge(AirlockHome.layer(home)),
-    Layer.provideMerge(BunContext.layer)
+    Layer.provideMerge(BunServices.layer)
   )
 
 const withWorld = <A, E>(
   body: (context: {
     readonly home: string
-    readonly fs: Context.Tag.Service<typeof FileSystem.FileSystem>
-    readonly path: Context.Tag.Service<typeof Path.Path>
-    readonly outbox: Context.Tag.Service<typeof Outbox>
-    readonly ledger: Context.Tag.Service<typeof Ledger>
+    readonly fs: Context.Service.Shape<typeof FileSystem.FileSystem>
+    readonly path: Context.Service.Shape<typeof Path.Path>
+    readonly outbox: Context.Service.Shape<typeof Outbox>
+    readonly ledger: Context.Service.Shape<typeof Ledger>
     readonly url: string
     readonly received: () => number
   }) => Effect.Effect<A, E>
@@ -41,7 +40,7 @@ const withWorld = <A, E>(
       const ledger = yield* Effect.provide(Ledger, layersFor(home))
       let hits = 0
       const server = yield* Effect.acquireRelease(
-        Effect.async<http.Server>((resume) => {
+        Effect.callback<http.Server>((resume) => {
           const value = http.createServer((_request, response) => {
             hits += 1
             response.writeHead(200)
@@ -52,7 +51,7 @@ const withWorld = <A, E>(
           )
         }),
         (server) =>
-          Effect.async<void>((resume) => {
+          Effect.callback<void>((resume) => {
             server.close(() => resume(Effect.void))
           })
       )
@@ -67,7 +66,7 @@ const withWorld = <A, E>(
         received: () => hits
       })
     })
-  ).pipe(Effect.provide(BunContext.layer))
+  ).pipe(Effect.provide(BunServices.layer))
 
 const post = (
   url: string,
@@ -90,16 +89,16 @@ describe("Outbox — durable dispatch boundary", () => {
         const staged = yield* outbox.stage(post(url), 60_000)
         const results = yield* Effect.all(
           [
-            outbox.commit(staged.id).pipe(Effect.either),
-            outbox.commit(staged.id).pipe(Effect.either)
+            outbox.commit(staged.id).pipe(Effect.result),
+            outbox.commit(staged.id).pipe(Effect.result)
           ],
           { concurrency: "unbounded" }
         )
 
-        expect(results.filter((result) => result._tag === "Right")).toHaveLength(
+        expect(results.filter((result) => result._tag === "Success")).toHaveLength(
           1
         )
-        expect(results.filter((result) => result._tag === "Left")).toHaveLength(
+        expect(results.filter((result) => result._tag === "Failure")).toHaveLength(
           1
         )
         expect(received()).toBe(1)
@@ -112,7 +111,7 @@ describe("Outbox — durable dispatch boundary", () => {
       Effect.scoped(Effect.gen(function* () {
         let originHits = 0
         const origin = yield* Effect.acquireRelease(
-          Effect.async<http.Server>((resume) => {
+          Effect.callback<http.Server>((resume) => {
             const value = http.createServer((_request, response) => {
               originHits += 1
               response.writeHead(302, { location: url })
@@ -123,7 +122,7 @@ describe("Outbox — durable dispatch boundary", () => {
             )
           }),
           (server) =>
-            Effect.async<void>((resume) => {
+            Effect.callback<void>((resume) => {
               server.close(() => resume(Effect.void))
             })
         )
@@ -277,6 +276,6 @@ describe("Outbox — durable dispatch boundary", () => {
       expect(commitStart).toBeGreaterThanOrEqual(0)
       expect(fetchSite).toBeGreaterThan(commitStart)
       expect(fetchSite).toBeLessThan(cancelStart)
-    }).pipe(Effect.provide(BunContext.layer))
+    }).pipe(Effect.provide(BunServices.layer))
   )
 })

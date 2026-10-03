@@ -1,7 +1,6 @@
-import { FileSystem, Path } from "@effect/platform"
-import { BunContext } from "@effect/platform-bun"
+import { Effect, FileSystem, Layer, Path } from "effect"
+import { BunServices } from "@effect/platform-bun"
 import { describe, expect, it } from "@effect/vitest"
-import { Effect, Layer } from "effect"
 import * as http from "node:http"
 import type { AddressInfo } from "node:net"
 import * as AirlockHome from "../src/AirlockHome.ts"
@@ -39,7 +38,7 @@ const layersFor = (home: string, failedAct: LedgerAct) =>
   OutboxLive.pipe(
     Layer.provideMerge(failingLedger(failedAct)),
     Layer.provideMerge(AirlockHome.layer(home)),
-    Layer.provideMerge(BunContext.layer)
+    Layer.provideMerge(BunServices.layer)
   )
 
 const withWorld = <A, E>(
@@ -62,7 +61,7 @@ const withWorld = <A, E>(
       )
       let hits = 0
       const server = yield* Effect.acquireRelease(
-        Effect.async<http.Server>((resume) => {
+        Effect.callback<http.Server>((resume) => {
           const value = http.createServer((_request, response) => {
             hits += 1
             response.writeHead(200)
@@ -73,7 +72,7 @@ const withWorld = <A, E>(
           )
         }),
         (value) =>
-          Effect.async<void>((resume) => {
+          Effect.callback<void>((resume) => {
             value.close(() => resume(Effect.void))
           })
       )
@@ -84,7 +83,7 @@ const withWorld = <A, E>(
         received: () => hits
       })
     })
-  ).pipe(Effect.provide(BunContext.layer))
+  ).pipe(Effect.provide(BunServices.layer))
 
 const post = (url: string) =>
   new EmissionRequest({

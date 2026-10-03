@@ -1,22 +1,22 @@
-import { Schema } from "effect"
+import { Effect, Schema } from "effect"
 import { EmissionId } from "../domain.ts"
 
-export const OutboxState = Schema.Literal(
+export const OutboxState = Schema.Literals([
   "staged",
   "committing",
   "committed",
   "uncertain",
   "cancelled"
-)
+])
 export type OutboxState = typeof OutboxState.Type
 
-export const HttpMethod = Schema.Literal(
+export const HttpMethod = Schema.Literals([
   "GET",
   "POST",
   "PUT",
   "PATCH",
   "DELETE"
-)
+])
 export type HttpMethod = typeof HttpMethod.Type
 
 export class HttpExternalIntent extends Schema.TaggedClass<HttpExternalIntent>()(
@@ -24,10 +24,10 @@ export class HttpExternalIntent extends Schema.TaggedClass<HttpExternalIntent>()
   {
     url: Schema.String,
     method: HttpMethod,
-    headers: Schema.optionalWith(
-      Schema.Record({ key: Schema.String, value: Schema.String }),
-      { default: () => ({}) }
-    ),
+    headers: Schema.Record(Schema.String, Schema.String).pipe(
+    Schema.withDecodingDefault(Effect.succeed({})),
+    Schema.withConstructorDefault(Effect.succeed({}))
+  ),
     body: Schema.optional(Schema.String)
   }
 ) {}
@@ -40,17 +40,17 @@ export class ExternalCommandIntent extends Schema.TaggedClass<ExternalCommandInt
     executable: Schema.String,
     args: Schema.Array(Schema.String),
     cwd: Schema.optional(Schema.String),
-    env: Schema.optionalWith(
-      Schema.Record({ key: Schema.String, value: Schema.String }),
-      { default: () => ({}) }
-    )
+    env: Schema.Record(Schema.String, Schema.String).pipe(
+    Schema.withDecodingDefault(Effect.succeed({})),
+    Schema.withConstructorDefault(Effect.succeed({}))
+  )
   }
 ) {}
 
-export const ExternalIntent = Schema.Union(
+export const ExternalIntent = Schema.Union([
   HttpExternalIntent,
   ExternalCommandIntent
-)
+])
 export type ExternalIntent = typeof ExternalIntent.Type
 
 export class HttpIntentSummary extends Schema.Class<HttpIntentSummary>(
@@ -68,15 +68,15 @@ export class RedactedEmissionRequest extends Schema.Class<RedactedEmissionReques
 )({
   method: HttpMethod,
   url: Schema.String,
-  headers: Schema.Record({ key: Schema.String, value: Schema.String }),
+  headers: Schema.Record(Schema.String, Schema.String),
   body: Schema.optional(Schema.String)
 }) {}
 
 /** A supervisor seal identity, persisted verbatim rather than computed here. */
 export const StagedDispatchSealDigest = Schema.String.pipe(
-  Schema.pattern(/^sha256:[0-9a-f]{64}$/, {
-    message: () => "must be sha256:<64 lowercase hex>"
-  })
+  Schema.check(Schema.isPattern(/^sha256:[0-9a-f]{64}$/, {
+    message: "must be sha256:<64 lowercase hex>"
+  }))
 )
 export type StagedDispatchSealDigest =
   typeof StagedDispatchSealDigest.Type
@@ -87,7 +87,7 @@ export type StagedDispatchSealDigest =
  * endpoint grant match.
  */
 export const CanonicalDispatchEndpoint = Schema.String.pipe(
-  Schema.filter((value) => {
+  Schema.check(Schema.makeFilter((value) => {
     try {
       const endpoint = new URL(value)
       const canonical =
@@ -103,7 +103,7 @@ export const CanonicalDispatchEndpoint = Schema.String.pipe(
     } catch {
       return "must be a canonical http(s) scheme://host/path endpoint"
     }
-  })
+  }))
 )
 export type CanonicalDispatchEndpoint =
   typeof CanonicalDispatchEndpoint.Type
@@ -129,7 +129,7 @@ export class StagedDispatchAuthorization
  * second dispatcher: it records that the trusted supervisor plane, not a human
  * act, called the ordinary `Outbox.commit`.
  */
-export const CommitAuthority = Schema.Literal("supervisor", "policy-auto")
+export const CommitAuthority = Schema.Literals(["supervisor", "policy-auto"])
 export type CommitAuthority = typeof CommitAuthority.Type
 
 /**
@@ -185,7 +185,7 @@ export class OutboxOutcome extends Schema.Class<OutboxOutcome>("OutboxOutcome")(
   response: Schema.optional(RedactedDispatchResponse),
   /** Present once a dispatch completed; names the authority that committed. */
   provenance: Schema.optional(DispatchProvenance),
-  completedAt: Schema.DateTimeUtc
+  completedAt: Schema.DateTimeUtcFromString
 }) {}
 
 export class OutboxEmission extends Schema.Class<OutboxEmission>(
@@ -197,8 +197,8 @@ export class OutboxEmission extends Schema.Class<OutboxEmission>(
   // Compatibility view for existing callers. Values are deliberately
   // redacted; dispatch material is never returned by pending/inspect.
   request: RedactedEmissionRequest,
-  stagedAt: Schema.DateTimeUtc,
-  holdUntil: Schema.DateTimeUtc,
+  stagedAt: Schema.DateTimeUtcFromString,
+  holdUntil: Schema.DateTimeUtcFromString,
   authorization: Schema.optional(StagedDispatchAuthorization),
   outcome: Schema.optional(OutboxOutcome)
 }) {}
@@ -210,8 +210,8 @@ export class PersistedOutboxManifest extends Schema.Class<PersistedOutboxManifes
   id: EmissionId,
   intent: HttpIntentSummary,
   request: RedactedEmissionRequest,
-  stagedAt: Schema.DateTimeUtc,
-  holdUntil: Schema.DateTimeUtc,
+  stagedAt: Schema.DateTimeUtcFromString,
+  holdUntil: Schema.DateTimeUtcFromString,
   /** Exact digest of dispatch.json; commit refuses any post-stage substitution. */
   dispatchDigest: StagedDispatchSealDigest,
   authorization: Schema.optional(StagedDispatchAuthorization)
@@ -226,7 +226,7 @@ export class PrivateHttpDispatch extends Schema.Class<PrivateHttpDispatch>(
   schemaVersion: Schema.Literal("airlock/http-dispatch/v1"),
   url: Schema.String,
   method: HttpMethod,
-  headers: Schema.Record({ key: Schema.String, value: Schema.String }),
+  headers: Schema.Record(Schema.String, Schema.String),
   body: Schema.optional(Schema.String)
 }) {}
 
@@ -277,12 +277,12 @@ export class OutboxStateCorrupt extends Schema.TaggedError<OutboxStateCorrupt>()
   }
 ) {}
 
-export const DispatchUncertaintyReason = Schema.Literal(
+export const DispatchUncertaintyReason = Schema.Literals([
   "transport-failed",
   "interrupted",
   "persistence-failed-after-dispatch",
   "recovered-after-crash"
-)
+])
 export type DispatchUncertaintyReason =
   typeof DispatchUncertaintyReason.Type
 
