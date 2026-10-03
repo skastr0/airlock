@@ -1792,18 +1792,40 @@ const runCli = async (seal: SealContext): Promise<void> => {
   )
   const MainLayer = CellLive.pipe(Layer.provideMerge(ExecutionDependencies))
 
-  const main = Command.runWith(root, { version: AIRLOCK_VERSION })(
-    process.argv.slice(2)
+  // stdout carries results. The command runner prints help through Console
+  // for refused invocations too, so its output is collected and routed once
+  // the outcome is known; handlers keep the real console.
+  const runnerOutput: Array<readonly ["log" | "error", string]> = []
+  const collect = (stream: "log" | "error") =>
+    (...args: ReadonlyArray<unknown>) => {
+      runnerOutput.push([stream, `${args.join(" ")}\n`])
+    }
+  const runnerConsole: Console.Console = Object.assign(
+    Object.create(globalThis.console),
+    { log: collect("log"), error: collect("error") }
+  )
+  const writeRunnerOutput = (refused: boolean) => {
+    for (const [stream, text] of runnerOutput) {
+      (refused || stream === "error" ? process.stderr : process.stdout).write(text)
+    }
+  }
+  const main = Command.runWith(
+    Command.provideSync(root, Console.Console, globalThis.console),
+    { version: AIRLOCK_VERSION }
+  )(process.argv.slice(2)).pipe(
+    Effect.provideService(Console.Console, runnerConsole)
   )
 
   const runtime = ManagedRuntime.make(MainLayer)
   try {
     const exit = await runtime.runPromiseExit(main)
-    if (Exit.isSuccess(exit)) return
+    if (Exit.isSuccess(exit)) return writeRunnerOutput(false)
     const failure = Cause.squash(exit.cause)
-    // Usage errors were already rendered by the command runner; only the
-    // exit status remains. Anything else is a defect and stays loud.
+    // Usage errors are reported by the command runner; only the exit status
+    // remains. Anything else is a defect and stays loud.
     if (!CliError.isCliError(failure)) throw failure
+    const requestedHelp = failure._tag === "ShowHelp" && failure.errors.length === 0
+    writeRunnerOutput(!requestedHelp)
     process.exitCode = failure._tag === "ShowHelp"
       ? failure[EffectRuntime.errorExitCode]
       : 1

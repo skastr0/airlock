@@ -138,9 +138,16 @@ const invoke = (
 
 const parseJson = (text: string) => JSON.parse(text) as Record<string, unknown>
 const stripAnsi = (text: string) => text.replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, "")
+/** Spelling suggestions the command runner appends to an unknown subcommand. */
+const suggestionBlock = /\n\s*Did you mean this\?\n((?: {4}\S+\n?)+)/
+const suggestedCommands = (text: string): ReadonlyArray<string> =>
+  (suggestionBlock.exec(stripAnsi(text))?.[1] ?? "").split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0)
 const normalizeMismatch = (text: string) => stripAnsi(text)
+  .replace(suggestionBlock, "\n")
   .replaceAll(basename(binary), "<binary>")
-  .replace(/\b(?:commit|exec|undo|change|nonsense)\b/g, "<command>")
+  .replace(/\b(?:commit|exec|undo|change|nonsense|rm|write|send)\b/g, "<command>")
   .trim()
 
 const fullVerbs = [
@@ -245,12 +252,14 @@ describe("sealed CLI grant graph", () => {
     })
     const nonsense = invoke(["nonsense"], { seal })
     expect(nonsense.status).not.toBe(0)
-    expect(stripAnsi(nonsense.stderr)).toContain("CommandMismatch")
+    expect(stripAnsi(nonsense.stderr)).toContain("Unknown subcommand")
 
     for (const denied of ["commit", "exec", "undo", "change"] as const) {
       const result = invoke([denied], { seal })
       expect(result.status).toBe(nonsense.status)
       expect(normalizeMismatch(result.stderr)).toBe(normalizeMismatch(nonsense.stderr))
+      for (const suggested of suggestedCommands(result.stderr))
+        expect(["run", "eval", "held"]).toContain(suggested)
       expect(result.stderr).not.toContain("CliInputError")
     }
 
@@ -273,6 +282,8 @@ describe("sealed CLI grant graph", () => {
       expect(normalizeMismatch(result.stderr)).toBe(
         normalizeMismatch(aliasNonsense.stderr)
       )
+      for (const suggested of suggestedCommands(result.stderr))
+        expect(suggested).toBe("held")
       expect(result.stderr).not.toContain("CliInputError")
     }
     const aliasHelp = invoke(["--help"], { seal: aliases })
@@ -287,7 +298,7 @@ describe("sealed CLI grant graph", () => {
     expect(normalizeMismatch(emptyKnown.stderr)).toBe(
       normalizeMismatch(emptyNonsense.stderr)
     )
-    expect(stripAnsi(emptyKnown.stderr)).toContain("CommandMismatch")
+    expect(stripAnsi(emptyKnown.stderr)).toContain("Unexpected positional argument")
     expect(stripAnsi(emptyKnown.stderr)).not.toContain("TypeError")
     const emptyHelp = invoke(["--help"], { seal: empty })
     expect(emptyHelp.status, emptyHelp.stderr).toBe(0)
@@ -307,7 +318,7 @@ describe("sealed CLI grant graph", () => {
       expect(help.stdout).not.toMatch(/\bchange\b/)
       const refused = invoke(["change", "apply", "proposal"], options)
       expect(refused.status).not.toBe(0)
-      expect(stripAnsi(refused.stderr)).toContain("CommandMismatch")
+      expect(stripAnsi(refused.stderr)).toContain("Unknown subcommand")
     }
   })
 
@@ -329,7 +340,7 @@ describe("sealed CLI grant graph", () => {
       "--cwd", workspace
     ], { seal, home, cwd: workspace })
     expect(refused.status).not.toBe(0)
-    expect(stripAnsi(refused.stderr)).toContain("CommandMismatch")
+    expect(stripAnsi(refused.stderr)).toContain("Unknown subcommand")
     expect(existsSync(marker)).toBe(false)
     const runDirectory = join(home, "runs")
     expect(existsSync(runDirectory) ? readdirSync(runDirectory) : []).toEqual([])
@@ -351,7 +362,7 @@ describe("sealed CLI grant graph", () => {
     const outside = join(root, "outside-exec-workspace")
     mkdirSync(outside)
     const outOfScope = invoke([
-      "exec", "--executable", "/bin/sh", "--arg", "-c", "--arg", "true",
+      "exec", "--executable", "/bin/sh", "--arg=-c", "--arg", "true",
       "--cwd", outside, "--private-workspace", join(root, "private-exec")
     ], { seal: scoped, home, cwd: workspace })
     expect(outOfScope.status).toBe(1)

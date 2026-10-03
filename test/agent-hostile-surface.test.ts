@@ -72,6 +72,18 @@ const environmentFor = (
   return { ...environment, ...overrides }
 }
 
+/** Names under the SUBCOMMANDS heading of one help page, in listed order. */
+const listedSubcommands = (helpText: string): ReadonlyArray<string> => {
+  const section = helpText.split(/^SUBCOMMANDS$/m)[1] ?? ""
+  const names: Array<string> = []
+  for (const line of section.split("\n").slice(1)) {
+    const match = /^  ([a-z][a-z-]*)(?:\s|$)/.exec(line)
+    if (match === null) break
+    names.push(match[1]!)
+  }
+  return names
+}
+
 const runAgent = (
   args: ReadonlyArray<string>,
   home: string,
@@ -219,9 +231,7 @@ describe("agent-hostile command surface", () => {
 
       const help = runAgent(["--help"], home)
       expect(help.status, help.stderr).toBe(0)
-      const discovered = [...new Set([...help.stdout.matchAll(/^  - ([a-z-]+)/gm)].map(
-        (match) => match[1]!
-      ))]
+      const discovered = listedSubcommands(help.stdout)
       expect(discovered).toEqual([
         "doctor",
         "capabilities",
@@ -239,7 +249,9 @@ describe("agent-hostile command surface", () => {
       expect(discovered.some((command) => terminalCommands.includes(command))).toBe(
         false
       )
-      expect([...help.stdout.matchAll(/^  - change ([a-z-]+)/gm)].map(match => match[1]))
+      const changeHelp = runAgent(["change", "--help"], home)
+      expect(changeHelp.status, changeHelp.stderr).toBe(0)
+      expect(listedSubcommands(changeHelp.stdout))
         .toEqual(["inbox", "stage", "review", "content", "status"])
 
       const attempts = [
