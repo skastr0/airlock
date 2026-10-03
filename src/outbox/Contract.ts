@@ -60,7 +60,7 @@ export class HttpIntentSummary extends Schema.Class<HttpIntentSummary>(
   method: HttpMethod,
   endpoint: Schema.String,
   headerNames: Schema.Array(Schema.String),
-  bodyBytes: Schema.Number
+  bodyBytes: Schema.Finite
 }) {}
 
 /** A supervisor seal identity, persisted verbatim rather than computed here. */
@@ -138,9 +138,9 @@ export class DispatchProvenance extends Schema.Class<DispatchProvenance>(
 )({
   committedBy: CommitAuthority,
   /** Grant identity from the admitted authority; absent for a bare manual commit. */
-  grantId: Schema.optional(Schema.String),
+  grantId: Schema.optionalKey(Schema.String),
   /** The policy selector that matched, as written in the supervisor policy file. */
-  grantSelector: Schema.optional(Schema.String),
+  grantSelector: Schema.optionalKey(Schema.String),
   /**
    * The supervisor's effective class, recorded and never decided here. The
    * type is deliberately the single class a pre-authorized commit can carry:
@@ -148,8 +148,8 @@ export class DispatchProvenance extends Schema.Class<DispatchProvenance>(
    * Outbox receipt that could spell a wider class would be a second place to
    * read one from. A manual supervisor commit records none.
    */
-  dispatchClass: Schema.optional(Schema.Literal("read")),
-  endpoint: Schema.optional(Schema.String)
+  dispatchClass: Schema.optionalKey(Schema.Literal("read")),
+  endpoint: Schema.optionalKey(Schema.String)
 }) {}
 
 /**
@@ -160,22 +160,22 @@ export class DispatchProvenance extends Schema.Class<DispatchProvenance>(
 export class RedactedDispatchResponse extends Schema.Class<RedactedDispatchResponse>(
   "RedactedDispatchResponse"
 )({
-  status: Schema.Number,
-  contentType: Schema.optional(Schema.String),
+  status: Schema.Finite,
+  contentType: Schema.optionalKey(Schema.String),
   /** Bytes actually retained; never larger than `limitBytes`. */
-  retainedBytes: Schema.Number,
+  retainedBytes: Schema.Finite,
   /** True when the endpoint sent more than the bound allowed. */
   truncated: Schema.Boolean,
-  limitBytes: Schema.Number
+  limitBytes: Schema.Finite
 }) {}
 
 export class OutboxOutcome extends Schema.Class<OutboxOutcome>("OutboxOutcome")({
-  status: Schema.Number,
-  responseBytes: Schema.optional(Schema.Number),
+  status: Schema.Finite,
+  responseBytes: Schema.optionalKey(Schema.Finite),
   /** Present once a dispatch completed; describes the bounded capture. */
-  response: Schema.optional(RedactedDispatchResponse),
+  response: Schema.optionalKey(RedactedDispatchResponse),
   /** Present once a dispatch completed; names the authority that committed. */
-  provenance: Schema.optional(DispatchProvenance),
+  provenance: Schema.optionalKey(DispatchProvenance),
   completedAt: Schema.DateTimeUtcFromString
 }) {}
 
@@ -189,8 +189,8 @@ export class OutboxEmission extends Schema.Class<OutboxEmission>(
   intent: HttpIntentSummary,
   stagedAt: Schema.DateTimeUtcFromString,
   holdUntil: Schema.DateTimeUtcFromString,
-  authorization: Schema.optional(StagedDispatchAuthorization),
-  outcome: Schema.optional(OutboxOutcome)
+  authorization: Schema.optionalKey(StagedDispatchAuthorization),
+  outcome: Schema.optionalKey(OutboxOutcome)
 }) {}
 
 export class PersistedOutboxManifest extends Schema.Class<PersistedOutboxManifest>(
@@ -212,7 +212,7 @@ export class PersistedOutboxManifest extends Schema.Class<PersistedOutboxManifes
   holdUntil: Schema.DateTimeUtcFromString,
   /** Exact digest of dispatch.json; commit refuses any post-stage substitution. */
   dispatchDigest: StagedDispatchSealDigest,
-  authorization: Schema.optional(StagedDispatchAuthorization)
+  authorization: Schema.optionalKey(StagedDispatchAuthorization)
 }) {}
 
 // Dispatch material is stored separately from the redacted manifest with
