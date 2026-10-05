@@ -93,6 +93,11 @@ const identity = {
   holdUntil: Schema.DateTimeUtcFromString,
   authorization: Schema.optionalKey(DispatchAuthorization),
   /**
+   * Set only by the kernel: the committed emission this one answers. A
+   * compensation is an ordinary emission that carries this link.
+   */
+  compensates: Schema.optionalKey(EmissionId),
+  /**
    * The phases whose Ledger entry is known to be durable. A phase the state
    * owes that is missing here is recorded before the kernel does anything
    * else with the emission.
@@ -193,6 +198,7 @@ const identityOf = (record: EmissionRecord) => ({
   stagedAt: record.stagedAt,
   holdUntil: record.holdUntil,
   ...(record.authorization === undefined ? {} : { authorization: record.authorization }),
+  ...(record.compensates === undefined ? {} : { compensates: record.compensates }),
   ledgered: record.ledgered
 })
 

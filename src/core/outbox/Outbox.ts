@@ -8,7 +8,13 @@ import {
 } from "../Canonical.ts"
 import { Ledger, LedgerEntry, type LedgerFailed } from "../ledger/Ledger.ts"
 import type { DispatchHandlers } from "./Dispatcher.ts"
-import type { Intent, IntentKind, IntentKinds } from "./Intent.ts"
+import type {
+  ClosedUnderCompensation,
+  CompensableTag,
+  Intent,
+  IntentKind,
+  IntentKinds
+} from "./Intent.ts"
 import type { EmissionState } from "./Lifecycle.ts"
 import { OutboxStore } from "./OutboxStore.ts"
 import {
@@ -17,7 +23,7 @@ import {
   DispatchProvenance,
   EmissionId,
   type EmissionRecord,
-  type IdempotencyKey,
+  IdempotencyKey,
   InvalidIntent,
   type LedgerPhase,
   OutboxStateCorrupt,
@@ -134,6 +140,19 @@ export class EmissionDispatchUncertain extends Schema.TaggedError<EmissionDispat
   { id: EmissionId, reason: UncertainReason }
 ) {}
 
+/**
+ * Only a committed emission of a kind that declares a compensation can be
+ * answered. Anything else has nothing to compensate, or is irreversible.
+ */
+export class NotCompensable extends Schema.TaggedError<NotCompensable>()(
+  "NotCompensable",
+  {
+    id: EmissionId,
+    reason: Schema.Literals(["not-committed", "irreversible"]),
+    state: Schema.String
+  }
+) {}
+
 /** The handler proved nothing was sent. Terminal: stage again under a new key to retry. */
 export class EmissionRefused extends Schema.TaggedError<EmissionRefused>()(
   "EmissionRefused",
@@ -175,6 +194,14 @@ export type CommitError =
   | DigestUnavailable
   | Unreadable
 export type CancelError = UnknownEmission | EmissionNotPending | OutboxRecoveryRequired | Unreadable
+export type CompensateError = UnknownEmission | NotCompensable | StageError
+export type PerformError = StageError | CommitError
+
+/** A committed emission of one kind, with the response bytes its dispatch retained. */
+export interface Performed<Kinds extends IntentKinds, Tag extends keyof Kinds & string> {
+  readonly emission: Emission<Pick<Kinds, Tag>, "committed">
+  readonly response: Uint8Array
+}
 
 // ── the service ─────────────────────────────────────────────────────────────
 
@@ -196,6 +223,29 @@ export interface OutboxService<Kinds extends IntentKinds> {
     provenance: DispatchProvenance
   ) => Effect.Effect<Emission<Kinds, "committed">, CommitError>
   readonly cancel: (id: EmissionId) => Effect.Effect<Emission<Kinds, "cancelled">, CancelError>
+  /**
+   * Stages and commits in one step, and records the result under the key.
+   * The first call dispatches; every later call with the same key, in this
+   * process or after a restart, returns the recorded outcome and the same
+   * response bytes without dispatching. This is what makes a re-executed
+   * caller deterministic. A key whose emission settled any other way fails
+   * with that settlement: uncertain, refused, or no longer pending.
+   */
+  readonly perform: <Tag extends keyof Kinds & string>(
+    request: StageRequest<Pick<Kinds, Tag>>,
+    provenance: DispatchProvenance
+  ) => Effect.Effect<Performed<Kinds, Tag>, PerformError>
+  /**
+   * Stages the act that answers a committed emission, as its kind declares.
+   * The result is an ordinary staged emission linked to the original by
+   * `compensates`; it is admitted, held and committed like any other. Its id
+   * derives from the original's, so answering twice returns the same emission.
+   * A kind without a compensation cannot be passed here at all.
+   */
+  readonly compensate: (
+    committed: Emission<Pick<Kinds, CompensableTag<Kinds>>, "committed">,
+    options: { readonly holdMillis: number; readonly authorization?: DispatchAuthorization }
+  ) => Effect.Effect<Emission<Kinds>, CompensateError>
   /** The bounded response of a committed emission, for the trusted runtime only. */
   readonly response: (id: EmissionId) => Effect.Effect<Option.Option<Uint8Array>, ReadError>
   readonly pending: Effect.Effect<ReadonlyArray<Emission<Kinds, "staged">>, Unreadable>
@@ -267,14 +317,22 @@ const requestDigestOf = (
   kind: string,
   dispatchDigest: Sha256Digest,
   holdMillis: number,
-  authorization: DispatchAuthorization | undefined
+  authorization: DispatchAuthorization | undefined,
+  compensates: EmissionId | undefined
 ) =>
   sha256Canonical({
     kind,
     dispatchDigest,
     holdMillis,
-    authorization: authorization === undefined ? null : { ...authorization }
+    authorization: authorization === undefined ? null : { ...authorization },
+    compensates: compensates ?? null
   })
+
+/** Compensations are named in their own id space, so no caller-chosen key can claim one. */
+const compensationIdFor = (original: EmissionId) =>
+  sha256Text(`airlock/compensation-id/v1:${original}`).pipe(
+    Effect.map((digest) => EmissionId.make(`emi_${digest.slice("sha256:".length, "sha256:".length + 32)}`))
+  )
 
 const corrupt = (id: string, part: OutboxStateCorrupt["part"], reason: string) =>
   new OutboxStateCorrupt({ id, part, reason })
@@ -292,9 +350,19 @@ const recovery = (record: EmissionRecord) => (failure: LedgerFailed) =>
  * fails to compile until that kind has a handler.
  */
 export const defineOutbox = <const Kinds extends IntentKinds>(
-  kinds: Kinds
+  kinds: Kinds & ClosedUnderCompensation<Kinds>
 ): OutboxDefinition<Kinds> => {
   type Tag = keyof Kinds & string
+  // The types already require every compensation to target a registered kind.
+  // This also refuses a different kind registered under the expected tag.
+  for (const kind of Object.values<IntentKind.Any>(kinds)) {
+    const answer = kind.compensate
+    if (answer !== undefined && (!Object.hasOwn(kinds, answer.kind) || kinds[answer.kind] !== answer.with)) {
+      throw new TypeError(
+        `intent kind ${kind.tag} compensates with ${answer.kind}, which is not the kind registered under that tag`
+      )
+    }
+  }
   const Outbox = Context.Service<OutboxOf<Kinds>, OutboxService<Kinds>>("airlock/core/Outbox")
   const Dispatcher = Context.Service<DispatcherOf<Kinds>, DispatchHandlers<Kinds>>(
     "airlock/core/Dispatcher"
@@ -470,7 +538,8 @@ export const defineOutbox = <const Kinds extends IntentKinds>(
           record.kind,
           record.dispatchDigest,
           DateTime.toEpochMillis(record.holdUntil) - DateTime.toEpochMillis(record.stagedAt),
-          record.authorization
+          record.authorization,
+          record.compensates
         ).pipe(withCrypto)
         if (expected !== record.requestDigest) {
           return yield* corrupt(record.id, "record", "staged record does not match its request digest")
@@ -484,6 +553,23 @@ export const defineOutbox = <const Kinds extends IntentKinds>(
         return emission
       })
 
+    /** The sealed dispatch, verified against the record's digest and decoded. */
+    const sealedDispatchOf = (record: EmissionRecord) =>
+      Effect.gen(function* () {
+        const kind = yield* kindOf(record)
+        const sealed = yield* store.readDispatch(record.id)
+        const digest = yield* sha256Text(sealed.canonical).pipe(withCrypto)
+        if (digest !== record.dispatchDigest || sealed.digest !== record.dispatchDigest) {
+          return yield* corrupt(record.id, "dispatch", "sealed dispatch does not match its staged digest")
+        }
+        const dispatch: IntentKind.DispatchOf<Kinds[Tag]> = yield* Schema.decodeUnknownEffect(
+          Schema.fromJsonString(kind.dispatch)
+        )(sealed.canonical).pipe(
+          Effect.mapError((error) => corrupt(record.id, "dispatch", error.message))
+        )
+        return dispatch
+      })
+
     const existing = (id: EmissionId) =>
       store.read(id).pipe(
         Effect.flatMap(Option.match({
@@ -492,7 +578,14 @@ export const defineOutbox = <const Kinds extends IntentKinds>(
         }))
       )
 
-    const stage: OutboxService<Kinds>["stage"] = Effect.fn("Outbox.stage")(function* (request) {
+    /**
+     * Staging proper. `origin` says which emission this is: a caller's key, or
+     * the answer to a committed emission, which only `compensate` may name.
+     */
+    const stageAs = Effect.fn("Outbox.stage")(function* (
+      request: StageRequest<Kinds>,
+      compensates: EmissionId | undefined
+    ) {
       if (!validHold(request.holdMillis)) {
         return yield* new InvalidHoldDuration({ holdMillis: request.holdMillis })
       }
@@ -526,9 +619,12 @@ export const defineOutbox = <const Kinds extends IntentKinds>(
         tag,
         dispatchDigest,
         request.holdMillis,
-        request.authorization
+        request.authorization,
+        compensates
       ).pipe(withCrypto)
-      const id = yield* emissionIdFor(request.key).pipe(withCrypto)
+      const id = yield* (
+        compensates === undefined ? emissionIdFor(request.key) : compensationIdFor(compensates)
+      ).pipe(withCrypto)
       const stagedAt = yield* DateTime.now
       const record = new StagedEmission({
         id,
@@ -540,6 +636,7 @@ export const defineOutbox = <const Kinds extends IntentKinds>(
         stagedAt,
         holdUntil: DateTime.add(stagedAt, { milliseconds: request.holdMillis }),
         ...(request.authorization === undefined ? {} : { authorization: request.authorization }),
+        ...(compensates === undefined ? {} : { compensates }),
         ledgered: []
       })
       // Publishing the record and publishing its receipt are one cancellation
@@ -562,6 +659,8 @@ export const defineOutbox = <const Kinds extends IntentKinds>(
         })
       )
     })
+
+    const stage: OutboxService<Kinds>["stage"] = (request) => stageAs(request, undefined)
 
     const inspect: OutboxService<Kinds>["inspect"] = Effect.fn("Outbox.inspect")(function* (id) {
       return yield* view(yield* existing(id))
@@ -594,16 +693,7 @@ export const defineOutbox = <const Kinds extends IntentKinds>(
           const kind = yield* kindOf(staged)
           const tag = kind.tag as Tag
           // Verify the sealed material before anything becomes irreversible.
-          const sealed = yield* store.readDispatch(id)
-          const digest = yield* sha256Text(sealed.canonical).pipe(withCrypto)
-          if (digest !== staged.dispatchDigest || sealed.digest !== staged.dispatchDigest) {
-            return yield* corrupt(id, "dispatch", "sealed dispatch does not match its staged digest")
-          }
-          const dispatch = yield* Schema.decodeUnknownEffect(
-            Schema.fromJsonString(kind.dispatch)
-          )(sealed.canonical).pipe(
-            Effect.mapError((error) => corrupt(id, "dispatch", error.message))
-          )
+          const dispatch = yield* sealedDispatchOf(staged)
 
           const committing = yield* store.transition(id, "staged", {
             state: "committing",
@@ -749,7 +839,73 @@ export const defineOutbox = <const Kinds extends IntentKinds>(
       return { committed, failed, waiting: staged.length - due.length }
     })
 
-    return { stage, inspect, commit, cancel, response, pending, pendingAuthorized, flush }
+    const perform: OutboxService<Kinds>["perform"] = Effect.fn("Outbox.perform")(function* (
+      request,
+      provenance
+    ) {
+      // A request for some of the kinds is a request for the registry.
+      const staged = yield* stageAs(request as unknown as StageRequest<Kinds>, undefined)
+      const id = staged.id
+      // A racing caller with the same key may commit first; whoever loses
+      // reads the settled record instead of dispatching again.
+      const settled = staged.state === "staged"
+        ? yield* commit(id, provenance).pipe(
+            Effect.catchTag("EmissionNotPending", () => inspect(id))
+          )
+        : staged
+      switch (settled.state) {
+        case "committed": {
+          const bytes = yield* store.readResponse(id)
+          if (Option.isNone(bytes)) {
+            return yield* corrupt(id, "response", "a committed emission has no response")
+          }
+          // `settled` is the record of the kind that was asked for; the
+          // registry-derived type cannot carry that through the runtime lookup.
+          return { emission: settled, response: bytes.value } as unknown as Performed<Kinds, typeof request.intent.kind>
+        }
+        case "uncertain":
+          return yield* new EmissionDispatchUncertain({ id, reason: settled.reason })
+        case "refused":
+          return yield* new EmissionRefused({ id, reason: settled.reason })
+        default:
+          return yield* new EmissionNotPending({ id, state: settled.state })
+      }
+    })
+
+    const compensate: OutboxService<Kinds>["compensate"] = Effect.fn("Outbox.compensate")(function* (
+      committed,
+      options
+    ) {
+      // The argument only names the emission. What is answered is the stored
+      // record, re-read and re-verified, never the value the caller holds.
+      const id: EmissionId = committed.id
+      const record = yield* existing(id)
+      if (record.state !== "committed") {
+        return yield* new NotCompensable({ id, reason: "not-committed", state: record.state })
+      }
+      const kind = yield* kindOf(record)
+      const answer = kind.compensate
+      if (answer === undefined) {
+        return yield* new NotCompensable({ id, reason: "irreversible", state: record.state })
+      }
+      const dispatch = yield* sealedDispatchOf(record)
+      const outcome: unknown = yield* Schema.decodeUnknownEffect(kind.outcome)(record.outcome).pipe(
+        Effect.mapError((error) => corrupt(id, "record", `outcome: ${error.message}`))
+      )
+      return yield* stageAs(
+        {
+          key: IdempotencyKey.make(`compensation-of:${id}`),
+          // `answer.intent` returns the dispatch of the kind registered under
+          // `answer.kind`, which `defineOutbox` checked at construction.
+          intent: { kind: answer.kind, dispatch: answer.intent({ dispatch, outcome }) } as Intent<Kinds>,
+          holdMillis: options.holdMillis,
+          ...(options.authorization === undefined ? {} : { authorization: options.authorization })
+        },
+        id
+      )
+    })
+
+    return { stage, inspect, commit, cancel, perform, compensate, response, pending, pendingAuthorized, flush }
   })
 
   return { kinds, Outbox, Dispatcher, fromRecord: view, toRecord, layer: Layer.effect(Outbox, make) }

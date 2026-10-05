@@ -153,6 +153,8 @@ type FakeOutboxOptions = {
 const fakeOutbox = (options: FakeOutboxOptions = {}) => Outbox.of({
   stage: () => Effect.die("unused stage"),
   inspect: () => Effect.die("unused inspect"),
+  perform: () => Effect.die("unused perform"),
+  compensate: () => Effect.die("unused compensate"),
   commit: (id, provenance) => options.onCommit?.(id, provenance) ??
     Effect.die("unexpected commit"),
   cancel: () => Effect.die("unused cancel"),
