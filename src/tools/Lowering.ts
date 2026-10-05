@@ -12,10 +12,9 @@ import {
 } from "../actions/index.ts"
 import { CellProfile, Digest } from "../plan/index.ts"
 import {
-  AnyToolDefinition,
+  ToolDefinition,
   LoadedToolDefinition,
   ToolDefinitionId,
-  ToolLoweringKind,
   ToolResultDecoder,
   ToolInputRejected,
   endpointRejection,
@@ -27,7 +26,7 @@ import {
   type ToolEnqueueActionDefinition,
   type ToolExecutableConstraint,
   type ToolResourceRequirement,
-  type ToolV2ActionDefinition
+  type ToolDefinitionAction
 } from "./Definitions.ts"
 
 /**
@@ -86,15 +85,6 @@ export class UnknownToolAction extends Schema.TaggedError<UnknownToolAction>()(
   {
     definitionId: Schema.String,
     action: Schema.String
-  }
-) {}
-
-export class UnsupportedToolActionLowering extends Schema.TaggedError<UnsupportedToolActionLowering>()(
-  "UnsupportedToolActionLowering",
-  {
-    definitionId: Schema.String,
-    action: Schema.String,
-    lowering: ToolLoweringKind
   }
 ) {}
 
@@ -177,7 +167,6 @@ export class ToolRequestLoweringRejected extends Schema.TaggedError<ToolRequestL
 
 export type ToolActionLoweringError =
   | UnknownToolAction
-  | UnsupportedToolActionLowering
   | ToolExecutableRejected
   | ToolTemplateRejected
   | ToolDefinitionDigestFailed
@@ -478,7 +467,7 @@ const canonicalJson = (value: unknown): string => {
 const digestDefinition = (
   loaded: LoadedToolDefinition
 ): Effect.Effect<Digest, ToolDefinitionDigestFailed> =>
-  Schema.encodeEffect(AnyToolDefinition)(loaded.definition).pipe(
+  Schema.encodeEffect(ToolDefinition)(loaded.definition).pipe(
     Effect.mapError(
       () =>
         new ToolDefinitionDigestFailed({
@@ -504,7 +493,7 @@ const digestDefinition = (
 const actionNamed = (
   loaded: LoadedToolDefinition,
   action: string
-): Effect.Effect<ToolV2ActionDefinition, UnknownToolAction> => {
+): Effect.Effect<ToolDefinitionAction, UnknownToolAction> => {
   const found = loaded.definition.actions.find((candidate) => candidate.name === action)
   return found === undefined
     ? Effect.fail(
@@ -526,7 +515,7 @@ const actionNamed = (
  */
 const lowerEnqueueAction = <E, R>(
   request: ToolActionLoweringRequest,
-  definition: AnyToolDefinition,
+  definition: ToolDefinition,
   action: ToolEnqueueActionDefinition,
   bindPath: NativePathSelectorBinder<E, R>
 ): Effect.Effect<ToolActionLoweringResult, ToolActionLoweringError | E, R> =>
@@ -636,13 +625,6 @@ export const lowerToolAction = <E = never, R = never>(
         action,
         bindPath
       )
-    }
-    if (action.lowering !== "invoke") {
-      return yield* new UnsupportedToolActionLowering({
-        definitionId: definition.id,
-        action: action.name,
-        lowering: action.lowering
-      })
     }
 
     const executableConstraint = yield* selectExecutableConstraint(

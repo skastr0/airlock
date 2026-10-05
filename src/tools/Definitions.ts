@@ -81,9 +81,6 @@ export class ToolResourceRequirement extends Schema.Class<ToolResourceRequiremen
   rights: Schema.Array(Right)
 }) {}
 
-export const ToolLoweringKind = Schema.Literals(["invoke", "enqueue"])
-export type ToolLoweringKind = typeof ToolLoweringKind.Type
-
 export const ToolEffect = Schema.Literals(["capture", "invoke", "apply", "enqueue"])
 export type ToolEffect = typeof ToolEffect.Type
 
@@ -180,7 +177,7 @@ export class ToolActionDefinition extends Schema.Class<ToolActionDefinition>(
     Schema.withDecodingDefault(Effect.succeed([])),
     Schema.withConstructorDefault(Effect.succeed([]))
   ),
-  lowering: ToolLoweringKind,
+  lowering: Schema.Literal("invoke"),
   effectFootprint: Schema.Array(ToolEffect),
   resultDecoder: ToolResultDecoder
 }) {}
@@ -213,37 +210,23 @@ export class ToolEnqueueActionDefinition extends Schema.Class<ToolEnqueueActionD
   resultDecoder: ToolResultDecoder
 }) {}
 
-export const ToolV2ActionDefinition = Schema.Union([
+export const ToolDefinitionAction = Schema.Union([
   ToolEnqueueActionDefinition,
   ToolActionDefinition
 ])
-export type ToolV2ActionDefinition = typeof ToolV2ActionDefinition.Type
-
-export class ToolDefinition extends Schema.Class<ToolDefinition>("ToolDefinition")({
-  schemaVersion: Schema.Literal("airlock/tool-definition/v1"),
-  id: ToolDefinitionId,
-  version: Schema.String,
-  executables: Schema.Array(ToolExecutableConstraint),
-  actions: Schema.Array(ToolActionDefinition)
-}) {}
+export type ToolDefinitionAction = typeof ToolDefinitionAction.Type
 
 /**
- * v2 supersedes v1 by version literal, not by alias: v1 documents keep
- * decoding through the unchanged v1 schema and the unchanged invoke-only
- * gate. v2 adds exactly one thing — the `enqueue` lowering the v1 schema
- * already reserved — and may therefore declare no executable at all when it
- * exports no invoke action.
+ * A definition exports invoke actions, enqueue actions, or both, and may
+ * declare no executable at all when it exports no invoke action.
  */
-export class ToolDefinitionV2 extends Schema.Class<ToolDefinitionV2>("ToolDefinitionV2")({
+export class ToolDefinition extends Schema.Class<ToolDefinition>("ToolDefinition")({
   schemaVersion: Schema.Literal("airlock/tool-definition/v2"),
   id: ToolDefinitionId,
   version: Schema.String,
   executables: Schema.Array(ToolExecutableConstraint),
-  actions: Schema.Array(ToolV2ActionDefinition)
+  actions: Schema.Array(ToolDefinitionAction)
 }) {}
-
-export const AnyToolDefinition = Schema.Union([ToolDefinition, ToolDefinitionV2])
-export type AnyToolDefinition = typeof AnyToolDefinition.Type
 
 export const isEnqueueAction = (
   action: ToolActionDefinition | ToolEnqueueActionDefinition
@@ -261,7 +244,7 @@ export class ToolDefinitionDocument extends Schema.Class<ToolDefinitionDocument>
 export class LoadedToolDefinition extends Schema.Class<LoadedToolDefinition>(
   "LoadedToolDefinition"
 )({
-  definition: AnyToolDefinition,
+  definition: ToolDefinition,
   location: ToolDefinitionLocation,
   file: Schema.String
 }) {}
@@ -276,7 +259,7 @@ export class ToolDefinitionRegistry extends Schema.Class<ToolDefinitionRegistry>
 export class ExportedToolAction extends Schema.Class<ExportedToolAction>("ExportedToolAction")({
   name: Schema.String,
   loaded: LoadedToolDefinition,
-  action: ToolV2ActionDefinition
+  action: ToolDefinitionAction
 }) {}
 
 export class ToolActionNameCollision extends Schema.TaggedError<ToolActionNameCollision>()(
@@ -372,7 +355,7 @@ export interface ToolDefinitionReader {
 const duplicates = (values: ReadonlyArray<string>) =>
   [...new Set(values.filter((value, index) => values.indexOf(value) !== index))].sort()
 
-/** Identity is all these checks need; the shape may be a v1 or v2 document. */
+/** Identity is all these checks need. */
 type DefinitionIdentity = { readonly id: string }
 type ActionIdentity = { readonly name: string }
 
@@ -681,16 +664,15 @@ const validateEnqueueAction = (
  * It intentionally cannot validate an executable's behavior or grant power.
  */
 export const validateToolDefinition = (
-  definition: AnyToolDefinition
-): Effect.Effect<AnyToolDefinition, ToolDefinitionValidationError> =>
+  definition: ToolDefinition
+): Effect.Effect<ToolDefinition, ToolDefinitionValidationError> =>
   Effect.gen(function* () {
     yield* nonBlank(definition, "id", definition.id)
     yield* callableNamespace(definition, "id", definition.id)
     yield* nonBlank(definition, "version", definition.version)
-    // Only an invoke action needs an executable. A v2 document that exports
+    // Only an invoke action needs an executable. A definition that exports
     // enqueue actions alone binds no executable authority at all.
     const requiresExecutable =
-      definition.schemaVersion === "airlock/tool-definition/v1" ||
       definition.actions.some((action) => !isEnqueueAction(action))
     if (definition.executables.length === 0 && requiresExecutable) {
       return yield* new InvalidToolDefinition({
@@ -755,18 +737,6 @@ export const validateToolDefinition = (
     for (const action of definition.actions) {
       yield* nonBlank(definition, "actions[].name", action.name)
       yield* callableNamespace(definition, `actions.${action.name}.name`, action.name)
-      // The invoke-only gate is version-scoped, not removed: v1 documents keep
-      // refusing every lowering the v1 schema reserved but never implemented.
-      if (
-        definition.schemaVersion === "airlock/tool-definition/v1" &&
-        action.lowering !== "invoke"
-      ) {
-        return yield* new InvalidToolDefinition({
-          id: definition.id,
-          field: `actions.${action.name}.lowering`,
-          reason: "v1 definitions support only invoke lowering"
-        })
-      }
       if (isEnqueueAction(action)) {
         yield* validateEnqueueAction(definition, action)
         continue
@@ -812,14 +782,12 @@ export const validateToolDefinition = (
           Effect.mapError((error) => new InvalidToolDefinition({ id: definition.id, field: `actions.${action.name}.outputSchema${error.path.slice(1)}`, reason: error.reason }))
         )
       }
-      if (action.lowering === "invoke") {
-        if (!action.effectFootprint.includes("invoke")) {
-          return yield* new InvalidToolDefinition({
-            id: definition.id,
-            field: `actions.${action.name}.effectFootprint`,
-            reason: "invoke lowering must declare the invoke effect"
-          })
-        }
+      if (!action.effectFootprint.includes("invoke")) {
+        return yield* new InvalidToolDefinition({
+          id: definition.id,
+          field: `actions.${action.name}.effectFootprint`,
+          reason: "invoke lowering must declare the invoke effect"
+        })
       }
       if (
         !Number.isSafeInteger(action.outputLimitBytes) ||
@@ -925,32 +893,6 @@ const refuseWidenedEmissionEffect = (
   return Effect.void
 }
 
-/** v2 action vocabulary carried by a v1 document is inert and misleading. */
-const v2OnlyActionFields = ["request", "emissionEffect"] as const
-
-const refuseVersionMismatchedFields = (
-  source: unknown
-): Effect.Effect<void, InvalidToolDefinition> => {
-  if (!isRecord(source)) return Effect.void
-  if (source.schemaVersion !== "airlock/tool-definition/v1") return Effect.void
-  if (!Array.isArray(source.actions)) return Effect.void
-  for (const action of source.actions) {
-    if (!isRecord(action)) continue
-    for (const field of v2OnlyActionFields) {
-      if (field in action) {
-        return Effect.fail(
-          new InvalidToolDefinition({
-            id: typeof source.id === "string" ? source.id : "",
-            field: `actions.${typeof action.name === "string" ? action.name : ""}.${field}`,
-            reason: "requires schemaVersion airlock/tool-definition/v2"
-          })
-        )
-      }
-    }
-  }
-  return Effect.void
-}
-
 export const decodeToolDefinition = (
   document: ToolDefinitionDocument
 ): Effect.Effect<
@@ -963,10 +905,9 @@ export const decodeToolDefinition = (
       new ToolDefinitionDecodeFailed({ file: document.file, message: "document is not valid JSON" })
   }).pipe(
     Effect.tap(refuseGrantSideAssertion),
-    Effect.tap(refuseVersionMismatchedFields),
     Effect.tap(refuseWidenedEmissionEffect),
     Effect.flatMap((parsed) =>
-      Schema.decodeUnknownEffect(AnyToolDefinition)(parsed).pipe(
+      Schema.decodeUnknownEffect(ToolDefinition)(parsed).pipe(
         Effect.mapError(
           (error) => new ToolDefinitionDecodeFailed({ file: document.file, message: error.message })
         )
