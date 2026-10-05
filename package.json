@@ -19,6 +19,7 @@
   "exports": {
     "./core": "./src/core/index.ts",
     "./core/testing": "./src/core/testing/index.ts",
+    "./cloud": "./src/cloud/index.ts",
     "./package.json": "./package.json"
   },
   "files": [
@@ -31,6 +32,7 @@
     "scripts/build-box.ts",
     "scripts/seal-box.ts",
     "scripts/prove-core-portable.ts",
+    "scripts/prove-cloud-portable.ts",
     "scripts/prove-sealed-box-macos.sh",
     "scripts/install-macos.sh",
     "scripts/uninstall-macos.sh",
@@ -65,7 +67,8 @@
     "test": "bun scripts/run-tests.ts",
     "test:bun": "bun run scripts/verify-bun-integrations.ts",
     "prove:core": "bun scripts/prove-core-portable.ts",
-    "verify": "bun run typecheck && bun run test && bun run test:bun && bun run prove:core"
+    "prove:cloud": "bun scripts/prove-cloud-portable.ts",
+    "verify": "bun run typecheck && bun run test && bun run test:bun && bun run prove:core && bun run prove:cloud"
   },
   "dependencies": {
     "@effect/platform-bun": "4.0.0-rc.115",
@@ -75,6 +78,7 @@
     "@effect/vitest": "4.0.0-rc.115",
     "@types/bun": "^1.4.2",
     "esbuild": "0.25.12",
+    "miniflare": "4.20260708.1",
     "typescript": "^6.0.3",
     "vitest": "^5.0.1"
   },
