@@ -1119,50 +1119,74 @@ exercised.
 
 ### Outbox: send, pending, cancel, commit, flush
 
+The blocks in this subsection and the Ledger one were re-executed on
+2026-10-05 with Bun 1.4.2, after the Outbox moved onto the storage-agnostic
+kernel. Timestamps and the local port are elided; everything else is as
+printed.
+
 ```sh
 airlock send https://api.example.com/hook --body '{"operation":"snapshot-ready"}' --hold 30s
 airlock pending
-airlock cancel emi_789312fb-110f
+airlock cancel emi_77ed07e8e359fd88b3f41bec9f369f49
 ```
 
 ```json
 {
-  "id": "emi_789312fb-110f",
-  "status": "staged",
-  "intent":  { "kind": "http", "method": "POST", "endpoint": "https://api.example.com/hook", "headerNames": ["content-type"], "bodyBytes": 30 },
-  "request": { "method": "POST", "url": "https://api.example.com/hook", "headers": { "content-type": "[redacted]" }, "body": "[redacted:30 bytes]" },
-  "stagedAt": "…", "holdUntil": "…"
+  "id": "emi_77ed07e8e359fd88b3f41bec9f369f49",
+  "key": "cli-send:fa98858e-b14c-4a22-bc88-89db3e8eaf80",
+  "kind": "http",
+  "dispatchDigest": "sha256:b1b1d5d9792fed60e5e87f62323e467baa7fcb7bb3d7b2f34740f8cc2bb64d3e",
+  "requestDigest": "sha256:a1c020d9b1d4c85df0f2353f185fed09f16cdc36854ebf802509bbda29321002",
+  "summary": { "method": "POST", "endpoint": "https://api.example.com/hook", "target": "https://api.example.com/hook", "headerNames": [], "bodyBytes": 30 },
+  "stagedAt": "…", "holdUntil": "…",
+  "ledgered": ["stage"],
+  "state": "staged"
 }
 ```
 
-Headers and body are redacted in every public record. A cancelled emission
-reports `"status": "cancelled"` — **it was never sent**.
+`send` records intent and sends nothing. The record is the public description:
+`summary` carries names and sizes, never header values or the body, and a URL's
+credentials, query values and fragment are removed from `endpoint`. The request
+itself is stored sealed beside the record and is never listed. The id is
+derived from `key`; `airlock send` uses a fresh key each time, so every
+invocation is a new emission. `pending` prints the same record inside a list.
+
+`cancel` reports the same record with `"state": "cancelled"`, a `cancelledAt`
+time and `"ledgered": ["stage", "cancel"]` — **it was never sent**.
 
 `commit` is the wire. Executed against a local fixture server:
 
 ```sh
 airlock send http://127.0.0.1:PORT/hook --body '{"operation":"snapshot-ready"}' --hold 0s
-airlock commit emi_36203bbd-9f26
+airlock commit emi_7574766855075ce23f49adf8c9ae902e
 ```
 
 ```json
 {
-  "id": "emi_36203bbd-9f26",
-  "status": "committed",
-  "outcome": {
-    "status": 200,
-    "responseBytes": 36,
-    "response": { "status": 200, "contentType": "application/json", "retainedBytes": 36, "truncated": false, "limitBytes": 65536 },
-    "provenance": { "committedBy": "supervisor" },
-    "completedAt": "2026-08-03T20:46:15.700Z"
-  }
+  "id": "emi_7574766855075ce23f49adf8c9ae902e",
+  "key": "cli-send:fd14dd5b-8c04-4aa7-a968-5a601a72998e",
+  "kind": "http",
+  "dispatchDigest": "sha256:f79835dc37eb76ecd979ec3124716d448ff64fa6a5426cd3b7ee4fc87ac264bf",
+  "requestDigest": "sha256:28a6006226a1b57105056fb34352e8fb469e9da3e2a629d9a1cda9c00a077885",
+  "summary": { "method": "POST", "endpoint": "http://127.0.0.1:PORT/hook", "target": "http://127.0.0.1:PORT/hook", "headerNames": [], "bodyBytes": 30 },
+  "stagedAt": "…", "holdUntil": "…",
+  "ledgered": ["stage", "commit"],
+  "provenance": { "committedBy": "supervisor" },
+  "committingAt": "…",
+  "state": "committed",
+  "outcome": { "status": 200, "contentType": "application/json;charset=utf-8" },
+  "capture": { "retainedBytes": 31, "truncated": false, "limitBytes": 65536 },
+  "completedAt": "…"
 }
 ```
 
 The fixture server's own log confirmed receipt of exactly
 `POST /hook {"operation":"snapshot-ready"}`. `committedBy: "supervisor"` is the
 human path; `policy-auto` is the [dispatch-class](#4-dispatch-classes-and-tool-definitions)
-path.
+path. `capture` describes the bounded response that was retained; the bytes
+themselves are private. Committing the same id again fails with
+`EmissionNotPending`, and a dispatch whose result is unknown ends as
+`uncertain` and is never sent again.
 
 `flush` sends every staged emission whose hold has expired, and reports what it
 did not touch:
@@ -1175,10 +1199,10 @@ airlock flush
 { "committed": [], "failed": [], "waiting": 0 }
 ```
 
-Current dispatch is bounded HTTP with **manual** redirects — it is not the
-proposed general endpoint broker, and it does not silently follow a redirect to
-an unadmitted endpoint. Compatibility children retain ambient network; their
-sends are not Outbox dispatches and get none of these guarantees.
+Dispatch is bounded HTTP with **manual** redirects — it is not the proposed
+general endpoint broker, and it does not follow a redirect to an address that
+was never staged. Compatibility children retain ambient network; their sends
+are not Outbox dispatches and get none of these guarantees.
 
 ### Ledger
 
@@ -1188,10 +1212,16 @@ airlock ledger
 
 ```json
 [
-  { "at": "…", "effect": "emission", "act": "stage",  "ref": "emi_36203bbd-9f26", "detail": "POST http://127.0.0.1:PORT/hook" },
-  { "at": "…", "effect": "emission", "act": "commit", "ref": "emi_36203bbd-9f26", "detail": "POST http://127.0.0.1:PORT/hook -> 200 [by=supervisor]" }
+  { "at": "…", "effect": "emission", "act": "stage",  "ref": "emi_77ed07e8e359fd88b3f41bec9f369f49", "detail": "http https://api.example.com/hook", "key": "emi_77ed07e8e359fd88b3f41bec9f369f49:stage" },
+  { "at": "…", "effect": "emission", "act": "cancel", "ref": "emi_77ed07e8e359fd88b3f41bec9f369f49", "key": "emi_77ed07e8e359fd88b3f41bec9f369f49:cancel" },
+  { "at": "…", "effect": "emission", "act": "stage",  "ref": "emi_7574766855075ce23f49adf8c9ae902e", "detail": "http http://127.0.0.1:PORT/hook", "key": "emi_7574766855075ce23f49adf8c9ae902e:stage" },
+  { "at": "…", "effect": "emission", "act": "commit", "ref": "emi_7574766855075ce23f49adf8c9ae902e", "detail": "http [by=supervisor]", "key": "emi_7574766855075ce23f49adf8c9ae902e:commit" }
 ]
 ```
+
+An emission entry carries a `key`; recording the same key again is a no-op, so
+a receipt lost to a crash is written exactly once when the emission is next
+touched.
 
 Append-only, one line per act, with the committing authority named inline. Hold
 and Outbox serialize recovery transitions across processes with a bounded,
