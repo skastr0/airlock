@@ -2,11 +2,15 @@ import { Context, Effect, Layer, Result, Schema, Semaphore } from "effect"
 import { createHash, randomUUID } from "node:crypto"
 import { constants } from "node:fs"
 import {
+  mkdir,
   open,
   readFile,
+  rename,
+  stat,
+  writeFile,
   type FileHandle
 } from "node:fs/promises"
-import { dirname } from "node:path"
+import { dirname, join } from "node:path"
 import { AirlockHome } from "../AirlockHome.ts"
 import { Ledger, LedgerEntry, LedgerFailed } from "../core/ledger/Ledger.ts"
 import { makeExclusiveFileLock } from "../platform/ExclusiveFileLock.ts"
@@ -498,25 +502,81 @@ export const FileLedgerLive = Layer.effect(
         })
     })
 
-    // Keys already in the journal. Only keyed records consult it, and it is
-    // brought up to date under the lease by reading the bytes other writers
-    // appended since the last look, never the whole journal again.
-    const recordedKeys = new Set<string>()
-    let scannedBytes = 0
+    /*
+     * Which keys are already in the journal, answered without reading it.
+     *
+     *   <ledger>.keys/<sha256 of key>   one empty marker per recorded key
+     *   <ledger>.keys/scanned           journal length the markers cover
+     *
+     * A marker is written after its entry is durable and is not itself
+     * flushed, so a crash can lose a marker but never invent one. A missing
+     * marker is therefore checked against the journal bytes past `scanned`.
+     * When that stretch grows past `rescanBytes`, every key in it is marked,
+     * the markers are flushed, and only then does `scanned` move forward, so
+     * the stretch read on a miss stays bounded however long the journal is.
+     * The directory is created by the first keyed record.
+     */
+    const rescanBytes = 64 * 1024
+    const keysDirectory = `${ledgerFile}.keys`
+    const scannedFile = join(keysDirectory, "scanned")
+    const markerOf = (key: string) =>
+      join(keysDirectory, createHash("sha256").update(key).digest("hex"))
+    const present = (target: string) =>
+      ioEffect("read", target, async () => {
+        try {
+          await stat(target)
+          return true
+        } catch (cause) {
+          if (errorCode(cause) === "ENOENT") return false
+          throw cause
+        }
+      })
+    const mark = (keys: ReadonlyArray<string>, durable = false) =>
+      ioEffect("append", keysDirectory, async () => {
+        await mkdir(keysDirectory, { recursive: true, mode: 0o700 })
+        for (const key of keys) await writeFile(markerOf(key), "", { mode: 0o600 })
+        if (durable) await withFile(keysDirectory, "r", undefined, (handle) => handle.sync())
+      })
+    const readScanned = ioEffect("read", scannedFile, async () => {
+      try {
+        const value = Number(await readFile(scannedFile, "utf8"))
+        return Number.isSafeInteger(value) && value >= 0 ? value : 0
+      } catch (cause) {
+        if (errorCode(cause) === "ENOENT") return 0
+        throw cause
+      }
+    })
+    const writeScanned = (bytes: number) =>
+      ioEffect("append", scannedFile, async () => {
+        const next = `${scannedFile}.next-${randomUUID()}`
+        await writeFile(next, String(bytes), { mode: 0o600 })
+        await rename(next, scannedFile)
+      })
+
+    let scannedBytes: number | undefined
     const alreadyRecorded = Effect.fnUntraced(function* (key: string) {
+      if (yield* present(markerOf(key))) return true
+      scannedBytes ??= yield* readScanned
       let appended = yield* readAppended(ledgerFile, scannedBytes)
       if (appended === undefined) {
-        recordedKeys.clear()
+        // The journal is shorter than the markers claim to cover. They are
+        // no longer evidence: set them aside and rebuild from the journal.
+        yield* ioEffect("quarantine", keysDirectory, () =>
+          rename(keysDirectory, `${keysDirectory}.stale-${randomUUID()}`))
         scannedBytes = 0
         appended = (yield* readAppended(ledgerFile, 0)) ?? Buffer.alloc(0)
       }
       const split = splitJournal(appended)
-      for (const line of split.completeLines) {
-        const found = keyOfLine(line)
-        if (found !== undefined) recordedKeys.add(found)
+      const found = split.completeLines.flatMap((line) => {
+        const lineKey = keyOfLine(line)
+        return lineKey === undefined ? [] : [lineKey]
+      })
+      if (split.completeBytes > rescanBytes) {
+        yield* mark(found, true)
+        scannedBytes += split.completeBytes
+        yield* writeScanned(scannedBytes)
       }
-      scannedBytes += split.completeBytes
-      return recordedKeys.has(key)
+      return found.includes(key)
     })
 
     const recordCritical = Effect.fnUntraced(function* (entry: LedgerEntry) {
@@ -534,6 +594,7 @@ export const FileLedgerLive = Layer.effect(
       // A keyed entry is recorded exactly once: replaying it is a no-op.
       if (entry.key !== undefined && (yield* alreadyRecorded(entry.key))) return
       yield* appendDurably(ledgerFile, Buffer.from(`${line}\n`, "utf8"))
+      if (entry.key !== undefined) yield* mark([entry.key])
     })
 
     const entriesCritical = Effect.fnUntraced(function* () {
