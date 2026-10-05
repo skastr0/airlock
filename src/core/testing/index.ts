@@ -14,3 +14,4 @@ export {
 } from "./MemoryOutboxStore.ts"
 export { outboxConformance, type OutboxWorld } from "./OutboxConformance.ts"
 export { outboxStoreConformance, type OutboxStoreWorld } from "./OutboxStoreConformance.ts"
+export { expectedTranscript, runWorkedExample, type WorkedExampleAdapters } from "./WorkedExample.ts"
