@@ -11,7 +11,6 @@ import {
 import {
   Artifact,
   ArtifactId,
-  Digest,
   Receipt,
   ReceiptId,
   type InvokeNode,
@@ -37,6 +36,11 @@ import { ActId, RemoveReceipt } from "../src/core/domain.ts"
 import { stagedHttpRecord } from "./support/TestOutbox.ts"
 import { HoldRecoveryRequired } from "../src/Hold.ts"
 import { ProcessReceipt } from "../src/process/Process.ts"
+import { createHash } from "node:crypto"
+import { Sha256Digest } from "../src/core/Canonical.ts"
+
+const digestOf = (bytes: Uint8Array) =>
+  Sha256Digest.make(`sha256:${createHash("sha256").update(bytes).digest("hex")}`)
 
 const now = DateTime.fromDateUnsafe(new Date("2026-07-29T00:00:00.000Z"))
 const encoder = new TextEncoder()
@@ -56,7 +60,7 @@ const artifact = (
 ) => new RuntimeArtifact({
   artifact: new Artifact({
     id,
-    digest: Digest.make(`sha256:${id}:${bytes.byteLength}`),
+    digest: digestOf(bytes),
     mediaType,
     byteLength: bytes.byteLength,
     provenance
@@ -96,7 +100,7 @@ const RuntimeTest = Layer.succeed(Runtime, Runtime.of({
       ...inputs.map((input) => new RuntimeArtifact({
         artifact: new Artifact({
           id: input.id,
-          digest: Digest.make("sha256:input"),
+          digest: digestOf(input.bytes),
           mediaType: input.mediaType,
           byteLength: input.bytes.byteLength,
           provenance: input.provenance

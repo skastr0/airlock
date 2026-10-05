@@ -12,7 +12,6 @@ import {
   ApplyNode,
   AuthorityAdmission,
   CaptureNode,
-  Digest,
   InvokeNode,
   type PlanNode,
   Plan,
@@ -22,6 +21,11 @@ import {
   RequirementId,
   ResourceRequirement
 } from "../../src/core/plan/index.ts"
+import { createHash } from "node:crypto"
+import { Sha256Digest } from "../../src/core/Canonical.ts"
+
+const digest = (label: string) =>
+  Sha256Digest.make(`sha256:${createHash("sha256").update(label).digest("hex")}`)
 
 const timestamp = DateTime.fromDateUnsafe(
   new Date("2026-07-29T00:00:00.000Z")
@@ -113,7 +117,7 @@ export const uncheckedRuntimeAuthority = (
   label = `runtime-invalid-${crypto.randomUUID()}`
 ): ExecutionAuthority => {
   const planId = PlanId.make(`plan/${label}`)
-  const policyDigest = Digest.make("sha256:unchecked-runtime-test")
+  const policyDigest = digest("unchecked-runtime-test")
   const plan = new Plan({
     schemaVersion: "airlock/plan/v1",
     id: planId,
@@ -128,7 +132,7 @@ export const uncheckedRuntimeAuthority = (
       policyDigest
     }),
     definitionDigests: [],
-    planDigest: Digest.make("sha256:unchecked-runtime-plan")
+    planDigest: digest("unchecked-runtime-plan")
   })
   return new ExecutionAuthority({
     schemaVersion: "airlock/execution-authority/v1",
@@ -137,7 +141,7 @@ export const uncheckedRuntimeAuthority = (
       grants: [],
       policyDigest,
       profile: "compatibility",
-      closureDigest: Digest.make("sha256:unchecked-authority")
+      closureDigest: digest("unchecked-authority")
     }),
     bindings: [],
     boundAt: timestamp

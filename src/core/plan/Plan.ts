@@ -1,4 +1,5 @@
 import { Effect, Schema } from "effect"
+import { Sha256Digest } from "../Canonical.ts"
 
 // The canonical, adapter-free planning boundary. Locators are inert data;
 // authority enters only as Grants and runtime-minted Handles.
@@ -17,8 +18,6 @@ export const ArtifactId = Schema.String.pipe(Schema.brand("ArtifactId"))
 export type ArtifactId = typeof ArtifactId.Type
 export const ReceiptId = Schema.String.pipe(Schema.brand("ReceiptId"))
 export type ReceiptId = typeof ReceiptId.Type
-export const Digest = Schema.String.pipe(Schema.brand("Digest"))
-export type Digest = typeof Digest.Type
 
 export const Right = Schema.Literals([
   "read",
@@ -221,15 +220,15 @@ export class PlanDraft extends Schema.Class<PlanDraft>("PlanDraft")({
   actionReference: Schema.String,
   nodes: Schema.Array(PlanNode),
   requirements: Schema.Array(ResourceRequirement),
-  policyDigest: Schema.optional(Digest),
-  definitionDigests: Schema.Array(Digest)
+  policyDigest: Schema.optional(Sha256Digest),
+  definitionDigests: Schema.Array(Sha256Digest)
 }) {}
 
 export class AuthorityAdmission extends Schema.Class<AuthorityAdmission>("AuthorityAdmission")({
   grantIds: Schema.Array(GrantId),
   admittedBy: Schema.String,
   admittedAt: Schema.DateTimeUtcFromString,
-  policyDigest: Schema.optional(Digest)
+  policyDigest: Schema.optional(Sha256Digest)
 }) {}
 
 export class HandleResolution extends Schema.Class<HandleResolution>("HandleResolution")({
@@ -245,8 +244,8 @@ export class Plan extends Schema.Class<Plan>("Plan")({
   handles: Schema.Array(Handle),
   resolutions: Schema.Array(HandleResolution),
   admission: AuthorityAdmission,
-  definitionDigests: Schema.Array(Digest),
-  planDigest: Digest
+  definitionDigests: Schema.Array(Sha256Digest),
+  planDigest: Sha256Digest
 }) {}
 
 export const PlanState = Schema.Literals([
@@ -284,7 +283,7 @@ export class PlanRuntime extends Schema.Class<PlanRuntime>("PlanRuntime")({
 
 export class Artifact extends Schema.Class<Artifact>("Artifact")({
   id: ArtifactId,
-  digest: Digest,
+  digest: Sha256Digest,
   mediaType: Schema.String,
   byteLength: Schema.Number,
   provenance: Schema.String
@@ -298,7 +297,7 @@ export class Receipt extends Schema.Class<Receipt>("Receipt")({
   sequence: Schema.Number,
   state: NodeState,
   at: Schema.DateTimeUtcFromString,
-  inputDigests: Schema.Array(Digest),
+  inputDigests: Schema.Array(Sha256Digest),
   outputArtifacts: Schema.Array(ArtifactId),
   resourceIdentities: Schema.Array(Schema.String),
   errorTag: Schema.optional(Schema.String)
@@ -718,7 +717,7 @@ export const closeExecution = (
   resolutions: ReadonlyArray<HandleResolution>,
   grants: ReadonlyArray<Grant>,
   admission: AuthorityAdmission,
-  planDigest: Digest
+  planDigest: Sha256Digest
 ): Effect.Effect<Plan, PlanValidationError | RequirementUnresolved | HandleGrantMismatch> =>
   Effect.gen(function* () {
     const ordered = yield* orderPlan(draft)

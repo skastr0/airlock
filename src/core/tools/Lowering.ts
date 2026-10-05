@@ -1,4 +1,4 @@
-import { sha256Text } from "../Canonical.ts"
+import { Sha256Digest, sha256Text } from "../Canonical.ts"
 import { type Crypto, Effect, Schema } from "effect"
 import {
   HttpStageAction,
@@ -10,7 +10,7 @@ import {
   type NativePathSelectorBinder,
   unchangedNativePathSelector
 } from "../actions/index.ts"
-import { CellProfile, Digest } from "../plan/index.ts"
+import { CellProfile } from "../plan/index.ts"
 import {
   ToolDefinition,
   LoadedToolDefinition,
@@ -66,7 +66,7 @@ export class ToolActionLoweringResult extends Schema.Class<ToolActionLoweringRes
 )({
   definitionId: ToolDefinitionId,
   definitionVersion: Schema.String,
-  definitionDigest: Digest,
+  definitionDigest: Sha256Digest,
   actionName: Schema.String,
   resultDecoder: ToolResultDecoder,
   /**
@@ -466,7 +466,7 @@ const canonicalJson = (value: unknown): string => {
 
 const digestDefinition = (
   loaded: LoadedToolDefinition
-): Effect.Effect<Digest, ToolDefinitionDigestFailed, Crypto.Crypto> =>
+): Effect.Effect<Sha256Digest, ToolDefinitionDigestFailed, Crypto.Crypto> =>
   Schema.encodeEffect(ToolDefinition)(loaded.definition).pipe(
     Effect.mapError(
       () =>
@@ -487,7 +487,6 @@ const digestDefinition = (
     ),
     Effect.flatMap((canonical) =>
       sha256Text(canonical).pipe(
-        Effect.map((sha256) => Digest.make(sha256)),
         Effect.mapError((error) =>
           new ToolDefinitionDigestFailed({
             definitionId: loaded.definition.id,

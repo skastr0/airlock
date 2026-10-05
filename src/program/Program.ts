@@ -51,7 +51,6 @@ import {
   ArtifactId,
   type CellProfile,
   CaptureNode,
-  Digest,
   InvokeNode,
   NodeId,
   NodeState,
@@ -96,7 +95,7 @@ export class ProgramActionCall extends Schema.Class<ProgramActionCall>("ProgramA
 export class ProgramToolBinding extends Schema.Class<ProgramToolBinding>("ProgramToolBinding")({
   name: Schema.String,
   definitionId: Schema.String,
-  definitionDigest: Digest,
+  definitionDigest: Canonical.Sha256Digest,
   resultDecoder: Schema.Literals(["exit-status", "json-stdout", "json-stderr", "none"]),
   /**
    * The definition author's declared consequence, carried forward so the
@@ -130,7 +129,7 @@ export class ProgramRequest extends Schema.Class<ProgramRequest>("ProgramRequest
 export class ProgramActionRequest extends Schema.Class<ProgramActionRequest>("ProgramActionRequest")({
   call: ProgramActionCall,
   /** Bound into draft.actionReference so admission covers call and input bytes. */
-  callDigest: Schema.String.pipe(Schema.brand("Digest")),
+  callDigest: Canonical.Sha256Digest,
   draft: PlanDraft,
   inlineArtifacts: Schema.Array(InlineArtifact),
   tool: Schema.optional(ProgramToolBinding)
@@ -617,8 +616,8 @@ const digestAction = (
   call: NativeActionCallValue,
   artifacts: ReadonlyArray<InlineArtifact>,
   tool?: ProgramToolBinding
-): Digest =>
-  Digest.make(`sha256:${createHash("sha256").update(canonical({
+): Canonical.Sha256Digest =>
+  Canonical.Sha256Digest.make(`sha256:${createHash("sha256").update(canonical({
     call,
     ...(tool === undefined ? {} : { tool: {
       name: tool.name,
@@ -637,7 +636,7 @@ const digestAction = (
       .sort((left, right) => left.id.localeCompare(right.id))
   })).digest("hex")}`)
 
-const actionReference = (call: NativeActionCallValue, callDigest: Digest) =>
+const actionReference = (call: NativeActionCallValue, callDigest: Canonical.Sha256Digest) =>
   `${call.action}@${callDigest}`
 
 const needKey = (need: ResourceNeed) =>
@@ -912,7 +911,7 @@ export const draftForAction = (
       actionReference: actionReference(call, callDigest),
       nodes,
       requirements,
-      definitionDigests: [] as Digest[]
+      definitionDigests: [] as Canonical.Sha256Digest[]
     })
     return new ProgramActionRequest({
       call: new ProgramActionCall({ action: call.action, input: call }),
@@ -1097,7 +1096,7 @@ const FileMkdirActionResult = Schema.Struct({
 
 const ProcessArtifactResult = Schema.NullOr(Schema.Struct({
   id: ArtifactId,
-  digest: Digest,
+  digest: Canonical.Sha256Digest,
   media_type: Schema.String,
   byte_length: Schema.Finite,
   provenance: Schema.String

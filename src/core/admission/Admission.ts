@@ -1,7 +1,6 @@
 import { type Crypto, DateTime, Effect, Result, Schema } from "effect"
-import { type DigestUnavailable, sha256Canonical } from "../Canonical.ts"
+import { type DigestUnavailable, Sha256Digest, sha256Canonical } from "../Canonical.ts"
 import {
-  Digest,
   Grant,
   GrantId,
   Handle,
@@ -98,14 +97,14 @@ export const policyDispatchDecision = (
 export class AdmissionResult extends Schema.Class<AdmissionResult>("AdmissionResult")({
   plan: Plan,
   grants: Schema.Array(Grant),
-  policyDigest: Schema.String.pipe(Schema.brand("Digest")),
+  policyDigest: Sha256Digest,
   profile: AdmissionProfile,
   /**
    * Detects accidental mutation between admission and use. This is not a
    * signature and must never be accepted from an untrusted wire as proof of
    * admission; the in-process Admission capability remains the authority.
    */
-  closureDigest: Schema.String.pipe(Schema.brand("Digest"))
+  closureDigest: Sha256Digest
 }) {}
 
 export class NodeAuthorityBinding extends Schema.Class<NodeAuthorityBinding>(
@@ -180,8 +179,7 @@ export type ExecutionAuthorityError =
   | UndeclaredNodeAuthority
   | DigestUnavailable
 
-const digest = (value: unknown) =>
-  sha256Canonical(value).pipe(Effect.map((sha256) => Digest.make(sha256)))
+const digest = sha256Canonical
 
 const isAbsolutePath = (value: string) => value.startsWith("/")
 /** Resolves `.` and `..` segments of an absolute POSIX path without touching a filesystem. */

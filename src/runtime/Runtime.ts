@@ -45,7 +45,6 @@ import { AirlockOutbox, Outbox, type OutboxEmission } from "../Outbox.ts"
 import {
   ArtifactId,
   Artifact,
-  type Digest,
   type Handle,
   NodeId,
   type NodeState,
@@ -64,6 +63,7 @@ import {
   ProcessTimedOut
 } from "../process/Process.ts"
 import { makeExclusiveFileLock } from "../platform/ExclusiveFileLock.ts"
+import { Sha256Digest } from "../core/Canonical.ts"
 
 /**
  * Candidate Plan interpreter. Plan, receipt, and Cell contracts are the
@@ -790,8 +790,8 @@ const makeMemoryRuntimeRunJournal = () => {
   })
 }
 
-const digest = (bytes: Uint8Array): Digest =>
-  `sha256:${createHash("sha256").update(bytes).digest("hex")}` as Digest
+const digest = (bytes: Uint8Array): Sha256Digest =>
+  Sha256Digest.make(`sha256:${createHash("sha256").update(bytes).digest("hex")}`)
 
 const artifact = (
   id: ArtifactId,
@@ -1207,12 +1207,12 @@ const nodeReceipt = (
 ) => Effect.map(DateTime.now, (at) => new Receipt({
   id: receiptId(), planId: plan.id, nodeId: node.id, sequence, state, at,
   inputDigests: node._tag === "Invoke" && node.stdin !== undefined
-    ? [artifacts.get(node.stdin)?.artifact.digest].filter((value): value is Digest => value !== undefined)
+    ? [artifacts.get(node.stdin)?.artifact.digest].filter((value): value is Sha256Digest => value !== undefined)
     : node._tag === "Apply" && node.sourceArtifact !== undefined
-      ? [artifacts.get(node.sourceArtifact)?.artifact.digest].filter((value): value is Digest => value !== undefined)
+      ? [artifacts.get(node.sourceArtifact)?.artifact.digest].filter((value): value is Sha256Digest => value !== undefined)
       : node._tag === "RequestExternal" && node.bodyArtifact !== undefined
         ? [artifacts.get(node.bodyArtifact)?.artifact.digest].filter(
-            (value): value is Digest => value !== undefined
+            (value): value is Sha256Digest => value !== undefined
           )
       : [],
   outputArtifacts, resourceIdentities,

@@ -6,7 +6,6 @@ import {
   AuthorityAdmission,
   CaptureNode,
   CyclicPlan,
-  Digest,
   DuplicateNodeId,
   Grant,
   GrantId,
@@ -35,10 +34,13 @@ import {
   transitionNode,
   transitionPlan
 } from "../src/core/plan/index.ts"
+import { createHash } from "node:crypto"
+import { Sha256Digest } from "../src/core/Canonical.ts"
 
 const id = (value: string) => NodeId.make(value)
 const req = (value: string) => RequirementId.make(value)
-const digest = (value: string) => Digest.make(value)
+const digest = (label: string) =>
+  Sha256Digest.make(`sha256:${createHash("sha256").update(label).digest("hex")}`)
 
 const requirement = new ResourceRequirement({
   id: req("workspace"), kind: "path", realm: "local", selector: "workspace/**", rights: ["write"]
