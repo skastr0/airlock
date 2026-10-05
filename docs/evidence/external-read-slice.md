@@ -129,8 +129,9 @@ Discharged against the checklist in
 - *Counterexample*: the outcome recorded only an HTTP status, so a receipt
   could not state what was captured or under what bound.
 - *Narrow or version*: narrowed, under the same
-  `airlock/outbox-outcome/v1` literal. Both fields are optional, so outcome
-  documents written before this change still decode.
+  `airlock/outbox-outcome/v1` literal. Both fields were optional when this
+  slice landed; they are required now, and an outcome document without them
+  is invalid.
 - *Consumers and migration*: `src/Outbox.ts`, `src/program/Program.ts`
   (the `http.stage` result record), the persisted `outcome.json`.
 - *Tests*: as above.
