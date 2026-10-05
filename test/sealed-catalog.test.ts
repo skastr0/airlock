@@ -18,12 +18,12 @@ import {
   hashBoxGrant
 } from "../src/admission/BoxGrant.ts"
 import {
-  LegacyToolDefinitionPathRejected,
-  LegacyToolDefinitionTamper,
+  UnsealedToolDefinitionPathRejected,
+  UnsealedToolDefinitionTamper,
   SealedCatalogDecodeFailed,
   SealedCatalogExportFailed,
-  assertNoLegacyToolDefinitions,
-  legacyDefinitionDirectories,
+  assertNoUnsealedToolDefinitions,
+  unsealedDefinitionDirectories,
   loadVerifiedCatalog,
   sealedTools
 } from "../src/seal/Catalog.ts"
@@ -47,7 +47,7 @@ const digest = (value: Uint8Array): BoxGrantSha256 =>
   `sha256:${createHash("sha256").update(value).digest("hex")}` as BoxGrantSha256
 
 const definition = (overrides: Record<string, unknown> = {}) => ({
-  schemaVersion: "airlock/tool-definition/v1",
+  schemaVersion: "airlock/tool-definition/v2",
   id: "vendor.echo",
   version: "1.0.0",
   executables: [{ realm: "machine", selector: "/usr/bin/true" }],
@@ -101,14 +101,15 @@ const sealWith = async (
   const grant = await Effect.runPromise(decodeBoxGrant({
     schemaVersion: "airlock/box-grant/v1",
     admission: {
-      schemaVersion: "airlock/admission-policy/v1",
+      schemaVersion: "airlock/admission-policy/v2",
       profile: "native-contained",
       principal: "agent/catalog-test",
       realm: "local",
       admittedBy: "operator/catalog-test",
       pathAllowlist: ["/workspace/**"],
       executableAllowlist: ["/usr/bin/true"],
-      endpointAllowlist: []
+      executableEdges: [],
+      endpointGrants: []
     },
     verbs: ["run", "actions"],
     nativeActions: ["file.read", "process.run"],
@@ -237,12 +238,12 @@ describe("sealed catalog mapping", () => {
   })
 })
 
-describe("sealed legacy-definition refusal", () => {
-  it("refuses an immediate suffix in every fixed legacy root before catalog export", async () => {
+describe("sealed refusal of unsealed definitions", () => {
+  it("refuses an immediate suffix in every fixed unsealed root before catalog export", async () => {
     const locations = ["builtin", "installed", "user", "project"] as const
     for (const kind of locations) {
       const { root, seal } = await makeSeal()
-      const directories = await exactDirectories(join(root, `legacy-${kind}`))
+      const directories = await exactDirectories(join(root, `unsealed-${kind}`))
       await writeFile(
         join(directories[kind], `${kind}.airlock-tool.json`),
         "bytes are never loaded"
@@ -253,18 +254,18 @@ describe("sealed legacy-definition refusal", () => {
         directories,
         nativeActionNames: new Set(["vendor.echo.check"])
       }))
-      expect(error).toBeInstanceOf(LegacyToolDefinitionTamper)
+      expect(error).toBeInstanceOf(UnsealedToolDefinitionTamper)
       expect(error).toMatchObject({
         location: { kind },
-        reason: "legacy-definition-present"
+        reason: "unsealed-definition-present"
       })
     }
   })
 
   it("refuses suffix-bearing symlinks and directories without following them", async () => {
     for (const kind of ["symlink", "directory"] as const) {
-      const root = await mkdtemp(join(tmpdir(), `airlock-legacy-${kind}-`))
-      const directories = await exactDirectories(join(root, "legacy"))
+      const root = await mkdtemp(join(tmpdir(), `airlock-unsealed-${kind}-`))
+      const directories = await exactDirectories(join(root, "unsealed"))
       const candidate = join(
         directories.project,
         `${kind}.airlock-tool.json`
@@ -277,17 +278,17 @@ describe("sealed legacy-definition refusal", () => {
         await mkdir(candidate)
       }
 
-      const error = await failed(assertNoLegacyToolDefinitions(root, {
+      const error = await failed(assertNoUnsealedToolDefinitions(root, {
         directories
       }))
-      expect(error).toBeInstanceOf(LegacyToolDefinitionTamper)
+      expect(error).toBeInstanceOf(UnsealedToolDefinitionTamper)
       expect(error).toMatchObject({ path: candidate })
     }
   })
 
   it("ignores unrelated immediate names and never recurses", async () => {
     const { root, seal } = await makeSeal()
-    const directories = await exactDirectories(join(root, "legacy"))
+    const directories = await exactDirectories(join(root, "unsealed"))
     await writeFile(join(directories.builtin, "README.txt"), "ignored")
     await writeFile(
       join(directories.installed, "almost.airlock-tool.JSON"),
@@ -307,7 +308,7 @@ describe("sealed legacy-definition refusal", () => {
   })
 
   it("derives the project root from each selected workspace", async () => {
-    const root = await mkdtemp(join(tmpdir(), "airlock-legacy-workspace-"))
+    const root = await mkdtemp(join(tmpdir(), "airlock-unsealed-workspace-"))
     const workspaceA = join(root, "workspace-a")
     const workspaceB = join(root, "workspace-b")
     const overrides = {
@@ -316,8 +317,8 @@ describe("sealed legacy-definition refusal", () => {
       homeDirectory: join(root, "home"),
       env: {}
     }
-    const directoriesA = legacyDefinitionDirectories(workspaceA, overrides)
-    const directoriesB = legacyDefinitionDirectories(workspaceB, overrides)
+    const directoriesA = unsealedDefinitionDirectories(workspaceA, overrides)
+    const directoriesB = unsealedDefinitionDirectories(workspaceB, overrides)
     await Promise.all([
       ...Object.values(directoriesA).map((path) => mkdir(path, { recursive: true })),
       mkdir(directoriesB.project, { recursive: true })
@@ -328,18 +329,18 @@ describe("sealed legacy-definition refusal", () => {
     )
     await writeFile(candidate, "never loaded")
 
-    await Effect.runPromise(assertNoLegacyToolDefinitions(workspaceA, overrides))
-    const error = await failed(assertNoLegacyToolDefinitions(
+    await Effect.runPromise(assertNoUnsealedToolDefinitions(workspaceA, overrides))
+    const error = await failed(assertNoUnsealedToolDefinitions(
       workspaceB,
       overrides
     ))
-    expect(error).toBeInstanceOf(LegacyToolDefinitionTamper)
+    expect(error).toBeInstanceOf(UnsealedToolDefinitionTamper)
     expect(error).toMatchObject({ path: candidate })
   })
 
-  it("refuses symlink and non-directory legacy roots as ambiguous paths", async () => {
+  it("refuses symlink and non-directory unsealed roots as ambiguous paths", async () => {
     for (const kind of ["symlink", "file"] as const) {
-      const root = await mkdtemp(join(tmpdir(), `airlock-legacy-root-${kind}-`))
+      const root = await mkdtemp(join(tmpdir(), `airlock-unsealed-root-${kind}-`))
       const directories = new ToolDefinitionDirectories({
         builtin: join(root, "missing-builtin"),
         installed: join(root, "missing-installed"),
@@ -354,10 +355,10 @@ describe("sealed legacy-definition refusal", () => {
         await writeFile(directories.user, "not a directory")
       }
 
-      const error = await failed(assertNoLegacyToolDefinitions(root, {
+      const error = await failed(assertNoUnsealedToolDefinitions(root, {
         directories
       }))
-      expect(error).toBeInstanceOf(LegacyToolDefinitionPathRejected)
+      expect(error).toBeInstanceOf(UnsealedToolDefinitionPathRejected)
       expect(error).toMatchObject({
         location: { kind: "user" },
         reason: kind === "symlink" ? "symlink" : "not-directory"

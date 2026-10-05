@@ -45,40 +45,40 @@ export class SealedCatalogExportFailed
     }
   ) {}
 
-/** An immediate legacy definition name is tamper evidence in sealed mode. */
-export class LegacyToolDefinitionTamper
-  extends Schema.TaggedError<LegacyToolDefinitionTamper>()(
-    "LegacyToolDefinitionTamper",
+/** An immediate unsealed definition name is tamper evidence in sealed mode. */
+export class UnsealedToolDefinitionTamper
+  extends Schema.TaggedError<UnsealedToolDefinitionTamper>()(
+    "UnsealedToolDefinitionTamper",
     {
       location: ToolDefinitionLocation,
       path: Schema.String,
-      reason: Schema.Literal("legacy-definition-present")
+      reason: Schema.Literal("unsealed-definition-present")
     }
   ) {}
 
-export const LegacyToolDefinitionPathReason = Schema.Literals([
+export const UnsealedToolDefinitionPathReason = Schema.Literals([
   "symlink",
   "not-directory",
   "path-component-not-directory",
   "changed-during-scan"
 ])
-export type LegacyToolDefinitionPathReason =
-  typeof LegacyToolDefinitionPathReason.Type
+export type UnsealedToolDefinitionPathReason =
+  typeof UnsealedToolDefinitionPathReason.Type
 
-/** A legacy trust root whose kind cannot be bounded to one exact directory. */
-export class LegacyToolDefinitionPathRejected
-  extends Schema.TaggedError<LegacyToolDefinitionPathRejected>()(
-    "LegacyToolDefinitionPathRejected",
+/** An unsealed trust root whose kind cannot be bounded to one exact directory. */
+export class UnsealedToolDefinitionPathRejected
+  extends Schema.TaggedError<UnsealedToolDefinitionPathRejected>()(
+    "UnsealedToolDefinitionPathRejected",
     {
       location: ToolDefinitionLocation,
-      reason: LegacyToolDefinitionPathReason
+      reason: UnsealedToolDefinitionPathReason
     }
   ) {}
 
 /** Inspection/list failures are refusals, never permission to skip a root. */
-export class LegacyToolDefinitionReadFailed
-  extends Schema.TaggedError<LegacyToolDefinitionReadFailed>()(
-    "LegacyToolDefinitionReadFailed",
+export class UnsealedToolDefinitionReadFailed
+  extends Schema.TaggedError<UnsealedToolDefinitionReadFailed>()(
+    "UnsealedToolDefinitionReadFailed",
     {
       location: ToolDefinitionLocation,
       operation: Schema.Literals(["inspect", "list", "reinspect"]),
@@ -90,13 +90,13 @@ export type SealedCatalogLoadError =
   | SealedCatalogDecodeFailed
   | SealedCatalogExportFailed
 
-export type LegacyToolDefinitionError =
-  | LegacyToolDefinitionTamper
-  | LegacyToolDefinitionPathRejected
-  | LegacyToolDefinitionReadFailed
+export type UnsealedToolDefinitionError =
+  | UnsealedToolDefinitionTamper
+  | UnsealedToolDefinitionPathRejected
+  | UnsealedToolDefinitionReadFailed
 
 /** Exact path overrides are useful to integrations and avoid global HOME edits in tests. */
-export interface LegacyDefinitionDirectoryOverrides {
+export interface UnsealedDefinitionDirectoryOverrides {
   readonly builtin?: string
   readonly installed?: string
   readonly user?: string
@@ -107,13 +107,13 @@ export interface LegacyDefinitionDirectoryOverrides {
   readonly env?: Readonly<Record<string, string | undefined>>
 }
 
-export interface LegacyDefinitionScanOptions
-  extends LegacyDefinitionDirectoryOverrides {
+export interface UnsealedDefinitionScanOptions
+  extends UnsealedDefinitionDirectoryOverrides {
   /** Bypass path derivation with four exact directories. */
   readonly directories?: ToolDefinitionDirectories
 }
 
-export interface SealedToolsOptions extends LegacyDefinitionScanOptions {
+export interface SealedToolsOptions extends UnsealedDefinitionScanOptions {
   /** Defaults to every native name, not merely the grant-enabled subset. */
   readonly nativeActionNames?: ReadonlySet<string>
 }
@@ -121,7 +121,7 @@ export interface SealedToolsOptions extends LegacyDefinitionScanOptions {
 const moduleDirectory = dirname(fileURLToPath(import.meta.url))
 
 /** The built-in location currently loaded by src/cli.ts, expressed from this module. */
-export const DEFAULT_LEGACY_BUILTIN_DEFINITION_DIRECTORY = join(
+export const DEFAULT_UNSEALED_BUILTIN_DEFINITION_DIRECTORY = join(
   moduleDirectory,
   "..",
   "..",
@@ -129,14 +129,14 @@ export const DEFAULT_LEGACY_BUILTIN_DEFINITION_DIRECTORY = join(
 )
 
 /**
- * Build exactly the four immediate legacy roots used by the unsealed CLI:
+ * Build exactly the four immediate roots used by the unsealed CLI:
  * built-in distribution, AIRLOCK_HOME, user config, and selected workspace.
  * This is a finite trust-surface check; it neither claims nor attempts to scan
  * arbitrary disk locations.
  */
-export const legacyDefinitionDirectories = (
+export const unsealedDefinitionDirectories = (
   workspace: string,
-  overrides: LegacyDefinitionDirectoryOverrides = {}
+  overrides: UnsealedDefinitionDirectoryOverrides = {}
 ): ToolDefinitionDirectories => {
   const home = overrides.homeDirectory ?? homedir()
   const env = overrides.env ?? process.env
@@ -145,7 +145,7 @@ export const legacyDefinitionDirectories = (
     join(home, ".airlock")
 
   return new ToolDefinitionDirectories({
-    builtin: overrides.builtin ?? DEFAULT_LEGACY_BUILTIN_DEFINITION_DIRECTORY,
+    builtin: overrides.builtin ?? DEFAULT_UNSEALED_BUILTIN_DEFINITION_DIRECTORY,
     installed: overrides.installed ?? join(airlockHome, "tools"),
     user: overrides.user ?? join(home, ".config", "airlock", "tools"),
     project: overrides.project ?? join(workspace, ".airlock", "tools")
@@ -241,16 +241,16 @@ const osCode = (cause: unknown): string | undefined =>
 
 const pathRejected = (
   location: ToolDefinitionLocation,
-  reason: LegacyToolDefinitionPathReason
-) => new LegacyToolDefinitionPathRejected({ location, reason })
+  reason: UnsealedToolDefinitionPathReason
+) => new UnsealedToolDefinitionPathRejected({ location, reason })
 
 const readFailed = (
   location: ToolDefinitionLocation,
   operation: "inspect" | "list" | "reinspect"
-) => new LegacyToolDefinitionReadFailed({
+) => new UnsealedToolDefinitionReadFailed({
   location,
   operation,
-  reason: `cannot ${operation} exact legacy definition directory`
+  reason: `cannot ${operation} exact unsealed definition directory`
 })
 
 type OptionalDirectory = Stats | undefined
@@ -258,7 +258,7 @@ type OptionalDirectory = Stats | undefined
 const inspectOptionalDirectory = (
   location: ToolDefinitionLocation,
   operation: "inspect" | "reinspect"
-): Effect.Effect<OptionalDirectory, LegacyToolDefinitionPathRejected | LegacyToolDefinitionReadFailed> =>
+): Effect.Effect<OptionalDirectory, UnsealedToolDefinitionPathRejected | UnsealedToolDefinitionReadFailed> =>
   Effect.tryPromise({
     try: async () => {
       try {
@@ -299,7 +299,7 @@ const sameDirectory = (left: Stats, right: Stats) =>
 
 const listImmediateNames = (
   location: ToolDefinitionLocation
-): Effect.Effect<ReadonlyArray<string>, LegacyToolDefinitionPathRejected | LegacyToolDefinitionReadFailed> =>
+): Effect.Effect<ReadonlyArray<string>, UnsealedToolDefinitionPathRejected | UnsealedToolDefinitionReadFailed> =>
   Effect.tryPromise({
     try: () => readdir(location.directory, { withFileTypes: true }),
     catch: (cause) => {
@@ -318,9 +318,9 @@ const listImmediateNames = (
     Effect.map((entries) => entries.map((entry) => entry.name).sort())
   )
 
-const scanLegacyLocation = (
+const scanUnsealedLocation = (
   location: ToolDefinitionLocation
-): Effect.Effect<void, LegacyToolDefinitionError> =>
+): Effect.Effect<void, UnsealedToolDefinitionError> =>
   Effect.gen(function* () {
     const before = yield* inspectOptionalDirectory(location, "inspect")
     if (before === undefined) return
@@ -330,10 +330,10 @@ const scanLegacyLocation = (
       name.endsWith(TOOL_DEFINITION_FILE_SUFFIX)
     )
     if (candidate !== undefined) {
-      return yield* new LegacyToolDefinitionTamper({
+      return yield* new UnsealedToolDefinitionTamper({
         location,
         path: join(location.directory, candidate),
-        reason: "legacy-definition-present"
+        reason: "unsealed-definition-present"
       })
     }
 
@@ -344,34 +344,34 @@ const scanLegacyLocation = (
   })
 
 /**
- * Refuse any immediate legacy `*.airlock-tool.json` name in the four fixed
+ * Refuse any immediate unsealed `*.airlock-tool.json` name in the four fixed
  * roots. Missing roots are allowed. Roots that are symlinks/non-directories or
  * cannot be inspected are refused because their suffix trust is ambiguous.
  * The scan is intentionally non-recursive and never reads definition bytes.
  */
-export const assertNoLegacyToolDefinitions = (
+export const assertNoUnsealedToolDefinitions = (
   workspace: string,
-  options: LegacyDefinitionScanOptions = {}
-): Effect.Effect<void, LegacyToolDefinitionError> => {
+  options: UnsealedDefinitionScanOptions = {}
+): Effect.Effect<void, UnsealedToolDefinitionError> => {
   const directories = options.directories ??
-    legacyDefinitionDirectories(workspace, options)
+    unsealedDefinitionDirectories(workspace, options)
   return Effect.forEach(
     knownToolDefinitionLocations(directories),
-    scanLegacyLocation,
+    scanUnsealedLocation,
     { concurrency: 1, discard: true }
   )
 }
 
-/** Legacy refusal always completes before a verified catalog is mapped. */
+/** Unsealed-definition refusal always completes before a verified catalog is mapped. */
 export const sealedTools = (
   seal: VerifiedSeal,
   workspace: string,
   options: SealedToolsOptions = {}
 ): Effect.Effect<
   ReadonlyArray<ExportedToolAction>,
-  LegacyToolDefinitionError | SealedCatalogLoadError
+  UnsealedToolDefinitionError | SealedCatalogLoadError
 > =>
-  assertNoLegacyToolDefinitions(workspace, options).pipe(
+  assertNoUnsealedToolDefinitions(workspace, options).pipe(
     Effect.andThen(loadVerifiedCatalog(
       seal,
       options.nativeActionNames ?? new Set(
