@@ -3,7 +3,6 @@ import { createHash } from "node:crypto"
 import {
   EmissionId,
   EmissionNotPending,
-  EmissionRequest,
   LedgerEntry,
   UnknownEmission
 } from "./domain.ts"
@@ -63,8 +62,6 @@ export const DISPATCH_RESPONSE_LIMIT_BYTES = 65_536
 /** Construction bound for connection plus bounded response capture. */
 export const OUTBOX_DISPATCH_TIMEOUT_MILLIS = 30_000
 
-type StageInput = EmissionRequest | ExternalIntent
-
 type StageError =
   | InvalidHoldDuration
   | InvalidOutboxIntent
@@ -114,7 +111,7 @@ export class Outbox extends Context.Service<
   Outbox,
   {
     readonly stage: (
-      request: StageInput,
+      request: ExternalIntent,
       holdMillis: number,
       authorization?: StagedDispatchAuthorization
     ) => Effect.Effect<OutboxEmission, StageError>
@@ -124,12 +121,11 @@ export class Outbox extends Context.Service<
     /**
      * The only wire-capable operation. `provenance` is recorded, never
      * interpreted: a caller acting on a supervisor grant supplies the grant
-     * identity and effective class, and omitting it records a bare manual
-     * supervisor commit exactly as before.
+     * identity and effective class; a manual commit names the supervisor.
      */
     readonly commit: (
       id: EmissionId,
-      provenance?: DispatchProvenance
+      provenance: DispatchProvenance
     ) => Effect.Effect<OutboxEmission, CommitError>
     readonly cancel: (
       id: EmissionId
@@ -269,29 +265,14 @@ const manifestAuthorizationMatches = (
 }
 
 const asHttpIntent = (
-  request: StageInput
-): Effect.Effect<
-  HttpExternalIntent,
-  InvalidOutboxIntent | UnsupportedExternalIntent
-> =>
-  Effect.gen(function* () {
-    if ("_tag" in request) {
-      if (request._tag === "ExternalCommandIntent") {
-        return yield* new UnsupportedExternalIntent({
-          kind: "external-command",
-          reason:
-            "external commands require an admitted Cell execution closure"
-        })
-      }
-      return request
-    }
-    return new HttpExternalIntent({
-      url: request.url,
-      method: request.method,
-      headers: request.headers,
-      ...(request.body === undefined ? {} : { body: request.body })
-    })
-  })
+  request: ExternalIntent
+): Effect.Effect<HttpExternalIntent, UnsupportedExternalIntent> =>
+  request._tag === "ExternalCommandIntent"
+    ? Effect.fail(new UnsupportedExternalIntent({
+        kind: "external-command",
+        reason: "external commands require an admitted Cell execution closure"
+      }))
+    : Effect.succeed(request)
 
 const validateHttpIntent = (intent: HttpExternalIntent) =>
   Effect.try({
@@ -431,7 +412,7 @@ const make = Effect.gen(function* () {
     )
 
   const stage = Effect.fn("Outbox.stage")(function* (
-    request: StageInput,
+    request: ExternalIntent,
     holdMillis: number,
     authorization?: StagedDispatchAuthorization
   ) {
@@ -517,9 +498,7 @@ const make = Effect.gen(function* () {
   // call in Outbox; all other methods manipulate inert durable state.
   const commit = Effect.fn("Outbox.commit")(function* (
     id: EmissionId,
-    provenance: DispatchProvenance = new DispatchProvenance({
-      committedBy: "supervisor"
-    })
+    provenance: DispatchProvenance
   ) {
     return yield* store.withExclusive(Effect.uninterruptibleMask((restore) =>
       Effect.gen(function* () {
@@ -608,7 +587,6 @@ const make = Effect.gen(function* () {
       const completedAt = yield* DateTime.now
       const outcome = new OutboxOutcome({
         status: delivered.success.status,
-        responseBytes: delivered.success.bytes.byteLength,
         response: new RedactedDispatchResponse({
           status: delivered.success.status,
           ...(delivered.success.contentType === undefined
@@ -776,7 +754,11 @@ const make = Effect.gen(function* () {
     const committed: Array<OutboxEmission> = []
     const failed: Array<string> = []
     for (const emission of due) {
-      const result = yield* commit(emission.id).pipe(Effect.result)
+      // Flush is the supervisor releasing every hold that has run out.
+      const result = yield* commit(
+        emission.id,
+        new DispatchProvenance({ committedBy: "supervisor" })
+      ).pipe(Effect.result)
       if (result._tag === "Success") {
         committed.push(result.success)
       } else if (result.failure._tag === "OutboxRecoveryRequired") {

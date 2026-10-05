@@ -4,17 +4,20 @@ import { describe, expect, it } from "@effect/vitest"
 import * as http from "node:http"
 import type { AddressInfo } from "node:net"
 import * as AirlockHome from "../src/AirlockHome.ts"
-import { EmissionRequest } from "../src/domain.ts"
 import {
   Ledger,
   LedgerFilesystemError
 } from "../src/Ledger.ts"
 import {
+  DispatchProvenance,
+  HttpExternalIntent,
   Outbox,
   OutboxLive
 } from "../src/Outbox.ts"
 
 type LedgerAct = "stage" | "commit" | "cancel"
+
+const bySupervisor = new DispatchProvenance({ committedBy: "supervisor" })
 
 const failingLedger = (failedAct: LedgerAct) =>
   Layer.succeed(
@@ -86,7 +89,7 @@ const withWorld = <A, E>(
   ).pipe(Effect.provide(BunServices.layer))
 
 const post = (url: string) =>
-  new EmissionRequest({
+  new HttpExternalIntent({
     url,
     method: "POST",
     body: "payload"
@@ -121,7 +124,7 @@ describe("Outbox — ledger recovery receipts", () => {
     withWorld("commit", ({ outbox, received, url }) =>
       Effect.gen(function* () {
         const staged = yield* outbox.stage(post(url), 0)
-        const failure = yield* outbox.commit(staged.id).pipe(Effect.flip)
+        const failure = yield* outbox.commit(staged.id, bySupervisor).pipe(Effect.flip)
         expect(failure._tag).toBe("OutboxRecoveryRequired")
         if (failure._tag !== "OutboxRecoveryRequired") return
 
@@ -140,7 +143,7 @@ describe("Outbox — ledger recovery receipts", () => {
         expect(yield* outbox.inspect(staged.id)).toEqual(failure.emission)
         expect(received()).toBe(1)
 
-        const retry = yield* outbox.commit(staged.id).pipe(Effect.flip)
+        const retry = yield* outbox.commit(staged.id, bySupervisor).pipe(Effect.flip)
         expect(retry._tag).toBe("EmissionNotPending")
         expect(received()).toBe(1)
       })

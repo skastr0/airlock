@@ -171,11 +171,10 @@ export class RedactedDispatchResponse extends Schema.Class<RedactedDispatchRespo
 
 export class OutboxOutcome extends Schema.Class<OutboxOutcome>("OutboxOutcome")({
   status: Schema.Finite,
-  responseBytes: Schema.optionalKey(Schema.Finite),
-  /** Present once a dispatch completed; describes the bounded capture. */
-  response: Schema.optionalKey(RedactedDispatchResponse),
-  /** Present once a dispatch completed; names the authority that committed. */
-  provenance: Schema.optionalKey(DispatchProvenance),
+  /** Describes the bounded capture. */
+  response: RedactedDispatchResponse,
+  /** Names the authority that committed. */
+  provenance: DispatchProvenance,
   completedAt: Schema.DateTimeUtcFromString
 }) {}
 
@@ -199,15 +198,6 @@ export class PersistedOutboxManifest extends Schema.Class<PersistedOutboxManifes
   schemaVersion: Schema.Literal("airlock/outbox-manifest/v1"),
   id: EmissionId,
   intent: HttpIntentSummary,
-  // Read-only: manifests staged before the redacted `request` view was removed
-  // carry it, and the manifest decoder rejects unknown keys. It is accepted so
-  // that state stays readable, never written, and never surfaced.
-  request: Schema.optionalKey(Schema.Struct({
-    method: HttpMethod,
-    url: Schema.String,
-    headers: Schema.Record(Schema.String, Schema.String),
-    body: Schema.optionalKey(Schema.String)
-  })),
   stagedAt: Schema.DateTimeUtcFromString,
   holdUntil: Schema.DateTimeUtcFromString,
   /** Exact digest of dispatch.json; commit refuses any post-stage substitution. */

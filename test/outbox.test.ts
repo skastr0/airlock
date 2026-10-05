@@ -4,9 +4,15 @@ import { describe, expect, it } from "@effect/vitest"
 import * as http from "node:http"
 import type { AddressInfo } from "node:net"
 import * as AirlockHome from "../src/AirlockHome.ts"
-import { EmissionRequest } from "../src/domain.ts"
 import { LedgerLive } from "../src/Ledger.ts"
-import { Outbox, OutboxLive } from "../src/Outbox.ts"
+import {
+  DispatchProvenance,
+  HttpExternalIntent,
+  Outbox,
+  OutboxLive
+} from "../src/Outbox.ts"
+
+const bySupervisor = new DispatchProvenance({ committedBy: "supervisor" })
 
 const layersFor = (home: string) =>
   OutboxLive.pipe(
@@ -67,7 +73,7 @@ const world = <A, E>(body: (ctx: World) => Effect.Effect<A, E>) =>
   ).pipe(Effect.provide(BunServices.layer))
 
 const post = (url: string) =>
-  new EmissionRequest({ url, method: "POST", body: "payload" })
+  new HttpExternalIntent({ url, method: "POST", body: "payload" })
 
 describe("Outbox — cancellable emissions", () => {
   it.effect("staging sends nothing", () =>
@@ -90,7 +96,7 @@ describe("Outbox — cancellable emissions", () => {
         expect(received()).toBe(0)
 
         // a cancelled emission cannot be committed
-        const error = yield* outbox.commit(emission.id).pipe(Effect.flip)
+        const error = yield* outbox.commit(emission.id, bySupervisor).pipe(Effect.flip)
         expect(error._tag).toBe("EmissionNotPending")
         expect(received()).toBe(0)
       })
@@ -101,13 +107,13 @@ describe("Outbox — cancellable emissions", () => {
     world(({ outbox, received, url }) =>
       Effect.gen(function* () {
         const emission = yield* outbox.stage(post(url), 60_000)
-        const committed = yield* outbox.commit(emission.id)
+        const committed = yield* outbox.commit(emission.id, bySupervisor)
         expect(committed.status).toBe("committed")
         expect(committed.outcome?.status).toBe(200)
         expect(received()).toBe(1)
 
         // committing twice is unrepresentable in state
-        const error = yield* outbox.commit(emission.id).pipe(Effect.flip)
+        const error = yield* outbox.commit(emission.id, bySupervisor).pipe(Effect.flip)
         expect(error._tag).toBe("EmissionNotPending")
         expect(received()).toBe(1)
       })
@@ -132,7 +138,7 @@ describe("Outbox — cancellable emissions", () => {
     world(({ home, outbox, received, url }) =>
       Effect.gen(function* () {
         const staged = yield* outbox.stage(post(url.replace("/hook", "/slow")), 0)
-        const committing = yield* Effect.forkChild(outbox.commit(staged.id))
+        const committing = yield* Effect.forkChild(outbox.commit(staged.id, bySupervisor))
         yield* Effect.callback<void>((resume) => {
           const timer = setTimeout(() => resume(Effect.void), 25)
           return Effect.sync(() => clearTimeout(timer))

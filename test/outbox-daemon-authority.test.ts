@@ -4,14 +4,16 @@ import { describe, expect, it } from "@effect/vitest"
 import * as http from "node:http"
 import type { AddressInfo } from "node:net"
 import * as AirlockHome from "../src/AirlockHome.ts"
-import { EmissionRequest } from "../src/domain.ts"
 import { LedgerLive } from "../src/Ledger.ts"
 import {
   DispatchProvenance,
+  HttpExternalIntent,
   Outbox,
   OutboxLive,
   StagedDispatchAuthorization
 } from "../src/Outbox.ts"
+
+const bySupervisor = new DispatchProvenance({ committedBy: "supervisor" })
 
 const sealDigest = `sha256:${"a".repeat(64)}`
 const otherSealDigest = `sha256:${"b".repeat(64)}`
@@ -79,7 +81,7 @@ const authorizationFor = (endpoint: string) =>
   })
 
 const post = (url: string, body: string) =>
-  new EmissionRequest({
+  new HttpExternalIntent({
     url,
     method: "POST",
     headers: { authorization: "Bearer private-token" },
@@ -221,53 +223,6 @@ describe("Outbox — persisted daemon dispatch authority", () => {
           document: "manifest.json"
         })
         expect(received()).toBe(0)
-      })
-    )
-  )
-
-  it.effect("still reads and commits a manifest written with the removed request view", () =>
-    withWorld(({ fs, path, home, outbox, baseUrl, received }) =>
-      Effect.gen(function* () {
-        const endpoint = `${baseUrl}/read`
-        const staged = yield* outbox.stage(post(endpoint, "old-shape-body"), 60_000)
-        const manifestPath = path.join(
-          home,
-          "outbox",
-          `${staged.id}.staged`,
-          "manifest.json"
-        )
-        const current = JSON.parse(
-          yield* fs.readFileString(manifestPath)
-        ) as Record<string, unknown>
-        expect(current).not.toHaveProperty("request")
-
-        // The exact shape earlier Airlock versions persisted next to `intent`.
-        const oldShape = {
-          schemaVersion: current.schemaVersion,
-          id: current.id,
-          intent: current.intent,
-          request: {
-            method: "POST",
-            url: endpoint,
-            headers: {},
-            body: "[redacted:14 bytes]"
-          },
-          stagedAt: current.stagedAt,
-          holdUntil: current.holdUntil,
-          dispatchDigest: current.dispatchDigest
-        }
-        yield* fs.writeFileString(manifestPath, JSON.stringify(oldShape))
-
-        const restarted = yield* Effect.provide(Outbox, layersFor(home))
-        const inspected = yield* restarted.inspect(staged.id)
-        expect(inspected.status).toBe("staged")
-        expect(inspected.intent).toEqual(staged.intent)
-        expect(inspected).not.toHaveProperty("request")
-        expect((yield* restarted.pending).map((emission) => emission.id)).toEqual([staged.id])
-
-        const committed = yield* restarted.commit(staged.id)
-        expect(committed.status).toBe("committed")
-        expect(received()).toBe(1)
       })
     )
   )

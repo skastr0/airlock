@@ -116,8 +116,6 @@ export const makeFileOutboxStore = Effect.gen(function* () {
     path.join(home.outboxDir, `${id}.${state}`)
   const lockRoot = path.join(home.home, "outbox-locks")
   const activeLock = path.join(lockRoot, "active")
-  const releasedLock = path.join(lockRoot, "released")
-  const abandonedLock = path.join(lockRoot, "abandoned")
 
   const validateId = (id: EmissionId) =>
     safeIdPattern.test(id)
@@ -189,8 +187,6 @@ export const makeFileOutboxStore = Effect.gen(function* () {
   const lock = makeExclusiveFileLock({
     root: lockRoot,
     active: activeLock,
-    released: releasedLock,
-    abandoned: abandonedLock,
     onError: (operation, _target, cause) =>
       fail(`lock-${operation}`, cause)
   })

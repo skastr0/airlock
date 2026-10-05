@@ -4,13 +4,16 @@ import { describe, expect, it } from "@effect/vitest"
 import * as http from "node:http"
 import type { AddressInfo } from "node:net"
 import * as AirlockHome from "../src/AirlockHome.ts"
-import { EmissionRequest } from "../src/domain.ts"
 import { Ledger, LedgerLive } from "../src/Ledger.ts"
 import {
+  DispatchProvenance,
   ExternalCommandIntent,
+  HttpExternalIntent,
   Outbox,
   OutboxLive
 } from "../src/Outbox.ts"
+
+const bySupervisor = new DispatchProvenance({ committedBy: "supervisor" })
 
 const layersFor = (home: string) =>
   OutboxLive.pipe(
@@ -75,7 +78,7 @@ const post = (
     readonly headers?: Readonly<Record<string, string>>
   }
 ) =>
-  new EmissionRequest({
+  new HttpExternalIntent({
     url,
     method: "POST",
     ...(options?.body === undefined ? {} : { body: options.body }),
@@ -89,8 +92,8 @@ describe("Outbox — durable dispatch boundary", () => {
         const staged = yield* outbox.stage(post(url), 60_000)
         const results = yield* Effect.all(
           [
-            outbox.commit(staged.id).pipe(Effect.result),
-            outbox.commit(staged.id).pipe(Effect.result)
+            outbox.commit(staged.id, bySupervisor).pipe(Effect.result),
+            outbox.commit(staged.id, bySupervisor).pipe(Effect.result)
           ],
           { concurrency: "unbounded" }
         )
@@ -132,7 +135,7 @@ describe("Outbox — durable dispatch boundary", () => {
           60_000
         )
 
-        const committed = yield* outbox.commit(staged.id)
+        const committed = yield* outbox.commit(staged.id, bySupervisor)
         expect(committed.outcome?.status).toBe(302)
         expect(originHits).toBe(1)
         expect(received()).toBe(0)
@@ -148,11 +151,11 @@ describe("Outbox — durable dispatch boundary", () => {
           60_000
         )
 
-        const first = yield* outbox.commit(staged.id).pipe(Effect.flip)
+        const first = yield* outbox.commit(staged.id, bySupervisor).pipe(Effect.flip)
         expect(first._tag).toBe("EmissionDispatchUncertain")
         expect((yield* outbox.inspect(staged.id)).status).toBe("uncertain")
 
-        const retry = yield* outbox.commit(staged.id).pipe(Effect.flip)
+        const retry = yield* outbox.commit(staged.id, bySupervisor).pipe(Effect.flip)
         expect(retry._tag).toBe("EmissionNotPending")
         expect((yield* outbox.pending).map((item) => item.id)).not.toContain(
           staged.id
@@ -175,7 +178,7 @@ describe("Outbox — durable dispatch boundary", () => {
         expect((yield* restarted.inspect(staged.id)).status).toBe("uncertain")
         expect(received()).toBe(0)
 
-        const retry = yield* restarted.commit(staged.id).pipe(Effect.flip)
+        const retry = yield* restarted.commit(staged.id, bySupervisor).pipe(Effect.flip)
         expect(retry._tag).toBe("EmissionNotPending")
         expect(received()).toBe(0)
       })
