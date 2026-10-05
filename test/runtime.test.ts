@@ -322,20 +322,19 @@ describe("runtime Plan interpreter", () => {
         expect(existsSync(join(home, "outbox"))).toBe(true)
         const [stateDirectory] = readdirSync(join(home, "outbox"))
         expect(stateDirectory).toMatch(/^emi_.+\.staged$/)
-        const manifestText = readFileSync(
-          join(home, "outbox", stateDirectory!, "manifest.json"),
+        const recordText = readFileSync(
+          join(home, "outbox", stateDirectory!, "record.staged.json"),
           "utf8"
         )
-        const manifest = JSON.parse(manifestText) as {
-          readonly intent: { readonly headerNames: ReadonlyArray<string>; readonly bodyBytes: number }
+        const record = JSON.parse(recordText) as {
+          readonly summary: { readonly headerNames: ReadonlyArray<string>; readonly bodyBytes: number }
         }
-        expect(manifest.intent.headerNames).toEqual(["authorization", "content-type"])
-        expect(manifest.intent.bodyBytes).toBe(new TextEncoder().encode("{\"phase\":\"stage-only\"}").byteLength)
-        // The manifest summarizes the request; no header value or body text
-        // reaches it in any field.
-        expect(manifest).not.toHaveProperty("request")
-        expect(manifestText).not.toContain("never-expose")
-        expect(manifestText).not.toContain("stage-only")
+        expect(record.summary.headerNames).toEqual(["authorization", "content-type"])
+        expect(record.summary.bodyBytes).toBe(new TextEncoder().encode("{\"phase\":\"stage-only\"}").byteLength)
+        // The public record summarizes the request; no header value or body
+        // text reaches it in any field.
+        expect(recordText).not.toContain("never-expose")
+        expect(recordText).not.toContain("stage-only")
       }))
     )
   )

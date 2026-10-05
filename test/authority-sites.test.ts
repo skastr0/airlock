@@ -12,12 +12,23 @@ const matches = (pattern: RegExp) => files.flatMap(({ file, source }) =>
 )
 
 describe("terminal authority construction sites", () => {
-  it("has exactly one wire call and it remains in Outbox.commit", () => {
+  it("has exactly one wire call, in the host HTTP handler, behind a live permit", () => {
     const wire = matches(/\bfetch\s*\(/g)
     expect(wire).toHaveLength(1)
-    expect(wire[0]?.file).toBe("Outbox.ts")
-    expect(files.find(({ file }) => file === "Outbox.ts")?.source)
-      .toContain('const commit = Effect.fn("Outbox.commit")')
+    expect(wire[0]?.file).toBe("host/HttpDispatcher.ts")
+    const source = files.find(({ file }) => file === "host/HttpDispatcher.ts")!.source
+    const handler = source.indexOf('Effect.fn("HttpDispatcher.dispatch")')
+    const permitCheck = source.indexOf("isLivePermit(request.permit)")
+    // The handler refuses a permit that is not live before it builds a request.
+    expect(handler).toBeGreaterThan(-1)
+    expect(permitCheck).toBeGreaterThan(handler)
+    expect(wire[0]!.index).toBeGreaterThan(permitCheck)
+  })
+
+  it("keeps the kernel free of any wire call", () => {
+    expect(matches(/\bfetch\s*\(/g).filter(({ file }) => file.startsWith("core/"))).toEqual([])
+    const globals = matches(/\b(?:XMLHttpRequest|WebSocket|EventSource)\b/g)
+    expect(globals.filter(({ file }) => file.startsWith("core/"))).toEqual([])
   })
 
   it("has exactly one physical deletion and it remains in Hold.reap", () => {

@@ -458,17 +458,17 @@ export const runVouchProof = async (): Promise<VouchProofReport> => {
         const pending = yield* outbox.pending
         assert(pending.length === 1, "expected one staged external intent")
         const staged = pending[0]!
-        assert(staged.status === "staged", "external intent was not left staged")
+        assert(staged.state === "staged", "external intent was not left staged")
         assert(
-          staged.intent.endpoint === endpoint,
+          staged.summary.endpoint === endpoint,
           "staged endpoint does not match the admitted endpoint"
         )
         assert(
-          staged.intent.bodyBytes === Buffer.byteLength(externalBody),
+          staged.summary.bodyBytes === Buffer.byteLength(externalBody),
           "Runtime did not preserve the external body"
         )
         assert(
-          JSON.stringify(staged.intent.headerNames) ===
+          JSON.stringify(staged.summary.headerNames) ===
             JSON.stringify(Object.keys(externalHeaders).sort()),
           "Runtime did not preserve external header names"
         )
@@ -479,7 +479,12 @@ export const runVouchProof = async (): Promise<VouchProofReport> => {
           `${staged.id}.staged`,
           "dispatch.json"
         )
-        const privateDispatch = JSON.parse(readFileSync(dispatchPath, "utf8")) as {
+        // The store keeps the dispatch sealed: the kernel's canonical JSON
+        // beside its digest.
+        const sealedDispatch = JSON.parse(readFileSync(dispatchPath, "utf8")) as {
+          readonly canonical: string
+        }
+        const privateDispatch = JSON.parse(sealedDispatch.canonical) as {
           readonly body?: string
           readonly headers?: Record<string, string>
           readonly method?: string
@@ -566,12 +571,12 @@ export const runVouchProof = async (): Promise<VouchProofReport> => {
             restoredSessionPresent: true
           },
           outbox: {
-            status: staged.status,
+            status: staged.state,
             dispatchCalls,
-            endpoint: staged.intent.endpoint,
-            method: staged.intent.method,
-            headerNames: [...staged.intent.headerNames],
-            bodyBytes: staged.intent.bodyBytes,
+            endpoint: staged.summary.endpoint,
+            method: staged.summary.method,
+            headerNames: [...staged.summary.headerNames],
+            bodyBytes: staged.summary.bodyBytes,
             privateDispatchPreserved,
             privateDispatchMode
           },

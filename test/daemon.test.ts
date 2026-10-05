@@ -18,18 +18,19 @@ import {
   handleDaemonRequest,
   requireDaemonHealth
 } from "../src/daemon/index.ts"
-import { ActId, EmissionId, ReapReport } from "../src/core/domain.ts"
-import { Hold } from "../src/Hold.ts"
+import { ActId, ReapReport } from "../src/core/domain.ts"
 import {
+  Canonical,
+  DispatchAuthorization,
+  DispatchProvenance,
   EmissionDispatchUncertain,
-  Outbox,
-  OutboxEmission,
-  StagedDispatchAuthorization,
-  type DispatchProvenance
-} from "../src/Outbox.ts"
-import {
-  HttpIntentSummary
-} from "../src/outbox/Contract.ts"
+  EmissionId,
+  IdempotencyKey,
+  ResponseCapture,
+  StagedEmission
+} from "../src/core/index.ts"
+import { Hold } from "../src/Hold.ts"
+import { Outbox, type OutboxEmission } from "../src/Outbox.ts"
 import {
   SealVerificationFailed,
   VerifiedSeal
@@ -73,6 +74,12 @@ const seal = (daemonOps: ReadonlyArray<BoxGrantDaemonOp>) =>
     catalog: []
   })
 
+type Staged = Extract<OutboxEmission, { readonly state: "staged" }>
+type Committed = Extract<OutboxEmission, { readonly state: "committed" }>
+
+const emissionId = (suffix: string) =>
+  EmissionId.make(`emi_${Buffer.from(suffix).toString("hex").padEnd(32, "0").slice(0, 32)}`)
+
 const emission = (
   suffix: string,
   options: {
@@ -81,41 +88,65 @@ const emission = (
     readonly authorized?: boolean
     readonly grantSelector?: string
   } = {}
-) => {
+): Staged => {
   const endpoint = `https://status.example/${suffix}`
-  return new OutboxEmission({
-    id: EmissionId.make(`emi_${suffix.padEnd(8, "x")}`),
-    status: "staged",
-    intent: new HttpIntentSummary({
+  const summary = {
+    method: "GET" as const,
+    endpoint,
+    target: endpoint,
+    headerNames: [],
+    bodyBytes: 0
+  }
+  return {
+    ...new StagedEmission({
+      id: emissionId(suffix),
+      key: IdempotencyKey.make(`daemon-test:${suffix}`),
       kind: "http",
-      method: "GET",
-      endpoint,
-      headerNames: [],
-      bodyBytes: 0
-    }),
-    stagedAt: at,
-    holdUntil: options.holdUntil ?? at,
-    ...(options.authorized === false
-      ? {}
-      : {
-        authorization: new StagedDispatchAuthorization({
-          sealDigest: options.digest ?? sealDigest,
-          grantId: `grant/${suffix}`,
-          grantSelector: options.grantSelector ?? "https://status.example/*",
-          dispatchClass: "read",
-          endpoint
+      dispatchDigest: Canonical.Sha256Digest.make(otherDigest),
+      requestDigest: Canonical.Sha256Digest.make(otherDigest),
+      summary,
+      ledgered: ["stage"],
+      stagedAt: at,
+      holdUntil: options.holdUntil ?? at,
+      ...(options.authorized === false
+        ? {}
+        : {
+          authorization: new DispatchAuthorization({
+            sealDigest: Canonical.Sha256Digest.make(options.digest ?? sealDigest),
+            grantId: `grant/${suffix}`,
+            grantSelector: options.grantSelector ?? "https://status.example/*",
+            dispatchClass: "read",
+            target: endpoint
+          })
         })
-      })
-  })
+    }),
+    kind: "http",
+    summary
+  }
+}
+
+/** What the kernel returns for a staged emission the fake wire delivered. */
+const delivered = (staged: Staged, provenance: DispatchProvenance): Committed => {
+  const { state: _state, ...identity } = staged
+  return {
+    ...identity,
+    state: "committed",
+    ledgered: ["stage", "commit"],
+    provenance,
+    committingAt: at,
+    outcome: { status: 200 },
+    capture: new ResponseCapture({ retainedBytes: 0, truncated: false, limitBytes: 65_536 }),
+    completedAt: at
+  }
 }
 
 type FakeOutboxOptions = {
-  readonly pending?: () => ReadonlyArray<OutboxEmission>
+  readonly pending?: () => ReadonlyArray<Staged>
   readonly onPendingAuthorized?: (digest: string) => void
   readonly onCommit?: (
     id: EmissionId,
-    provenance: DispatchProvenance | undefined
-  ) => Effect.Effect<OutboxEmission, EmissionDispatchUncertain>
+    provenance: DispatchProvenance
+  ) => Effect.Effect<Committed, EmissionDispatchUncertain>
   readonly onFlush?: () => void
 }
 
@@ -178,7 +209,7 @@ describe("Daemon supervisor component", () => {
     const wrongSeal = emission("wrongseal", { digest: otherDigest })
     const manual = emission("manual", { authorized: false })
     const sequence: Array<string> = []
-    const provenance: Array<DispatchProvenance | undefined> = []
+    const provenance: Array<DispatchProvenance> = []
     const reaped = ActId.make("act_reaped-fixture")
     const outbox = fakeOutbox({
       pending: () => [first, wrongSeal, manual, second],
@@ -188,7 +219,7 @@ describe("Daemon supervisor component", () => {
       onCommit: (id, value) => Effect.sync(() => {
         sequence.push(`commit:${id}`)
         provenance.push(value)
-        return id === first.id ? first : second
+        return delivered(id === first.id ? first : second, value)
       })
     })
     const hold = fakeHold((olderThanMillis) => Effect.sync(() => {
@@ -224,13 +255,13 @@ describe("Daemon supervisor component", () => {
             grantId: "grant/first",
             grantSelector: "https://status.example/*",
             dispatchClass: "read",
-            endpoint: first.intent.endpoint
+            target: first.summary.target
           }),
           expect.objectContaining({
             committedBy: "policy-auto",
             grantId: "grant/second",
             dispatchClass: "read",
-            endpoint: second.intent.endpoint
+            target: second.summary.target
           })
         ])
       }))
@@ -306,9 +337,9 @@ describe("Daemon supervisor component", () => {
     let checks = 0
     const outbox = fakeOutbox({
       pending: () => [first, second],
-      onCommit: (id) => Effect.sync(() => {
+      onCommit: (id, value) => Effect.sync(() => {
         sequence.push(`commit:${id}`)
-        return id === first.id ? first : second
+        return delivered(id === first.id ? first : second, value)
       })
     })
     const failure = new SealVerificationFailed({
@@ -352,9 +383,9 @@ describe("Daemon supervisor component", () => {
     const committed: Array<EmissionId> = []
     const outbox = fakeOutbox({
       pending: () => [due, waiting],
-      onCommit: (id) => Effect.sync(() => {
+      onCommit: (id, value) => Effect.sync(() => {
         committed.push(id)
-        return due
+        return delivered(due, value)
       }),
       onFlush: () => { blanketFlushCalls += 1 }
     })
@@ -383,7 +414,7 @@ describe("Daemon supervisor component", () => {
         staged = false
         return Effect.fail(new EmissionDispatchUncertain({
           id,
-          reason: "transport-failed"
+          reason: "dispatch-failed"
         }))
       })
     })

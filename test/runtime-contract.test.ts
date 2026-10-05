@@ -19,14 +19,8 @@ import {
   NativeStat,
   NativeWriteReceipt
 } from "../src/native/index.ts"
-import {
-  Outbox,
-  OutboxEmission,
-  StagedDispatchAuthorization
-} from "../src/Outbox.ts"
-import {
-  HttpIntentSummary,
-} from "../src/outbox/Contract.ts"
+import { Canonical, DispatchAuthorization } from "../src/core/index.ts"
+import { stagingOnlyOutbox } from "./support/TestOutbox.ts"
 import {
   ApplyNode,
   ArtifactId,
@@ -229,43 +223,19 @@ const nativeLayer = (calls: Array<NativeCall>) =>
 const outboxLayer = (
   requests: Array<string>,
   options: {
-    readonly authorizations?: Array<StagedDispatchAuthorization | undefined>
+    readonly authorizations?: Array<DispatchAuthorization | undefined>
     readonly commits?: Array<string>
   } = {}
 ) =>
-  Layer.succeed(Outbox, Outbox.of({
-    stage: (request, holdMillis, authorization) => {
-      if (request._tag !== "HttpExternalIntent") return Effect.die("external command intent is not a Plan v1 node")
-      requests.push(request.url)
+  // These plans carry no inline dispatch authorization, so staging is the
+  // whole lowering: a commit here would be an unauthorized second effect.
+  stagingOnlyOutbox({
+    staged: ({ url, authorization }) => {
+      requests.push(url)
       options.authorizations?.push(authorization)
-      return Effect.succeed(new OutboxEmission({
-        id: EmissionId.make(`emi_${crypto.randomUUID()}`),
-        status: "staged",
-        intent: new HttpIntentSummary({
-          kind: "http",
-          method: request.method,
-          endpoint: request.url,
-          headerNames: Object.keys(request.headers).sort(),
-          bodyBytes: encoder.encode(request.body ?? "").byteLength
-        }),
-        stagedAt: timestamp,
-        holdUntil: DateTime.add(timestamp, { milliseconds: holdMillis }),
-        ...(authorization === undefined ? {} : { authorization })
-      }))
     },
-    inspect: () => Effect.die("unused"),
-    // These plans carry no dispatch authorization, so staging is the whole
-    // lowering: a commit here would be an unauthorized second effect.
-    commit: (id) => {
-      options.commits?.push(id)
-      return Effect.die("Runtime must not commit through this test Outbox")
-    },
-    cancel: () => Effect.die("unused"),
-    response: () => Effect.die("unused"),
-    pending: Effect.succeed([]),
-    pendingAuthorized: () => Effect.succeed([]),
-    flush: Effect.die("Runtime never flushes Outbox")
-  }))
+    committed: (id) => { options.commits?.push(id) }
+  })
 
 const runtimeLayer = (
   runner: ProcessRun,
@@ -273,7 +243,7 @@ const runtimeLayer = (
     readonly profile?: "compatibility" | "native-contained"
     readonly nativeCalls?: Array<NativeCall>
     readonly externalRequests?: Array<string>
-    readonly stagedAuthorizations?: Array<StagedDispatchAuthorization | undefined>
+    readonly stagedAuthorizations?: Array<DispatchAuthorization | undefined>
     readonly commits?: Array<string>
   } = {}
 ) =>
@@ -312,15 +282,15 @@ describe("Runtime total Plan contract", () => {
   it.effect("persists sealed read authority and never auto-commits inline", () => {
     const endpoint = "https://status.internal.example/v1/health"
     const id = nodeId("sealed-external")
-    const authorizations: Array<StagedDispatchAuthorization | undefined> = []
+    const authorizations: Array<DispatchAuthorization | undefined> = []
     const commits: string[] = []
     const externalRequests: string[] = []
-    const stagedAuthorization = new StagedDispatchAuthorization({
-      sealDigest: `sha256:${"a".repeat(64)}`,
+    const stagedAuthorization = new DispatchAuthorization({
+      sealDigest: Canonical.Sha256Digest.make(`sha256:${"a".repeat(64)}`),
       grantId: "grant/read-health",
       grantSelector: "https://status.internal.example/v1/*",
       dispatchClass: "read",
-      endpoint
+      target: endpoint
     })
     const dispatch = new RuntimeDispatchAuthorization({
       nodeId: id,

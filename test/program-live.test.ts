@@ -32,11 +32,9 @@ import {
   RuntimeProcessEvidence,
   RuntimeRun
 } from "../src/runtime/index.ts"
-import { OutboxEmission } from "../src/Outbox.ts"
-import {
-  HttpIntentSummary,
-} from "../src/outbox/Contract.ts"
-import { ActId, EmissionId, RemoveReceipt } from "../src/core/domain.ts"
+import { EmissionId, EmissionRecord } from "../src/core/index.ts"
+import { ActId, RemoveReceipt } from "../src/core/domain.ts"
+import { stagedHttpRecord } from "./support/TestOutbox.ts"
 import { HoldRecoveryRequired } from "../src/Hold.ts"
 import { ProcessReceipt } from "../src/process/Process.ts"
 
@@ -268,17 +266,13 @@ const RuntimeTest = Layer.succeed(Runtime, Runtime.of({
           staged.push(node.endpoint)
           artifacts.push(encodedArtifact(
             id,
-            OutboxEmission,
-            new OutboxEmission({
-              id: EmissionId.make("emi_test"),
-              status: "staged",
-              intent: new HttpIntentSummary({
-                kind: "http",
-                method: node.method,
-                endpoint: node.endpoint,
-                headerNames: Object.keys(node.headers),
-                bodyBytes: encoder.encode(node.body ?? "").byteLength
-              }),
+            EmissionRecord,
+            stagedHttpRecord({
+              id: EmissionId.make(`emi_${"0".repeat(32)}`),
+              url: node.endpoint,
+              method: node.method,
+              headers: node.headers,
+              ...(node.body === undefined ? {} : { body: node.body }),
               stagedAt: now,
               holdUntil: DateTime.add(now, { milliseconds: node.holdMillis })
             }),

@@ -11,13 +11,8 @@ import {
   HoldRecoveryRequired
 } from "../src/Hold.ts"
 import { FileLedger } from "../src/host/FileLedger.ts"
-import {
-  DispatchProvenance,
-  HttpExternalIntent,
-  Outbox,
-  OutboxLive,
-  OutboxRecoveryRequired
-} from "../src/Outbox.ts"
+import { DispatchProvenance, IdempotencyKey } from "../src/core/index.ts"
+import { Outbox, OutboxLive } from "../src/Outbox.ts"
 import { ExclusiveRenameTestLive } from "./support/ExclusiveRenameTestLive.ts"
 
 type LedgerAct = "remove" | "reap" | "stage" | "commit"
@@ -52,13 +47,6 @@ const realDelay = (milliseconds: number) =>
   })
 
 const supervisorCommit = new DispatchProvenance({ committedBy: "supervisor" })
-
-const post = (url: string) =>
-  new HttpExternalIntent({
-    url,
-    method: "POST",
-    body: "payload"
-  })
 
 describe("durable cancellation receipts", () => {
   it.effect("keeps cancellation interruptible before Reaper enters terminal authority", () =>
@@ -231,7 +219,38 @@ describe("durable cancellation receipts", () => {
     ).pipe(Effect.provide(BunServices.layer))
   )
 
-  it.effect("returns the generated Outbox id when staging is interrupted after publication", () =>
+  /**
+   * A ledger whose named act signals that it began and then waits to be
+   * released: the instant between publishing an emission and recording it.
+   */
+  const gatedLedger = (
+    act: "stage" | "commit",
+    started: Deferred.Deferred<void>,
+    release: Deferred.Deferred<void>
+  ) =>
+    Layer.succeed(
+      FileLedger,
+      FileLedger.of({
+        record: (entry) =>
+          entry.act === act
+            ? Deferred.succeed(started, undefined).pipe(
+                Effect.andThen(Deferred.await(release))
+              )
+            : Effect.void,
+        entries: Effect.succeed([])
+      })
+    )
+
+  const stageRequest = (url: string, holdMillis: number) => ({
+    key: IdempotencyKey.make(`cancellation:${url}`),
+    intent: {
+      kind: "http" as const,
+      dispatch: { url, method: "POST" as const, headers: {}, body: "payload" }
+    },
+    holdMillis
+  })
+
+  it.effect("an interrupt cannot tear staging apart: the same key names the one emission", () =>
     Effect.scoped(
       Effect.gen(function* () {
         const fs = yield* FileSystem.FileSystem
@@ -239,43 +258,40 @@ describe("durable cancellation receipts", () => {
         const temporary = yield* fs.makeTempDirectoryScoped()
         const home = path.join(temporary, "airlock-home")
         const started = yield* Deferred.make<void>()
+        const release = yield* Deferred.make<void>()
         const layer = OutboxLive.pipe(
-          Layer.provideMerge(blockingLedger("stage", started)),
+          Layer.provideMerge(gatedLedger("stage", started, release)),
           Layer.provideMerge(AirlockHome.layer(home)),
           Layer.provideMerge(BunServices.layer)
         )
 
         yield* Effect.gen(function* () {
           const outbox = yield* Outbox
-          const fiber = yield* outbox.stage(
-            post("https://example.invalid/staged-only"),
-            60_000
-          ).pipe(Effect.forkChild)
+          const request = stageRequest("https://example.invalid/staged-only", 60_000)
+          const fiber = yield* outbox.stage(request).pipe(Effect.forkChild)
           yield* Deferred.await(started)
-          const exit = yield* Fiber.interrupt(fiber).pipe(Effect.andThen(Fiber.await(fiber)))
-          const failure = typedFailure(exit)
+          // The emission is published and its receipt is being written. The
+          // interrupt must wait for that write instead of abandoning it.
+          const interruption = yield* Fiber.interrupt(fiber).pipe(Effect.forkChild)
+          yield* realDelay(40)
+          expect(fiber.pollUnsafe()).toBeUndefined()
+          yield* Deferred.succeed(release, undefined)
+          yield* Fiber.join(interruption)
 
-          expect(failure).toBeInstanceOf(OutboxRecoveryRequired)
-          if (!(failure instanceof OutboxRecoveryRequired)) return
-          expect(failure).toMatchObject({
-            phase: "ledger-after-stage",
-            status: "staged",
-            emission: {
-              status: "staged"
-            }
-          })
-          expect(yield* outbox.inspect(failure.id)).toEqual(
-            failure.emission
-          )
-          expect((yield* outbox.pending).map(({ id }) => id)).toEqual([
-            failure.id
-          ])
+          const pending = yield* outbox.pending
+          expect(pending).toHaveLength(1)
+          expect(pending[0]).toMatchObject({ state: "staged", ledgered: ["stage"] })
+          // The interrupted caller lost its return value, not the emission:
+          // replaying the key returns it and stages nothing new.
+          const replayed = yield* outbox.stage(request)
+          expect(replayed.id).toBe(pending[0]!.id)
+          expect(yield* outbox.pending).toHaveLength(1)
         }).pipe(Effect.provide(layer))
       })
     ).pipe(Effect.provide(BunServices.layer))
   )
 
-  it.effect("returns a committed outcome on interruption and never redispatches it", () =>
+  it.effect("an interrupt during the commit receipt leaves one committed dispatch, never a second", () =>
     Effect.scoped(
       Effect.gen(function* () {
         const fs = yield* FileSystem.FileSystem
@@ -283,6 +299,7 @@ describe("durable cancellation receipts", () => {
         const temporary = yield* fs.makeTempDirectoryScoped()
         const home = path.join(temporary, "airlock-home")
         const started = yield* Deferred.make<void>()
+        const release = yield* Deferred.make<void>()
         let hits = 0
         const server = yield* Effect.acquireRelease(
           Effect.callback<http.Server>((resume) => {
@@ -302,7 +319,7 @@ describe("durable cancellation receipts", () => {
         )
         const address = server.address() as AddressInfo
         const layer = OutboxLive.pipe(
-          Layer.provideMerge(blockingLedger("commit", started)),
+          Layer.provideMerge(gatedLedger("commit", started, release)),
           Layer.provideMerge(AirlockHome.layer(home)),
           Layer.provideMerge(BunServices.layer)
         )
@@ -310,30 +327,21 @@ describe("durable cancellation receipts", () => {
         yield* Effect.gen(function* () {
           const outbox = yield* Outbox
           const staged = yield* outbox.stage(
-            post(`http://127.0.0.1:${address.port}/hook`),
-            0
+            stageRequest(`http://127.0.0.1:${address.port}/hook`, 0)
           )
           const fiber = yield* outbox.commit(staged.id, supervisorCommit).pipe(Effect.forkChild)
           yield* Deferred.await(started)
-          const exit = yield* Fiber.interrupt(fiber).pipe(Effect.andThen(Fiber.await(fiber)))
-          const failure = typedFailure(exit)
+          const interruption = yield* Fiber.interrupt(fiber).pipe(Effect.forkChild)
+          yield* realDelay(40)
+          expect(fiber.pollUnsafe()).toBeUndefined()
+          yield* Deferred.succeed(release, undefined)
+          yield* Fiber.join(interruption)
 
-          expect(failure).toBeInstanceOf(OutboxRecoveryRequired)
-          if (!(failure instanceof OutboxRecoveryRequired)) return
-          expect(failure).toMatchObject({
-            id: staged.id,
-            phase: "ledger-after-commit",
-            status: "committed",
-            emission: {
-              status: "committed",
-              outcome: {
-                status: 200
-              }
-            }
+          expect(yield* outbox.inspect(staged.id)).toMatchObject({
+            state: "committed",
+            outcome: { status: 200 },
+            ledgered: ["stage", "commit"]
           })
-          expect(yield* outbox.inspect(staged.id)).toEqual(
-            failure.emission
-          )
           const retry = yield* outbox.commit(staged.id, supervisorCommit).pipe(Effect.flip)
           expect(retry._tag).toBe("EmissionNotPending")
           expect(hits).toBe(1)
