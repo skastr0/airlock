@@ -154,9 +154,8 @@ const Held = Schema.Struct({
 
 const Pending = Schema.Struct({
   id: Schema.String,
-  status: Schema.String,
-  intent: Schema.Struct({
-    kind: Schema.String,
+  state: Schema.String,
+  summary: Schema.Struct({
     method: Schema.String,
     endpoint: Schema.String,
     headerNames: Schema.Array(Schema.String),
@@ -474,7 +473,7 @@ export const runVouchOperationsProof =
       runCli(["pending"], fixture.home, fixture.policy)
     )
     assert(pending.length === 1, `expected one staged intent, got ${pending.length}`)
-    assert(pending[0]!.status === "staged", "external intent is not inert")
+    assert(pending[0]!.state === "staged", "external intent is not inert")
 
     const processBoundaries = await Effect.runPromise(
       processBoundaryProof(fixture.workspace)
@@ -563,9 +562,9 @@ export const runVouchOperationsProof =
       outbox: {
         state: "staged",
         pendingCount: pending.length,
-        endpoint: pending[0]!.intent.endpoint,
-        headerNames: [...pending[0]!.intent.headerNames],
-        bodyBytes: pending[0]!.intent.bodyBytes
+        endpoint: pending[0]!.summary.endpoint,
+        headerNames: [...pending[0]!.summary.headerNames],
+        bodyBytes: pending[0]!.summary.bodyBytes
       }
     })
   }

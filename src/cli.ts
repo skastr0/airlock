@@ -38,7 +38,7 @@ import {
 } from "./native/index.ts"
 import { ProcessRequest, ProcessRunner, ProcessRunnerLive } from "./process/Process.ts"
 import { Outbox, OutboxLive } from "./Outbox.ts"
-import { DispatchProvenance, EmissionId, IdempotencyKey } from "./core/index.ts"
+import { Canonical, DispatchProvenance, EmissionId, IdempotencyKey } from "./core/index.ts"
 import {
   checkDaemonSocket,
   runDaemon,
@@ -77,7 +77,6 @@ import {
   verifyInstalledReadiness
 } from "./seal/index.ts"
 import { describeFailure, reasonOf } from "./FailureText.ts"
-import type { Sha256Digest } from "./core/Canonical.ts"
 
 /**
  * CLI is deliberately an adapter: it parses agent-facing atoms, invokes typed
@@ -1747,15 +1746,29 @@ const makeSealedRoot = (seal: SealContext, name: string) => makeRoot(
  * unchanged compatibility path.
  */
 const startupSeal = async (): Promise<SealContext | undefined> => {
-  const expectedOperatorKeyDigest = process.env[
+  const rawOperatorKeyDigest = process.env[
     "AIRLOCK_OPERATOR_KEY_SHA256_INTERNAL"
   ]
+  const expectedOperatorKeyDigest = rawOperatorKeyDigest === undefined
+    ? undefined
+    : Schema.decodeUnknownOption(Canonical.Sha256Digest)(rawOperatorKeyDigest)
+  // A pinned operator key that is not a digest can match no key: refuse to
+  // start rather than verify against nothing.
+  if (expectedOperatorKeyDigest !== undefined && Option.isNone(expectedOperatorKeyDigest)) {
+    console.error(JSON.stringify(new SealVerificationFailed({
+      phase: "environment",
+      path: "AIRLOCK_OPERATOR_KEY_SHA256_INTERNAL",
+      reason: "operator-key-mismatch"
+    })))
+    process.exitCode = 78
+    return undefined
+  }
   const readinessPath = process.env["AIRLOCK_GENERATION_READINESS_INTERNAL"]
   const generationMode = process.env["AIRLOCK_GENERATION_MODE_INTERNAL"]
   const startup = loadStartupSeal(
     expectedOperatorKeyDigest === undefined
       ? {}
-      : { expectedOperatorKeyDigest: expectedOperatorKeyDigest as Sha256Digest }
+      : { expectedOperatorKeyDigest: expectedOperatorKeyDigest.value }
   ).pipe(
     Effect.flatMap((seal) =>
       readinessPath !== undefined && seal._tag === "VerifiedSeal"

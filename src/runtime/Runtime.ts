@@ -41,7 +41,7 @@ import {
   IdempotencyKey,
   OutboxRecoveryRequired
 } from "../core/index.ts"
-import { Outbox } from "../Outbox.ts"
+import { AirlockOutbox, Outbox, type OutboxEmission } from "../Outbox.ts"
 import {
   ArtifactId,
   Artifact,
@@ -1768,6 +1768,16 @@ const make = Effect.gen(function* () {
       }
     }
 
+  /** An emission in the form an artifact carries: the kernel's record. */
+  const storable = (nodeId: NodeId, emission: OutboxEmission) =>
+    AirlockOutbox.toRecord(emission).pipe(
+      Effect.mapError((error) => new RuntimeNodeFailure({
+        nodeId,
+        operation: "encode external emission",
+        reason: `${error._tag}: ${errorReason(error)}`
+      }))
+    )
+
   const runNode = (
     plan: Plan,
     node: PlanNode,
@@ -2065,7 +2075,7 @@ const make = Effect.gen(function* () {
               node,
               artifacts,
               EmissionRecord,
-              staged,
+              yield* storable(node.id, staged),
               `request-external:${node.endpoint}`
             )
           }
@@ -2104,7 +2114,7 @@ const make = Effect.gen(function* () {
             node,
             artifacts,
             EmissionRecord,
-            committed,
+            yield* storable(node.id, committed),
             `request-external:${node.endpoint}`
           )
           if (node.produces[1] === undefined) return emitted

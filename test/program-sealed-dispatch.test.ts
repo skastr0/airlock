@@ -77,7 +77,7 @@ describe("sealed Program dispatch authority", () => {
         stagedAuthorization: {
           sealDigest,
           dispatchClass: "read",
-          endpoint
+          target: endpoint
         }
       })
       expect(supervisorDispatchAuthority(policy, { sealDigest })(

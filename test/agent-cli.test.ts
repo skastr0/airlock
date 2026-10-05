@@ -140,7 +140,8 @@ describe("agent-only CLI surface", () => {
     expect(pending.status, pending.stderr).toBe(0)
     expect(JSON.parse(pending.stdout)).toEqual([
       expect.objectContaining({
-        intent: expect.objectContaining({
+        state: "staged",
+        summary: expect.objectContaining({
           bodyBytes: new TextEncoder().encode(body).byteLength
         })
       })
