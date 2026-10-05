@@ -32,18 +32,19 @@ const digest = (bytes: Uint8Array) =>
 const mode = (path: string) => statSync(path).mode & 0o7777
 
 const admission = (workspace: string, profile: "native-contained" | "compatibility" = "native-contained") => ({
-  schemaVersion: "airlock/admission-policy/v1",
+  schemaVersion: "airlock/admission-policy/v2",
   profile,
   principal: "agent/seal-box-test",
   realm: "local",
   admittedBy: "operator/seal-box-test",
   pathAllowlist: [`${workspace}/**`],
   executableAllowlist: ["/bin/sh"],
-  endpointAllowlist: []
+  executableEdges: [],
+  endpointGrants: []
 })
 
 const definition = (id = "vendor.echo") => Buffer.from(`${JSON.stringify({
-  schemaVersion: "airlock/tool-definition/v1",
+  schemaVersion: "airlock/tool-definition/v2",
   id,
   version: "1.0.0",
   executables: [{ realm: "local", selector: "/bin/echo" }],

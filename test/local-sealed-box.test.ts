@@ -179,6 +179,7 @@ describe.skipIf(!isNonRootDarwin)("same-user local sealed generation", () => {
         profile: "native-contained",
         pathAllowlist: [`${physicalWorkspace}/**`],
         executableAllowlist: [],
+        executableEdges: [],
         endpointGrants: []
       },
       verbs: ["actions", "doctor", "eval", "held", "pending", "run", "schema", "serve"],
@@ -439,14 +440,15 @@ describe.skipIf(!isNonRootDarwin)("same-user local sealed generation", () => {
   it("requires the loud compatibility flag before claiming the output", () => {
     const admission = join(root, "compatibility.json")
     writeFileSync(admission, `${JSON.stringify({
-      schemaVersion: "airlock/admission-policy/v1",
+      schemaVersion: "airlock/admission-policy/v2",
       profile: "compatibility",
       principal: "agent:local-compatibility-test",
       realm: "local",
       admittedBy: "operator:local-compatibility-test",
       pathAllowlist: [`${physicalWorkspace}/**`],
       executableAllowlist: [],
-      endpointAllowlist: []
+      executableEdges: [],
+      endpointGrants: []
     })}\n`)
     const out = join(root, "compatibility-without-flag")
     const refused = runSeal([

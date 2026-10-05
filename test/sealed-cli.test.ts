@@ -17,7 +17,8 @@ import {
   AdmissionPolicy,
   BoxGrant,
   BoxGrantCatalogPin,
-  type BoxGrantVerb
+  type BoxGrantVerb,
+  EndpointGrantPolicy
 } from "../src/admission/index.ts"
 import { type NativeActionName } from "../src/actions/index.ts"
 import {
@@ -52,14 +53,15 @@ const digest = (bytes: Uint8Array) =>
   `sha256:${createHash("sha256").update(bytes).digest("hex")}` as const
 
 const defaultAdmission = () => new AdmissionPolicy({
-  schemaVersion: "airlock/admission-policy/v1",
+  schemaVersion: "airlock/admission-policy/v2",
   profile: "compatibility",
   principal: "agent:sealed-cli-test",
   realm: "local",
   admittedBy: "operator:sealed-cli-test",
   pathAllowlist: [`${root}/**`],
   executableAllowlist: ["/bin/sh", "/bin/echo"],
-  endpointAllowlist: []
+  executableEdges: [],
+  endpointGrants: []
 })
 
 const makeSeal = (name: string, options: {
@@ -158,7 +160,7 @@ const fullVerbs = [
 ] as const
 
 describe("sealed CLI grant graph", () => {
-  it("preserves legacy unsealed commands alongside local change proposals", () => {
+  it("keeps every unsealed command alongside local change proposals", () => {
     const help = invoke(["--help"])
     expect(help.status, help.stderr).toBe(0)
     for (const verb of fullVerbs) expect(help.stdout).toMatch(new RegExp(`\\b${verb}\\b`))
@@ -349,14 +351,15 @@ describe("sealed CLI grant graph", () => {
       verbs: ["exec"],
       nativeActions: ["process.run"],
       admission: new AdmissionPolicy({
-        schemaVersion: "airlock/admission-policy/v1",
+        schemaVersion: "airlock/admission-policy/v2",
         profile: "native-contained",
         principal: "agent:exec-scope-test",
         realm: "local",
         admittedBy: "operator:exec-scope-test",
         pathAllowlist: [`${workspace}/**`],
         executableAllowlist: ["/bin/sh"],
-        endpointAllowlist: []
+        executableEdges: [],
+        endpointGrants: []
       })
     })
     const outside = join(root, "outside-exec-workspace")
@@ -380,14 +383,15 @@ describe("sealed CLI grant graph", () => {
       const privateWorkspace = join(temporary, "private")
       mkdirSync(workspace)
       const policy = new AdmissionPolicy({
-        schemaVersion: "airlock/admission-policy/v1",
+        schemaVersion: "airlock/admission-policy/v2",
         profile: "native-contained",
         principal: "agent:raw-exec-path-test",
         realm: "local",
         admittedBy: "operator:raw-exec-path-test",
         pathAllowlist: [`${workspace}/**`],
         executableAllowlist: ["/usr/bin/true"],
-        endpointAllowlist: []
+        executableEdges: [],
+        endpointGrants: []
       })
       const seal = makeSeal("raw-exec-path", {
         verbs: ["exec"],
@@ -415,14 +419,15 @@ describe("sealed CLI grant graph", () => {
     mkdirSync(allowed, { recursive: true })
     mkdirSync(denied, { recursive: true })
     const policy = new AdmissionPolicy({
-      schemaVersion: "airlock/admission-policy/v1",
+      schemaVersion: "airlock/admission-policy/v2",
       profile: "native-contained",
       principal: "agent:raw-admission-test",
       realm: "local",
       admittedBy: "operator:raw-admission-test",
       pathAllowlist: [`${allowed}/**`],
       executableAllowlist: [],
-      endpointAllowlist: ["https://allowed.invalid/*"]
+      executableEdges: [],
+      endpointGrants: [new EndpointGrantPolicy({ selector: "https://allowed.invalid/*" })]
     })
     const seal = makeSeal("raw-admission", {
       verbs: ["write", "rm", "send", "pending", "held"],
@@ -497,7 +502,7 @@ describe("sealed CLI grant graph", () => {
     const workspace = join(root, "discovery-workspace")
     mkdirSync(workspace, { recursive: true })
     const invokeBytes = new TextEncoder().encode(JSON.stringify({
-      schemaVersion: "airlock/tool-definition/v1",
+      schemaVersion: "airlock/tool-definition/v2",
       id: "invoke_tool",
       version: "1.0.0",
       executables: [{ realm: "local", selector: "/bin/echo" }],

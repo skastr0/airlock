@@ -13,9 +13,10 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import * as AirlockHome from "../src/AirlockHome.ts"
 import {
-  admit,
   AdmissionPolicy,
-  bindAdmissionForUse
+  admit,
+  bindAdmissionForUse,
+  EndpointGrantPolicy
 } from "../src/admission/index.ts"
 import { CellLive } from "../src/cell/index.ts"
 import { Hold } from "../src/Hold.ts"
@@ -327,7 +328,7 @@ export const runVouchProof = async (): Promise<VouchProofReport> => {
     soulPath
   )
   const policy = new AdmissionPolicy({
-    schemaVersion: "airlock/admission-policy/v1",
+    schemaVersion: "airlock/admission-policy/v2",
     profile: "native-contained",
     principal: "agent:vouch-proof",
     realm: "host",
@@ -338,7 +339,7 @@ export const runVouchProof = async (): Promise<VouchProofReport> => {
     executableEdges: tarDescendants.length === 0
       ? []
       : [{ root: "/usr/bin/tar", descendants: tarDescendants }],
-    endpointAllowlist: [endpoint]
+    endpointGrants: [new EndpointGrantPolicy({ selector: endpoint })]
   })
 
   const homeLayer = AirlockHome.layer(fixture.home).pipe(

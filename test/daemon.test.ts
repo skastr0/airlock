@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs"
 import { describe, expect, it } from "@effect/vitest"
 import { DateTime, Effect } from "effect"
 import {
-  AdmissionPolicyV2,
+  AdmissionPolicy,
   BoxGrant,
   EndpointGrantPolicy,
   type BoxGrantDaemonOp,
@@ -45,7 +45,7 @@ const seal = (daemonOps: ReadonlyArray<BoxGrantDaemonOp>) =>
     sealPath: "/supervisor/seal",
     grant: new BoxGrant({
       schemaVersion: "airlock/box-grant/v1",
-      admission: new AdmissionPolicyV2({
+      admission: new AdmissionPolicy({
         schemaVersion: "airlock/admission-policy/v2",
         profile: "native-contained",
         principal: "agent/daemon-test",
@@ -53,6 +53,7 @@ const seal = (daemonOps: ReadonlyArray<BoxGrantDaemonOp>) =>
         admittedBy: "operator/daemon-test",
         pathAllowlist: [],
         executableAllowlist: [],
+        executableEdges: [],
         endpointGrants: [new EndpointGrantPolicy({
           selector: "https://status.example/*",
           methods: ["GET"],
@@ -347,7 +348,7 @@ describe("Daemon supervisor component", () => {
     const waiting = emission("flushwait", {
       holdUntil: instant("2999-01-01T00:00:00.000Z")
     })
-    let legacyFlushCalls = 0
+    let blanketFlushCalls = 0
     const committed: Array<EmissionId> = []
     const outbox = fakeOutbox({
       pending: () => [due, waiting],
@@ -355,7 +356,7 @@ describe("Daemon supervisor component", () => {
         committed.push(id)
         return due
       }),
-      onFlush: () => { legacyFlushCalls += 1 }
+      onFlush: () => { blanketFlushCalls += 1 }
     })
 
     return provide(daemonTick({
@@ -364,7 +365,7 @@ describe("Daemon supervisor component", () => {
     }), outbox).pipe(
       Effect.tap((report) => Effect.sync(() => {
         expect(committed).toEqual([due.id])
-        expect(legacyFlushCalls).toBe(0)
+        expect(blanketFlushCalls).toBe(0)
         expect(report.attempted).toEqual([due.id])
         expect(report.waiting).toBe(1)
       }))

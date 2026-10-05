@@ -404,7 +404,7 @@ const prepareCase = (
 
   if (policy !== undefined) {
     writeFileSync(policy, JSON.stringify({
-      schemaVersion: "airlock/admission-policy/v1",
+      schemaVersion: "airlock/admission-policy/v2",
       profile: "native-contained",
       principal: `agent:parity-50:${definition.caseId}`,
       realm: "local",
@@ -412,7 +412,7 @@ const prepareCase = (
       pathAllowlist: [`${canonicalWorkspace}/**`],
       executableAllowlist: [executable],
       executableEdges: [],
-      endpointAllowlist: []
+      endpointGrants: []
     }))
   }
 

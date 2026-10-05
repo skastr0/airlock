@@ -21,8 +21,8 @@ import { fileURLToPath } from "node:url"
 import { BunServices } from "@effect/platform-bun"
 import { Effect, Layer, ManagedRuntime } from "effect"
 import {
-  AdmissionPolicyV2,
-  type AdmissionPolicyDocument,
+  AdmissionPolicy,
+  type AdmissionPolicy,
   EndpointGrantPolicy
 } from "../src/admission/index.ts"
 import { layer as airlockHomeLayer } from "../src/AirlockHome.ts"
@@ -86,8 +86,8 @@ const grant = (
 
 const policyOf = (
   grants: ReadonlyArray<EndpointGrantPolicy>
-): AdmissionPolicyDocument =>
-  new AdmissionPolicyV2({
+): AdmissionPolicy =>
+  new AdmissionPolicy({
     schemaVersion: "airlock/admission-policy/v2",
     profile: "native-contained",
     principal: "agent:external-read-proof",
@@ -95,6 +95,7 @@ const policyOf = (
     admittedBy: "proof",
     pathAllowlist: [],
     executableAllowlist: [],
+    executableEdges: [],
     endpointGrants: grants
   })
 
@@ -125,7 +126,7 @@ const readExampleTools = Effect.gen(function* () {
 })
 
 const runProgram = async (
-  policy: AdmissionPolicyDocument,
+  policy: AdmissionPolicy,
   source: string,
   tools: ReadonlyArray<ExportedToolAction> = []
 ): Promise<ProgramOutcome> => {

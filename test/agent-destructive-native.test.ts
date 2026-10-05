@@ -68,14 +68,15 @@ describe.skipIf(!supported)(
         writeFileSync(
           policy,
           JSON.stringify({
-            schemaVersion: "airlock/admission-policy/v1",
+            schemaVersion: "airlock/admission-policy/v2",
             profile: "native-contained",
             principal: "agent:destructive-parity",
             realm: "local",
             admittedBy: "operator:destructive-parity",
             pathAllowlist: [`${workspace}/**`],
             executableAllowlist: ["/bin/rm"],
-            endpointAllowlist: []
+            executableEdges: [],
+            endpointGrants: []
           })
         )
 
@@ -136,7 +137,7 @@ describe.skipIf(!supported)(
           readonly target: string
           readonly hasPayload: boolean
           readonly status: string
-          readonly purpose?: string
+          readonly purpose: string
         }>
         const removal = recoverable.find(
           ({ target: heldTarget }) =>

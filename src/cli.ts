@@ -7,11 +7,8 @@ import * as nodeOs from "node:os"
 import { createInterface } from "node:readline"
 import {
   AdmissionPolicy,
-  AdmissionPolicyDocument,
-  AdmissionPolicyV2,
   type BoxGrantVerb,
-  admit,
-  isAdmissionPolicyV2
+  admit
 } from "./admission/index.ts"
 import {
   NativeActionCatalog,
@@ -21,7 +18,7 @@ import {
   nativeActionSchema
 } from "./actions/index.ts"
 import { AirlockHome, layerFromEnv } from "./AirlockHome.ts"
-import { ActId, EmissionId, EmissionRequest, ScopeEscape } from "./domain.ts"
+import { ActId, EmissionId, ScopeEscape } from "./domain.ts"
 import { Hold } from "./Hold.ts"
 import { HoldLive } from "./HoldLive.ts"
 import { Change, ChangeLive } from "./change/Change.ts"
@@ -41,6 +38,7 @@ import {
 } from "./native/index.ts"
 import { ProcessRequest, ProcessRunner, ProcessRunnerLive } from "./process/Process.ts"
 import { Outbox, OutboxLive } from "./Outbox.ts"
+import { DispatchProvenance, HttpExternalIntent } from "./outbox/Contract.ts"
 import {
   checkDaemonSocket,
   runDaemon,
@@ -293,7 +291,7 @@ const requireNativeAction = (
       )
 
 /**
- * Compatibility is the migration posture, so it preserves the supervisor's
+ * The compatibility profile is Bash parity, so it preserves the supervisor's
  * process environment. Contained profiles never call this helper: their
  * environment remains an explicit capability supplied by the admitted Plan.
  */
@@ -405,14 +403,15 @@ const parseBindings = (raw: Option.Option<string>): Effect.Effect<Readonly<Recor
 }
 
 const compatibilityPolicy = (workspace: string) => new AdmissionPolicy({
-  schemaVersion: "airlock/admission-policy/v1",
+  schemaVersion: "airlock/admission-policy/v2",
   profile: "compatibility",
   principal: "airlock-cli-agent",
   realm: "local",
   admittedBy: "airlock-cli compatibility supervisor",
   pathAllowlist: [workspace],
   executableAllowlist: [],
-  endpointAllowlist: []
+  executableEdges: [],
+  endpointGrants: []
 })
 
 /** Fixed, immediate, optional locations; definitions never recursively load code. */
@@ -455,8 +454,8 @@ const discoveredTools = (
 }
 
 const bindPolicyPathScopes = (
-  policy: AdmissionPolicyDocument
-): Effect.Effect<AdmissionPolicyDocument, never, FileSystem.FileSystem> => {
+  policy: AdmissionPolicy
+): Effect.Effect<AdmissionPolicy, never, FileSystem.FileSystem> => {
   if (policy.profile !== "native-contained") return Effect.succeed(policy)
 
   return Effect.gen(function* () {
@@ -484,9 +483,7 @@ const bindPolicyPathScopes = (
       },
       { concurrency: 1 }
     )
-    return isAdmissionPolicyV2(policy)
-      ? new AdmissionPolicyV2({ ...policy, pathAllowlist })
-      : new AdmissionPolicy({ ...policy, pathAllowlist })
+    return new AdmissionPolicy({ ...policy, pathAllowlist })
   })
 }
 
@@ -499,7 +496,7 @@ const sealedAdmissionFailure = (
 })
 
 /**
- * Raw compatibility verbs retain their historical adapters, but a sealed
+ * Raw compatibility verbs keep their direct adapters, but a sealed
  * route first constructs and admits the equivalent native-action Plan. Thus a
  * second CLI spelling can never bypass the signed path or endpoint policy.
  * The decoded, bound call is returned so direct raw physics uses exactly the
@@ -511,8 +508,8 @@ const admitSealedNativeAction = (
   input: unknown,
   workspace: string = process.cwd()
 ): Effect.Effect<NativeActionCallValue | undefined, CliInputError, FileSystem.FileSystem> => {
-  // Preserve the historical unsealed helper: no decode, binding, or stricter
-  // validation is introduced on the zero-config compatibility route.
+  // The ratchet: no decode, binding, or stricter validation is introduced
+  // on the zero-config compatibility route.
   if (seal._tag === "UnsealedSeal") return Effect.succeed(undefined)
   return Effect.gen(function* () {
     const policy = yield* bindPolicyPathScopes(seal.grant.admission)
@@ -543,7 +540,7 @@ const admitSealedNativeAction = (
 const supervisorPolicy = (
   profile: "compatibility" | "native-contained" | "vm-enclosed",
   workspace: string
-): Effect.Effect<AdmissionPolicyDocument, CliInputError, FileSystem.FileSystem> => {
+): Effect.Effect<AdmissionPolicy, CliInputError, FileSystem.FileSystem> => {
   if (profile === "vm-enclosed") {
     return failInput("profile", "vm-enclosed has no bundled VM Cell backend; refusing fallback")
   }
@@ -555,7 +552,7 @@ const supervisorPolicy = (
   }
   return Effect.flatMap(FileSystem.FileSystem, (fs) => fs.readFileString(policyFile).pipe(
     Effect.mapError((error) => new CliInputError({ field: "AIRLOCK_POLICY_FILE", reason: describeFailure(error) })),
-    Effect.flatMap(Schema.decodeUnknownEffect(Schema.fromJsonString(AdmissionPolicyDocument))),
+    Effect.flatMap(Schema.decodeUnknownEffect(Schema.fromJsonString(AdmissionPolicy))),
     Effect.mapError((error) => new CliInputError({ field: "AIRLOCK_POLICY_FILE", reason: reasonOf(error) })),
     Effect.flatMap((policy) => policy.profile === profile
       ? Effect.succeed(policy)
@@ -837,7 +834,11 @@ const makeSend = (seal: SealContext) => Command.make(
           }
         ).pipe(
           Effect.andThen(Effect.flatMap(Outbox, (outbox) => outbox.stage(
-            new EmissionRequest({ url, method, body: bodyValue }),
+            new HttpExternalIntent({
+              url,
+              method,
+              ...(bodyValue === undefined ? {} : { body: bodyValue })
+            }),
             millis
           )))
         )
@@ -859,7 +860,10 @@ const makeCommit = (seal: SealContext) => Command.make(
   { id: Argument.String("emission-id") },
   ({ id }) => rendered(
     requireVerb(seal, "commit").pipe(
-      Effect.andThen(Effect.flatMap(Outbox, (outbox) => outbox.commit(EmissionId.make(id))))
+      Effect.andThen(Effect.flatMap(Outbox, (outbox) => outbox.commit(
+        EmissionId.make(id),
+        new DispatchProvenance({ committedBy: "supervisor" })
+      )))
     )
   )
 ).pipe(Command.withDescription("Approve and send a staged emission now"))
@@ -1167,7 +1171,7 @@ const executeRawProcess = (
 
 /** Raw sealed exec must honor the exact root and descendant executable edges. */
 const requireSealedExecAdmission = (
-  policy: AdmissionPolicyDocument,
+  policy: AdmissionPolicy,
   executable: string,
   descendants: ReadonlyArray<string>
 ): Effect.Effect<void, CliInputError> => {

@@ -12,7 +12,7 @@ import {
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
 import { beforeAll, describe, expect, it } from "vitest"
-import { AdmissionPolicy, BoxGrant, hashBoxGrant } from "../src/admission/index.ts"
+import { AdmissionPolicy, BoxGrant, EndpointGrantPolicy, hashBoxGrant } from "../src/admission/index.ts"
 import {
   BOX_GRANT_FILE,
   BOX_GRANT_SIGNATURE_FILE,
@@ -59,14 +59,15 @@ const writeGoodSeal = () => {
   const grant = new BoxGrant({
     schemaVersion: "airlock/box-grant/v1",
     admission: new AdmissionPolicy({
-      schemaVersion: "airlock/admission-policy/v1",
+      schemaVersion: "airlock/admission-policy/v2",
       profile: "compatibility",
       principal: "agent:required-seal-test",
       realm: "local",
       admittedBy: "operator:required-seal-test",
       pathAllowlist: [root],
       executableAllowlist: [],
-      endpointAllowlist: []
+      executableEdges: [],
+      endpointGrants: []
     }),
     verbs: ["doctor"],
     nativeActions: [],
@@ -184,14 +185,15 @@ describe("required-seal tenant entrypoint", () => {
     const grant = new BoxGrant({
       schemaVersion: "airlock/box-grant/v1",
       admission: new AdmissionPolicy({
-        schemaVersion: "airlock/admission-policy/v1",
+        schemaVersion: "airlock/admission-policy/v2",
         profile: "compatibility",
         principal: "agent:attacker",
         realm: "local",
         admittedBy: "attacker",
         pathAllowlist: ["/"],
         executableAllowlist: ["/bin/sh"],
-        endpointAllowlist: ["https://"]
+        executableEdges: [],
+        endpointGrants: [new EndpointGrantPolicy({ selector: "https://" })]
       }),
       verbs: ["exec", "serve"],
       nativeActions: ["process.run"],

@@ -18,7 +18,7 @@ import {
   hashBoxGrant
 } from "../admission/BoxGrant.ts"
 import {
-  AnyToolDefinition,
+  ToolDefinition,
   ToolDefinitionDocument,
   ToolDefinitionLocation,
   decodeToolDefinition
@@ -71,7 +71,7 @@ export class VerifiedCatalogDocument
     path: Schema.String,
     digest: BoxGrantSha256,
     rawBytes: Schema.Uint8Array,
-    definition: AnyToolDefinition
+    definition: ToolDefinition
   }) {}
 
 export class UnsealedSeal extends Schema.TaggedClass<UnsealedSeal>()(

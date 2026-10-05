@@ -55,14 +55,15 @@ const makeSeal = (name: string, options: {
   const grant = new BoxGrant({
     schemaVersion: "airlock/box-grant/v1",
     admission: new AdmissionPolicy({
-      schemaVersion: "airlock/admission-policy/v1",
+      schemaVersion: "airlock/admission-policy/v2",
       profile: "compatibility",
       principal: "agent:startup-test",
       realm: "local",
       admittedBy: "operator:startup-test",
       pathAllowlist: [root],
       executableAllowlist: [],
-      endpointAllowlist: []
+      executableEdges: [],
+      endpointGrants: []
     }),
     verbs: [
       "rm", "write", "undo", "held", "reap", "send", "pending",
@@ -91,7 +92,7 @@ const makeSeal = (name: string, options: {
   if (options.extraDefinition) {
     writeFileSync(
       join(catalog, "extra.airlock-tool.json"),
-      JSON.stringify({ schemaVersion: "airlock/tool-definition/v1" })
+      JSON.stringify({ schemaVersion: "airlock/tool-definition/v2" })
     )
   }
   expect(hashBoxGrant(grant)).toMatch(/^sha256:[0-9a-f]{64}$/)

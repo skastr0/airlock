@@ -130,7 +130,7 @@ const writeNativePolicy = (
   const canonicalWorkspace = realpathSync(workspace)
   const policy = join(root, "policy.json")
   writeFileSync(policy, JSON.stringify({
-    schemaVersion: "airlock/admission-policy/v1",
+    schemaVersion: "airlock/admission-policy/v2",
     profile: "native-contained",
     principal,
     realm: "local",
@@ -138,7 +138,7 @@ const writeNativePolicy = (
     pathAllowlist: [`${canonicalWorkspace}/**`],
     executableAllowlist: executables,
     executableEdges,
-    endpointAllowlist: []
+    endpointGrants: []
   }))
   return policy
 }

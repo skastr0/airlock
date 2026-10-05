@@ -9,7 +9,7 @@ import { Effect, Fiber, Layer } from "effect"
 import { afterAll, beforeAll, describe, expect, it } from "vitest"
 import * as AirlockHome from "../src/AirlockHome.ts"
 import {
-  AdmissionPolicyV2,
+  AdmissionPolicy,
   BoxGrant,
   BoxGrantCatalogPin,
   EndpointGrantPolicy,
@@ -82,7 +82,7 @@ beforeAll(async () => {
   const pin = new BoxGrantCatalogPin({ id: "fixture_status", sha256: sha256(fixtureBytes) })
   grant = new BoxGrant({
     schemaVersion: "airlock/box-grant/v1",
-    admission: new AdmissionPolicyV2({
+    admission: new AdmissionPolicy({
       schemaVersion: "airlock/admission-policy/v2",
       profile: "compatibility",
       principal: "agent:sealed-proof",
@@ -90,6 +90,7 @@ beforeAll(async () => {
       admittedBy: "operator:sealed-proof",
       pathAllowlist: [`${workspace}/**`],
       executableAllowlist: [],
+      executableEdges: [],
       endpointGrants: [new EndpointGrantPolicy({
         selector: `${origin}/v1/*`, methods: ["GET"], class: "read", commit: "auto"
       })]

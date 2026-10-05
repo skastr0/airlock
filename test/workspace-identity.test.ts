@@ -40,14 +40,15 @@ const writePolicy = (
   writeFileSync(
     path,
     JSON.stringify({
-      schemaVersion: "airlock/admission-policy/v1",
+      schemaVersion: "airlock/admission-policy/v2",
       profile: "native-contained",
       principal: "agent:workspace-identity",
       realm: "local",
       admittedBy: "operator:workspace-identity",
       pathAllowlist: [`${workspace}/**`],
       executableAllowlist: ["/usr/bin/touch"],
-      endpointAllowlist: []
+      executableEdges: [],
+      endpointGrants: []
     })
   )
 

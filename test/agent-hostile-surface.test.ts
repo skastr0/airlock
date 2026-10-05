@@ -142,14 +142,15 @@ const nativeFixture = (executables: ReadonlyArray<string>) => {
   writeFileSync(
     policy,
     JSON.stringify({
-      schemaVersion: "airlock/admission-policy/v1",
+      schemaVersion: "airlock/admission-policy/v2",
       profile: "native-contained",
       principal: "agent:hostile-surface",
       realm: "local",
       admittedBy: "operator:hostile-surface",
       pathAllowlist: [`${workspace}/**`],
       executableAllowlist: executables,
-      endpointAllowlist: []
+      executableEdges: [],
+      endpointGrants: []
     })
   )
   return {
@@ -465,7 +466,7 @@ describe("agent-hostile admission and containment", () => {
         expect(held.status, held.stderr).toBe(0)
         const retained = JSON.parse(held.stdout) as ReadonlyArray<{
           readonly target: string
-          readonly purpose?: string
+          readonly purpose: string
         }>
         expect(retained).toEqual([
           expect.objectContaining({ purpose: "runtime-private" })

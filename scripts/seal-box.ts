@@ -45,8 +45,8 @@ import {
 import { Effect, Schema } from "effect"
 import { decodeBoxGrant } from "../src/admission/BoxGrant.ts"
 import {
-  AdmissionPolicyDocument,
-  AdmissionPolicyV2
+  AdmissionPolicy,
+  AdmissionPolicy
 } from "../src/admission/Admission.ts"
 import { checkDaemonSocket } from "../src/daemon/index.ts"
 import {
@@ -570,17 +570,17 @@ type DefinitionSnapshot = {
   readonly digest: `sha256:${string}`
 }
 
-const decodeAdmission = async (path: string): Promise<typeof AdmissionPolicyDocument.Type> => {
+const decodeAdmission = async (path: string): Promise<typeof AdmissionPolicy.Type> => {
   const bytes = await readRegularNoSymlink("--admission", path, {
     maxBytes: DEFAULT_TOOL_DEFINITION_MAX_BYTES
   })
   const parsed = decodeJson("--admission", decodeUtf8("--admission", bytes))
   try {
     return await Effect.runPromise(
-      Schema.decodeUnknownEffect(AdmissionPolicyDocument, { onExcessProperty: "error" })(parsed)
+      Schema.decodeUnknownEffect(AdmissionPolicy, { onExcessProperty: "error" })(parsed)
     )
   } catch {
-    return fail("--admission is not a strict AdmissionPolicyDocument", 65)
+    return fail("--admission is not a strict AdmissionPolicy", 65)
   }
 }
 
@@ -891,7 +891,7 @@ const local = async (): Promise<void> => {
   }
 
   const admission = admissionPath === undefined
-    ? new AdmissionPolicyV2({
+    ? new AdmissionPolicy({
         schemaVersion: "airlock/admission-policy/v2",
         profile: "native-contained",
         principal: "agent:local-box",
@@ -899,6 +899,7 @@ const local = async (): Promise<void> => {
         admittedBy: "operator:local-box",
         pathAllowlist: [`${workspace}/**`],
         executableAllowlist: [],
+        executableEdges: [],
         endpointGrants: []
       })
     : await decodeAdmission(admissionPath)

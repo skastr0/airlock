@@ -47,14 +47,15 @@ describe.skipIf(!supported)("native-contained agent CLI", () => {
       'return process.run({ executable: "/usr/bin/touch", args: ["created.txt"], cwd: workspace, cellProfile: "native-contained", stdout: "capture", stderr: "capture" })\n'
     )
     writeFileSync(policy, JSON.stringify({
-      schemaVersion: "airlock/admission-policy/v1",
+      schemaVersion: "airlock/admission-policy/v2",
       profile: "native-contained",
       principal: "agent:cli-native-test",
       realm: "local",
       admittedBy: "operator:cli-native-test",
       pathAllowlist: [`${workspace}/**`],
       executableAllowlist: ["/usr/bin/touch"],
-      endpointAllowlist: []
+      executableEdges: [],
+      endpointGrants: []
     }))
 
     const run = invoke([

@@ -516,14 +516,15 @@ describe("agent-only CLI surface", () => {
       const outside = join(root, "outside.txt")
       mkdirSync(workspace)
       writeFileSync(policy, JSON.stringify({
-        schemaVersion: "airlock/admission-policy/v1",
+        schemaVersion: "airlock/admission-policy/v2",
         profile: "native-contained",
         principal: "agent:profile-test",
         realm: "local",
         admittedBy: "operator:profile-test",
         pathAllowlist: [`${workspace}/**`],
         executableAllowlist: ["/usr/bin/touch"],
-        endpointAllowlist: []
+        executableEdges: [],
+        endpointGrants: []
       }))
       const environment = {
         AIRLOCK_AGENT_PROFILE: "native-contained",

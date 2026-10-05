@@ -33,18 +33,7 @@ const flippedBinary = new TextEncoder().encode("airlock compiled fixture v2\n")
 const digest = (bytes: Uint8Array) =>
   `sha256:${createHash("sha256").update(bytes).digest("hex")}`
 
-const admissionV1 = {
-  schemaVersion: "airlock/admission-policy/v1" as const,
-  profile: "native-contained" as const,
-  principal: "agent/seal-test",
-  realm: "local",
-  admittedBy: "operator/seal-test",
-  pathAllowlist: ["/workspace/**"],
-  executableAllowlist: ["/usr/bin/true"],
-  endpointAllowlist: []
-}
-
-const admissionV2 = {
+const admission = {
   schemaVersion: "airlock/admission-policy/v2" as const,
   profile: "native-contained" as const,
   principal: "agent/seal-test",
@@ -52,15 +41,12 @@ const admissionV2 = {
   admittedBy: "operator/seal-test",
   pathAllowlist: ["/workspace/**"],
   executableAllowlist: ["/usr/bin/true"],
+  executableEdges: [],
   endpointGrants: []
 }
 
-const definition = (
-  id = "vendor.echo",
-  schemaVersion: "airlock/tool-definition/v1" | "airlock/tool-definition/v2" =
-    "airlock/tool-definition/v1"
-) => new TextEncoder().encode(JSON.stringify({
-  schemaVersion,
+const definition = (id = "vendor.echo") => new TextEncoder().encode(JSON.stringify({
+  schemaVersion: "airlock/tool-definition/v2",
   id,
   version: "1.0.0",
   executables: [{ realm: "machine", selector: "/usr/bin/true" }],
@@ -82,7 +68,7 @@ type Entry = {
 }
 
 type FixtureOptions = {
-  readonly admission?: typeof admissionV1 | typeof admissionV2
+  readonly admission?: typeof admission
   readonly entries?: ReadonlyArray<Entry>
   readonly grantOverrides?: Readonly<Record<string, unknown>>
   readonly serializeGrant?: (grant: Record<string, unknown>) => string
@@ -107,7 +93,7 @@ const makeFixture = async (options: FixtureOptions = {}) => {
   }))
   const grantObject: Record<string, unknown> = {
     schemaVersion: "airlock/box-grant/v1",
-    admission: options.admission ?? admissionV1,
+    admission: options.admission ?? admission,
     verbs: ["run", "actions"],
     nativeActions: ["file.read", "process.run"],
     catalog: pins,
@@ -230,9 +216,8 @@ describe("startup seal verification", () => {
   })
 
   it("verifies generated Ed25519 authority and retains exact inert snapshots", async () => {
-    const rawBytes = definition("vendor.echo", "airlock/tool-definition/v2")
+    const rawBytes = definition("vendor.echo")
     const fixture = await makeFixture({
-      admission: admissionV2,
       entries: [{ pinId: "vendor.echo", rawBytes }]
     })
     const context = await load(fixture.sealPath)
@@ -256,14 +241,6 @@ describe("startup seal verification", () => {
     expect(context.catalog[0]!.definition.schemaVersion).toBe(
       "airlock/tool-definition/v2"
     )
-  })
-
-  it("accepts either nested admission-policy version", async () => {
-    for (const admission of [admissionV1, admissionV2]) {
-      const fixture = await makeFixture({ admission })
-      const context = await load(fixture.sealPath)
-      expect(context.grant.admission.schemaVersion).toBe(admission.schemaVersion)
-    }
   })
 
   it("uses a digest filename and never a grant id as a path fragment", () => {

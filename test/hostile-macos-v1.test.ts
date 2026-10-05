@@ -99,14 +99,15 @@ const makeFixture = (
   writeFileSync(
     policy,
     JSON.stringify({
-      schemaVersion: "airlock/admission-policy/v1",
+      schemaVersion: "airlock/admission-policy/v2",
       profile: "native-contained",
       principal: "agent:hostile-macos-v1",
       realm: "local",
       admittedBy: "operator:hostile-macos-v1",
       pathAllowlist: [`${canonicalWorkspace}/**`],
       executableAllowlist: executables,
-      endpointAllowlist: endpoints
+      executableEdges: [],
+      endpointGrants: endpoints.map((selector) => ({ selector }))
     })
   )
   return {
@@ -586,7 +587,7 @@ describe.skipIf(!supported)("hostile macOS v1 — actual agent entrypoint", () =
       writeFileSync(
         fixture.policy,
         JSON.stringify({
-          schemaVersion: "airlock/admission-policy/v1",
+          schemaVersion: "airlock/admission-policy/v2",
           profile: "native-contained",
           principal: "agent:hostile-macos-v1",
           realm: "local",
@@ -599,7 +600,7 @@ describe.skipIf(!supported)("hostile macOS v1 — actual agent entrypoint", () =
               descendants: [hook, "/bin/sh", "/bin/bash"]
             }
           ],
-          endpointAllowlist: []
+          endpointGrants: []
         })
       )
       const rootEscalation = evalAgent(

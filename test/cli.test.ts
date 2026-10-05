@@ -123,7 +123,7 @@ describe("agent-facing CLI", () => {
     mkdirSync(join(home, ".airlock"))
     mkdirSync(tools)
     writeFileSync(join(tools, "printf.airlock-tool.json"), JSON.stringify({
-      schemaVersion: "airlock/tool-definition/v1",
+      schemaVersion: "airlock/tool-definition/v2",
       id: "printf_json",
       version: "1.0.0",
       executables: [{ realm: "local", selector: "/usr/bin/printf" }],
@@ -163,7 +163,7 @@ describe("agent-facing CLI", () => {
     mkdirSync(join(home, ".airlock"))
     mkdirSync(tools)
     writeFileSync(join(tools, "exit-check.airlock-tool.json"), JSON.stringify({
-      schemaVersion: "airlock/tool-definition/v1",
+      schemaVersion: "airlock/tool-definition/v2",
       id: "exit_check",
       version: "1.0.0",
       executables: [{ realm: "local", selector: "/usr/bin/false" }],
@@ -287,14 +287,15 @@ describe("agent-facing CLI", () => {
 
     const policy = join(home, "native-policy.json")
     writeFileSync(policy, JSON.stringify({
-      schemaVersion: "airlock/admission-policy/v1",
+      schemaVersion: "airlock/admission-policy/v2",
       profile: "native-contained",
       principal: "agent:test",
       realm: "local",
       admittedBy: "operator:test",
       pathAllowlist: [`${home}/**`],
       executableAllowlist: [],
-      endpointAllowlist: []
+      executableEdges: [],
+      endpointGrants: []
     }))
     const downgrade = run(
       ["run", program, "--workspace", home, "--profile", "compatibility"],

@@ -279,7 +279,7 @@ const makeFixture = () => {
   writeFileSync(snapshot, "legacy snapshot bytes\n")
   writeFileSync(stale, "999999\n")
   writeFileSync(policy, JSON.stringify({
-    schemaVersion: "airlock/admission-policy/v1",
+    schemaVersion: "airlock/admission-policy/v2",
     profile: "native-contained",
     principal: "agent:vouch-operations-proof",
     realm: "local",
@@ -294,7 +294,7 @@ const makeFixture = () => {
     executableEdges: tarDescendants.length === 0
       ? []
       : [{ root: "/usr/bin/tar", descendants: tarDescendants }],
-    endpointAllowlist: [endpoint]
+    endpointGrants: [{ selector: endpoint }]
   }))
   return {
     root,

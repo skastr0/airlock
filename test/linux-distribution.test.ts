@@ -246,14 +246,15 @@ describe.skipIf(process.platform !== "linux")("Linux distribution", () => {
       'return process.run({ executable: "/usr/bin/touch", args: ["installed.txt"], cwd: workspace, cellProfile: "native-contained", stdout: "capture", stderr: "capture" })\n'
     )
     writeFileSync(policy, JSON.stringify({
-      schemaVersion: "airlock/admission-policy/v1",
+      schemaVersion: "airlock/admission-policy/v2",
       profile: "native-contained",
       principal: "agent:linux-distribution",
       realm: "local",
       admittedBy: "operator:linux-distribution",
       pathAllowlist: [`${workspace}/**`],
       executableAllowlist: ["/usr/bin/touch"],
-      endpointAllowlist: []
+      executableEdges: [],
+      endpointGrants: []
     }))
     const executed = spawnSync(installed(prefix).airlock, [
       "run", program, "--workspace", workspace, "--profile", "native-contained"

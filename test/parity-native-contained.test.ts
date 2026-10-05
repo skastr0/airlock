@@ -46,14 +46,15 @@ describe.skipIf(!supported)("shell parity — native-contained rewrite and undo"
     writeFileSync(live, "before\n")
     writeFileSync(join(workspace, "replacement.txt"), "after\n")
     writeFileSync(policy, JSON.stringify({
-      schemaVersion: "airlock/admission-policy/v1",
+      schemaVersion: "airlock/admission-policy/v2",
       profile: "native-contained",
       principal: "agent:parity-corpus",
       realm: "local",
       admittedBy: "operator:parity-corpus",
       pathAllowlist: [`${workspace}/**`],
       executableAllowlist: ["/bin/cp"],
-      endpointAllowlist: []
+      executableEdges: [],
+      endpointGrants: []
     }))
 
     const executed = run([
@@ -103,7 +104,7 @@ describe.skipIf(!supported)("shell parity — native-contained rewrite and undo"
       readonly previousHeld?: boolean
       readonly hasPayload: boolean
       readonly status: string
-      readonly purpose?: string
+      readonly purpose: string
     }>
     const rewrite = recoverable.find(({ target }) => target === canonicalLive)
     expect(rewrite).toMatchObject({
