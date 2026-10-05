@@ -7,7 +7,6 @@ import { ExecutionAuthority } from "../src/core/admission/index.ts"
 import { Cell } from "../src/cell/index.ts"
 import {
   ActId,
-  EmissionId,
   RemoveReceipt
 } from "../src/core/domain.ts"
 import { Hold } from "../src/Hold.ts"

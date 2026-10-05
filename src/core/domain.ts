@@ -14,9 +14,6 @@ export const ActId = Schema.String.pipe(
 )
 export type ActId = typeof ActId.Type
 
-export const EmissionId = Schema.String.pipe(Schema.brand("EmissionId"))
-export type EmissionId = typeof EmissionId.Type
-
 // ── held mutations ──────────────────────────────────────────────────────────
 
 export const HoldPurpose = Schema.Literals(["managed", "runtime-private"])
