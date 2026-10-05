@@ -112,7 +112,7 @@ describe("file OutboxStore: settled emissions leave the scanned root", () => {
       // A settled directory whose record does not decode. Anything that read
       // history would fail on it.
       const broken = `${settled}/emi_${"f".repeat(32)}.committed`
-      yield* fs.makeDirectory(broken)
+      yield* fs.makeDirectory(broken, { recursive: true })
       yield* fs.writeFileString(`${broken}/record.committed.json`, "{ not a record")
       expect((yield* store.list("staged")).map((record) => record.id)).toEqual([open.id])
       expect(yield* store.list("committing")).toEqual([])

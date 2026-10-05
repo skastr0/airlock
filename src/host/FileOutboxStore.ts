@@ -32,7 +32,8 @@ import { makeExclusiveFileLock } from "../platform/ExclusiveFileLock.ts"
  *
  * An emission is settled when its state is terminal and it owes the Ledger
  * nothing. A settled emission is renamed into `settled/`, so the outbox root
- * holds only what is still in motion. Finding one emission by id probes its
+ * holds only what is still in motion (`settled/` is created by the first
+ * move, so an outbox that settled nothing holds nothing). Finding one emission by id probes its
  * possible names; nothing lists the root except the operations that ask for
  * unsettled emissions, and nothing lists history unless history is asked for.
  */
@@ -98,7 +99,6 @@ export const make = Effect.gen(function* () {
 
   const lockRoot = path.join(home.home, "outbox-locks")
   yield* secureDirectory(home.outboxDir, "initialize")
-  yield* secureDirectory(settledRoot, "initialize-settled")
   yield* secureDirectory(lockRoot, "initialize-lock")
 
   const fileLock = (name: string) =>
@@ -186,6 +186,8 @@ export const make = Effect.gen(function* () {
   /** Every emission directly under `root`, by its directory name. */
   const entriesOf = (root: string) =>
     fs.readDirectory(root).pipe(
+      // `settled/` does not exist until something settles.
+      Effect.catchIf(isNotFound, () => Effect.succeed<ReadonlyArray<string>>([])),
       Effect.mapError(failed("list")),
       Effect.flatMap((entries) => {
         const found = new Map<EmissionId, Located>()
@@ -230,7 +232,10 @@ export const make = Effect.gen(function* () {
   const settle = (record: EmissionRecord, found: Located) =>
     found.directory.startsWith(settledRoot) || !isSettled(record)
       ? Effect.void
-      : fs.rename(found.directory, stateDirectory(record.id, record.state, settledRoot)).pipe(Effect.ignore)
+      : fs.makeDirectory(settledRoot, { recursive: true, mode: 0o700 }).pipe(
+          Effect.andThen(fs.rename(found.directory, stateDirectory(record.id, record.state, settledRoot))),
+          Effect.ignore
+        )
 
   const read = (id: EmissionId) =>
     Effect.flatMap(locate(id), Option.match({
