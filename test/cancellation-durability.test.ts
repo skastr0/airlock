@@ -4,7 +4,6 @@ import { describe, expect, it } from "@effect/vitest"
 import * as http from "node:http"
 import type { AddressInfo } from "node:net"
 import * as AirlockHome from "../src/AirlockHome.ts"
-import { EmissionRequest } from "../src/domain.ts"
 import {
   Hold,
   HoldLayer,
@@ -13,6 +12,8 @@ import {
 } from "../src/Hold.ts"
 import { Ledger } from "../src/Ledger.ts"
 import {
+  DispatchProvenance,
+  HttpExternalIntent,
   Outbox,
   OutboxLive,
   OutboxRecoveryRequired
@@ -50,8 +51,10 @@ const realDelay = (milliseconds: number) =>
     return Effect.sync(() => clearTimeout(timer))
   })
 
+const supervisorCommit = new DispatchProvenance({ committedBy: "supervisor" })
+
 const post = (url: string) =>
-  new EmissionRequest({
+  new HttpExternalIntent({
     url,
     method: "POST",
     body: "payload"
@@ -310,7 +313,7 @@ describe("durable cancellation receipts", () => {
             post(`http://127.0.0.1:${address.port}/hook`),
             0
           )
-          const fiber = yield* outbox.commit(staged.id).pipe(Effect.forkChild)
+          const fiber = yield* outbox.commit(staged.id, supervisorCommit).pipe(Effect.forkChild)
           yield* Deferred.await(started)
           const exit = yield* Fiber.interrupt(fiber).pipe(Effect.andThen(Fiber.await(fiber)))
           const failure = typedFailure(exit)
@@ -331,7 +334,7 @@ describe("durable cancellation receipts", () => {
           expect(yield* outbox.inspect(staged.id)).toEqual(
             failure.emission
           )
-          const retry = yield* outbox.commit(staged.id).pipe(Effect.flip)
+          const retry = yield* outbox.commit(staged.id, supervisorCommit).pipe(Effect.flip)
           expect(retry._tag).toBe("EmissionNotPending")
           expect(hits).toBe(1)
         }).pipe(Effect.provide(layer))

@@ -91,10 +91,7 @@ export class DaemonTickReport extends Schema.Class<DaemonTickReport>(
   failed: Schema.Array(DaemonDispatchFailure),
   waiting: Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
   reaped: Schema.Array(ActId),
-  skipped: Schema.Array(DaemonOperationSkipped).pipe(
-    Schema.withDecodingDefault(Effect.succeed([])),
-    Schema.withConstructorDefault(Effect.succeed([]))
-  )
+  skipped: Schema.Array(DaemonOperationSkipped)
 }) {}
 
 export type DaemonTickError =
@@ -226,7 +223,7 @@ const tickWithServices = (
 
       // `commit` means an immediate scan: read-class automatic dispatch does
       // not require the cancellation delay to elapse. `flush` is deliberately
-      // narrower than the legacy blanket method: it schedules only matching
+      // narrower than Outbox.flush: it schedules only matching
       // authorized evidence whose existing hold deadline is due, and every
       // selected item still uses the ordinary single-item commit authority.
       let selected = authorized

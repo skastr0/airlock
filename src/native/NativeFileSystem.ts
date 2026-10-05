@@ -113,7 +113,7 @@ export class NativeWriteReceipt extends Schema.Class<NativeWriteReceipt>("Native
     at: Schema.DateTimeUtcFromString,
     metadata: Schema.Struct({
       device: Schema.Finite,
-      inode: Schema.optionalKey(Schema.Finite),
+      inode: Schema.Finite,
       mode: Schema.Finite,
       bytes: Schema.Finite
     })

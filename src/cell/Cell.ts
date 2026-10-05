@@ -119,10 +119,7 @@ export class CellReceipt extends Schema.Class<CellReceipt>("CellReceipt")({
   readAuthority: CellReadAuthority,
   process: ProcessRequest,
   processReceipt: ProcessReceipt,
-  executableBindings: Schema.Array(CellExecutableBinding).pipe(
-    Schema.withDecodingDefault(Effect.succeed([])),
-    Schema.withConstructorDefault(Effect.succeed([]))
-  ),
+  executableBindings: Schema.Array(CellExecutableBinding),
   baseline: WorkspaceFingerprint,
   live: WorkspaceFingerprint,
   private: WorkspaceFingerprint,

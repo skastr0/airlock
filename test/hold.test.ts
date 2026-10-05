@@ -368,37 +368,6 @@ describe("Hold — undoable mutations", () => {
     )
   )
 
-  it.effect("decodes purpose-less managed journals and keeps them undoable", () =>
-    world(({ fs, hold, path, tmp }) =>
-      Effect.gen(function* () {
-        const managed = path.join(tmp, "legacy-managed.txt")
-        yield* fs.writeFileString(managed, "legacy bytes")
-        const receipt = yield* hold.remove(managed)
-        const home = path.join(tmp, "airlock-home")
-        const journalPath = path.join(
-          home,
-          "hold",
-          receipt.id,
-          "manifest.json"
-        )
-        const encoded = JSON.parse(
-          yield* fs.readFileString(journalPath)
-        ) as {
-          readonly manifest: Record<string, unknown>
-        }
-        expect(encoded.manifest).not.toHaveProperty("purpose")
-
-        const reconstructed = yield* Effect.provide(Hold, layersFor(home))
-        const manifest = (yield* reconstructed.held).find(
-          (candidate) => candidate.id === receipt.id
-        )
-        expect(manifest?.purpose).toBeUndefined()
-        expect((yield* reconstructed.undoLast).id).toBe(receipt.id)
-        expect(yield* fs.readFileString(managed)).toBe("legacy bytes")
-      })
-    )
-  )
-
   it.effect("reaper is the sole terminal authority for runtime-private payloads", () =>
     world(({ fs, hold, path, tmp }) =>
       Effect.gen(function* () {

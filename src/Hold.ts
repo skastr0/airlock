@@ -4,6 +4,7 @@ import { AirlockHome } from "./AirlockHome.ts"
 import {
   ActId,
   HeldManifest,
+  type HoldPurpose,
   LedgerEntry,
   NotHeld,
   NothingToUndo,
@@ -139,7 +140,7 @@ type HoldMutationError = HoldIoError | LedgerError | HoldRecoveryRequired
 
 export class ReplaceMetadata extends Schema.Class<ReplaceMetadata>("ReplaceMetadata")({
   device: Schema.Finite,
-  inode: Schema.optionalKey(Schema.Finite),
+  inode: Schema.Finite,
   mode: Schema.Finite,
   bytes: Schema.Finite
 }) {}
@@ -261,7 +262,7 @@ export class Hold extends Context.Service<
 // reconciled on the next construction without widening the public contract.
 class RetainedMetadata extends Schema.Class<RetainedMetadata>("RetainedMetadata")({
   device: Schema.Finite,
-  inode: Schema.optionalKey(Schema.Finite),
+  inode: Schema.Finite,
   mode: Schema.Finite,
   bytes: Schema.Finite
 }) {}
@@ -310,7 +311,6 @@ class HoldPostRenameDirectorySyncFailed extends Schema.TaggedError<HoldPostRenam
 
 const encodeJournal = Schema.encodeEffect(Schema.fromJsonString(HoldJournal))
 const decodeJournal = Schema.decodeEffect(Schema.fromJsonString(HoldJournal))
-const decodeLegacyManifest = Schema.decodeEffect(Schema.fromJsonString(HeldManifest))
 
 const newActId = () => ActId.make(`act_${crypto.randomUUID().slice(0, 13)}`)
 
@@ -333,8 +333,6 @@ const make = Effect.gen(function* () {
   const stageFile = (id: string) => path.join(actDir(id), "stage")
   const lockRoot = path.join(home.home, "hold-locks")
   const activeLock = path.join(lockRoot, "active")
-  const releasedLock = path.join(lockRoot, "released")
-  const abandonedLock = path.join(lockRoot, "abandoned")
 
   const fsError = (operation: string, target: string) => (cause: unknown) =>
     new HoldFilesystemError({ operation, target, reason: reasonOf(cause) })
@@ -483,8 +481,6 @@ const make = Effect.gen(function* () {
   const lock = makeExclusiveFileLock({
     root: lockRoot,
     active: activeLock,
-    released: releasedLock,
-    abandoned: abandonedLock,
     onError: (operation, target, cause) =>
       fsError(`Hold lock ${operation}`, target)(cause)
   })
@@ -494,17 +490,6 @@ const make = Effect.gen(function* () {
 
   const decodeStoredJournal = (raw: string, id: ActId) =>
     decodeJournal(raw).pipe(
-      // Existing v0 manifests are a supported persisted format. Rewrite them
-      // as journals on their next state transition; never make a prior hold
-      // unreadable because the recovery format grew a phase.
-      Effect.catch(() =>
-        decodeLegacyManifest(raw).pipe(
-          Effect.map(
-            (manifest) =>
-              new HoldJournal({ state: manifest.status, manifest })
-          )
-        )
-      ),
       Effect.mapError(fsError("decode hold journal", manifestFile(id)))
     )
 
@@ -892,7 +877,7 @@ const make = Effect.gen(function* () {
     target: string,
     act: "remove" | "overwrite" | "displaced",
     entry: Entry,
-    purpose?: "runtime-private"
+    purpose: HoldPurpose = "managed"
   ) {
     yield* admitSameVolume(target)
     const id = newActId()
@@ -903,7 +888,7 @@ const make = Effect.gen(function* () {
       target,
       kind: entry.kind,
       hasPayload: true,
-      ...(purpose === undefined ? {} : { purpose }),
+      purpose,
       status: "held",
       at
     })
@@ -943,6 +928,7 @@ const make = Effect.gen(function* () {
       target,
       kind,
       hasPayload: false,
+      purpose: "managed",
       status: "held",
       at
     })
@@ -1170,7 +1156,7 @@ const make = Effect.gen(function* () {
 
   const reconcileJournal = Effect.fnUntraced(function* (journal: HoldJournal) {
     // Checked operations own their recovery evidence. An ambiguous operation
-    // remains inspectable and pinned, never bricks legacy Hold construction.
+    // remains inspectable and pinned, never bricks Hold construction.
     if (journal.checkedKey !== undefined || journal.snapshotRetirementId !== undefined) return
     if (journal.state === "restored") return
     const { manifest } = journal
@@ -1770,7 +1756,7 @@ const make = Effect.gen(function* () {
     yield* admitSameVolume(request.target)
     const manifest = new HeldManifest({
       id: newActId(), target: request.target, kind, hasPayload, act,
-      at: yield* DateTime.now, status: "held"
+      purpose: "managed", at: yield* DateTime.now, status: "held"
     })
     yield* reserveAct(manifest, undefined, request.operationKey)
     return manifest
@@ -1991,7 +1977,7 @@ const make = Effect.gen(function* () {
         yield* fs.makeDirectory(actDir(id), { recursive: true, mode: 0o700 })
         yield* syncDirectory(home.holdDir, "snapshot act directory sync")
         const manifest = new HeldManifest({ id, act: "remove", target: path.join(home.home, "changes", input.id),
-          kind: "directory", at: yield* DateTime.now, status: "held", hasPayload: true })
+          kind: "directory", purpose: "managed", at: yield* DateTime.now, status: "held", hasPayload: true })
         yield* writeJournal(new HoldJournal({ state: "held", manifest, checkedPinned: true, snapshotRetirementId: input.id }))
       }
       const journal = yield* readJournal(id)

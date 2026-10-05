@@ -235,7 +235,7 @@ const outboxLayer = (
 ) =>
   Layer.succeed(Outbox, Outbox.of({
     stage: (request, holdMillis, authorization) => {
-      if ("_tag" in request) return Effect.die("external command intent is not a Plan v1 node")
+      if (request._tag !== "HttpExternalIntent") return Effect.die("external command intent is not a Plan v1 node")
       requests.push(request.url)
       options.authorizations?.push(authorization)
       return Effect.succeed(new OutboxEmission({

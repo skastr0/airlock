@@ -48,15 +48,15 @@ describe("explicit snapshot lifecycle", () => {
     const inbox = await run(change.inventory())
     expect(inbox.totals).toEqual({ rows: 200, active: 0, reservedBytes: 0, snapshotBytes: 0, collected: 200, errors: 0 })
   }), 600000)
-  it("retirement artifacts cannot shadow legacy held or undoLast", () => world(async ({ root, change, hold }) => {
-    const legacy = path.join(root, "legacy")
-    await writeFile(legacy, "recover me")
-    const removed = await run(hold.remove(legacy))
+  it("retirement artifacts cannot shadow ordinary held acts or undoLast", () => world(async ({ root, change, hold }) => {
+    const ordinary = path.join(root, "ordinary")
+    await writeFile(ordinary, "recover me")
+    const removed = await run(hold.remove(ordinary))
     const p = await proposal(root, change)
     await run(change.cancel(p.id)); await retire(change, p.id); await run(change.collect(p.id))
     expect((await run(hold.held)).map(m => m.id)).toEqual([removed.id])
     expect((await run(hold.undoLast)).id).toBe(removed.id)
-    expect(await readFile(legacy, "utf8")).toBe("recover me")
+    expect(await readFile(ordinary, "utf8")).toBe("recover me")
   }))
   it("stale retirement digest and retained-content drift refuse without releasing budget", () => world(async ({ root, home, change }) => {
     const p = await proposal(root, change)

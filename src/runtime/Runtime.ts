@@ -23,7 +23,7 @@ import {
   WorkspaceDeltaCandidate
 } from "../cell/index.ts"
 import { Hold, HoldRecoveryRequired } from "../Hold.ts"
-import { ActId, EmissionRequest, RemoveReceipt } from "../domain.ts"
+import { ActId, RemoveReceipt } from "../domain.ts"
 import {
   NativeFileSystem,
   NativeListEntry,
@@ -34,6 +34,7 @@ import {
   NativeStat,
   NativeWriteReceipt
 } from "../native/index.ts"
+import { HttpExternalIntent } from "../outbox/Contract.ts"
 import {
   DispatchProvenance,
   Outbox,
@@ -195,10 +196,7 @@ export class RuntimeProcessEvidence extends Schema.Class<RuntimeProcessEvidence>
   nodeId: Schema.String,
   outcome: RuntimeProcessOutcome,
   receipt: ProcessReceipt,
-  executableBindings: Schema.Array(CellExecutableBinding).pipe(
-    Schema.withDecodingDefault(Effect.succeed([])),
-    Schema.withConstructorDefault(Effect.succeed([]))
-  )
+  executableBindings: Schema.Array(CellExecutableBinding)
 }) {}
 
 export class RuntimeMergeEvidence extends Schema.Class<RuntimeMergeEvidence>(
@@ -260,7 +258,6 @@ export type RuntimeRecoveryEvidence = typeof RuntimeRecoveryEvidence.Type
 
 export class RuntimeRun extends Schema.Class<RuntimeRun>("RuntimeRun")({
   schemaVersion: Schema.Literal("airlock/runtime-run/v1").pipe(
-    Schema.withDecodingDefault(Effect.succeed("airlock/runtime-run/v1" as const)),
     Schema.withConstructorDefault(Effect.succeed("airlock/runtime-run/v1" as const))
   ),
   planId: Schema.String,
@@ -269,18 +266,9 @@ export class RuntimeRun extends Schema.Class<RuntimeRun>("RuntimeRun")({
   finishedAt: Schema.DateTimeUtcFromString,
   receipts: Schema.Array(Receipt),
   artifacts: Schema.Array(RuntimeArtifact),
-  processes: Schema.Array(RuntimeProcessEvidence).pipe(
-    Schema.withDecodingDefault(Effect.succeed([])),
-    Schema.withConstructorDefault(Effect.succeed([]))
-  ),
-  lifecycle: Schema.Array(RuntimeLifecycleReceipt).pipe(
-    Schema.withDecodingDefault(Effect.succeed([])),
-    Schema.withConstructorDefault(Effect.succeed([]))
-  ),
-  recovery: Schema.Array(RuntimeRecoveryEvidence).pipe(
-    Schema.withDecodingDefault(Effect.succeed([])),
-    Schema.withConstructorDefault(Effect.succeed([]))
-  )
+  processes: Schema.Array(RuntimeProcessEvidence),
+  lifecycle: Schema.Array(RuntimeLifecycleReceipt),
+  recovery: Schema.Array(RuntimeRecoveryEvidence)
 }) {}
 
 export class RuntimeRunSnapshot extends Schema.Class<RuntimeRunSnapshot>(
@@ -1352,8 +1340,6 @@ const make = Effect.gen(function* () {
     const lock = makeExclusiveFileLock({
       root: claimRoot,
       active,
-      released: `${active}.released`,
-      abandoned: `${active}.abandoned`,
       onError: claimFailure
     })
 
@@ -1631,7 +1617,8 @@ const make = Effect.gen(function* () {
           processes.set(node.id, new RuntimeProcessEvidence({
             nodeId: node.id,
             outcome: evidenced.evidence,
-            receipt: evidenced.receipt
+            receipt: evidenced.receipt,
+            executableBindings: []
           }))
           const outputArtifacts = materializeInvokeOutputs(
             node,
@@ -2027,7 +2014,7 @@ const make = Effect.gen(function* () {
               })
             })
           }
-          const stagedResult = yield* outbox.stage(new EmissionRequest({
+          const stagedResult = yield* outbox.stage(new HttpExternalIntent({
             url: node.endpoint,
             method: node.method,
             headers: node.headers,
@@ -2433,6 +2420,7 @@ const make = Effect.gen(function* () {
         receipts,
         artifacts: [...artifacts.values()],
         processes: [...processes.values()],
+        lifecycle: [],
         recovery
       })
       yield* persistSnapshot("finalizing")
