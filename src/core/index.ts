@@ -9,6 +9,7 @@ export * as Canonical from "./Canonical.ts"
 export {
   defineToolContract,
   type ToolContract,
+  type ToolShape,
   ToolSummary
 } from "./contract/ToolContract.ts"
 export * as Hold from "./domain.ts"
@@ -74,6 +75,20 @@ export {
   type StageRequest
 } from "./outbox/Outbox.ts"
 export { OutboxStore } from "./outbox/OutboxStore.ts"
+export {
+  type CallResult,
+  type GrantFor,
+  InvalidToolInput,
+  InvalidToolSession,
+  openToolSession,
+  SessionBudgetExceeded,
+  type Staged,
+  type ToolCallError,
+  ToolCallNotGranted,
+  type ToolContracts,
+  type ToolSession,
+  type ToolSessionOptions
+} from "./session/ToolSession.ts"
 export {
   acknowledge,
   advance,

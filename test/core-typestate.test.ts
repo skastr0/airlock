@@ -14,6 +14,7 @@ import {
   isLegalTransition,
   isLivePermit,
   type Next,
+  openToolSession,
   type OutboxService,
   OutboxStore,
   WebCrypto
@@ -161,6 +162,55 @@ describe("core: what the types rule out", () => {
     expect(Admission.validateToolGrants([denied], exampleContracts)?.field).toBe(
       "policy.toolGrants[0].where.body"
     )
+  })
+
+  it("gives a session a method only for a granted tool, and an outcome only for a read", () => {
+    const tools = defineOutbox(exampleContracts)
+    const program = Effect.gen(function* () {
+      const session = yield* openToolSession(tools, {
+        runId: "run",
+        grants: [
+          Admission.toolGrant(MailList, { class: "read", commit: "auto" }),
+          Admission.toolGrant(LabelAdd)
+        ],
+        budget: { maxCalls: 1, maxInputBytes: 1 }
+      })
+      // @ts-expect-error mail.send was not granted: the method does not exist
+      session["mail.send"]
+      // @ts-expect-error label.remove was not granted either
+      session["label.remove"]
+      // @ts-expect-error a method takes its own tool's input
+      session["mail.list"]({ mailbox: "inbox" })
+
+      const listed = yield* session["mail.list"]({ mailbox: "inbox", query: "q" })
+      const ids = listed._tag === "Performed" ? listed.outcome.ids : []
+      const labelled = yield* session["label.add"]({ messageId: "m", label: "l" })
+      // A write's result is `Staged` and nothing else: there is no outcome to read.
+      const staged: "Staged" = labelled._tag
+      // @ts-expect-error a staged write has no outcome, in the type or at run time
+      labelled.outcome
+      // @ts-expect-error nor a response
+      labelled.response
+      return [ids, staged] as const
+    })
+    expect(Effect.isEffect(program)).toBe(true)
+  })
+
+  it("makes every method optional when the grants arrive as data", () => {
+    const tools = defineOutbox(exampleContracts)
+    const grants: ReadonlyArray<Admission.ToolGrantPolicy> = []
+    const program = Effect.gen(function* () {
+      const session = yield* openToolSession(tools, {
+        runId: "run",
+        grants,
+        budget: { maxCalls: 1, maxInputBytes: 1 }
+      })
+      // @ts-expect-error the method may be absent, so it cannot be called unchecked
+      session["mail.list"]({ mailbox: "inbox", query: "q" })
+      const list = session["mail.list"]
+      return list === undefined ? "absent" : "present"
+    })
+    expect(Effect.isEffect(program)).toBe(true)
   })
 
   it("gives no module outside the kernel a way to make a live permit", () => {

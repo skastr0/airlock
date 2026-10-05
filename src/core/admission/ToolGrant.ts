@@ -51,7 +51,7 @@ export const toolGrant = <Contract extends ToolContract.Any>(
     readonly commit?: CommitMode
     readonly where?: { readonly [Field in ToolContract.PublicOf<Contract>]?: FieldMatch }
   } = {}
-): ToolGrantPolicy =>
+): ToolGrantPolicy & { readonly tool: Contract["tag"] } =>
   new ToolGrantPolicy({
     tool: contract.tag,
     ...(grant.class === undefined ? {} : { class: grant.class }),

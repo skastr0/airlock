@@ -13,6 +13,7 @@ import {
   defineOutbox,
   DISPATCH_TIMEOUT_MILLIS,
   isLivePermit,
+  type OutboxOf,
   type OutboxService,
   RESPONSE_LIMIT_BYTES
 } from "../outbox/Outbox.ts"
@@ -26,7 +27,9 @@ import {
   InvalidIntent
 } from "../outbox/Records.ts"
 import { holds, type Runner, same } from "./Check.ts"
-import { exampleContracts } from "./ExampleContracts.ts"
+import { toolGrant, ToolGrantPolicy } from "../admission/ToolGrant.ts"
+import { openToolSession } from "../session/ToolSession.ts"
+import { exampleContracts, MailList, MailSend } from "./ExampleContracts.ts"
 import { digestOf, encoded, instant } from "./Fixtures.ts"
 
 /**
@@ -190,7 +193,11 @@ export const outboxConformance = (
   const toolSession = <A, E>(
     current: OutboxWorld,
     handlers: ToolHandlers,
-    body: (outbox: Tools, store: OutboxStore["Service"], ledger: Ledger["Service"]) => Effect.Effect<A, E>
+    body: (
+      outbox: Tools,
+      store: OutboxStore["Service"],
+      ledger: Ledger["Service"]
+    ) => Effect.Effect<A, E, OutboxOf<typeof tools.kinds> | Crypto.Crypto>
   ) =>
     Effect.gen(function* () {
       return yield* body(yield* tools.Outbox, yield* OutboxStore, yield* Ledger)
@@ -782,6 +789,152 @@ export const outboxConformance = (
         const all = yield* toolSession(current, handlers, (_, store) => store.list())
         same(all.length, 2, "no compensation was staged")
         same(calls.map((call) => call.tool), ["label.remove"])
+      }))
+
+    timed("a session exposes exactly the granted tools, performs reads and only stages the rest", () =>
+      Effect.gen(function* () {
+        const current = yield* world
+        const { calls, handlers } = toolWire()
+        const grants = [
+          toolGrant(MailList, { class: "read", commit: "auto", where: { mailbox: { equals: "inbox" } } }),
+          toolGrant(MailSend, { where: { to: { endsWith: "@example.com" } } })
+        ]
+        const open = (runId: string) =>
+          openToolSession(tools, { runId, grants, budget: { maxCalls: 10, maxInputBytes: 10_000 } })
+
+        const first = yield* toolSession(current, handlers, () =>
+          Effect.gen(function* () {
+            const session = yield* open("run-1")
+            same(Object.keys(session).sort(), ["mail.list", "mail.send"], "one method per granted tool")
+            holds(Object.isFrozen(session), "a session cannot be given new methods")
+            const listed = yield* session["mail.list"]({ mailbox: "inbox", query: "from:ada" })
+            const sent = yield* session["mail.send"]({ to: "ada@example.com", subject: "hi", body: "secret" })
+            return { listed, sent }
+          }))
+        same(first.listed._tag === "Performed" ? first.listed.outcome : first.listed._tag, { ids: ["m-1", "inbox"] })
+        same([first.sent._tag, first.sent.state, "outcome" in first.sent], ["Staged", "staged", false])
+        same(calls.map((call) => call.tool), ["mail.list"], "the write was recorded, not sent")
+
+        // The guest is executed again from the top, after a restart.
+        const again = yield* toolSession(current, handlers, () =>
+          Effect.gen(function* () {
+            const session = yield* open("run-1")
+            const listed = yield* session["mail.list"]({ mailbox: "inbox", query: "from:ada" })
+            const sent = yield* session["mail.send"]({ to: "ada@example.com", subject: "hi", body: "secret" })
+            return { listed, sent }
+          }))
+        same(again.listed, first.listed, "a re-executed read gets the recorded result")
+        same(again.sent.id, first.sent.id)
+        same(calls.length, 1)
+
+        // A supervisor commits the staged send. The guest still learns nothing from it.
+        yield* toolSession(current, handlers, (outbox) => outbox.commit(first.sent.id, bySupervisor))
+        const afterCommit = yield* toolSession(current, handlers, () =>
+          Effect.gen(function* () {
+            const session = yield* open("run-1")
+            yield* session["mail.list"]({ mailbox: "inbox", query: "from:ada" })
+            return yield* session["mail.send"]({ to: "ada@example.com", subject: "hi", body: "secret" })
+          }))
+        same([afterCommit._tag, afterCommit.state, "outcome" in afterCommit], ["Staged", "committed", false])
+        same(calls.map((call) => call.tool), ["mail.list", "mail.send"])
+
+        // Another run is another set of keys.
+        const other = yield* toolSession(current, handlers, () =>
+          Effect.flatMap(open("run-2"), (session) => session["mail.list"]({ mailbox: "inbox", query: "from:ada" })))
+        same(other._tag === "Performed" ? other.id === first.listed.id : other._tag, false)
+        same(calls.length, 3)
+      }))
+
+    timed("a session refuses what its grants do not cover and records nothing for it", () =>
+      Effect.gen(function* () {
+        const current = yield* world
+        const { calls, handlers } = toolWire()
+        const grants = [
+          toolGrant(MailList, { class: "read", commit: "auto", where: { mailbox: { equals: "inbox" } } }),
+          toolGrant(MailSend, { where: { to: { endsWith: "@example.com" } } })
+        ]
+        const refusals = yield* toolSession(current, handlers, (_, store) =>
+          Effect.gen(function* () {
+            const session = yield* openToolSession(tools, {
+              runId: "run-1",
+              grants,
+              budget: { maxCalls: 10, maxInputBytes: 10_000 }
+            })
+            // The grant set was copied: growing the caller's array grants nothing.
+            grants.push(toolGrant(MailSend))
+            const failures = yield* Effect.all([
+              Effect.flip(session["mail.list"]({ mailbox: "drafts", query: "q" })),
+              Effect.flip(session["mail.send"]({ to: "eve@elsewhere.test", subject: "s", body: "b" })),
+              Effect.flip(session["mail.send"]({ to: "ada@example.com" } as never)),
+              Effect.flip(session["mail.send"]({ to: 7, subject: "s", body: "b" } as never))
+            ])
+            return { failures, stored: yield* store.list(), names: Object.keys(session).sort() }
+          }))
+        same(refusals.failures.map((failure) => failure._tag), [
+          "ToolCallNotGranted",
+          "ToolCallNotGranted",
+          "InvalidToolInput",
+          "InvalidToolInput"
+        ])
+        same(refusals.stored.length, 0)
+        same(refusals.names, ["mail.list", "mail.send"])
+        same(calls.length, 0)
+
+        // A read that is granted but not pre-authorized is staged like a write.
+        const waiting = yield* toolSession(current, handlers, () =>
+          Effect.flatMap(
+            openToolSession(tools, {
+              runId: "run-3",
+              grants: [toolGrant(MailList, { class: "read" })],
+              budget: { maxCalls: 1, maxInputBytes: 1_000 }
+            }),
+            (session) => session["mail.list"]({ mailbox: "inbox", query: "q" })
+          ))
+        same([waiting._tag, calls.length], ["Staged", 0])
+
+        // A grant set that is invalid against the contracts opens no session at all.
+        const invalid = yield* toolSession(current, handlers, () =>
+          Effect.flip(openToolSession(tools, {
+            runId: "run-4",
+            grants: [new ToolGrantPolicy({ tool: "mail.send", where: { body: { equals: "x" } } })],
+            budget: { maxCalls: 1, maxInputBytes: 1_000 }
+          })))
+        same(invalid._tag, "InvalidToolSession")
+      }))
+
+    timed("a session's budgets fail closed", () =>
+      Effect.gen(function* () {
+        const current = yield* world
+        const { calls, handlers } = toolWire()
+        const grants = [toolGrant(MailList, { class: "read", commit: "auto" })]
+        const outcome = yield* toolSession(current, handlers, (_, store) =>
+          Effect.gen(function* () {
+            const counted = yield* openToolSession(tools, {
+              runId: "calls",
+              grants,
+              budget: { maxCalls: 2, maxInputBytes: 10_000 }
+            })
+            const call = (query: string) => counted["mail.list"]({ mailbox: "inbox", query })
+            yield* call("one")
+            // A refused call still spends budget.
+            yield* Effect.flip(counted["mail.list"]({ mailbox: 1 } as never))
+            const overCalls = yield* Effect.flip(call("three"))
+
+            const sized = yield* openToolSession(tools, {
+              runId: "bytes",
+              grants,
+              budget: { maxCalls: 10, maxInputBytes: 60 }
+            })
+            yield* sized["mail.list"]({ mailbox: "inbox", query: "a" })
+            const overBytes = yield* Effect.flip(sized["mail.list"]({ mailbox: "inbox", query: "x".repeat(40) }))
+            return { overCalls, overBytes, stored: (yield* store.list()).length }
+          }))
+        same(
+          [outcome.overCalls, outcome.overBytes].map((failure) =>
+            failure._tag === "SessionBudgetExceeded" ? failure.budget : failure._tag),
+          ["calls", "inputBytes"]
+        )
+        same([outcome.stored, calls.length], [2, 2], "nothing is recorded or sent past a budget")
       }))
 
     timed("a record that no longer decodes stops every operation on it, and sends nothing", () =>

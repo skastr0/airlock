@@ -27,26 +27,43 @@ export type ToolSummary = typeof ToolSummary.Type
 
 type JsonRecord = { readonly [field: string]: Schema.Json }
 
+/** Everything about one tool that its types depend on. */
+export interface ToolShape {
+  readonly name: string
+  /** The decoded input a handler receives. */
+  readonly input: unknown
+  /** The JSON a caller supplies; the input schema decodes it. */
+  readonly wire: JsonRecord
+  readonly output: unknown
+  /** Names of the public input fields. */
+  readonly public: string
+  /** What the author says the tool does; `undefined` claims nothing. */
+  readonly effect: "read" | "mutate" | undefined
+  /** Name of the contract that answers a committed call; `never` when irreversible. */
+  readonly answer: string
+}
+
 /**
  * One tool, as one intent kind: its handler is total over this tool alone and
  * its dispatch material is this tool's typed input.
  */
-export interface ToolContract<
-  Name extends string,
-  Input,
-  Output,
-  Public extends string = never,
-  Compensates extends string = never
-> extends IntentKind<Name, Input, ToolSummary, Output, Compensates> {
+export interface ToolContract<Shape extends ToolShape>
+  extends IntentKind<Shape["name"], Shape["input"], ToolSummary, Shape["output"], Shape["answer"]>
+{
   readonly version: string
-  readonly emissionEffect: "read" | "mutate" | undefined
+  readonly input: Schema.Codec<Shape["input"], Shape["wire"]>
+  readonly emissionEffect: Shape["effect"]
   /** The only input fields whose values a summary, grant or receipt may see. */
-  readonly publicFields: ReadonlyArray<Public>
+  readonly publicFields: ReadonlyArray<Shape["public"]>
 }
 
 export declare namespace ToolContract {
-  export type Any = ToolContract<string, any, any, any, any>
-  export type PublicOf<Contract> = Contract extends ToolContract<string, any, any, infer P, any> ? P : never
+  export type Any = ToolContract<any>
+  export type ShapeOf<Contract> = Contract extends ToolContract<infer Shape> ? Shape : never
+  export type PublicOf<Contract> = ShapeOf<Contract>["public"]
+  export type WireOf<Contract> = ShapeOf<Contract>["wire"]
+  export type OutputOf<Contract> = ShapeOf<Contract>["output"]
+  export type EffectOf<Contract> = ShapeOf<Contract>["effect"]
 }
 
 const encoder = new TextEncoder()
@@ -64,15 +81,17 @@ const encoder = new TextEncoder()
 export const defineToolContract = <
   const Name extends string,
   Input,
+  Wire extends JsonRecord,
   Output,
   const Public extends keyof Input & string = never,
-  Answer extends IntentKind.Any = never
+  Answer extends IntentKind.Any = never,
+  const Declared extends "read" | "mutate" | undefined = undefined
 >(spec: {
   readonly name: Name
   readonly version: string
-  readonly input: Schema.Codec<Input, JsonRecord>
+  readonly input: Schema.Codec<Input, Wire>
   readonly output: Schema.Codec<Output, Schema.Json>
-  readonly emissionEffect?: "read" | "mutate"
+  readonly emissionEffect?: Declared
   readonly public?: ReadonlyArray<Public>
   /** Defaults to `tool:<name>`. Must not reveal a field that is not public. */
   readonly target?: (input: Input) => string
@@ -88,7 +107,15 @@ export const defineToolContract = <
       readonly outcome: Output
     }) => IntentKind.DispatchOf<Answer>
   }
-}): ToolContract<Name, Input, Output, Public, Answer["tag"]> => {
+}): ToolContract<{
+  readonly name: Name
+  readonly input: Input
+  readonly wire: Wire
+  readonly output: Output
+  readonly public: Public
+  readonly effect: Declared
+  readonly answer: Answer["tag"]
+}> => {
   const answer: Compensation<Input, Output, Answer["tag"]> | undefined = spec.compensate === undefined
     ? undefined
     : { kind: spec.compensate.with.tag, with: spec.compensate.with, intent: spec.compensate.intent }
@@ -97,7 +124,9 @@ export const defineToolContract = <
   return {
     tag: spec.name,
     version: spec.version,
-    emissionEffect: spec.emissionEffect,
+    input: spec.input,
+    // An omitted effect is `undefined`, which is what `Declared` defaults to.
+    emissionEffect: spec.emissionEffect as Declared,
     publicFields,
     dispatch: spec.input,
     summary: ToolSummary,
