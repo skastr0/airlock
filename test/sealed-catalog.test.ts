@@ -13,10 +13,9 @@ import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
 import { describe, expect, it } from "@effect/vitest"
 import { Effect } from "effect"
+import type { Sha256Digest } from "../src/core/Canonical.ts"
 import {
-  type BoxGrantSha256,
   decodeBoxGrant,
-  hashBoxGrant
 } from "../src/core/admission/BoxGrant.ts"
 import {
   UnsealedToolDefinitionPathRejected,
@@ -29,6 +28,7 @@ import {
   sealedTools
 } from "../src/seal/Catalog.ts"
 import {
+  boxGrantDigest,
   VerifiedCatalogDocument,
   VerifiedSeal
 } from "../src/seal/Seal.ts"
@@ -44,8 +44,8 @@ import {
 const bytes = (value: unknown) =>
   new TextEncoder().encode(JSON.stringify(value))
 
-const digest = (value: Uint8Array): BoxGrantSha256 =>
-  `sha256:${createHash("sha256").update(value).digest("hex")}` as BoxGrantSha256
+const digest = (value: Uint8Array): Sha256Digest =>
+  `sha256:${createHash("sha256").update(value).digest("hex")}` as Sha256Digest
 
 const definition = (overrides: Record<string, unknown> = {}) => ({
   schemaVersion: "airlock/tool-definition/v2",
@@ -124,7 +124,7 @@ const sealWith = async (
   return new VerifiedSeal({
     sealPath,
     grant,
-    grantDigest: Effect.runSync(hashBoxGrant(grant).pipe(Effect.provide(BunCrypto.layer))),
+    grantDigest: boxGrantDigest(grant),
     binaryPath: "/fixture/airlock",
     binaryDigest: grant.binaryDigest,
     catalog: [...catalog]

@@ -327,7 +327,9 @@ describe("Runtime total Plan contract", () => {
       expect(result.receipts[0]?.state).toBe("succeeded")
     })
   })
-  it.effect("revalidates grant lifetime immediately before node execution", () => {
+  // Live clock: authority lifetime is read from the Effect clock, and the
+  // grant must be judged expired against the present, not test time zero.
+  it.live("revalidates grant lifetime immediately before node execution", () => {
     let processCalls = 0
     const runner: ProcessRun = (request) => {
       processCalls += 1

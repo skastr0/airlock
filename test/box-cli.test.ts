@@ -12,12 +12,13 @@ import {
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
 import { beforeAll, describe, expect, it } from "vitest"
-import { AdmissionPolicy, BoxGrant, EndpointGrantPolicy, hashBoxGrant } from "../src/core/admission/index.ts"
+import { AdmissionPolicy, BoxGrant, EndpointGrantPolicy } from "../src/core/admission/index.ts"
 import {
   BOX_GRANT_FILE,
   BOX_GRANT_SIGNATURE_FILE,
   OPERATOR_PUBLIC_KEY_FILE,
   SEAL_CATALOG_DIRECTORY,
+  boxGrantDigest,
   boxGrantSigningPayload
 } from "../src/seal/index.ts"
 
@@ -86,7 +87,7 @@ const writeGoodSeal = () => {
   )
   writeFileSync(join(generation, "SEALED"), `${JSON.stringify({
     schemaVersion: "airlock/installed-generation/v1",
-    grantDigest: hashBoxGrant(grant),
+    grantDigest: boxGrantDigest(grant),
     binaryDigest: grant.binaryDigest,
     ownershipApplied: true,
     runnable: true,

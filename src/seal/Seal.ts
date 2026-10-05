@@ -14,10 +14,10 @@ import { Effect, Schema } from "effect"
 import {
   BoxGrant,
   BoxGrantCatalogPin,
-  BoxGrantSha256,
   decodeBoxGrant,
   hashBoxGrant
 } from "../core/admission/BoxGrant.ts"
+import { Sha256Digest } from "../core/Canonical.ts"
 import {
   ToolDefinition,
   ToolDefinitionDocument,
@@ -50,11 +50,11 @@ export const BOX_GRANT_SIGNATURE_DOMAIN =
  * hashes synchronously and cannot be unavailable here, so signers and
  * fixtures get a plain value.
  */
-const grantDigestOf = (grant: BoxGrant): BoxGrantSha256 =>
+export const boxGrantDigest = (grant: BoxGrant): Sha256Digest =>
   Effect.runSync(hashBoxGrant(grant).pipe(Effect.provide(BunCrypto.layer)))
 
 export const boxGrantSigningPayload = (grant: BoxGrant): Uint8Array =>
-  new TextEncoder().encode(`${BOX_GRANT_SIGNATURE_DOMAIN}${grantDigestOf(grant)}`)
+  new TextEncoder().encode(`${BOX_GRANT_SIGNATURE_DOMAIN}${boxGrantDigest(grant)}`)
 
 /**
  * Catalog ids are authority strings, not path fragments. A pin's digest is the
@@ -78,7 +78,7 @@ export class VerifiedCatalogDocument
   extends Schema.Class<VerifiedCatalogDocument>("VerifiedCatalogDocument")({
     id: Schema.String,
     path: Schema.String,
-    digest: BoxGrantSha256,
+    digest: Sha256Digest,
     rawBytes: Schema.Uint8Array,
     definition: ToolDefinition
   }) {}
@@ -98,9 +98,9 @@ export class VerifiedSeal extends Schema.TaggedClass<VerifiedSeal>()(
   {
     sealPath: Schema.String,
     grant: BoxGrant,
-    grantDigest: BoxGrantSha256,
+    grantDigest: Sha256Digest,
     binaryPath: Schema.String,
-    binaryDigest: BoxGrantSha256,
+    binaryDigest: Sha256Digest,
     catalog: Schema.Array(VerifiedCatalogDocument)
   }
 ) {}
@@ -174,7 +174,7 @@ export type BinarySnapshotProvider = () => Effect.Effect<
 export interface SealVerificationOptions {
   readonly binarySnapshotProvider?: BinarySnapshotProvider
   /** Compiled tenant trust anchor: SHA-256 of the operator Ed25519 SPKI DER. */
-  readonly expectedOperatorKeyDigest?: BoxGrantSha256
+  readonly expectedOperatorKeyDigest?: Sha256Digest
 }
 
 export interface LoadStartupSealOptions extends SealVerificationOptions {
@@ -190,8 +190,8 @@ const failure = (
   reason: SealVerificationReason
 ) => new SealVerificationFailed({ phase, path, reason })
 
-const sha256 = (bytes: Uint8Array): BoxGrantSha256 =>
-  `sha256:${createHash("sha256").update(bytes).digest("hex")}` as BoxGrantSha256
+const sha256 = (bytes: Uint8Array): Sha256Digest =>
+  `sha256:${createHash("sha256").update(bytes).digest("hex")}` as Sha256Digest
 
 const lexical = (left: string, right: string) =>
   left < right ? -1 : left > right ? 1 : 0
@@ -308,7 +308,7 @@ const signatureMaxBytes = 16 * 1024
 const readGrant = (
   sealPath: string
 ): Effect.Effect<
-  { readonly grant: BoxGrant; readonly grantDigest: BoxGrantSha256 },
+  { readonly grant: BoxGrant; readonly grantDigest: Sha256Digest },
   SealVerificationFailed
 > => {
   const path = join(sealPath, BOX_GRANT_FILE)
@@ -321,7 +321,7 @@ const readGrant = (
     Effect.flatMap((parsed) => decodeBoxGrant(parsed).pipe(
       Effect.mapError(() => failure("grant", path, "invalid-grant"))
     )),
-    Effect.map((grant) => ({ grant, grantDigest: grantDigestOf(grant) }))
+    Effect.map((grant) => ({ grant, grantDigest: boxGrantDigest(grant) }))
   )
 }
 
@@ -353,7 +353,7 @@ const readOperatorPublicKey = (sealPath: string) => {
 const verifyGrantSignature = (
   sealPath: string,
   grant: BoxGrant,
-  expectedOperatorKeyDigest?: BoxGrantSha256
+  expectedOperatorKeyDigest?: Sha256Digest
 ): Effect.Effect<void, SealVerificationFailed> => {
   const path = join(sealPath, BOX_GRANT_SIGNATURE_FILE)
   return Effect.all({

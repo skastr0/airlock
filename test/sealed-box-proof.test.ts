@@ -13,7 +13,6 @@ import {
   BoxGrant,
   BoxGrantCatalogPin,
   EndpointGrantPolicy,
-  hashBoxGrant
 } from "../src/core/admission/index.ts"
 import { daemonTick, runDaemonHealthServer } from "../src/daemon/index.ts"
 import { HoldLive } from "../src/HoldLive.ts"
@@ -25,6 +24,7 @@ import {
   BinarySnapshot,
   OPERATOR_PUBLIC_KEY_FILE,
   SEAL_CATALOG_DIRECTORY,
+  boxGrantDigest,
   boxGrantSigningPayload,
   catalogFileNameForPin,
   reverifySeal,
@@ -109,7 +109,7 @@ beforeAll(async () => {
   writeFileSync(join(sealPath, SEAL_CATALOG_DIRECTORY, catalogFileNameForPin(pin)), fixtureBytes)
   writeFileSync(join(generation, "SEALED"), `${JSON.stringify({
     schemaVersion: "airlock/installed-generation/v1",
-    grantDigest: hashBoxGrant(grant),
+    grantDigest: boxGrantDigest(grant),
     binaryDigest: grant.binaryDigest,
     ownershipApplied: true,
     runnable: true,

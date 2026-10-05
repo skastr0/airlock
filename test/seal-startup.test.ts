@@ -11,12 +11,13 @@ import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
 import { beforeAll, describe, expect, it } from "vitest"
 import { NativeActionCatalog } from "../src/core/actions/index.ts"
-import { AdmissionPolicy, BoxGrant, hashBoxGrant } from "../src/core/admission/index.ts"
+import { AdmissionPolicy, BoxGrant } from "../src/core/admission/index.ts"
 import {
   BOX_GRANT_FILE,
   BOX_GRANT_SIGNATURE_FILE,
   OPERATOR_PUBLIC_KEY_FILE,
   SEAL_CATALOG_DIRECTORY,
+  boxGrantDigest,
   boxGrantSigningPayload
 } from "../src/seal/index.ts"
 
@@ -95,7 +96,7 @@ const makeSeal = (name: string, options: {
       JSON.stringify({ schemaVersion: "airlock/tool-definition/v2" })
     )
   }
-  expect(hashBoxGrant(grant)).toMatch(/^sha256:[0-9a-f]{64}$/)
+  expect(boxGrantDigest(grant)).toMatch(/^sha256:[0-9a-f]{64}$/)
   return directory
 }
 
