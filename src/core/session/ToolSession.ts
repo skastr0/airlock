@@ -9,13 +9,16 @@ import { canonicalJson, type DigestUnavailable, sha256Text } from "../Canonical.
 import type { ToolContract, ToolSummary } from "../contract/ToolContract.ts"
 import type { EmissionState } from "../outbox/Lifecycle.ts"
 import type { OutboxDefinition, OutboxOf, PerformError, StageError } from "../outbox/Outbox.ts"
-import { DispatchProvenance, type EmissionId, IdempotencyKey } from "../outbox/Records.ts"
+import {
+  DispatchProvenance,
+  EmissionAdmission,
+  type EmissionId,
+  IdempotencyKey
+} from "../outbox/Records.ts"
+import { ToolPolicy, toolPolicyDigest, type ToolPolicyFor } from "./ToolPolicy.ts"
 
 /** A registry made only of tool contracts, keyed by tool name. */
 export type ToolContracts = { readonly [Name in string]: ToolContract<any> & { readonly tag: Name } }
-
-/** A grant that still knows, in its type, which tool it is for. */
-export type GrantFor<Name extends string> = ToolGrantPolicy & { readonly tool: Name }
 
 // ── what a call returns ─────────────────────────────────────────────────────
 
@@ -104,13 +107,11 @@ export interface ToolSessionOptions<Granted extends string> {
    * call derives the key it derived before and gets the recorded result.
    */
   readonly runId: string
-  /** Fixed for the life of the session. Nothing in the session can add to it. */
-  readonly grants: ReadonlyArray<GrantFor<Granted>>
-  readonly budget: {
-    readonly maxCalls: number
-    /** Total canonical input bytes across all calls. */
-    readonly maxInputBytes: number
-  }
+  /**
+   * The supervisor's decision for this session. Its grants and budget are
+   * fixed for the life of the session; nothing in the session can add to them.
+   */
+  readonly policy: ToolPolicyFor<Granted>
   /** Hold applied to every call this session stages. */
   readonly holdMillis?: number
 }
@@ -128,22 +129,24 @@ export const openToolSession = <Contracts extends ToolContracts, Granted extends
   options: ToolSessionOptions<Granted>
 ): Effect.Effect<
   ToolSession<Contracts, Granted>,
-  InvalidToolSession,
+  InvalidToolSession | DigestUnavailable,
   OutboxOf<Contracts> | Crypto.Crypto
 > =>
   Effect.gen(function* () {
     const contracts = outbox.kinds
-    // The grant set is copied and frozen here; the session keeps no way to reach
-    // the caller's array, and no method takes a grant.
-    const grants: ReadonlyArray<ToolGrantPolicy> = Object.freeze([...options.grants])
+    // The policy is decoded again here, so the session holds its own validated
+    // copy: it keeps no way to reach the caller's object, and no method takes a
+    // grant.
+    const policy = yield* Schema.decodeUnknownEffect(ToolPolicy)(
+      Schema.encodeSync(ToolPolicy)(options.policy)
+    ).pipe(
+      Effect.mapError((error) => new InvalidToolSession({ field: "policy", reason: error.message }))
+    )
+    const grants: ReadonlyArray<ToolGrantPolicy> = Object.freeze([...policy.toolGrants])
     const rejection = validateToolGrants(grants, contracts)
     if (rejection !== undefined) return yield* new InvalidToolSession(rejection)
-    const { maxCalls, maxInputBytes } = options.budget
-    for (const [field, limit] of [["budget.maxCalls", maxCalls], ["budget.maxInputBytes", maxInputBytes]] as const) {
-      if (!Number.isSafeInteger(limit) || limit < 0) {
-        return yield* new InvalidToolSession({ field, reason: "must be a non-negative integer" })
-      }
-    }
+    const { maxCalls, maxInputBytes } = policy.budget
+    const policyDigest = yield* toolPolicyDigest(policy)
 
     const service = yield* outbox.Outbox
     const crypto = yield* Effect.context<Crypto.Crypto>()
@@ -174,9 +177,11 @@ export const openToolSession = <Contracts extends ToolContracts, Granted extends
           return yield* new SessionBudgetExceeded({ budget: "inputBytes", limit: maxInputBytes })
         }
 
-        if (fittingToolGrants(grants, summary).length === 0) {
+        const fitting = fittingToolGrants(grants, summary)
+        if (fitting.length === 0) {
           return yield* new ToolCallNotGranted({ tool: contract.tag })
         }
+        const grantIds = fitting.map((grant) => grant.id)
 
         // The key names this call of this run: same run, same position, same
         // input. A guest that diverges on re-execution gets a different key
@@ -188,7 +193,12 @@ export const openToolSession = <Contracts extends ToolContracts, Granted extends
         const key = IdempotencyKey.make(
           `session:${encoder.encode(options.runId).byteLength}:${options.runId}:${index}:${contract.tag}:${digest}`
         )
-        const request = { key, intent: { kind: contract.tag, dispatch: input }, holdMillis }
+        const request = {
+          key,
+          intent: { kind: contract.tag, dispatch: input },
+          holdMillis,
+          admission: new EmissionAdmission({ policyDigest, grantIds })
+        }
 
         const decision = toolDispatchDecision(grants, contracts, summary)
         if (decision._tag === "AutoCommit") {
@@ -196,6 +206,7 @@ export const openToolSession = <Contracts extends ToolContracts, Granted extends
             request,
             new DispatchProvenance({
               committedBy: "policy-auto",
+              grantId: grantIds.join(","),
               grantSelector: decision.selector,
               dispatchClass: "read",
               target: summary.target

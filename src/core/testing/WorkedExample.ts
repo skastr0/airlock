@@ -5,6 +5,7 @@ import type { DispatchHandlers } from "../outbox/Dispatcher.ts"
 import { defineOutbox } from "../outbox/Outbox.ts"
 import type { OutboxStore } from "../outbox/OutboxStore.ts"
 import { DispatchProvenance } from "../outbox/Records.ts"
+import { toolPolicy, toolPolicyDigest } from "../session/ToolPolicy.ts"
 import { openToolSession } from "../session/ToolSession.ts"
 import { exampleContracts, LabelAdd, MailList, MailSend } from "./ExampleContracts.ts"
 
@@ -46,11 +47,14 @@ const makeMailbox = () => {
 }
 
 /** What the supervisor allows this guest: read the inbox freely, send only inside the company. */
-const grants = [
-  toolGrant(MailList, { class: "read", commit: "auto", where: { mailbox: { equals: "inbox" } } }),
-  toolGrant(MailSend, { where: { to: { endsWith: "@example.com" } } }),
-  toolGrant(LabelAdd, { class: "mutate" })
-]
+const policy = toolPolicy({
+  budget: { maxCalls: 8, maxInputBytes: 4_096 },
+  toolGrants: [
+    toolGrant(MailList, { id: "read-inbox", class: "read", commit: "auto", where: { mailbox: { equals: "inbox" } } }),
+    toolGrant(MailSend, { id: "send-inside-company", where: { to: { endsWith: "@example.com" } } }),
+    toolGrant(LabelAdd, { id: "label-messages", class: "mutate" })
+  ]
+})
 
 const bySupervisor = new DispatchProvenance({ committedBy: "supervisor" })
 
@@ -86,8 +90,7 @@ export const runWorkedExample = (adapters: WorkedExampleAdapters) =>
     const guest = Effect.gen(function* () {
       const session = yield* openToolSession(mail, {
         runId: "guest-run-1",
-        grants,
-        budget: { maxCalls: 8, maxInputBytes: 4_096 }
+        policy
       })
       const listed = yield* session["mail.list"]({ mailbox: "inbox", query: "is:unread" })
       const sent = yield* session["mail.send"]({
@@ -133,6 +136,21 @@ export const runWorkedExample = (adapters: WorkedExampleAdapters) =>
 
     // 5. The guest is executed again from the top, after a restart.
     const replay = yield* lifetime(guest)
+    // Every emission the session staged names the policy and grant that admitted it.
+    const admitted = yield* lifetime(
+      Effect.gen(function* () {
+        const outbox = yield* mail.Outbox
+        const digest = yield* toolPolicyDigest(policy)
+        const sent = yield* outbox.inspect(first.ids.sent)
+        const labelled = yield* outbox.inspect(first.ids.labelled)
+        return {
+          underThisPolicy:
+            sent.admission?.policyDigest === digest && labelled.admission?.policyDigest === digest,
+          sent: sent.admission?.grantIds,
+          labelled: labelled.admission?.grantIds
+        }
+      })
+    )
     const receipts = yield* lifetime(
       Effect.map(Effect.flatMap(Ledger, (ledger) => ledger.entries), (entries) =>
         entries.map((entry) => entry.act))
@@ -145,6 +163,7 @@ export const runWorkedExample = (adapters: WorkedExampleAdapters) =>
       supervised,
       replay: { listed: replay.listed, sent: replay.sent, labelled: replay.labelled },
       sameEmissions: replay.ids.sent === first.ids.sent && replay.ids.labelled === first.ids.labelled,
+      admitted,
       dispatched: [...mailbox.dispatched],
       receipts
     }
@@ -172,6 +191,7 @@ export const expectedTranscript = {
     labelled: { tag: "Staged", state: "committed" }
   },
   sameEmissions: true,
+  admitted: { underThisPolicy: true, sent: ["send-inside-company"], labelled: ["label-messages"] },
   dispatched: ["mail.list", "mail.send", "label.add", "label.remove"],
   receipts: ["stage", "commit", "stage", "stage", "commit", "commit", "stage", "commit"]
 } as const

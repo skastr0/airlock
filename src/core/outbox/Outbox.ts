@@ -21,6 +21,7 @@ import {
   acknowledge,
   type DispatchAuthorization,
   DispatchProvenance,
+  type EmissionAdmission,
   EmissionId,
   type EmissionRecord,
   IdempotencyKey,
@@ -109,6 +110,12 @@ export interface StageRequest<Kinds extends IntentKinds> {
   readonly intent: Intent<Kinds>
   readonly holdMillis: number
   readonly authorization?: DispatchAuthorization
+  /**
+   * Evidence of why this was allowed, kept on the record. It is not part of
+   * what the key names: a replay keeps the admission the emission was first
+   * stored with.
+   */
+  readonly admission?: EmissionAdmission
 }
 
 // ── errors ──────────────────────────────────────────────────────────────────
@@ -636,6 +643,7 @@ export const defineOutbox = <const Kinds extends IntentKinds>(
         stagedAt,
         holdUntil: DateTime.add(stagedAt, { milliseconds: request.holdMillis }),
         ...(request.authorization === undefined ? {} : { authorization: request.authorization }),
+        ...(request.admission === undefined ? {} : { admission: request.admission }),
         ...(compensates === undefined ? {} : { compensates }),
         ledgered: []
       })

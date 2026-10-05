@@ -25,6 +25,8 @@ export type FieldMatch = typeof FieldMatch.Type
  * irreversible send that stays staged until a supervisor commits it.
  */
 export class ToolGrantPolicy extends Schema.Class<ToolGrantPolicy>("ToolGrantPolicy")({
+  /** Names this grant in receipts. Unique within one policy. */
+  id: Schema.String,
   tool: Schema.String,
   class: DispatchClass.pipe(
     Schema.withDecodingDefault(Effect.succeed("irreversible-send" as const)),
@@ -47,12 +49,14 @@ export class ToolGrantPolicy extends Schema.Class<ToolGrantPolicy>("ToolGrantPol
 export const toolGrant = <Contract extends ToolContract.Any>(
   contract: Contract,
   grant: {
+    readonly id: string
     readonly class?: DispatchClass
     readonly commit?: CommitMode
     readonly where?: { readonly [Field in ToolContract.PublicOf<Contract>]?: FieldMatch }
-  } = {}
+  }
 ): ToolGrantPolicy & { readonly tool: Contract["tag"] } =>
   new ToolGrantPolicy({
+    id: grant.id,
     tool: contract.tag,
     ...(grant.class === undefined ? {} : { class: grant.class }),
     ...(grant.commit === undefined ? {} : { commit: grant.commit }),
@@ -63,15 +67,21 @@ export type ToolGrantRejection = Readonly<{ readonly field: string; readonly rea
 
 /**
  * Checks grants that arrived as data against the contracts they name. A grant
- * for an unknown tool, on a field its contract does not declare public, or
- * auto-committing anything but a read, is rejected before it can match a call.
+ * with a blank or repeated id, for an unknown tool, on a field its contract
+ * does not declare public, or auto-committing anything but a read, is rejected
+ * before it can match a call.
  */
 export const validateToolGrants = (
   grants: ReadonlyArray<ToolGrantPolicy>,
   contracts: { readonly [name: string]: ToolContract.Any }
 ): ToolGrantRejection | undefined => {
+  const seen = new Set<string>()
   for (const [index, grant] of grants.entries()) {
     const at = `policy.toolGrants[${index}]`
+    if (grant.id.trim().length === 0 || seen.has(grant.id)) {
+      return { field: `${at}.id`, reason: "must be a non-blank id that appears exactly once" }
+    }
+    seen.add(grant.id)
     const contract = Object.hasOwn(contracts, grant.tool) ? contracts[grant.tool] : undefined
     if (contract === undefined) {
       return { field: `${at}.tool`, reason: `no contract is registered for tool ${grant.tool}` }

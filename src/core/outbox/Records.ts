@@ -52,6 +52,17 @@ export class DispatchProvenance extends Schema.Class<DispatchProvenance>(
   target: Schema.optionalKey(Schema.String)
 }) {}
 
+/**
+ * Why an emission was allowed to be staged at all: the policy it was admitted
+ * under, by digest, and the grants in it that fitted. Recorded once, when the
+ * emission is first stored, so a receipt can answer "under which policy and
+ * which grant".
+ */
+export class EmissionAdmission extends Schema.Class<EmissionAdmission>("EmissionAdmission")({
+  policyDigest: Sha256Digest,
+  grantIds: Schema.Array(Schema.String)
+}) {}
+
 /** Shape of the bounded response capture; the bytes live in the store's blob. */
 export class ResponseCapture extends Schema.Class<ResponseCapture>("ResponseCapture")({
   retainedBytes: Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
@@ -92,6 +103,8 @@ const identity = {
   stagedAt: Schema.DateTimeUtcFromString,
   holdUntil: Schema.DateTimeUtcFromString,
   authorization: Schema.optionalKey(DispatchAuthorization),
+  /** The policy and grants this emission was admitted under, when it came through one. */
+  admission: Schema.optionalKey(EmissionAdmission),
   /**
    * Set only by the kernel: the committed emission this one answers. A
    * compensation is an ordinary emission that carries this link.
@@ -198,6 +211,7 @@ const identityOf = (record: EmissionRecord) => ({
   stagedAt: record.stagedAt,
   holdUntil: record.holdUntil,
   ...(record.authorization === undefined ? {} : { authorization: record.authorization }),
+  ...(record.admission === undefined ? {} : { admission: record.admission }),
   ...(record.compensates === undefined ? {} : { compensates: record.compensates }),
   ledgered: record.ledgered
 })

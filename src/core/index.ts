@@ -77,7 +77,6 @@ export {
 export { OutboxStore } from "./outbox/OutboxStore.ts"
 export {
   type CallResult,
-  type GrantFor,
   InvalidToolInput,
   InvalidToolSession,
   openToolSession,
@@ -89,6 +88,7 @@ export {
   type ToolSession,
   type ToolSessionOptions
 } from "./session/ToolSession.ts"
+export { ToolPolicy, toolPolicy, toolPolicyDigest, type ToolPolicyFor } from "./session/ToolPolicy.ts"
 export {
   acknowledge,
   advance,
@@ -100,6 +100,7 @@ export {
   CommittingEmission,
   DispatchAuthorization,
   DispatchProvenance,
+  EmissionAdmission,
   EmissionId,
   EmissionRecord,
   IdempotencyKey,

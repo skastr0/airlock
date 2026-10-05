@@ -28,6 +28,7 @@ import {
 } from "../outbox/Records.ts"
 import { holds, type Runner, same } from "./Check.ts"
 import { toolGrant, ToolGrantPolicy } from "../admission/ToolGrant.ts"
+import { ToolPolicy, toolPolicy, toolPolicyDigest } from "../session/ToolPolicy.ts"
 import { openToolSession } from "../session/ToolSession.ts"
 import { exampleContracts, MailList, MailSend } from "./ExampleContracts.ts"
 import { digestOf, encoded, instant } from "./Fixtures.ts"
@@ -796,11 +797,14 @@ export const outboxConformance = (
         const current = yield* world
         const { calls, handlers } = toolWire()
         const grants = [
-          toolGrant(MailList, { class: "read", commit: "auto", where: { mailbox: { equals: "inbox" } } }),
-          toolGrant(MailSend, { where: { to: { endsWith: "@example.com" } } })
+          toolGrant(MailList, { id: "grant/maillist/1", class: "read", commit: "auto", where: { mailbox: { equals: "inbox" } } }),
+          toolGrant(MailSend, { id: "grant/mailsend/2", where: { to: { endsWith: "@example.com" } } })
         ]
         const open = (runId: string) =>
-          openToolSession(tools, { runId, grants, budget: { maxCalls: 10, maxInputBytes: 10_000 } })
+          openToolSession(tools, {
+            runId,
+            policy: toolPolicy({ toolGrants: grants, budget: { maxCalls: 10, maxInputBytes: 10_000 } })
+          })
 
         const first = yield* toolSession(current, handlers, () =>
           Effect.gen(function* () {
@@ -814,6 +818,25 @@ export const outboxConformance = (
         same(first.listed._tag === "Performed" ? first.listed.outcome : first.listed._tag, { ids: ["m-1", "inbox"] })
         same([first.sent._tag, first.sent.state, "outcome" in first.sent], ["Staged", "staged", false])
         same(calls.map((call) => call.tool), ["mail.list"], "the write was recorded, not sent")
+
+        // Each record says under which policy, and which grant in it, it was admitted.
+        const digest = yield* toolPolicyDigest(
+          toolPolicy({ toolGrants: grants, budget: { maxCalls: 10, maxInputBytes: 10_000 } })
+        ).pipe(Effect.provide(current.crypto))
+        const [sentRecord, listedRecord] = yield* toolSession(current, handlers, (_, store) =>
+          Effect.all([store.read(first.sent.id), store.read(first.listed.id)]))
+        same(
+          Option.map(sentRecord, (record) => record.admission),
+          Option.some({ policyDigest: digest, grantIds: ["grant/mailsend/2"] })
+        )
+        same(
+          Option.map(listedRecord, (record) => [
+            record.admission?.policyDigest === digest,
+            record.admission?.grantIds,
+            record.state === "committed" ? record.provenance.grantId : record.state
+          ]),
+          Option.some([true, ["grant/maillist/1"], "grant/maillist/1"])
+        )
 
         // The guest is executed again from the top, after a restart.
         const again = yield* toolSession(current, handlers, () =>
@@ -850,18 +873,17 @@ export const outboxConformance = (
         const current = yield* world
         const { calls, handlers } = toolWire()
         const grants = [
-          toolGrant(MailList, { class: "read", commit: "auto", where: { mailbox: { equals: "inbox" } } }),
-          toolGrant(MailSend, { where: { to: { endsWith: "@example.com" } } })
+          toolGrant(MailList, { id: "grant/maillist/3", class: "read", commit: "auto", where: { mailbox: { equals: "inbox" } } }),
+          toolGrant(MailSend, { id: "grant/mailsend/4", where: { to: { endsWith: "@example.com" } } })
         ]
         const refusals = yield* toolSession(current, handlers, (_, store) =>
           Effect.gen(function* () {
             const session = yield* openToolSession(tools, {
               runId: "run-1",
-              grants,
-              budget: { maxCalls: 10, maxInputBytes: 10_000 }
+              policy: toolPolicy({ toolGrants: grants, budget: { maxCalls: 10, maxInputBytes: 10_000 } })
             })
             // The grant set was copied: growing the caller's array grants nothing.
-            grants.push(toolGrant(MailSend))
+            grants.push(toolGrant(MailSend, { id: "grant/mailsend/5" }))
             const failures = yield* Effect.all([
               Effect.flip(session["mail.list"]({ mailbox: "drafts", query: "q" })),
               Effect.flip(session["mail.send"]({ to: "eve@elsewhere.test", subject: "s", body: "b" })),
@@ -885,8 +907,10 @@ export const outboxConformance = (
           Effect.flatMap(
             openToolSession(tools, {
               runId: "run-3",
-              grants: [toolGrant(MailList, { class: "read" })],
-              budget: { maxCalls: 1, maxInputBytes: 1_000 }
+              policy: toolPolicy({
+                toolGrants: [toolGrant(MailList, { id: "grant/maillist/6", class: "read" })],
+                budget: { maxCalls: 1, maxInputBytes: 1_000 }
+              })
             }),
             (session) => session["mail.list"]({ mailbox: "inbox", query: "q" })
           ))
@@ -896,8 +920,12 @@ export const outboxConformance = (
         const invalid = yield* toolSession(current, handlers, () =>
           Effect.flip(openToolSession(tools, {
             runId: "run-4",
-            grants: [new ToolGrantPolicy({ tool: "mail.send", where: { body: { equals: "x" } } })],
-            budget: { maxCalls: 1, maxInputBytes: 1_000 }
+            policy: new ToolPolicy({
+              toolGrants: [
+                new ToolGrantPolicy({ id: "grant/private", tool: "mail.send", where: { body: { equals: "x" } } })
+              ],
+              budget: { maxCalls: 1, maxInputBytes: 1_000 }
+            })
           })))
         same(invalid._tag, "InvalidToolSession")
       }))
@@ -906,13 +934,12 @@ export const outboxConformance = (
       Effect.gen(function* () {
         const current = yield* world
         const { calls, handlers } = toolWire()
-        const grants = [toolGrant(MailList, { class: "read", commit: "auto" })]
+        const grants = [toolGrant(MailList, { id: "grant/maillist/7", class: "read", commit: "auto" })]
         const outcome = yield* toolSession(current, handlers, (_, store) =>
           Effect.gen(function* () {
             const counted = yield* openToolSession(tools, {
               runId: "calls",
-              grants,
-              budget: { maxCalls: 2, maxInputBytes: 10_000 }
+              policy: toolPolicy({ toolGrants: grants, budget: { maxCalls: 2, maxInputBytes: 10_000 } })
             })
             const call = (query: string) => counted["mail.list"]({ mailbox: "inbox", query })
             yield* call("one")
@@ -922,8 +949,7 @@ export const outboxConformance = (
 
             const sized = yield* openToolSession(tools, {
               runId: "bytes",
-              grants,
-              budget: { maxCalls: 10, maxInputBytes: 60 }
+              policy: toolPolicy({ toolGrants: grants, budget: { maxCalls: 10, maxInputBytes: 60 } })
             })
             yield* sized["mail.list"]({ mailbox: "inbox", query: "a" })
             const overBytes = yield* Effect.flip(sized["mail.list"]({ mailbox: "inbox", query: "x".repeat(40) }))

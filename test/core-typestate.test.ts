@@ -15,6 +15,8 @@ import {
   isLivePermit,
   type Next,
   openToolSession,
+  ToolPolicy,
+  toolPolicy,
   type OutboxService,
   OutboxStore,
   WebCrypto
@@ -154,9 +156,9 @@ describe("core: what the types rule out", () => {
   })
 
   it("lets a grant name only a tool's public fields", () => {
-    const allowed = Admission.toolGrant(MailSend, { where: { to: { endsWith: "@example.com" } } })
+    const allowed = Admission.toolGrant(MailSend, { id: "g/1", where: { to: { endsWith: "@example.com" } } })
     // @ts-expect-error body is private: no grant can see or constrain it
-    const denied = Admission.toolGrant(MailSend, { where: { body: { equals: "x" } } })
+    const denied = Admission.toolGrant(MailSend, { id: "g/2", where: { body: { equals: "x" } } })
     expect(Admission.validateToolGrants([allowed], exampleContracts)).toBeUndefined()
     // Built past the types, it still fails closed.
     expect(Admission.validateToolGrants([denied], exampleContracts)?.field).toBe(
@@ -169,11 +171,13 @@ describe("core: what the types rule out", () => {
     const program = Effect.gen(function* () {
       const session = yield* openToolSession(tools, {
         runId: "run",
-        grants: [
-          Admission.toolGrant(MailList, { class: "read", commit: "auto" }),
-          Admission.toolGrant(LabelAdd)
-        ],
-        budget: { maxCalls: 1, maxInputBytes: 1 }
+        policy: toolPolicy({
+          budget: { maxCalls: 1, maxInputBytes: 1 },
+          toolGrants: [
+            Admission.toolGrant(MailList, { id: "g/3", class: "read", commit: "auto" }),
+            Admission.toolGrant(LabelAdd, { id: "g/4" })
+          ]
+        })
       })
       // @ts-expect-error mail.send was not granted: the method does not exist
       session["mail.send"]
@@ -198,13 +202,9 @@ describe("core: what the types rule out", () => {
 
   it("makes every method optional when the grants arrive as data", () => {
     const tools = defineOutbox(exampleContracts)
-    const grants: ReadonlyArray<Admission.ToolGrantPolicy> = []
+    const policy = new ToolPolicy({ toolGrants: [], budget: { maxCalls: 1, maxInputBytes: 1 } })
     const program = Effect.gen(function* () {
-      const session = yield* openToolSession(tools, {
-        runId: "run",
-        grants,
-        budget: { maxCalls: 1, maxInputBytes: 1 }
-      })
+      const session = yield* openToolSession(tools, { runId: "run", policy })
       // @ts-expect-error the method may be absent, so it cannot be called unchecked
       session["mail.list"]({ mailbox: "inbox", query: "q" })
       const list = session["mail.list"]
