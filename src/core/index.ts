@@ -3,7 +3,14 @@
  * can provide the ports: an OutboxStore, a Ledger, a Dispatcher, and
  * `effect/Crypto`. Nothing here names a file, a process, or an operating system.
  */
+export * as Actions from "./actions/index.ts"
+export * as Admission from "./admission/index.ts"
 export * as Canonical from "./Canonical.ts"
+export * as Hold from "./domain.ts"
+export * as Labels from "./labels/index.ts"
+export * as Language from "./language/index.ts"
+export * as Plan from "./plan/index.ts"
+export * as Tools from "./tools/index.ts"
 export * as WebCrypto from "./WebCrypto.ts"
 export { EffectClass, Ledger, LedgerEntry, LedgerFailed } from "./ledger/Ledger.ts"
 export { type Delivery, DispatchFailed, type DispatchHandlers, type DispatchRequest } from "./outbox/Dispatcher.ts"

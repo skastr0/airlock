@@ -117,13 +117,3 @@ export class RuntimePrivateNotUndoable extends Schema.TaggedError<RuntimePrivate
     target: Schema.String
   }
 ) {}
-
-export class UnknownEmission extends Schema.TaggedError<UnknownEmission>()(
-  "UnknownEmission",
-  { id: Schema.String }
-) {}
-
-export class EmissionNotPending extends Schema.TaggedError<EmissionNotPending>()(
-  "EmissionNotPending",
-  { id: Schema.String, status: Schema.String }
-) {}
