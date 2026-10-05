@@ -1,3 +1,4 @@
+import { BunCrypto } from "@effect/platform-bun"
 import { describe, expect, it } from "@effect/vitest"
 import { readFile } from "node:fs/promises"
 import { Effect, Layer } from "effect"
@@ -281,7 +282,10 @@ const runExample = async (
       }))
     }
   })
-  const layer = ProgramRunnerLive.pipe(Layer.provide(executor))
+  const layer = ProgramRunnerLive.pipe(
+    Layer.provide(executor),
+    Layer.provide(BunCrypto.layer)
+  )
   const source = await readCorpus(name)
   const result = await Effect.runPromise(
     Effect.gen(function* () {

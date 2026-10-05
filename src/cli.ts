@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 import { Argument, CliError, Command, Flag } from "effect/unstable/cli"
 import { BunServices } from "@effect/platform-bun"
-import { Cause, Console, Effect, Exit, FileSystem, Layer, ManagedRuntime, Option, Runtime as EffectRuntime, Schema } from "effect"
+import { Cause, Console, Crypto, Effect, Exit, FileSystem, Layer, ManagedRuntime, Option, Runtime as EffectRuntime, Schema } from "effect"
 import * as nodePath from "node:path"
 import * as nodeOs from "node:os"
 import { createInterface } from "node:readline"
@@ -18,7 +18,7 @@ import {
   nativeActionSchema
 } from "./core/actions/index.ts"
 import { AirlockHome, layerFromEnv } from "./AirlockHome.ts"
-import { ActId, EmissionId, ScopeEscape } from "./core/domain.ts"
+import { ActId, ScopeEscape } from "./core/domain.ts"
 import { Hold } from "./Hold.ts"
 import { HoldLive } from "./HoldLive.ts"
 import { Change, ChangeLive } from "./change/Change.ts"
@@ -38,7 +38,7 @@ import {
 } from "./native/index.ts"
 import { ProcessRequest, ProcessRunner, ProcessRunnerLive } from "./process/Process.ts"
 import { Outbox, OutboxLive } from "./Outbox.ts"
-import { DispatchProvenance, HttpExternalIntent } from "./outbox/Contract.ts"
+import { DispatchProvenance, EmissionId, IdempotencyKey } from "./core/index.ts"
 import {
   checkDaemonSocket,
   runDaemon,
@@ -507,7 +507,11 @@ const admitSealedNativeAction = (
   action: NativeActionName,
   input: unknown,
   workspace: string = process.cwd()
-): Effect.Effect<NativeActionCallValue | undefined, CliInputError, FileSystem.FileSystem> => {
+): Effect.Effect<
+  NativeActionCallValue | undefined,
+  CliInputError,
+  FileSystem.FileSystem | Crypto.Crypto
+> => {
   // The ratchet: no decode, binding, or stricter validation is introduced
   // on the zero-config compatibility route.
   if (seal._tag === "UnsealedSeal") return Effect.succeed(undefined)
@@ -833,14 +837,21 @@ const makeSend = (seal: SealContext) => Command.make(
             holdMillis: millis
           }
         ).pipe(
-          Effect.andThen(Effect.flatMap(Outbox, (outbox) => outbox.stage(
-            new HttpExternalIntent({
-              url,
-              method,
-              ...(bodyValue === undefined ? {} : { body: bodyValue })
-            }),
-            millis
-          )))
+          // Each `send` is a new act: a fresh key, so nothing is replayed.
+          Effect.andThen(Effect.flatMap(Crypto.Crypto, (crypto) => crypto.randomUUIDv4)),
+          Effect.flatMap((uuid) => Effect.flatMap(Outbox, (outbox) => outbox.stage({
+            key: IdempotencyKey.make(`cli-send:${uuid}`),
+            intent: {
+              kind: "http",
+              dispatch: {
+                url,
+                method,
+                headers: {},
+                ...(bodyValue === undefined ? {} : { body: bodyValue })
+              }
+            },
+            holdMillis: millis
+          })))
         )
       })
     )
@@ -855,13 +866,23 @@ const makePending = (seal: SealContext) => Command.make("pending", {}, () =>
   )
 ).pipe(Command.withDescription("List staged emissions"))
 
+/** An id the kernel could have issued, or a usage error; never a defect. */
+const emissionIdArgument = (raw: string) =>
+  Schema.decodeUnknownEffect(EmissionId)(raw).pipe(
+    Effect.mapError(() => new CliInputError({
+      field: "emission-id",
+      reason: "expected an emission id such as emi_<32 hex digits>"
+    }))
+  )
+
 const makeCommit = (seal: SealContext) => Command.make(
   "commit",
   { id: Argument.String("emission-id") },
   ({ id }) => rendered(
     requireVerb(seal, "commit").pipe(
-      Effect.andThen(Effect.flatMap(Outbox, (outbox) => outbox.commit(
-        EmissionId.make(id),
+      Effect.andThen(emissionIdArgument(id)),
+      Effect.flatMap((emissionId) => Effect.flatMap(Outbox, (outbox) => outbox.commit(
+        emissionId,
         new DispatchProvenance({ committedBy: "supervisor" })
       )))
     )
@@ -873,7 +894,8 @@ const makeCancel = (seal: SealContext) => Command.make(
   { id: Argument.String("emission-id") },
   ({ id }) => rendered(
     requireVerb(seal, "cancel").pipe(
-      Effect.andThen(Effect.flatMap(Outbox, (outbox) => outbox.cancel(EmissionId.make(id))))
+      Effect.andThen(emissionIdArgument(id)),
+      Effect.flatMap((emissionId) => Effect.flatMap(Outbox, (outbox) => outbox.cancel(emissionId)))
     )
   )
 ).pipe(Command.withDescription("Cancel a staged emission — it was never sent"))

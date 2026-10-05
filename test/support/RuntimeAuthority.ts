@@ -1,3 +1,4 @@
+import { BunCrypto } from "@effect/platform-bun"
 import { DateTime, Effect } from "effect"
 import {
   admit,
@@ -97,7 +98,8 @@ export const runtimeAuthority = (
     admit(draft, policy, admittedAt).pipe(
       Effect.flatMap((result) =>
         bindAdmissionForUse(result, admittedAt)
-      )
+      ),
+      Effect.provide(BunCrypto.layer)
     )
   )
 }

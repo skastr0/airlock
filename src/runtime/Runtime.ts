@@ -1,5 +1,5 @@
 import { describeFailure, reasonOf } from "../FailureText.ts"
-import { Cause, Context, DateTime, Effect, Exit, Layer, Path, Schema } from "effect"
+import { Cause, Context, Crypto, DateTime, Effect, Exit, Layer, Option, Path, Schema } from "effect"
 import { createHash } from "node:crypto"
 import {
   lstat,
@@ -34,14 +34,14 @@ import {
   NativeStat,
   NativeWriteReceipt
 } from "../native/index.ts"
-import { HttpExternalIntent } from "../outbox/Contract.ts"
 import {
+  DispatchAuthorization,
   DispatchProvenance,
-  Outbox,
-  OutboxEmission,
-  OutboxRecoveryRequired,
-  StagedDispatchAuthorization
-} from "../Outbox.ts"
+  EmissionRecord,
+  IdempotencyKey,
+  OutboxRecoveryRequired
+} from "../core/index.ts"
+import { Outbox } from "../Outbox.ts"
 import {
   ArtifactId,
   Artifact,
@@ -134,7 +134,7 @@ export class RuntimeDispatchAuthorization extends Schema.Class<RuntimeDispatchAu
    * Present only in sealed daemon mode. Runtime persists this read-only
    * evidence with the staged intent and deliberately does not commit inline.
    */
-  stagedAuthorization: Schema.optional(StagedDispatchAuthorization)
+  stagedAuthorization: Schema.optional(DispatchAuthorization)
 }) {}
 
 export class RuntimeCellWorkspaceHeld extends Schema.TaggedClass<RuntimeCellWorkspaceHeld>()(
@@ -1303,6 +1303,8 @@ const make = Effect.gen(function* () {
   const hold = yield* Hold
   const native = yield* NativeFileSystem
   const outbox = yield* Outbox
+  // Authority digests are recomputed with the host's Crypto, captured once.
+  const withCrypto = Effect.provideService(Crypto.Crypto, yield* Crypto.Crypto)
   const runJournal = config.runJournalDirectory === undefined
     ? makeMemoryRuntimeRunJournal()
     : makeFileRuntimeRunJournal(config.runJournalDirectory)
@@ -2014,12 +2016,24 @@ const make = Effect.gen(function* () {
               })
             })
           }
-          const stagedResult = yield* outbox.stage(new HttpExternalIntent({
-            url: node.endpoint,
-            method: node.method,
-            headers: node.headers,
-            ...(body === undefined ? {} : { body })
-          }), node.holdMillis, dispatch?.stagedAuthorization).pipe(Effect.result)
+          // One Plan node is one logical act: replaying the node names the
+          // same emission instead of staging a second request.
+          const stagedResult = yield* outbox.stage({
+            key: IdempotencyKey.make(`plan-node:${plan.id}:${node.id}`),
+            intent: {
+              kind: "http",
+              dispatch: {
+                url: node.endpoint,
+                method: node.method,
+                headers: node.headers,
+                ...(body === undefined ? {} : { body })
+              }
+            },
+            holdMillis: node.holdMillis,
+            ...(dispatch?.stagedAuthorization === undefined
+              ? {}
+              : { authorization: dispatch.stagedAuthorization })
+          }).pipe(Effect.result)
           if (stagedResult._tag === "Failure") {
             if (stagedResult.failure._tag === "OutboxRecoveryRequired") {
               recovery.push(new RuntimeOutboxRecoveryEvidence({
@@ -2050,7 +2064,7 @@ const make = Effect.gen(function* () {
             return yield* materializeStructuredResult(
               node,
               artifacts,
-              OutboxEmission,
+              EmissionRecord,
               staged,
               `request-external:${node.endpoint}`
             )
@@ -2062,7 +2076,7 @@ const make = Effect.gen(function* () {
               grantId: dispatch.grantId,
               grantSelector: dispatch.grantSelector,
               dispatchClass: dispatch.dispatchClass,
-              endpoint: dispatch.endpoint
+              target: dispatch.endpoint
             })
           ).pipe(Effect.result)
           if (committedResult._tag === "Failure") {
@@ -2089,7 +2103,7 @@ const make = Effect.gen(function* () {
           const emitted = yield* materializeStructuredResult(
             node,
             artifacts,
-            OutboxEmission,
+            EmissionRecord,
             committed,
             `request-external:${node.endpoint}`
           )
@@ -2103,15 +2117,14 @@ const make = Effect.gen(function* () {
               reason: `${error._tag}: ${errorReason(error)}`
             }))
           )
-          const captured = committed.outcome?.response
           return [
             ...emitted,
             ...materializeNodeArtifact(
               node,
               artifacts,
-              responseBytes ?? new Uint8Array(0),
+              Option.getOrElse(responseBytes, () => new Uint8Array(0)),
               `request-external-response:${dispatch.endpoint}`,
-              captured?.contentType ?? "application/octet-stream",
+              committed.outcome.contentType ?? "application/octet-stream",
               1
             )
           ]
@@ -2323,6 +2336,7 @@ const make = Effect.gen(function* () {
           authority,
           node.id
         ).pipe(
+          withCrypto,
           Effect.mapError((error) => new RuntimeAuthorityInvalid({
             nodeId: node.id,
             causeTag: error._tag,

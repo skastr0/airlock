@@ -292,6 +292,52 @@ const hasTornTail = (ledgerFile: string) =>
     }
   })
 
+/**
+ * The bytes appended at or after `from`, or `undefined` when the journal is
+ * now shorter than `from` (a torn tail was quarantined) and must be re-read.
+ */
+const readAppended = (ledgerFile: string, from: number) =>
+  ioEffect("read", ledgerFile, async () => {
+    try {
+      return await withFile(ledgerFile, "r", undefined, async (handle) => {
+        const info = await ioStep("read", ledgerFile, () => handle.stat())
+        if (info.size < from) return undefined
+        const bytes = Buffer.allocUnsafe(info.size - from)
+        let filled = 0
+        while (filled < bytes.length) {
+          const read = await ioStep("read", ledgerFile, () =>
+            handle.read(bytes, filled, bytes.length - filled, from + filled)
+          )
+          if (read.bytesRead === 0) break
+          filled += read.bytesRead
+        }
+        return bytes.subarray(0, filled)
+      })
+    } catch (cause) {
+      if (
+        cause instanceof LedgerIoCause &&
+        errorCode(cause.cause) === "ENOENT"
+      ) {
+        return Buffer.alloc(0)
+      }
+      throw cause
+    }
+  })
+
+/** The `key` of one journal line, if it is a keyed entry. */
+const keyOfLine = (line: Buffer): string | undefined => {
+  try {
+    const parsed: unknown = JSON.parse(line.toString("utf8"))
+    return typeof parsed === "object" && parsed !== null && "key" in parsed &&
+        typeof parsed.key === "string"
+      ? parsed.key
+      : undefined
+  } catch {
+    // An undecodable line is reported by `entries`; it carries no key.
+    return undefined
+  }
+}
+
 type JournalSplit = Readonly<{
   readonly completeBytes: number
   readonly completeLines: ReadonlyArray<Buffer>
@@ -452,6 +498,27 @@ export const FileLedgerLive = Layer.effect(
         })
     })
 
+    // Keys already in the journal. Only keyed records consult it, and it is
+    // brought up to date under the lease by reading the bytes other writers
+    // appended since the last look, never the whole journal again.
+    const recordedKeys = new Set<string>()
+    let scannedBytes = 0
+    const alreadyRecorded = Effect.fnUntraced(function* (key: string) {
+      let appended = yield* readAppended(ledgerFile, scannedBytes)
+      if (appended === undefined) {
+        recordedKeys.clear()
+        scannedBytes = 0
+        appended = (yield* readAppended(ledgerFile, 0)) ?? Buffer.alloc(0)
+      }
+      const split = splitJournal(appended)
+      for (const line of split.completeLines) {
+        const found = keyOfLine(line)
+        if (found !== undefined) recordedKeys.add(found)
+      }
+      scannedBytes += split.completeBytes
+      return recordedKeys.has(key)
+    })
+
     const recordCritical = Effect.fnUntraced(function* (entry: LedgerEntry) {
       const line = yield* encodeEntry(entry).pipe(
         Effect.mapError(
@@ -464,6 +531,8 @@ export const FileLedgerLive = Layer.effect(
         )
       )
       yield* normalizeTail(ledgerFile)
+      // A keyed entry is recorded exactly once: replaying it is a no-op.
+      if (entry.key !== undefined && (yield* alreadyRecorded(entry.key))) return
       yield* appendDurably(ledgerFile, Buffer.from(`${line}\n`, "utf8"))
     })
 

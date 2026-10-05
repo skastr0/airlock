@@ -1,19 +1,20 @@
 import { Context, DateTime, Effect, Layer, Schema } from "effect"
 import { policyDispatchDecision } from "../core/admission/Admission.ts"
 import { type BoxGrantDaemonOp } from "../core/admission/BoxGrant.ts"
-import { ActId, EmissionId } from "../core/domain.ts"
+import { ActId } from "../core/domain.ts"
+import {
+  Canonical,
+  DispatchProvenance,
+  EmissionId,
+  OutboxStateCorrupt,
+  OutboxStoreFailed
+} from "../core/index.ts"
 import {
   Hold,
   HoldFilesystemError,
   HoldReapRecoveryRequired
 } from "../Hold.ts"
-import {
-  DispatchProvenance,
-  Outbox,
-  OutboxEmission,
-  OutboxStateCorrupt,
-  OutboxStorageFailed
-} from "../Outbox.ts"
+import { Outbox, type OutboxEmission, type OutboxService } from "../Outbox.ts"
 import {
   type VerifiedSeal,
   SealVerificationFailed,
@@ -97,12 +98,11 @@ export class DaemonTickReport extends Schema.Class<DaemonTickReport>(
 export type DaemonTickError =
   | DaemonConfigurationInvalid
   | SealVerificationFailed
-  | OutboxStorageFailed
+  | OutboxStoreFailed
   | OutboxStateCorrupt
   | HoldFilesystemError
   | HoldReapRecoveryRequired
 
-type OutboxService = Outbox["Service"]
 type HoldService = Hold["Service"]
 
 type TickState = {
@@ -167,11 +167,11 @@ const isAuthorizedReadEvidence = (
   emission: OutboxEmission
 ): boolean => {
   const authorization = emission.authorization
-  return emission.status === "staged" &&
+  return emission.state === "staged" &&
     authorization !== undefined &&
     authorization.dispatchClass === "read" &&
     authorization.sealDigest.length > 0 &&
-    authorization.endpoint === emission.intent.endpoint
+    authorization.target === emission.summary.target
 }
 
 const tickWithServices = (
@@ -197,7 +197,7 @@ const tickWithServices = (
 
     if (commitImmediately || scheduleDue) {
       const discovered = yield* outbox.pendingAuthorized(
-        config.seal.grantDigest
+        Canonical.Sha256Digest.make(config.seal.grantDigest)
       )
       const seen = new Set<string>()
       const authorized = discovered.filter((emission) => {
@@ -207,8 +207,8 @@ const tickWithServices = (
         const decision = policyDispatchDecision(
           config.seal.grant.admission,
           {
-            url: emission.intent.endpoint,
-            method: emission.intent.method
+            url: emission.summary.endpoint,
+            method: emission.summary.method
           }
         )
         if (
@@ -248,7 +248,7 @@ const tickWithServices = (
           grantId: authorization.grantId,
           grantSelector: authorization.grantSelector,
           dispatchClass: "read",
-          endpoint: authorization.endpoint
+          target: authorization.target
         })
 
         // Do not construct the terminal Effect before revalidation: a service

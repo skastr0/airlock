@@ -9,6 +9,7 @@ import {
   verify as verifySignature
 } from "node:crypto"
 import { isAbsolute, join } from "node:path"
+import { BunCrypto } from "@effect/platform-bun"
 import { Effect, Schema } from "effect"
 import {
   BoxGrant,
@@ -44,8 +45,16 @@ export const SEAL_CATALOG_DIRECTORY = "catalog"
 export const BOX_GRANT_SIGNATURE_DOMAIN =
   "airlock/box-grant/signature/v1\0"
 
+/**
+ * The kernel's canonical grant digest, computed with this host's Crypto. Bun
+ * hashes synchronously and cannot be unavailable here, so signers and
+ * fixtures get a plain value.
+ */
+const grantDigestOf = (grant: BoxGrant): BoxGrantSha256 =>
+  Effect.runSync(hashBoxGrant(grant).pipe(Effect.provide(BunCrypto.layer)))
+
 export const boxGrantSigningPayload = (grant: BoxGrant): Uint8Array =>
-  new TextEncoder().encode(`${BOX_GRANT_SIGNATURE_DOMAIN}${hashBoxGrant(grant)}`)
+  new TextEncoder().encode(`${BOX_GRANT_SIGNATURE_DOMAIN}${grantDigestOf(grant)}`)
 
 /**
  * Catalog ids are authority strings, not path fragments. A pin's digest is the
@@ -312,7 +321,7 @@ const readGrant = (
     Effect.flatMap((parsed) => decodeBoxGrant(parsed).pipe(
       Effect.mapError(() => failure("grant", path, "invalid-grant"))
     )),
-    Effect.map((grant) => ({ grant, grantDigest: hashBoxGrant(grant) }))
+    Effect.map((grant) => ({ grant, grantDigest: grantDigestOf(grant) }))
   )
 }
 

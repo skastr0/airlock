@@ -1,3 +1,4 @@
+import { BunCrypto } from "@effect/platform-bun"
 import { Effect, Layer } from "effect"
 import { describe, expect, it } from "vitest"
 import {
@@ -99,7 +100,10 @@ const runWith = async (
     Effect.gen(function* () {
       const runner = yield* ProgramRunner
       return yield* runner.run(new ProgramRequest({ source }))
-    }).pipe(Effect.provide(runnerLayer.pipe(Layer.provide(executor))))
+    }).pipe(Effect.provide(runnerLayer.pipe(
+      Layer.provide(executor),
+      Layer.provide(BunCrypto.layer)
+    )))
   )
   return { requests, result }
 }

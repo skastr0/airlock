@@ -1,3 +1,4 @@
+import { BunCrypto } from "@effect/platform-bun"
 import { Effect, Layer } from "effect"
 import { describe, expect, it } from "vitest"
 import {
@@ -22,7 +23,10 @@ const ExecutorLive = Layer.succeed(ProgramActionExecutor, {
     }))
   }
 })
-const TestLayer = ProgramRunnerLive.pipe(Layer.provide(ExecutorLive))
+const TestLayer = ProgramRunnerLive.pipe(
+  Layer.provide(ExecutorLive),
+  Layer.provide(BunCrypto.layer)
+)
 
 describe("ProgramRunner", () => {
   it("executes each branch-selected action as an independent plan fragment", async () => {

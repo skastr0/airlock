@@ -1,3 +1,4 @@
+import { BunCrypto } from "@effect/platform-bun"
 import { createHash } from "node:crypto"
 import {
   lstat,
@@ -123,7 +124,7 @@ const sealWith = async (
   return new VerifiedSeal({
     sealPath,
     grant,
-    grantDigest: hashBoxGrant(grant),
+    grantDigest: Effect.runSync(hashBoxGrant(grant).pipe(Effect.provide(BunCrypto.layer))),
     binaryPath: "/fixture/airlock",
     binaryDigest: grant.binaryDigest,
     catalog: [...catalog]
@@ -176,7 +177,7 @@ describe("sealed catalog mapping", () => {
         executable: "/usr/bin/true",
         cellProfile: "compatibility"
       })
-    ))
+    ).pipe(Effect.provide(BunCrypto.layer)))
     expect(lowered.call).toMatchObject({
       action: "process.run",
       executable: "/usr/bin/true",

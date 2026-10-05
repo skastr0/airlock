@@ -3,6 +3,7 @@ import { AirlockHome } from "../AirlockHome.ts"
 import { type EmissionState, transitions } from "../core/outbox/Lifecycle.ts"
 import { OutboxStore } from "../core/outbox/OutboxStore.ts"
 import {
+  acknowledge as markLedgered,
   advance,
   EmissionId,
   EmissionRecord,
@@ -277,6 +278,28 @@ export const make = Effect.gen(function* () {
       return next.success
     }))
 
+  const acknowledge: OutboxStore["Service"]["acknowledge"] = (id, phase) =>
+    atomically(Effect.gen(function* () {
+      const found = yield* require(id)
+      const current = yield* readRecord(found)
+      const marked = markLedgered(current, phase)
+      if (marked === current) return current
+      const directory = stateDirectory(id, found.state)
+      const recordJson = yield* encodeRecord(marked).pipe(
+        Effect.mapError(failed("encode-record", id))
+      )
+      // Same state, same file name: the rename replaces the record in place.
+      yield* writeDurable(
+        directory,
+        `record.${found.state}.json`,
+        encoder.encode(recordJson),
+        "write-record",
+        id
+      )
+      yield* syncPath(directory, "sync-emission", id)
+      return marked
+    }))
+
   const readResponse: OutboxStore["Service"]["readResponse"] = (id) =>
     Effect.flatMap(locate(id), (found) =>
       // A response exists only as part of a commit; bytes left by an attempt
@@ -317,6 +340,7 @@ export const make = Effect.gen(function* () {
     read,
     readDispatch,
     transition,
+    acknowledge,
     readResponse,
     list
   })

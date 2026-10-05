@@ -1,3 +1,4 @@
+import { BunCrypto } from "@effect/platform-bun"
 import { DateTime, Effect, Layer, Schema } from "effect"
 import { describe, expect, it } from "vitest"
 import { AdmissionPolicy } from "../src/core/admission/index.ts"
@@ -318,7 +319,8 @@ const policy = new AdmissionPolicy({
 })
 
 const ProgramTest = ProgramExecutionLive(policy).pipe(
-  Layer.provide(RuntimeTest)
+  Layer.provide(RuntimeTest),
+  Layer.provide(BunCrypto.layer)
 )
 
 describe("ProgramExecutionLive", () => {
@@ -547,7 +549,10 @@ describe("ProgramExecutionLive", () => {
       inspect: () => Effect.die("program test runtime has no persisted runs"),
       recent: Effect.succeed([])
     }))
-    const layer = ProgramExecutionLive(policy).pipe(Layer.provide(failedRuntimeLayer))
+    const layer = ProgramExecutionLive(policy).pipe(
+      Layer.provide(failedRuntimeLayer),
+      Layer.provide(BunCrypto.layer)
+    )
 
     const result = await Effect.runPromise(
       Effect.gen(function* () {

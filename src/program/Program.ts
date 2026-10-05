@@ -1,4 +1,4 @@
-import { Context, Effect, Layer, Schema } from "effect"
+import { Context, Crypto, Effect, Layer, Option, Schema } from "effect"
 import { createHash } from "node:crypto"
 import {
   admit,
@@ -36,9 +36,16 @@ import {
   NativeWriteReceipt
 } from "../native/index.ts"
 import { reasonOf } from "../FailureText.ts"
-import { OutboxEmission, StagedDispatchAuthorization } from "../Outbox.ts"
-import { CommitAuthority, OutboxState } from "../outbox/Contract.ts"
-import { ActId, EmissionId, RemoveReceipt } from "../core/domain.ts"
+import {
+  Canonical,
+  CommitAuthority,
+  DispatchAuthorization,
+  EmissionId,
+  EmissionRecord,
+  EmissionState,
+  HttpOutcome
+} from "../core/index.ts"
+import { ActId, RemoveReceipt } from "../core/domain.ts"
 import {
   ApplyNode,
   ArtifactId,
@@ -286,12 +293,13 @@ const runtimeExecutionFailure = (
  * Admission error vocabulary to the language-facing execution boundary.
  */
 export const ProgramAdmissionLive = (policy: AdmissionPolicy) =>
-  Layer.succeed(ProgramAdmission, ProgramAdmission.of({
+  Layer.effect(ProgramAdmission, Effect.map(Crypto.Crypto, (crypto) => ProgramAdmission.of({
     admit: (draft) => admit(draft, policy).pipe(
       Effect.flatMap((result) => bindAdmissionForUse(result)),
+      Effect.provideService(Crypto.Crypto, crypto),
       Effect.mapError(executionFailure(draft.actionReference, "admission"))
     )
-  }))
+  })))
 
 /**
  * Candidate composition bridge: action → draft → admission → runtime. It has
@@ -944,7 +952,7 @@ const draftForToolAction = (
   availableArtifacts: ReadonlyArray<InlineArtifact>,
   nativeActions: NativeActionSurface,
   bindPath: ProgramPathSelectorBinder
-): Effect.Effect<ProgramActionRequest, ProgramActionDecodeFailed> =>
+): Effect.Effect<ProgramActionRequest, ProgramActionDecodeFailed, Crypto.Crypto> =>
   Effect.gen(function* () {
     const name = exportedToolActionName(exported.loaded.definition, exported.action)
     const requiredNativeAction = nativeActionForTool(exported)
@@ -1117,7 +1125,7 @@ const ProcessRunActionResult = Schema.Struct({
 })
 
 const HttpStageActionResult = Schema.Struct({
-  state: OutboxState,
+  state: EmissionState,
   action: Schema.Literal("http.stage"),
   emission_id: EmissionId,
   method: Schema.Literals(["GET", "POST", "PUT", "PATCH", "DELETE"]),
@@ -1554,12 +1562,12 @@ export const supervisorDispatchAuthority = (
         dispatchClass: authorized.effectiveClass,
         endpoint: authorized.endpoint,
         ...(sealedDispatch === undefined ? {} : {
-          stagedAuthorization: new StagedDispatchAuthorization({
-            sealDigest: sealedDispatch.sealDigest,
+          stagedAuthorization: new DispatchAuthorization({
+            sealDigest: Canonical.Sha256Digest.make(sealedDispatch.sealDigest),
             grantId: authorized.grantId,
             grantSelector: authorized.grantSelector,
             dispatchClass: authorized.effectiveClass,
-            endpoint: authorized.endpoint
+            target: authorized.endpoint
           })
         })
       })
@@ -1833,7 +1841,7 @@ const makeProgramPlanRuntimeLive = (dispatch: ProgramDispatchAuthority) => Layer
               const staged = yield* decodeRuntimeJson(
                 run,
                 result!,
-                OutboxEmission,
+                EmissionRecord,
                 call.action
               )
               // A committed read carries its bounded response as the node's
@@ -1845,37 +1853,53 @@ const makeProgramPlanRuntimeLive = (dispatch: ProgramDispatchAuthority) => Layer
                 call.action,
                 1
               )
-              const captured = staged.outcome?.response
+              const provenance = "provenance" in staged ? staged.provenance : undefined
+              const committed = staged.state === "committed" ? staged : undefined
+              const decodedOutcome = committed === undefined
+                ? undefined
+                : Schema.decodeUnknownOption(HttpOutcome)(committed.outcome)
+              const outcome = decodedOutcome === undefined
+                ? undefined
+                : Option.getOrUndefined(decodedOutcome)
+              if (committed !== undefined && outcome === undefined) {
+                return yield* runtimeExecutionFailure(
+                  call.action,
+                  run,
+                  "contract",
+                  "a committed HTTP emission must carry an HTTP outcome",
+                  "ProgramPlanShapeMismatch"
+                )
+              }
               return nativeActionResult(call.action, {
-                state: staged.status,
+                state: staged.state,
                 action: call.action,
                 emission_id: staged.id,
                 method: external.method,
                 endpoint: external.endpoint,
                 hold_millis: external.holdMillis,
-                ...(staged.outcome?.provenance === undefined ? {} : {
-                  committed_by: staged.outcome.provenance.committedBy,
-                  ...(staged.outcome.provenance.dispatchClass === undefined
+                ...(provenance === undefined ? {} : {
+                  committed_by: provenance.committedBy,
+                  ...(provenance.dispatchClass === undefined
                     ? {}
-                    : { dispatch_class: staged.outcome.provenance.dispatchClass }),
-                  ...(staged.outcome.provenance.grantId === undefined
+                    : { dispatch_class: provenance.dispatchClass }),
+                  ...(provenance.grantId === undefined
                     ? {}
-                    : { grant_id: staged.outcome.provenance.grantId }),
-                  ...(staged.outcome.provenance.grantSelector === undefined
+                    : { grant_id: provenance.grantId }),
+                  ...(provenance.grantSelector === undefined
                     ? {}
-                    : { grant_selector: staged.outcome.provenance.grantSelector }),
-                  ...(staged.outcome.provenance.endpoint === undefined
+                    : { grant_selector: provenance.grantSelector }),
+                  ...(provenance.target === undefined
                     ? {}
-                    : { dispatched_endpoint: staged.outcome.provenance.endpoint })
+                    : { dispatched_endpoint: provenance.target })
                 }),
-                ...(captured === undefined ? {} : {
-                  status: captured.status,
-                  response_bytes: captured.retainedBytes,
-                  response_truncated: captured.truncated,
-                  response_limit_bytes: captured.limitBytes,
-                  ...(captured.contentType === undefined
+                ...(committed === undefined || outcome === undefined ? {} : {
+                  status: outcome.status,
+                  response_bytes: committed.capture.retainedBytes,
+                  response_truncated: committed.capture.truncated,
+                  response_limit_bytes: committed.capture.limitBytes,
+                  ...(outcome.contentType === undefined
                     ? {}
-                    : { response_content_type: captured.contentType })
+                    : { response_content_type: outcome.contentType })
                 }),
                 ...(responseArtifact === undefined ? {} : {
                   response_artifact: responseArtifact.artifact.id,
@@ -2007,7 +2031,7 @@ const runProgram = (executor: {
   readonly cellProfile: CellProfile
   readonly nativeActions: NativeActionSurface
   readonly bindPath: ProgramPathSelectorBinder
-}) =>
+}, digests: Crypto.Crypto) =>
   (request: ProgramRequest): Effect.Effect<ProgramRunResult, ProgramError> =>
     Effect.gen(function* () {
       const parsed = yield* parse(request.source)
@@ -2082,7 +2106,7 @@ const runProgram = (executor: {
               [...artifacts.values()],
               tools.nativeActions,
               tools.bindPath
-            )
+            ).pipe(Effect.provideService(Crypto.Crypto, digests))
             plans.push(next.draft)
             for (const input of next.inlineArtifacts) artifacts.set(input.id, input)
             const executed = yield* executor.execute(next)
@@ -2156,8 +2180,9 @@ const programRunnerLive = (configuration: {
     ProgramRunner,
     Effect.gen(function* () {
       const executor = yield* ProgramActionExecutor
+      const digests = yield* Crypto.Crypto
       return ProgramRunner.of({
-        run: runProgram(executor, tools)
+        run: runProgram(executor, tools, digests)
       })
     })
   )

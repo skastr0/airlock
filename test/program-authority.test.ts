@@ -1,3 +1,4 @@
+import { BunCrypto } from "@effect/platform-bun"
 import { describe, expect, it } from "@effect/vitest"
 import { Effect, Layer } from "effect"
 import {
@@ -40,7 +41,8 @@ describe("Program execution authority handoff", () => {
     }))
     const executor = ProgramPlanExecutorLive.pipe(
       Layer.provideMerge(ProgramAdmissionLive(policy)),
-      Layer.provideMerge(runtime)
+      Layer.provideMerge(runtime),
+      Layer.provide(BunCrypto.layer)
     )
 
     return Effect.gen(function* () {
