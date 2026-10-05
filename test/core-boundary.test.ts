@@ -23,11 +23,17 @@ const coreFiles = (existsSync(coreRoot)
     source: readFileSync(join(coreRoot, file), "utf8")
   }))
 
-/** Comments and string contents cannot import or reference anything. */
+/** Comments cannot import or reference anything. */
 const withoutComments = (source: string) =>
   source
     .replace(/\/\*[\s\S]*?\*\//g, "")
     .replace(/(^|[^:])\/\/[^\n]*/g, "$1")
+
+/** Text inside a string literal is data: the action name "process.run" names no host. */
+const withoutStrings = (source: string) =>
+  withoutComments(source)
+    .replace(/"(?:[^"\\\n]|\\.)*"/g, '""')
+    .replace(/'(?:[^'\\\n]|\\.)*'/g, "''")
 
 const moduleSpecifiers = (source: string): ReadonlyArray<string> => [
   ...withoutComments(source).matchAll(
@@ -70,7 +76,7 @@ describe("core kernel boundary", () => {
     const hostGlobal =
       /\b(?:process|Bun|Buffer|__dirname|__filename|require)\b(?=\s*[.(\[])|\bimport\.meta\.(?:dir|dirname|filename|path|main)\b/g
     const violations = coreFiles.flatMap(({ file, source }) =>
-      [...withoutComments(source).matchAll(hostGlobal)].map((match) => ({
+      [...withoutStrings(source).matchAll(hostGlobal)].map((match) => ({
         file,
         name: match[0]
       }))
