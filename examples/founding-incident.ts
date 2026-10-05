@@ -18,7 +18,7 @@ import { BunServices, BunRuntime } from "@effect/platform-bun"
 import * as AirlockHome from "../src/AirlockHome.ts"
 import { Hold } from "../src/Hold.ts"
 import { HoldLive } from "../src/HoldLive.ts"
-import { LedgerLive } from "../src/Ledger.ts"
+import { FileLedgerLive } from "../src/host/FileLedger.ts"
 
 const original = "one canvas, three boxes, hours of real work"
 
@@ -58,7 +58,7 @@ const program = Effect.gen(function* () {
 })
 
 const AirlockLive = HoldLive.pipe(
-  Layer.provideMerge(LedgerLive),
+  Layer.provideMerge(FileLedgerLive),
   Layer.provideMerge(AirlockHome.layerFromEnv),
   Layer.provideMerge(BunServices.layer)
 )

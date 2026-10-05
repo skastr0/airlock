@@ -3,7 +3,7 @@ import { Console, Effect, FileSystem, Layer } from "effect"
 import * as AirlockHome from "../../src/AirlockHome.ts"
 import { Hold } from "../../src/Hold.ts"
 import { HoldLive } from "../../src/HoldLive.ts"
-import { LedgerLive } from "../../src/Ledger.ts"
+import { FileLedgerLive } from "../../src/host/FileLedger.ts"
 import { ExclusiveRename } from "../../src/platform/ExclusiveRename.ts"
 import { LinuxExclusiveRenameLive } from "../../src/platform/linux/LinuxExclusiveRename.ts"
 import { MacosExclusiveRenameLive } from "../../src/platform/macos/MacosExclusiveRename.ts"
@@ -20,7 +20,7 @@ const PlatformExclusiveRenameLive = process.platform === "linux"
   : MacosExclusiveRenameLive
 
 const layer = HoldLive.pipe(
-  Layer.provideMerge(LedgerLive),
+  Layer.provideMerge(FileLedgerLive),
   Layer.provideMerge(AirlockHome.layer(home)),
   Layer.provideMerge(BunServices.layer)
 )

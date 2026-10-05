@@ -7,10 +7,10 @@ import {
   type FileHandle
 } from "node:fs/promises"
 import { dirname } from "node:path"
-import { AirlockHome } from "./AirlockHome.ts"
-import { LedgerEntry } from "./domain.ts"
-import { makeExclusiveFileLock } from "./platform/ExclusiveFileLock.ts"
-import { reasonOf } from "./FailureText.ts"
+import { AirlockHome } from "../AirlockHome.ts"
+import { Ledger, LedgerEntry, LedgerFailed } from "../core/ledger/Ledger.ts"
+import { makeExclusiveFileLock } from "../platform/ExclusiveFileLock.ts"
+import { reasonOf } from "../FailureText.ts"
 
 /**
  * Append-only receipt history.
@@ -20,13 +20,13 @@ import { reasonOf } from "./FailureText.ts"
  * A realm-wide macOS descriptor lease serializes both readers and writers
  * across runtimes and processes.
  */
-export class Ledger extends Context.Service<
-  Ledger,
+export class FileLedger extends Context.Service<
+  FileLedger,
   {
     readonly record: (entry: LedgerEntry) => Effect.Effect<void, LedgerError>
     readonly entries: Effect.Effect<ReadonlyArray<LedgerEntry>, LedgerError>
   }
->()("airlock/Ledger") {}
+>()("airlock/host/FileLedger") {}
 
 const LedgerFilesystemOperation = Schema.Literals([
   "lock",
@@ -434,8 +434,8 @@ const normalizeTail = Effect.fnUntraced(function* (ledgerFile: string) {
   return yield* Effect.fail(yield* quarantineTail(ledgerFile, split))
 })
 
-export const LedgerLive = Layer.effect(
-  Ledger,
+export const FileLedgerLive = Layer.effect(
+  FileLedger,
   Effect.gen(function* () {
     const { ledgerFile } = yield* AirlockHome
     const lockRoot = dirname(ledgerFile)
@@ -488,7 +488,7 @@ export const LedgerLive = Layer.effect(
       return yield* Effect.fail(yield* quarantineTail(ledgerFile, split))
     })
 
-    return Ledger.of({
+    return FileLedger.of({
       // The descriptor must not be released while a non-cancellable Node I/O
       // promise still owns a journal transition. Waiting for the lease remains
       // interruptible; once admitted, the short durability transaction is not.
@@ -499,6 +499,23 @@ export const LedgerLive = Layer.effect(
       entries: lock
         .withLock(Effect.uninterruptible(entriesCritical()))
         .pipe(Semaphore.withPermit(localMutex))
+    })
+  })
+)
+
+/**
+ * The core Ledger port over the same file ledger. The kernel needs only
+ * "durably recorded or not"; `cause` carries this adapter's error tag so host
+ * code can route to the richer recovery through `FileLedger`.
+ */
+export const ledgerLayer: Layer.Layer<Ledger, never, FileLedger> = Layer.effect(
+  Ledger,
+  Effect.map(FileLedger, (file) => {
+    const failed = (operation: "record" | "read") => (error: LedgerError) =>
+      new LedgerFailed({ operation, cause: error._tag, reason: reasonOf(error) })
+    return Ledger.of({
+      record: (entry) => file.record(entry).pipe(Effect.mapError(failed("record"))),
+      entries: file.entries.pipe(Effect.mapError(failed("read")))
     })
   })
 )

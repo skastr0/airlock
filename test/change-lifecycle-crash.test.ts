@@ -9,11 +9,11 @@ import { fileURLToPath } from "node:url"
 import * as AirlockHome from "../src/AirlockHome.ts"
 import { Change, ChangeLive } from "../src/change/Change.ts"
 import { Hold, HoldLayer } from "../src/Hold.ts"
-import { LedgerLive } from "../src/Ledger.ts"
+import { FileLedgerLive } from "../src/host/FileLedger.ts"
 import { ExclusiveRenameTestLive } from "./support/ExclusiveRenameTestLive.ts"
 
 const layers = (home: string) => ChangeLive.pipe(Layer.provideMerge(HoldLayer), Layer.provideMerge(ExclusiveRenameTestLive),
-  Layer.provideMerge(LedgerLive), Layer.provideMerge(AirlockHome.layer(home)), Layer.provideMerge(BunServices.layer))
+  Layer.provideMerge(FileLedgerLive), Layer.provideMerge(AirlockHome.layer(home)), Layer.provideMerge(BunServices.layer))
 const crash = (input: { home: string, id: string, digest: string, point: string, collect: boolean }) => {
   const script = `
     import { BunServices } from "@effect/platform-bun"
@@ -22,7 +22,7 @@ const crash = (input: { home: string, id: string, digest: string, point: string,
     import * as AirlockHome from "./src/AirlockHome.ts"
     import { Change, ChangeLive } from "./src/change/Change.ts"
     import { HoldLayer } from "./src/Hold.ts"
-    import { LedgerLive } from "./src/Ledger.ts"
+    import { FileLedgerLive } from "./src/host/FileLedger.ts"
     import { ExclusiveRename } from "./src/platform/ExclusiveRename.ts"
     import { ExclusiveRenameTestLive } from "./test/support/ExclusiveRenameTestLive.ts"
     const input = ${JSON.stringify(input)}
@@ -50,7 +50,7 @@ const crash = (input: { home: string, id: string, digest: string, point: string,
       }) }
     })).pipe(Layer.provide(BunServices.layer))
     const runtime = ManagedRuntime.make(ChangeLive.pipe(Layer.provideMerge(HoldLayer), Layer.provideMerge(moves),
-      Layer.provideMerge(LedgerLive), Layer.provideMerge(AirlockHome.layer(input.home)),
+      Layer.provideMerge(FileLedgerLive), Layer.provideMerge(AirlockHome.layer(input.home)),
       Layer.provideMerge(fileSystem), Layer.provideMerge(BunServices.layer)))
     const change = await runtime.runPromise(Change)
     await runtime.runPromise(input.collect ? change.collect(input.id) : change.retire({ id: input.id, expectedDigest: input.digest }))

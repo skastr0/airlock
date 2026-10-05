@@ -5,9 +5,9 @@ import * as http from "node:http"
 import type { AddressInfo } from "node:net"
 import * as AirlockHome from "../src/AirlockHome.ts"
 import {
-  Ledger,
+  FileLedger,
   LedgerFilesystemError
-} from "../src/Ledger.ts"
+} from "../src/host/FileLedger.ts"
 import {
   DispatchProvenance,
   HttpExternalIntent,
@@ -21,8 +21,8 @@ const bySupervisor = new DispatchProvenance({ committedBy: "supervisor" })
 
 const failingLedger = (failedAct: LedgerAct) =>
   Layer.succeed(
-    Ledger,
-    Ledger.of({
+    FileLedger,
+    FileLedger.of({
       record: (entry) =>
         entry.act === failedAct
           ? Effect.fail(

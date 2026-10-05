@@ -19,7 +19,7 @@ import {
   WorkspaceFingerprint
 } from "../src/cell/index.ts"
 import { Hold, HoldFilesystemError, HoldLayer } from "../src/Hold.ts"
-import { LedgerLive } from "../src/Ledger.ts"
+import { FileLedgerLive } from "../src/host/FileLedger.ts"
 import {
   NativeFileSystemLive,
   NativeFilesystemConfig
@@ -71,7 +71,7 @@ const compatibilityLayer = (
   Layer.provideMerge(runner),
   Layer.provideMerge(impossibleCell),
   Layer.provideMerge(NativeFileSystemLive(new NativeFilesystemConfig({ workspace }))),
-  Layer.provideMerge(HoldTestLive), Layer.provideMerge(OutboxLive), Layer.provideMerge(LedgerLive),
+  Layer.provideMerge(HoldTestLive), Layer.provideMerge(OutboxLive), Layer.provideMerge(FileLedgerLive),
   Layer.provideMerge(AirlockHome.layer(home)),
   Layer.provideMerge(RuntimeConfigLive(new RuntimeConfig({
     workspace,
@@ -88,7 +88,7 @@ const nativeLayer = (
 ) => RuntimeLive.pipe(
   Layer.provideMerge(cell), Layer.provideMerge(ProcessRunnerLive),
   Layer.provideMerge(NativeFileSystemLive(new NativeFilesystemConfig({ workspace }))),
-  Layer.provideMerge(hold), Layer.provideMerge(OutboxLive), Layer.provideMerge(LedgerLive),
+  Layer.provideMerge(hold), Layer.provideMerge(OutboxLive), Layer.provideMerge(FileLedgerLive),
   Layer.provideMerge(AirlockHome.layer(home)),
   Layer.provideMerge(RuntimeConfigLive(new RuntimeConfig({
     workspace,

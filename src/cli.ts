@@ -27,7 +27,7 @@ import {
   type LanguageValue,
   LanguageValueSchema
 } from "./language/evaluator.ts"
-import { Ledger, LedgerLive } from "./Ledger.ts"
+import { FileLedger, FileLedgerLive } from "./host/FileLedger.ts"
 import { Cell, CellLive, CellRequest } from "./cell/index.ts"
 import { LinuxPlatform, LinuxPlatformLive } from "./platform/linux/index.ts"
 import { MacosPlatform, MacosPlatformLive } from "./platform/macos/index.ts"
@@ -1525,7 +1525,7 @@ const makeSealedEvalProgram = (seal: SealContext) => Command.make(
 const makeLedger = (seal: SealContext) => Command.make("ledger", {}, () =>
   rendered(
     requireVerb(seal, "ledger").pipe(
-      Effect.andThen(Effect.flatMap(Ledger, (ledger) => ledger.entries))
+      Effect.andThen(Effect.flatMap(FileLedger, (ledger) => ledger.entries))
     )
   )
 ).pipe(Command.withDescription("The append-only record of every act"))
@@ -1719,7 +1719,7 @@ const makeSealedRoot = (seal: SealContext, name: string) => makeRoot(
 
 /**
  * Seal verification is the process bootstrap boundary. A present, invalid seal
- * exits before AirlockHome, Ledger, Hold, Outbox, Runtime, or any command
+ * exits before AirlockHome, FileLedger, Hold, Outbox, Runtime, or any command
  * handler is constructed. Only an actually absent AIRLOCK_SEAL selects the
  * unchanged compatibility path.
  */
@@ -1772,7 +1772,7 @@ const runCli = async (seal: SealContext): Promise<void> => {
   const PlatformAndHomeLayer = layerFromEnv.pipe(
     Layer.provideMerge(BunServices.layer)
   )
-  const LedgerLayer = LedgerLive.pipe(
+  const LedgerLayer = FileLedgerLive.pipe(
     Layer.provideMerge(PlatformAndHomeLayer)
   )
   const StateLayer = Layer.mergeAll(

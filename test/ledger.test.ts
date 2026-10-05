@@ -14,23 +14,23 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import * as AirlockHome from "../src/AirlockHome.ts"
 import {
-  Ledger,
+  FileLedger,
   LedgerDecodeError,
-  LedgerLive,
+  FileLedgerLive,
   LedgerQuarantineEvidence,
   LedgerTailQuarantined
-} from "../src/Ledger.ts"
-import { LedgerEntry } from "../src/domain.ts"
+} from "../src/host/FileLedger.ts"
+import { LedgerEntry } from "../src/core/ledger/Ledger.ts"
 
 const layerFor = (home: string) =>
-  LedgerLive.pipe(
+  FileLedgerLive.pipe(
     Layer.provideMerge(AirlockHome.layer(home)),
     Layer.provideMerge(BunServices.layer)
   )
 
 const world = <A, E>(
   body: (context: {
-    readonly ledger: typeof Ledger.Service
+    readonly ledger: typeof FileLedger.Service
     readonly fs: FileSystem.FileSystem
     readonly path: Path.Path
     readonly home: string
@@ -42,7 +42,7 @@ const world = <A, E>(
       const path = yield* Path.Path
       const tmp = yield* fs.makeTempDirectoryScoped()
       const home = path.join(tmp, "airlock-home")
-      const ledger = yield* Effect.provide(Ledger, layerFor(home))
+      const ledger = yield* Effect.provide(FileLedger, layerFor(home))
       return yield* body({ ledger, fs, path, home })
     })
   ).pipe(Effect.provide(BunServices.layer))
@@ -92,7 +92,7 @@ const childResult = (child: ChildProcess) => {
   )
 }
 
-describe("Ledger — append-only receipts", () => {
+describe("FileLedger — append-only receipts", () => {
   it.effect("a missing journal is an empty, valid history", () =>
     world(({ ledger }) =>
       Effect.gen(function* () {
@@ -255,7 +255,7 @@ describe("Ledger — append-only receipts", () => {
   )
 })
 
-describe("Ledger — cross-process serialization", () => {
+describe("FileLedger — cross-process serialization", () => {
   it("waits for a kernel lease held by another process before appending", async () => {
     const temporary = await mkdtemp(join(tmpdir(), "airlock-ledger-process-"))
     const home = join(temporary, "home")
@@ -293,16 +293,16 @@ describe("Ledger — cross-process serialization", () => {
       import { DateTime, Effect, Layer } from "effect"
       import { writeFile } from "node:fs/promises"
       import * as AirlockHome from ${JSON.stringify(new URL("../src/AirlockHome.ts", import.meta.url).href)}
-      import { Ledger, LedgerLive } from ${JSON.stringify(new URL("../src/Ledger.ts", import.meta.url).href)}
-      import { LedgerEntry } from ${JSON.stringify(new URL("../src/domain.ts", import.meta.url).href)}
+      import { FileLedger, FileLedgerLive } from ${JSON.stringify(new URL("../src/host/FileLedger.ts", import.meta.url).href)}
+      import { LedgerEntry } from ${JSON.stringify(new URL("../src/core/ledger/Ledger.ts", import.meta.url).href)}
       const [home, readyFile] = process.argv.slice(1)
-      const layer = LedgerLive.pipe(
+      const layer = FileLedgerLive.pipe(
         Layer.provideMerge(AirlockHome.layer(home)),
         Layer.provideMerge(BunServices.layer)
       )
       await Effect.runPromise(
         Effect.gen(function* () {
-          const ledger = yield* Ledger
+          const ledger = yield* FileLedger
           const at = yield* DateTime.now
           yield* Effect.promise(() => writeFile(readyFile, "ready"))
           yield* ledger.record(new LedgerEntry({

@@ -4,7 +4,7 @@ import { describe, expect, it } from "@effect/vitest"
 import * as http from "node:http"
 import type { AddressInfo } from "node:net"
 import * as AirlockHome from "../src/AirlockHome.ts"
-import { Ledger, LedgerLive } from "../src/Ledger.ts"
+import { FileLedger, FileLedgerLive } from "../src/host/FileLedger.ts"
 import {
   DispatchProvenance,
   ExternalCommandIntent,
@@ -17,7 +17,7 @@ const bySupervisor = new DispatchProvenance({ committedBy: "supervisor" })
 
 const layersFor = (home: string) =>
   OutboxLive.pipe(
-    Layer.provideMerge(LedgerLive),
+    Layer.provideMerge(FileLedgerLive),
     Layer.provideMerge(AirlockHome.layer(home)),
     Layer.provideMerge(BunServices.layer)
   )
@@ -28,7 +28,7 @@ const withWorld = <A, E>(
     readonly fs: Context.Service.Shape<typeof FileSystem.FileSystem>
     readonly path: Context.Service.Shape<typeof Path.Path>
     readonly outbox: Context.Service.Shape<typeof Outbox>
-    readonly ledger: Context.Service.Shape<typeof Ledger>
+    readonly ledger: Context.Service.Shape<typeof FileLedger>
     readonly url: string
     readonly received: () => number
   }) => Effect.Effect<A, E>
@@ -40,7 +40,7 @@ const withWorld = <A, E>(
       const tmp = yield* fs.makeTempDirectoryScoped()
       const home = path.join(tmp, "airlock-home")
       const outbox = yield* Effect.provide(Outbox, layersFor(home))
-      const ledger = yield* Effect.provide(Ledger, layersFor(home))
+      const ledger = yield* Effect.provide(FileLedger, layersFor(home))
       let hits = 0
       const server = yield* Effect.acquireRelease(
         Effect.callback<http.Server>((resume) => {

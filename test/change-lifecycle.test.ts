@@ -8,7 +8,7 @@ import * as AirlockHome from "../src/AirlockHome.ts"
 import { Change, ChangeLive } from "../src/change/Change.ts"
 import { exists } from "../src/change/Tree.ts"
 import { Hold, HoldLayer } from "../src/Hold.ts"
-import { LedgerLive } from "../src/Ledger.ts"
+import { FileLedgerLive } from "../src/host/FileLedger.ts"
 import { ExclusiveRenameTestLive } from "./support/ExclusiveRenameTestLive.ts"
 
 const run = Effect.runPromise
@@ -16,7 +16,7 @@ type ChangeService = Change["Service"]
 const world = async (body: (w: { root: string, home: string, change: ChangeService, hold: Hold["Service"] }) => Promise<void>) => {
   const root = await realpath(await mkdtemp(path.join(tmpdir(), "change-lifecycle-"))), home = path.join(root, "home")
   const runtime = ManagedRuntime.make(ChangeLive.pipe(Layer.provideMerge(HoldLayer), Layer.provideMerge(ExclusiveRenameTestLive),
-    Layer.provideMerge(LedgerLive), Layer.provideMerge(AirlockHome.layer(home)), Layer.provideMerge(BunServices.layer)))
+    Layer.provideMerge(FileLedgerLive), Layer.provideMerge(AirlockHome.layer(home)), Layer.provideMerge(BunServices.layer)))
   try { await body({ root, home, ...await runtime.runPromise(Effect.all({ change: Change, hold: Hold })) }) }
   finally { await runtime.dispose(); await rm(root, { recursive: true, force: true }) }
 }

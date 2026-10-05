@@ -21,7 +21,7 @@ import {
 import { CellLive } from "../src/cell/index.ts"
 import { Hold } from "../src/Hold.ts"
 import { HoldLive } from "../src/HoldLive.ts"
-import { Ledger, LedgerLive } from "../src/Ledger.ts"
+import { FileLedger, FileLedgerLive } from "../src/host/FileLedger.ts"
 import { Outbox, OutboxLive } from "../src/Outbox.ts"
 import {
   ApplyNode,
@@ -345,7 +345,7 @@ export const runVouchProof = async (): Promise<VouchProofReport> => {
   const homeLayer = AirlockHome.layer(fixture.home).pipe(
     Layer.provideMerge(BunServices.layer)
   )
-  const ledgerLayer = LedgerLive.pipe(Layer.provideMerge(homeLayer))
+  const ledgerLayer = FileLedgerLive.pipe(Layer.provideMerge(homeLayer))
   const stateLayer = Layer.mergeAll(
     ledgerLayer,
     HoldLive.pipe(Layer.provideMerge(ledgerLayer)),
@@ -512,25 +512,25 @@ export const runVouchProof = async (): Promise<VouchProofReport> => {
           "undo retained a session introduced by restore"
         )
 
-        const ledger = yield* Ledger
+        const ledger = yield* FileLedger
         const entries = yield* ledger.entries
         assert(
           entries.some(
             (entry) => entry.effect === "mutation" && entry.act === "overwrite"
           ),
-          "Hold merge receipt is absent from Ledger"
+          "Hold merge receipt is absent from FileLedger"
         )
         assert(
           entries.some(
             (entry) => entry.effect === "emission" && entry.act === "stage"
           ),
-          "Outbox staging receipt is absent from Ledger"
+          "Outbox staging receipt is absent from FileLedger"
         )
         assert(
           entries.some(
             (entry) => entry.effect === "mutation" && entry.act === "undo"
           ),
-          "undo receipt is absent from Ledger"
+          "undo receipt is absent from FileLedger"
         )
 
         return new VouchProofReport({

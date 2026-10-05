@@ -20,7 +20,7 @@ import {
   ScopeEscape,
   type TargetNotFound
 } from "../domain.ts"
-import type { LedgerError } from "../Ledger.ts"
+import type { LedgerError } from "../host/FileLedger.ts"
 import { reasonOf } from "../FailureText.ts"
 
 /**

@@ -17,7 +17,7 @@ import {
 } from "../src/admission/index.ts"
 import { daemonTick, runDaemonHealthServer } from "../src/daemon/index.ts"
 import { HoldLive } from "../src/HoldLive.ts"
-import { LedgerLive } from "../src/Ledger.ts"
+import { FileLedgerLive } from "../src/host/FileLedger.ts"
 import { Outbox, OutboxLive } from "../src/Outbox.ts"
 import {
   BOX_GRANT_FILE,
@@ -153,12 +153,12 @@ const waitFor = async (predicate: () => boolean, failure: string) => {
 }
 
 const stateLayer = OutboxLive.pipe(
-  Layer.provideMerge(LedgerLive),
+  Layer.provideMerge(FileLedgerLive),
   Layer.provideMerge(AirlockHome.layer(home)),
   Layer.provideMerge(BunServices.layer)
 ).pipe(Layer.provideMerge(
   HoldLive.pipe(
-    Layer.provideMerge(LedgerLive),
+    Layer.provideMerge(FileLedgerLive),
     Layer.provideMerge(AirlockHome.layer(home)),
     Layer.provideMerge(BunServices.layer)
   )

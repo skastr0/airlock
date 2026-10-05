@@ -4,7 +4,7 @@ import { describe, expect, it } from "@effect/vitest"
 import * as http from "node:http"
 import type { AddressInfo } from "node:net"
 import * as AirlockHome from "../src/AirlockHome.ts"
-import { LedgerLive } from "../src/Ledger.ts"
+import { FileLedgerLive } from "../src/host/FileLedger.ts"
 import {
   DispatchProvenance,
   HttpExternalIntent,
@@ -16,7 +16,7 @@ const bySupervisor = new DispatchProvenance({ committedBy: "supervisor" })
 
 const layersFor = (home: string) =>
   OutboxLive.pipe(
-    Layer.provideMerge(LedgerLive),
+    Layer.provideMerge(FileLedgerLive),
     Layer.provideMerge(AirlockHome.layer(home)),
     Layer.provideMerge(BunServices.layer)
   )

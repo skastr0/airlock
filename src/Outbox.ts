@@ -3,10 +3,10 @@ import { createHash } from "node:crypto"
 import {
   EmissionId,
   EmissionNotPending,
-  LedgerEntry,
   UnknownEmission
 } from "./domain.ts"
-import { Ledger, type LedgerError } from "./Ledger.ts"
+import { LedgerEntry } from "./core/ledger/Ledger.ts"
+import { FileLedger, type LedgerError } from "./host/FileLedger.ts"
 import {
   DispatchProvenance,
   EmissionDispatchUncertain,
@@ -336,7 +336,7 @@ const toEmission = (
 
 const make = Effect.gen(function* () {
   const store = yield* makeFileOutboxStore
-  const ledger = yield* Ledger
+  const ledger = yield* FileLedger
 
   // A durable `committing` directory means dispatch might have begun before a
   // prior runtime stopped. Recovery can only tell the truth: uncertain.
@@ -467,7 +467,7 @@ const make = Effect.gen(function* () {
       Effect.gen(function* () {
         // Publishing the staged directory and publishing its caller-visible
         // recovery receipt are one cancellation boundary. Filesystem work is
-        // deliberately small; only the fallible Ledger append is restored.
+        // deliberately small; only the fallible FileLedger append is restored.
         yield* store.create(id, manifestJson, dispatchJson)
         const recorded = yield* restore(
           ledger.record(
@@ -647,7 +647,7 @@ const make = Effect.gen(function* () {
             effect: "emission",
             act: "commit",
             ref: id,
-            // The Ledger line is the human-readable receipt: it names the
+            // The FileLedger line is the human-readable receipt: it names the
             // committing authority and the grant that authorized the wire, not
             // just the transport result.
             detail:

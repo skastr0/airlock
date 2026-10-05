@@ -141,7 +141,7 @@ describe("reviewed change CLI", () => {
       import * as AirlockHome from "./src/AirlockHome.ts"
       import { Change, ChangeLive } from "./src/change/Change.ts"
       import { HoldLayer } from "./src/Hold.ts"
-      import { LedgerLive } from "./src/Ledger.ts"
+      import { FileLedgerLive } from "./src/host/FileLedger.ts"
       import { ExclusiveRename } from "./src/platform/ExclusiveRename.ts"
       import { ExclusiveRenameTestLive } from "./test/support/ExclusiveRenameTestLive.ts"
       const moves = Layer.effect(ExclusiveRename, Effect.gen(function* () {
@@ -153,7 +153,7 @@ describe("reviewed change CLI", () => {
       })).pipe(Layer.provide(ExclusiveRenameTestLive))
       const runtime = ManagedRuntime.make(ChangeLive.pipe(
         Layer.provideMerge(HoldLayer), Layer.provideMerge(moves),
-        Layer.provideMerge(LedgerLive), Layer.provideMerge(AirlockHome.layer(${JSON.stringify(home)})),
+        Layer.provideMerge(FileLedgerLive), Layer.provideMerge(AirlockHome.layer(${JSON.stringify(home)})),
         Layer.provideMerge(BunServices.layer)
       ))
       const change = await runtime.runPromise(Change)

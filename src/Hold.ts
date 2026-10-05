@@ -5,7 +5,6 @@ import {
   ActId,
   HeldManifest,
   type HoldPurpose,
-  LedgerEntry,
   NotHeld,
   NothingToUndo,
   OverwriteReceipt,
@@ -19,7 +18,8 @@ import {
   UndoReceipt,
   UnknownAct
 } from "./domain.ts"
-import { Ledger, type LedgerError } from "./Ledger.ts"
+import { LedgerEntry } from "./core/ledger/Ledger.ts"
+import { FileLedger, type LedgerError } from "./host/FileLedger.ts"
 import {
   ExclusiveRename,
   type ExclusiveRenameError
@@ -324,7 +324,7 @@ const make = Effect.gen(function* () {
   const fs = yield* FileSystem.FileSystem
   const path = yield* Path.Path
   const home = yield* AirlockHome
-  const ledger = yield* Ledger
+  const ledger = yield* FileLedger
   const exclusiveRename = yield* ExclusiveRename
 
   const actDir = (id: string) => path.join(home.holdDir, id)
@@ -1630,7 +1630,7 @@ const make = Effect.gen(function* () {
        * Selection and lock waiting remain interruptible. Once terminal
        * authority enters this region, however, cancellation cannot surface as
        * a bare interrupt after the unique recovery bytes may have disappeared.
-       * Removal and its directory sync are uninterruptible; Ledger publication
+       * Removal and its directory sync are uninterruptible; FileLedger publication
        * is restored so cancellation becomes an exact partial/recovery receipt.
        */
       yield* Effect.uninterruptibleMask((restore) =>

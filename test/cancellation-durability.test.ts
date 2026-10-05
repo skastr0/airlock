@@ -10,7 +10,7 @@ import {
   HoldReapRecoveryRequired,
   HoldRecoveryRequired
 } from "../src/Hold.ts"
-import { Ledger } from "../src/Ledger.ts"
+import { FileLedger } from "../src/host/FileLedger.ts"
 import {
   DispatchProvenance,
   HttpExternalIntent,
@@ -27,8 +27,8 @@ const blockingLedger = (
   started: Deferred.Deferred<void>
 ) =>
   Layer.succeed(
-    Ledger,
-    Ledger.of({
+    FileLedger,
+    FileLedger.of({
       record: (entry) =>
         entry.act === act
           ? Deferred.succeed(started, undefined).pipe(
@@ -74,8 +74,8 @@ describe("durable cancellation receipts", () => {
         yield* fs.writeFileString(lockOwnerTarget, "lock owner bytes")
 
         const noOpLedger = Layer.succeed(
-          Ledger,
-          Ledger.of({
+          FileLedger,
+          FileLedger.of({
             record: () => Effect.void,
             entries: Effect.succeed([])
           })
@@ -137,8 +137,8 @@ describe("durable cancellation receipts", () => {
         yield* fs.writeFileString(target, "unique recovery bytes")
 
         const noOpLedger = Layer.succeed(
-          Ledger,
-          Ledger.of({
+          FileLedger,
+          FileLedger.of({
             record: () => Effect.void,
             entries: Effect.succeed([])
           })
@@ -188,7 +188,7 @@ describe("durable cancellation receipts", () => {
     ).pipe(Effect.provide(BunServices.layer))
   )
 
-  it.effect("returns a Hold recovery act when removal is interrupted during Ledger publication", () =>
+  it.effect("returns a Hold recovery act when removal is interrupted during FileLedger publication", () =>
     Effect.scoped(
       Effect.gen(function* () {
         const fs = yield* FileSystem.FileSystem

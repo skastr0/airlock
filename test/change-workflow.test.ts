@@ -8,13 +8,13 @@ import * as AirlockHome from "../src/AirlockHome.ts"
 import { Change, ChangeLive } from "../src/change/Change.ts"
 import { exists, scan } from "../src/change/Tree.ts"
 import { Hold, HoldLayer } from "../src/Hold.ts"
-import { LedgerLive } from "../src/Ledger.ts"
+import { FileLedgerLive } from "../src/host/FileLedger.ts"
 import { ExclusiveRename, ExclusiveRenameFailed } from "../src/platform/ExclusiveRename.ts"
 import { ExclusiveRenameTestLive } from "./support/ExclusiveRenameTestLive.ts"
 
 const layersFor = (home: string, moves = ExclusiveRenameTestLive) => ChangeLive.pipe(
   Layer.provideMerge(HoldLayer), Layer.provideMerge(moves),
-  Layer.provideMerge(LedgerLive), Layer.provideMerge(AirlockHome.layer(home)), Layer.provideMerge(BunServices.layer)
+  Layer.provideMerge(FileLedgerLive), Layer.provideMerge(AirlockHome.layer(home)), Layer.provideMerge(BunServices.layer)
 )
 type Services = { change: Change["Service"], hold: Hold["Service"] }
 const world = async (body: (w: Services & { root: string, home: string, restart: () => Promise<Services> }) => Promise<void>, moves = ExclusiveRenameTestLive) => {

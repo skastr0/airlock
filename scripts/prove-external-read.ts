@@ -27,7 +27,7 @@ import {
 } from "../src/admission/index.ts"
 import { layer as airlockHomeLayer } from "../src/AirlockHome.ts"
 import { CellLive } from "../src/cell/index.ts"
-import { LedgerLive } from "../src/Ledger.ts"
+import { FileLedgerLive } from "../src/host/FileLedger.ts"
 import { HoldLive } from "../src/HoldLive.ts"
 import { MacosPlatformLive } from "../src/platform/macos/index.ts"
 import { NativeFileSystemLive, NativeFilesystemConfig } from "../src/native/index.ts"
@@ -135,7 +135,7 @@ const runProgram = async (
   const PlatformAndHome = airlockHomeLayer(home).pipe(
     Layer.provideMerge(BunServices.layer)
   )
-  const LedgerLayer = LedgerLive.pipe(Layer.provideMerge(PlatformAndHome))
+  const LedgerLayer = FileLedgerLive.pipe(Layer.provideMerge(PlatformAndHome))
   const StateLayer = Layer.mergeAll(
     LedgerLayer,
     HoldLive.pipe(Layer.provideMerge(LedgerLayer)),

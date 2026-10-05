@@ -10,12 +10,12 @@ import * as AirlockHome from "../src/AirlockHome.ts"
 import { Change, ChangeLive } from "../src/change/Change.ts"
 import { exists } from "../src/change/Tree.ts"
 import { Hold, HoldLayer } from "../src/Hold.ts"
-import { LedgerLive } from "../src/Ledger.ts"
+import { FileLedgerLive } from "../src/host/FileLedger.ts"
 import { ExclusiveRenameTestLive } from "./support/ExclusiveRenameTestLive.ts"
 
 const repository = fileURLToPath(new URL("..", import.meta.url))
 const layers = (home: string) => ChangeLive.pipe(
-  Layer.provideMerge(HoldLayer), Layer.provideMerge(ExclusiveRenameTestLive), Layer.provideMerge(LedgerLive),
+  Layer.provideMerge(HoldLayer), Layer.provideMerge(ExclusiveRenameTestLive), Layer.provideMerge(FileLedgerLive),
   Layer.provideMerge(AirlockHome.layer(home)), Layer.provideMerge(BunServices.layer)
 )
 const makeRuntime = (home: string) => ManagedRuntime.make(layers(home))
@@ -27,7 +27,7 @@ const crash = (input: { home: string, id: string, digest: string, target: string
     import * as AirlockHome from "./src/AirlockHome.ts"
     import { Change, ChangeLive } from "./src/change/Change.ts"
     import { Hold, HoldLayer } from "./src/Hold.ts"
-    import { LedgerLive } from "./src/Ledger.ts"
+    import { FileLedgerLive } from "./src/host/FileLedger.ts"
     import { ExclusiveRename } from "./src/platform/ExclusiveRename.ts"
     import { ExclusiveRenameTestLive } from "./test/support/ExclusiveRenameTestLive.ts"
     const input = ${JSON.stringify(input)}
@@ -51,7 +51,7 @@ const crash = (input: { home: string, id: string, digest: string, target: string
         if (input.point === "after-acknowledgement" && checked && JSON.parse(content).acknowledged) process.exit(86)
       }) }
     })).pipe(Layer.provide(BunServices.layer))
-    const base = HoldLayer.pipe(Layer.provideMerge(moves), Layer.provideMerge(LedgerLive),
+    const base = HoldLayer.pipe(Layer.provideMerge(moves), Layer.provideMerge(FileLedgerLive),
       Layer.provideMerge(AirlockHome.layer(input.home)), Layer.provideMerge(fileSystem), Layer.provideMerge(BunServices.layer))
     const hooked = Layer.effect(Hold, Effect.gen(function* () {
       const real = yield* Hold

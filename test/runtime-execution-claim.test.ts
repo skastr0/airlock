@@ -12,7 +12,7 @@ import { join } from "node:path"
 import * as AirlockHome from "../src/AirlockHome.ts"
 import { Cell } from "../src/cell/index.ts"
 import { HoldLayer } from "../src/Hold.ts"
-import { LedgerLive } from "../src/Ledger.ts"
+import { FileLedgerLive } from "../src/host/FileLedger.ts"
 import {
   NativeFileSystemLive,
   NativeFilesystemConfig
@@ -90,7 +90,7 @@ const runtimeLayer = (
     ),
     Layer.provideMerge(holdLive),
     Layer.provideMerge(OutboxLive),
-    Layer.provideMerge(LedgerLive),
+    Layer.provideMerge(FileLedgerLive),
     Layer.provideMerge(AirlockHome.layer(home)),
     Layer.provideMerge(
       RuntimeConfigLive(new RuntimeConfig({

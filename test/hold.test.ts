@@ -11,16 +11,16 @@ import {
   HoldReapRecoveryRequired
 } from "../src/Hold.ts"
 import {
-  Ledger,
+  FileLedger,
   LedgerFilesystemError,
-  LedgerLive
-} from "../src/Ledger.ts"
+  FileLedgerLive
+} from "../src/host/FileLedger.ts"
 import { ExclusiveRenameTestLive } from "./support/ExclusiveRenameTestLive.ts"
 
 const layersFor = (home: string) =>
   HoldLayer.pipe(
     Layer.provideMerge(ExclusiveRenameTestLive),
-    Layer.provideMerge(LedgerLive),
+    Layer.provideMerge(FileLedgerLive),
     Layer.provideMerge(AirlockHome.layer(home)),
     Layer.provideMerge(BunServices.layer)
   )
@@ -221,8 +221,8 @@ describe("Hold — undoable mutations", () => {
         const home = path.join(tmp, "airlock-home")
         const ordered = yield* hold.held
         const failingLedger = Layer.succeed(
-          Ledger,
-          Ledger.of({
+          FileLedger,
+          FileLedger.of({
             record: () =>
               Effect.fail(
                 new LedgerFilesystemError({
@@ -307,7 +307,7 @@ describe("Hold — undoable mutations", () => {
         )
 
         const home = path.join(tmp, "airlock-home")
-        const ledger = yield* Effect.provide(Ledger, layersFor(home))
+        const ledger = yield* Effect.provide(FileLedger, layersFor(home))
         expect(yield* ledger.entries).toEqual(
           expect.arrayContaining([
             expect.objectContaining({

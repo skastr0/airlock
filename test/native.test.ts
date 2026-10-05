@@ -5,7 +5,7 @@ import { readFile } from "node:fs/promises"
 import * as AirlockHome from "../src/AirlockHome.ts"
 import { ActId } from "../src/domain.ts"
 import { Hold, HoldLayer } from "../src/Hold.ts"
-import { LedgerLive } from "../src/Ledger.ts"
+import { FileLedgerLive } from "../src/host/FileLedger.ts"
 import {
   NativeFileSystem,
   NativeFileSystemLive,
@@ -20,7 +20,7 @@ const HoldTestLive = HoldLayer.pipe(
 const layersFor = (home: string, workspace: string) =>
   NativeFileSystemLive(new NativeFilesystemConfig({ workspace })).pipe(
     Layer.provideMerge(HoldTestLive),
-    Layer.provideMerge(LedgerLive),
+    Layer.provideMerge(FileLedgerLive),
     Layer.provideMerge(AirlockHome.layer(home)),
     Layer.provideMerge(BunServices.layer)
   )
