@@ -6,13 +6,10 @@ import {
   AdmissionContractInvalid,
   AdmissionDenied,
   AdmissionPolicy,
-  AdmissionPolicyDocument,
-  AdmissionPolicyV2,
   type DispatchClass,
   EndpointGrantPolicy,
   admit,
   canonicalizeEndpoint,
-  endpointGrantsOf,
   policyDispatchDecision,
   refuseGrantAssertion,
   stricterDispatchClass
@@ -34,11 +31,11 @@ const grant = (overrides: Partial<ConstructorParameters<typeof EndpointGrantPoli
 
 const readGrant = grant({ methods: ["GET"], class: "read", commit: "auto" })
 
-const policyV2 = (
+const policyWith = (
   grants: ReadonlyArray<EndpointGrantPolicy>,
-  overrides: Partial<ConstructorParameters<typeof AdmissionPolicyV2>[0]> = {}
+  overrides: Partial<ConstructorParameters<typeof AdmissionPolicy>[0]> = {}
 ) =>
-  new AdmissionPolicyV2({
+  new AdmissionPolicy({
     schemaVersion: "airlock/admission-policy/v2",
     profile: "native-contained",
     principal: "agent/test",
@@ -46,20 +43,9 @@ const policyV2 = (
     admittedBy: "operator/test",
     pathAllowlist: [],
     executableAllowlist: [],
+    executableEdges: [],
     endpointGrants: grants,
     ...overrides
-  })
-
-const policyV1 = (endpointAllowlist: ReadonlyArray<string>) =>
-  new AdmissionPolicy({
-    schemaVersion: "airlock/admission-policy/v1",
-    profile: "native-contained",
-    principal: "agent/test",
-    realm: "macos/local",
-    admittedBy: "operator/test",
-    pathAllowlist: [],
-    executableAllowlist: [],
-    endpointAllowlist
   })
 
 const externalDraft = (
@@ -92,10 +78,10 @@ const externalDraft = (
   })
 }
 
-describe("admission policy v2: endpoint grants", () => {
-  it.effect("keeps v1 documents decoding and leaves their endpoint semantics untouched", () =>
+describe("admission policy: endpoint grants", () => {
+  it.effect("refuses a document in the removed allowlist shape", () =>
     Effect.gen(function* () {
-      const document = {
+      const removed = yield* Schema.decodeUnknownEffect(AdmissionPolicy)({
         schemaVersion: "airlock/admission-policy/v1",
         profile: "native-contained",
         principal: "agent/test",
@@ -104,54 +90,25 @@ describe("admission policy v2: endpoint grants", () => {
         pathAllowlist: [],
         executableAllowlist: [],
         endpointAllowlist: [readSelector]
-      }
-      const decoded = yield* Schema.decodeUnknownEffect(AdmissionPolicyDocument)(document)
-      expect(decoded).toBeInstanceOf(AdmissionPolicy)
-      expect(endpointGrantsOf(decoded)).toEqual([])
-
-      // v1 matching is still the raw string prefix, byte for byte. A v1
-      // document therefore keeps admitting exactly what it admitted before,
-      // including a traversal URL the v2 canonical match refuses. It is never
-      // auto-committed, because v1 has no class vocabulary at all.
-      const traversal = "https://status.internal.example/v1/../admin"
-      const admitted = yield* admit(externalDraft({ endpoint: traversal }), policyV1([readSelector]))
-      expect(admitted.plan.handles).toHaveLength(1)
-      expect(policyDispatchDecision(policyV1([readSelector]), {
-        url: endpoint,
-        method: "GET"
-      })).toMatchObject({ _tag: "AwaitSupervisor" })
-
-      // Same policy digest inputs as before: a v1 digest is not disturbed by
-      // the v2 field existing.
-      const again = yield* admit(externalDraft({ endpoint: traversal }), policyV1([readSelector]))
-      expect(again.policyDigest).toBe(admitted.policyDigest)
-
-      // A v1 document that names v2 grants does not acquire them: the version
-      // literal decides, and a v1 policy carries no class vocabulary.
-      const smuggled = yield* Schema.decodeUnknownEffect(AdmissionPolicyDocument)({
-        ...document,
-        endpointGrants: [{ selector: readSelector, class: "read", commit: "auto", methods: ["GET"] }]
-      })
-      expect(endpointGrantsOf(smuggled)).toEqual([])
-      expect(policyDispatchDecision(smuggled, { url: endpoint, method: "GET" }))
-        .toMatchObject({ _tag: "AwaitSupervisor" })
+      }).pipe(Effect.flip)
+      expect(removed._tag).toBe("SchemaError")
     })
   )
 
-  it.effect("leaves compatibility exactly as broad as it is under v1", () =>
+  it.effect("leaves the compatibility profile unrestricted by endpoint grants", () =>
     Effect.gen(function* () {
-      // Compatibility ignores the endpoint allowlist today; a v2 document does
-      // not silently tighten it. Grant shape is still validated, because an
+      // Compatibility does not match endpoints against grants. Grant shape is
+      // still validated, because an
       // invalid grant is a supervisor mistake in any profile.
       const compatible = yield* admit(
         externalDraft({ method: "POST", endpoint: "https://elsewhere.example/anything" }),
-        policyV2([readGrant], { profile: "compatibility" })
+        policyWith([readGrant], { profile: "compatibility" })
       )
       expect(compatible.plan.handles).toHaveLength(1)
 
       const invalid = yield* admit(
         externalDraft(),
-        policyV2([grant({ class: "mutate", commit: "auto", methods: ["GET"] })], {
+        policyWith([grant({ class: "mutate", commit: "auto", methods: ["GET"] })], {
           profile: "compatibility"
         })
       ).pipe(Effect.flip)
@@ -159,9 +116,9 @@ describe("admission policy v2: endpoint grants", () => {
     })
   )
 
-  it.effect("decodes v2 documents and defaults an unclassified grant to the staged floor", () =>
+  it.effect("defaults an unclassified grant to the staged floor", () =>
     Effect.gen(function* () {
-      const decoded = yield* Schema.decodeUnknownEffect(AdmissionPolicyDocument)({
+      const decoded = yield* Schema.decodeUnknownEffect(AdmissionPolicy)({
         schemaVersion: "airlock/admission-policy/v2",
         profile: "native-contained",
         principal: "agent/test",
@@ -169,10 +126,11 @@ describe("admission policy v2: endpoint grants", () => {
         admittedBy: "operator/test",
         pathAllowlist: [],
         executableAllowlist: [],
+        executableEdges: [],
         endpointGrants: [{ selector: readSelector }]
       })
-      expect(decoded).toBeInstanceOf(AdmissionPolicyV2)
-      const grants = endpointGrantsOf(decoded)
+      expect(decoded).toBeInstanceOf(AdmissionPolicy)
+      const grants = decoded.endpointGrants
       expect(grants[0]).toMatchObject({
         selector: readSelector,
         class: "irreversible-send",
@@ -180,7 +138,7 @@ describe("admission policy v2: endpoint grants", () => {
       })
       expect(grants[0]?.methods).toBeUndefined()
 
-      // Unclassified behaves exactly as today: admitted, and staged.
+      // Unclassified is admitted, and staged.
       const admitted = yield* admit(externalDraft(), decoded)
       expect(admitted.plan.handles).toHaveLength(1)
       expect(policyDispatchDecision(decoded, { url: endpoint, method: "GET" }))
@@ -190,7 +148,7 @@ describe("admission policy v2: endpoint grants", () => {
 
   it.effect("auto-commits only an unambiguous read-class grant whose method fits", () =>
     Effect.gen(function* () {
-      const policy = policyV2([readGrant])
+      const policy = policyWith([readGrant])
       yield* admit(externalDraft(), policy)
       expect(policyDispatchDecision(policy, { url: endpoint, method: "GET" })).toMatchObject({
         _tag: "AutoCommit",
@@ -212,7 +170,7 @@ describe("admission policy v2: endpoint grants", () => {
         .toMatchObject({ _tag: "AwaitSupervisor" })
 
       // Overlapping grants only auto-commit when every fitting grant agrees.
-      const overlapped = policyV2([
+      const overlapped = policyWith([
         readGrant,
         grant({ selector: "https://status.internal.example/v1/health", methods: ["GET"] })
       ])
@@ -223,7 +181,7 @@ describe("admission policy v2: endpoint grants", () => {
 
   it.effect("refuses auto-commit for URLs that only string-prefix-match a read grant", () =>
     Effect.gen(function* () {
-      const policy = policyV2([readGrant])
+      const policy = policyWith([readGrant])
       const prefix = readSelector.slice(0, -1)
       // Identity changes under canonicalization: no grant fits, so admission
       // denies outright rather than admitting and leaving the intent staged.
@@ -265,7 +223,7 @@ describe("admission policy v2: endpoint grants", () => {
       for (const dispatchClass of ["mutate", "irreversible-send"] as const) {
         const invalid = yield* admit(
           externalDraft(),
-          policyV2([grant({ methods: ["GET"], class: dispatchClass, commit: "auto" })])
+          policyWith([grant({ methods: ["GET"], class: dispatchClass, commit: "auto" })])
         ).pipe(Effect.flip)
         expect(invalid).toBeInstanceOf(AdmissionContractInvalid)
         expect(invalid).toMatchObject({ field: "policy.endpointGrants[0].commit" })
@@ -273,7 +231,7 @@ describe("admission policy v2: endpoint grants", () => {
 
       const implicitMethods = yield* admit(
         externalDraft(),
-        policyV2([grant({ class: "read", commit: "auto" })])
+        policyWith([grant({ class: "read", commit: "auto" })])
       ).pipe(Effect.flip)
       expect(implicitMethods).toMatchObject({
         _tag: "AdmissionContractInvalid",
@@ -282,7 +240,7 @@ describe("admission policy v2: endpoint grants", () => {
 
       const uncanonicalSelector = yield* admit(
         externalDraft(),
-        policyV2([grant({ selector: "https://status.internal.example/v1/../*" })])
+        policyWith([grant({ selector: "https://status.internal.example/v1/../*" })])
       ).pipe(Effect.flip)
       expect(uncanonicalSelector).toMatchObject({
         _tag: "AdmissionContractInvalid",
@@ -293,7 +251,7 @@ describe("admission policy v2: endpoint grants", () => {
 
   it.effect("narrows by effective class and never widens one", () =>
     Effect.gen(function* () {
-      const auto = policyV2([readGrant])
+      const auto = policyWith([readGrant])
       // A definition honestly declaring mutate under a read/auto grant stays
       // staged: the effective class is the stricter of the two.
       expect(policyDispatchDecision(auto, {
@@ -308,7 +266,7 @@ describe("admission policy v2: endpoint grants", () => {
       })).toMatchObject({ _tag: "AutoCommit" })
 
       // No declared value ever converts a supervisor commit into an auto one.
-      const supervised = policyV2([grant({ methods: ["GET"], class: "mutate" })])
+      const supervised = policyWith([grant({ methods: ["GET"], class: "mutate" })])
       for (const declared of ["read", "mutate", "irreversible-send"] as const) {
         expect(policyDispatchDecision(supervised, {
           url: endpoint,
@@ -325,7 +283,7 @@ describe("admission policy v2: endpoint grants", () => {
 
   it.effect("enforces the grant hold window and inline body budget at admission", () =>
     Effect.gen(function* () {
-      const bounded = policyV2([
+      const bounded = policyWith([
         grant({ methods: ["GET", "POST"], hold: { minMillis: 1_000, maxMillis: 10_000 } })
       ])
       yield* admit(externalDraft({ holdMillis: 1_000 }), bounded)
@@ -338,7 +296,7 @@ describe("admission policy v2: endpoint grants", () => {
       const tooLong = yield* admit(externalDraft({ holdMillis: 10_001 }), bounded).pipe(Effect.flip)
       expect(tooLong).toBeInstanceOf(AdmissionDenied)
 
-      const budgeted = policyV2([
+      const budgeted = policyWith([
         grant({ methods: ["POST"], budget: { maxBodyBytes: 8 } })
       ])
       yield* admit(externalDraft({ method: "POST", body: "12345678" }), budgeted)

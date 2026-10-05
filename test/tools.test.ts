@@ -29,7 +29,7 @@ const location = (kind: "builtin" | "installed" | "user" | "project") =>
   knownToolDefinitionLocations(directories).find((candidate) => candidate.kind === kind) as ToolDefinitionLocation
 
 const definition = (overrides: Record<string, unknown> = {}) => ({
-  schemaVersion: "airlock/tool-definition/v1",
+  schemaVersion: "airlock/tool-definition/v2",
   id: "archive",
   version: "1.0.0",
   executables: [{ realm: "machine", selector: "/usr/bin/tar" }],

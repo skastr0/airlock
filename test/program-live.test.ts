@@ -251,7 +251,8 @@ const RuntimeTest = Layer.succeed(Runtime, Runtime.of({
           processes.push(new RuntimeProcessEvidence({
             nodeId: node.id,
             outcome: "exited",
-            receipt
+            receipt,
+            executableBindings: []
           }))
           if (node.stdoutArtifact !== undefined) {
             artifacts.push(artifact(node.stdoutArtifact, stdout, "test:invoke:stdout"))
@@ -295,7 +296,9 @@ const RuntimeTest = Layer.succeed(Runtime, Runtime.of({
       finishedAt: now,
       receipts: [],
       artifacts,
-      processes
+      processes,
+      lifecycle: [],
+      recovery: []
     }))
   },
   inspect: () => Effect.die("program test runtime has no persisted runs"),
@@ -303,14 +306,15 @@ const RuntimeTest = Layer.succeed(Runtime, Runtime.of({
 }))
 
 const policy = new AdmissionPolicy({
-  schemaVersion: "airlock/admission-policy/v1",
+  schemaVersion: "airlock/admission-policy/v2",
   profile: "compatibility",
   principal: "test-agent",
   realm: "local",
   admittedBy: "test",
   pathAllowlist: [],
   executableAllowlist: [],
-  endpointAllowlist: []
+  executableEdges: [],
+  endpointGrants: []
 })
 
 const ProgramTest = ProgramExecutionLive(policy).pipe(
@@ -525,6 +529,7 @@ describe("ProgramExecutionLive", () => {
           ],
           artifacts: [],
           processes: [],
+          lifecycle: [],
           recovery: [
             new RuntimeHoldRecoveryEvidence({
               nodeId: node.id,

@@ -1,7 +1,7 @@
 import { describe, expect, it } from "@effect/vitest"
 import { Effect } from "effect"
 import {
-  AdmissionPolicyV2,
+  AdmissionPolicy,
   EndpointGrantPolicy,
   admit,
   bindAdmissionForUse
@@ -18,7 +18,7 @@ import { supervisorDispatchAuthority } from "../src/program/index.ts"
 
 const endpoint = "https://status.internal.example/v1/health"
 const nodeId = NodeId.make("external")
-const policy = new AdmissionPolicyV2({
+const policy = new AdmissionPolicy({
   schemaVersion: "airlock/admission-policy/v2",
   profile: "native-contained",
   principal: "agent/sealed-dispatch-test",
@@ -26,6 +26,7 @@ const policy = new AdmissionPolicyV2({
   admittedBy: "operator/test",
   pathAllowlist: [],
   executableAllowlist: [],
+  executableEdges: [],
   endpointGrants: [new EndpointGrantPolicy({
     selector: "https://status.internal.example/v1/*",
     methods: ["GET"],

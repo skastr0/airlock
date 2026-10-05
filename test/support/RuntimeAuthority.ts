@@ -79,7 +79,7 @@ export const runtimeAuthority = (
     definitionDigests: []
   })
   const policy = new AdmissionPolicy({
-    schemaVersion: "airlock/admission-policy/v1",
+    schemaVersion: "airlock/admission-policy/v2",
     profile: "compatibility",
     principal: "runtime-test",
     realm: "local",
@@ -89,7 +89,8 @@ export const runtimeAuthority = (
       : { grantTtlMillis: options.grantTtlMillis }),
     pathAllowlist: [],
     executableAllowlist: [],
-    endpointAllowlist: []
+    executableEdges: [],
+    endpointGrants: []
   })
   const admittedAt = options.admittedAt ?? DateTime.toDateUtc(timestamp)
   return Effect.runSync(

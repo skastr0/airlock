@@ -403,51 +403,8 @@ describe("tool definition v2: authority stays grant-side", () => {
   )
 })
 
-describe("tool definition v2: the v1 surface is unchanged", () => {
-  it.effect("keeps v1 documents on the invoke-only gate", () =>
-    Effect.gen(function* () {
-      const v1 = {
-        schemaVersion: "airlock/tool-definition/v1",
-        id: "unix.archive",
-        version: "1.0.0",
-        executables: [{ realm: "machine", selector: "/usr/bin/tar" }],
-        actions: [{ ...invokeAction, lowering: "enqueue", effectFootprint: ["enqueue"] }]
-      }
-      const gated = yield* load(v1).pipe(Effect.flip)
-      expect(gated).toBeInstanceOf(InvalidToolDefinition)
-      expect(gated).toMatchObject({
-        field: "actions.extract.lowering",
-        reason: "v1 definitions support only invoke lowering"
-      })
-    })
-  )
-
-  it.effect("refuses v2 action vocabulary carried by a v1 document", () =>
-    Effect.gen(function* () {
-      for (const field of ["request", "emissionEffect"] as const) {
-        const v1 = {
-          schemaVersion: "airlock/tool-definition/v1",
-          id: "unix.archive",
-          version: "1.0.0",
-          executables: [{ realm: "machine", selector: "/usr/bin/tar" }],
-          actions: [{
-            ...invokeAction,
-            [field]: field === "request"
-              ? (enqueueAction().request as Record<string, unknown>)
-              : "read"
-          }]
-        }
-        const error = yield* load(v1).pipe(Effect.flip)
-        expect(error, field).toBeInstanceOf(InvalidToolDefinition)
-        expect(error, field).toMatchObject({
-          field: `actions.extract.${field}`,
-          reason: "requires schemaVersion airlock/tool-definition/v2"
-        })
-      }
-    })
-  )
-
-  it.effect("lowers a v2 invoke action exactly as v1 does", () =>
+describe("tool definition: invoke and enqueue actions together", () => {
+  it.effect("lowers an invoke action to process.run", () =>
     Effect.gen(function* () {
       const loaded = yield* load(
         v2Definition({

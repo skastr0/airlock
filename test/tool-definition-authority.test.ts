@@ -66,7 +66,7 @@ describe("tool-definition authority", () => {
       writeFileSync(
         join(toolDirectory, "authority-probe.airlock-tool.json"),
         JSON.stringify({
-          schemaVersion: "airlock/tool-definition/v1",
+          schemaVersion: "airlock/tool-definition/v2",
           id: "authority_probe",
           version: "1.0.0",
           executables: [
@@ -103,14 +103,15 @@ describe("tool-definition authority", () => {
       writeFileSync(
         policy,
         JSON.stringify({
-          schemaVersion: "airlock/admission-policy/v1",
+          schemaVersion: "airlock/admission-policy/v2",
           profile: "native-contained",
           principal: "agent:definition-authority-test",
           realm: "local",
           admittedBy: "operator:definition-authority-test",
           pathAllowlist: [`${workspace}/**`],
           executableAllowlist: ["/bin/true"],
-          endpointAllowlist: []
+          executableEdges: [],
+          endpointGrants: []
         })
       )
       writeFileSync(

@@ -3,7 +3,6 @@ import { describe, expect, it } from "@effect/vitest"
 import { Effect, Result } from "effect"
 import {
   AdmissionPolicy,
-  AdmissionPolicyV2,
   BoxGrant,
   decodeAndHashBoxGrant,
   decodeBoxGrant,
@@ -13,18 +12,7 @@ import { NativeActionCatalog } from "../src/actions/index.ts"
 
 const sha = (hex: string) => `sha256:${hex.repeat(64)}`
 
-const admissionV1 = {
-  schemaVersion: "airlock/admission-policy/v1" as const,
-  profile: "native-contained" as const,
-  principal: "agent/test",
-  realm: "local",
-  admittedBy: "supervisor/test",
-  pathAllowlist: ["/workspace/**"],
-  executableAllowlist: ["/usr/bin/git"],
-  endpointAllowlist: []
-}
-
-const admissionV2 = {
+const admission = {
   schemaVersion: "airlock/admission-policy/v2" as const,
   profile: "native-contained" as const,
   principal: "agent/test",
@@ -32,12 +20,13 @@ const admissionV2 = {
   admittedBy: "supervisor/test",
   pathAllowlist: ["/workspace/**"],
   executableAllowlist: ["/usr/bin/git"],
+  executableEdges: [],
   endpointGrants: []
 }
 
 const document = (overrides: Record<string, unknown> = {}) => ({
   schemaVersion: "airlock/box-grant/v1",
-  admission: admissionV1,
+  admission,
   verbs: ["run", "held", "pending"],
   nativeActions: ["file.read", "process.run"],
   catalog: [{ id: "builtin/core@1", sha256: sha("b") }],
@@ -51,14 +40,12 @@ const rejected = async (input: unknown) =>
   Result.isFailure(await Effect.runPromise(Effect.result(decodeBoxGrant(input))))
 
 describe("box grant v1", () => {
-  it("nests either admission-policy wire version", async () => {
-    const v1 = await decoded(document())
-    const v2 = await decoded(document({ admission: admissionV2 }))
+  it("nests the admission policy", async () => {
+    const grant = await decoded(document())
 
-    expect(v1).toBeInstanceOf(BoxGrant)
-    expect(v1.admission).toBeInstanceOf(AdmissionPolicy)
-    expect(v2.admission).toBeInstanceOf(AdmissionPolicyV2)
-    expect(v1.schemaVersion).toBe("airlock/box-grant/v1")
+    expect(grant).toBeInstanceOf(BoxGrant)
+    expect(grant.admission).toBeInstanceOf(AdmissionPolicy)
+    expect(grant.schemaVersion).toBe("airlock/box-grant/v1")
   })
 
   it("hashes decoded semantic content independently of JSON object key order", async () => {
@@ -70,14 +57,15 @@ describe("box grant v1", () => {
       nativeActions: ["file.read", "process.run"],
       verbs: ["run", "held", "pending"],
       admission: {
-        endpointAllowlist: [],
+        executableEdges: [],
+        endpointGrants: [],
         executableAllowlist: ["/usr/bin/git"],
         pathAllowlist: ["/workspace/**"],
         admittedBy: "supervisor/test",
         realm: "local",
         principal: "agent/test",
         profile: "native-contained",
-        schemaVersion: "airlock/admission-policy/v1"
+        schemaVersion: "airlock/admission-policy/v2"
       },
       schemaVersion: "airlock/box-grant/v1"
     })))
@@ -169,13 +157,13 @@ describe("box grant v1", () => {
   it("strictly rejects excess fields at every authority-bearing level", async () => {
     expect(await rejected({ ...document(), mintedVerb: "root" })).toBe(true)
     expect(await rejected(document({
-      admission: { ...admissionV1, verbs: ["reap"] }
+      admission: { ...admission, verbs: ["reap"] }
     }))).toBe(true)
     expect(await rejected(document({
       catalog: [{ id: "builtin/core@1", sha256: sha("b"), path: "/tmp/plugin" }]
     }))).toBe(true)
     expect(await rejected(document({
-      admission: { ...admissionV2, endpointAllowlist: ["https://widen.example/*"] }
+      admission: { ...admission, endpointAllowlist: ["https://widen.example/*"] }
     }))).toBe(true)
   })
 
@@ -203,7 +191,7 @@ describe("box grant v1", () => {
       catalog: [{ id: "attacker", sha256: sha("c") }],
       daemonOps: ["commit"],
       binaryDigest: sha("a"),
-      admission: admissionV1
+      admission: admission
     })).toBe(true)
     expect(await rejected({
       source: 'return grant({ verbs: ["reap"] })',

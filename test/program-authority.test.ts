@@ -15,14 +15,15 @@ import {
 } from "../src/program/index.ts"
 
 const policy = new AdmissionPolicy({
-  schemaVersion: "airlock/admission-policy/v1",
+  schemaVersion: "airlock/admission-policy/v2",
   profile: "native-contained",
   principal: "agent/program-authority-test",
   realm: "local",
   admittedBy: "operator/test",
   pathAllowlist: ["/work/**"],
   executableAllowlist: [],
-  endpointAllowlist: []
+  executableEdges: [],
+  endpointGrants: []
 })
 
 describe("Program execution authority handoff", () => {

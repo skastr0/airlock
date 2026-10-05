@@ -30,7 +30,7 @@ const definitionDocument = (definition: unknown) => new ToolDefinitionDocument({
 })
 
 const invokeDefinition = {
-  schemaVersion: "airlock/tool-definition/v1",
+  schemaVersion: "airlock/tool-definition/v2",
   id: "fixture.invoke",
   version: "1.0.0",
   executables: [{ realm: "local", selector: "/usr/bin/true" }],

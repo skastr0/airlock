@@ -139,14 +139,15 @@ const inlineArtifacts = (
   )
 
 const compatibilityPolicy = new AdmissionPolicy({
-  schemaVersion: "airlock/admission-policy/v1",
+  schemaVersion: "airlock/admission-policy/v2",
   profile: "compatibility",
   principal: "agent:shell-contract-corpus",
   realm: "local",
   admittedBy: "test:shell-contract-corpus",
   pathAllowlist: [],
   executableAllowlist: [],
-  endpointAllowlist: []
+  executableEdges: [],
+  endpointGrants: []
 })
 
 describe("representative shell-to-Airlock contract corpus", () => {

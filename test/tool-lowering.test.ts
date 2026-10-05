@@ -21,7 +21,7 @@ const location = new ToolDefinitionLocation({
 })
 
 const archiveDefinition = (actions?: ReadonlyArray<Record<string, unknown>>) => ({
-  schemaVersion: "airlock/tool-definition/v1",
+  schemaVersion: "airlock/tool-definition/v2",
   id: "unix.archive",
   version: "1.0.0",
   executables: [{ realm: "machine", selector: "/usr/bin/tar" }],
@@ -290,7 +290,7 @@ describe("inert tool action lowering", () => {
     })
   )
 
-  it.effect("rejects unknown actions and unsupported lowerings at load time", () =>
+  it.effect("rejects unknown actions and an enqueue action without a request at load time", () =>
     Effect.gen(function* () {
       const enqueue = {
         ...archiveDefinition().actions[0]!,
@@ -302,9 +302,10 @@ describe("inert tool action lowering", () => {
         archiveDefinition().actions[0]!,
         enqueue
       ])).pipe(Effect.flip)
-      expect(unsupported).toBeInstanceOf(InvalidToolDefinition)
       expect(unsupported).toMatchObject({
-        field: "actions.publish.lowering"
+        _tag: "ToolEnqueueContractRejected",
+        action: "publish",
+        field: "actions.publish.request"
       })
 
       const loaded = yield* load(archiveDefinition())

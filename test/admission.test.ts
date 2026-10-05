@@ -5,13 +5,13 @@ import {
   AdmissionDenied,
   AdmissionPolicy,
   AdmissionResult,
+  EndpointGrantPolicy,
   HandleExpired,
   ProfileUnavailable,
   UndeclaredNodeAuthority,
   admit,
   bindAdmissionForUse,
   revalidateNodeAuthority,
-  resolveHandle
 } from "../src/admission/index.ts"
 import {
   ApplyNode,
@@ -31,14 +31,15 @@ const req = (value: string) => RequirementId.make(value)
 
 const policy = (overrides: Partial<ConstructorParameters<typeof AdmissionPolicy>[0]> = {}) =>
   new AdmissionPolicy({
-    schemaVersion: "airlock/admission-policy/v1",
+    schemaVersion: "airlock/admission-policy/v2",
     profile: "native-contained",
     principal: "agent/test",
     realm: "macos/local",
     admittedBy: "operator/test",
     pathAllowlist: ["/workspace/**"],
     executableAllowlist: ["/usr/bin/rg"],
-    endpointAllowlist: ["https://api.example.test/*"],
+    executableEdges: [],
+    endpointGrants: [new EndpointGrantPolicy({ selector: "https://api.example.test/*" })],
     ...overrides
   })
 
@@ -68,7 +69,6 @@ describe("Admission candidate", () => {
       expect(admitted.plan.handles).toHaveLength(1)
       expect(admitted.plan.handles[0]?.resourceIdentity).toBe("lexical:executable:macos/local:/usr/bin/rg")
       expect(admitted.grants[0]?.constraints.identityBinding).toContain("Cell must rebind")
-      expect(yield* resolveHandle(admitted, executable.id)).toEqual(admitted.plan.handles[0])
       expect(admitted.plan.admission.policyDigest).toBe(admitted.policyDigest)
     })
   )
@@ -92,7 +92,7 @@ describe("Admission candidate", () => {
 
       const compatible = yield* admit(
         draft([write], outside),
-        policy({ profile: "compatibility", pathAllowlist: [], executableAllowlist: [], endpointAllowlist: [] })
+        policy({ profile: "compatibility", pathAllowlist: [], executableAllowlist: [], endpointGrants: [] })
       )
       expect(compatible.plan.handles).toHaveLength(1)
       expect(compatible.grants[0]?.selector).toBe("/outside/file")
@@ -254,7 +254,7 @@ describe("Admission candidate", () => {
       const first = yield* admit(draft([executable], invoke), policy({ grantTtlMillis: 10 }), at)
       const second = yield* admit(draft([executable], invoke), policy({ grantTtlMillis: 10 }), at)
       expect(first.policyDigest).toBe(second.policyDigest)
-      const expired = yield* resolveHandle(first, executable.id, new Date(at.getTime() + 10)).pipe(Effect.flip)
+      const expired = yield* bindAdmissionForUse(first, new Date(at.getTime() + 10)).pipe(Effect.flip)
       expect(expired).toBeInstanceOf(HandleExpired)
 
       const unavailable = yield* admit(

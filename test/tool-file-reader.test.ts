@@ -16,7 +16,7 @@ import {
 const location = (directory: string) => new ToolDefinitionLocation({ kind: "project", directory })
 
 const definition = (id: string) => JSON.stringify({
-  schemaVersion: "airlock/tool-definition/v1",
+  schemaVersion: "airlock/tool-definition/v2",
   id,
   version: "1.0.0",
   executables: [{ realm: "machine", selector: "/usr/bin/true" }],
