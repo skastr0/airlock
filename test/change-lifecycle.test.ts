@@ -69,46 +69,100 @@ describe("explicit snapshot lifecycle", () => {
     expect((await run(change.collect(p.id))).state).toBe("recovery-required")
     expect((await run(change.inventory())).totals.reservedBytes).toBeGreaterThan(0)
   }))
-  it("a collected proposal is summarized once and costs later stages nothing", () => world(async ({ root, home, change }) => {
+  const finish = async (change: ChangeService, id: string) => {
+    await run(change.cancel(id)); await retire(change, id)
+    expect((await run(change.collect(id))).state).toBe("collected")
+  }
+  const refusedForBudget = (root: string, change: ChangeService) =>
+    expect(run(change.stage({ source: path.join(root, "source"), target: path.join(root, "target") })))
+      .rejects.toMatchObject({ _tag: "ChangeError", reason: expect.stringContaining("budget exceeded") })
+
+  it("a finished proposal leaves the scanned root and later stages never look at it", () => world(async ({ root, home, change }) => {
     const finished = await proposal(root, change)
-    await run(change.cancel(finished.id)); await retire(change, finished.id)
-    expect((await run(change.collect(finished.id))).state).toBe("collected")
-    const summary = path.join(home, "changes", "settled", `${finished.id}.json`)
-    expect(JSON.parse(await readFile(summary, "utf8"))).toMatchObject({
-      version: "change-settled/v1", row: { id: finished.id, active: false, reservationBytes: 0, snapshots: { state: "collected" } }
-    })
-    // Remove what a full inspection would need. The next stage must not ask
-    // for it: a finished proposal holds no budget.
+    await finish(change, finished.id)
+    expect(await exists(path.join(home, "changes", finished.id))).toBe(false)
+    expect(await exists(path.join(home, "changes", "settled", finished.id, "status.json"))).toBe(true)
+    // History still answers by id.
+    expect((await run(change.status(finished.id))).state).toBe("cancelled")
+    expect((await run(change.review(finished.id))).proposalDigest).toBe(finished.proposalDigest)
+    // Take away what a full inspection of the settled proposal would need.
+    // Staging must not ask for it: it does not read the settled directory.
     await rename(path.join(home, "hold", "snapshot-retirements", `${finished.id}.json`), path.join(root, "moved-away.json"))
     const next = await proposal(root, change)
-    const rows = (await run(change.inventory())).rows
-    expect(rows.find(r => r.id === finished.id)).toMatchObject({ active: false, reservationBytes: 0, errors: [] })
-    expect(rows.find(r => r.id === next.id)).toMatchObject({ active: true })
+    expect((await run(change.status(next.id))).state).toBe("staged")
   }))
-  it("a damaged, foreign or contradicted summary is ignored and the proposal is inspected in full", () => world(async ({ root, home, change }) => {
+  it("the limit is enforced by open proposals alone, with thousands settled beside them", () => world(async ({ root, home, change }) => {
+    // History the budget must not walk: three thousand settled directories.
+    const settled = path.join(home, "changes", "settled")
+    const first = await proposal(root, change)
+    await finish(change, first.id)
+    for (let n = 0; n < 3000; n++) await mkdir(path.join(settled, `change_${crypto.randomUUID()}`))
+    // Each open proposal reserves a little over 32 MiB, so fifteen fill the
+    // 512 MiB store and a sixteenth is refused.
+    const open: Array<Awaited<ReturnType<typeof proposal>>> = []
+    for (let n = 0; n < 15; n++) open.push(await proposal(root, change))
+    await refusedForBudget(root, change)
+    // Finishing one is what frees budget.
+    await finish(change, open[0]!.id)
+    await proposal(root, change)
+    await refusedForBudget(root, change)
+  }), 120000)
+  it("whatever is in the root is inspected in full and counted", () => world(async ({ root, home, change }) => {
+    // A directory planted in the root is an allocation nobody finished: it is
+    // charged the maximum reservation (288 MiB), not skipped.
+    await proposal(root, change).then(p => finish(change, p.id))
+    await mkdir(path.join(home, "changes", `change_${crypto.randomUUID()}`))
+    for (let n = 0; n < 6; n++) await proposal(root, change)
+    await refusedForBudget(root, change)
+  }), 120000)
+  it("a settled proposal moved back into the root is inspected again and moved out again", () => world(async ({ root, home, change }) => {
+    const p = await proposal(root, change)
+    await finish(change, p.id)
+    const open = path.join(home, "changes", p.id), settled = path.join(home, "changes", "settled", p.id)
+    await rename(settled, open)
+    await proposal(root, change)
+    expect(await exists(open)).toBe(false)
+    expect(await exists(settled)).toBe(true)
+    // Moved back with private bytes inside, it is not finished: it stays in
+    // the root and holds budget until someone deals with it.
+    await rename(settled, open)
+    await writeFile(path.join(open, "candidate"), "back again")
+    await proposal(root, change)
+    expect(await exists(open)).toBe(true)
+    const row = (await run(change.inventory())).rows.find(r => r.id === p.id)!
+    expect(row.snapshots.state).toBe("recovery-required")
+    expect(row.reservationBytes).toBeGreaterThan(0)
+  }))
+  it("a collection that was never followed by the move is healed by the next stage", () => world(async ({ root, home, change, hold }) => {
     const p = await proposal(root, change)
     await run(change.cancel(p.id)); await retire(change, p.id)
+    // Collect through Hold alone: the state a crash leaves between the durable
+    // collection and the move.
+    expect((await run(hold.collectChangeSnapshots(p.id))).state).toBe("collected")
+    expect(await exists(path.join(home, "changes", p.id))).toBe(true)
+    await proposal(root, change)
+    expect(await exists(path.join(home, "changes", p.id))).toBe(false)
+    expect(await exists(path.join(home, "changes", "settled", p.id))).toBe(true)
+  }))
+  it("the listing keeps history, and a settled proposal can still be undone", () => world(async ({ root, home, change }) => {
+    const p = await proposal(root, change)
+    const receipt = await run(change.apply({ id: p.id, expectedDigest: p.proposalDigest }))
+    await retire(change, p.id)
     expect((await run(change.collect(p.id))).state).toBe("collected")
-    const summary = path.join(home, "changes", "settled", `${p.id}.json`)
-    const original = await readFile(summary, "utf8")
-    const collectedRow = { id: p.id, active: false, snapshots: { state: "collected" }, errors: [] }
-
-    await writeFile(summary, "{ torn")
-    expect((await run(change.inventory())).rows[0]).toMatchObject(collectedRow)
-    await writeFile(summary, JSON.stringify({ ...JSON.parse(original), storeId: "another-store" }))
-    expect((await run(change.inventory())).rows[0]).toMatchObject(collectedRow)
-    const edited = JSON.parse(original)
-    edited.row.target = "/somewhere/else"
-    await writeFile(summary, JSON.stringify(edited))
-    expect((await run(change.inventory())).rows[0]!.target).not.toBe("/somewhere/else")
-
-    // Private bytes reappear in a finished proposal: the summary still
-    // verifies, but it no longer describes what is on disk.
-    await writeFile(summary, original)
-    await writeFile(path.join(home, "changes", p.id, "candidate"), "back again")
-    const row = (await run(change.inventory())).rows[0]!
-    expect(row.snapshots.state).toBe("recovery-required")
-    expect(row.errors.map(e => e.operation)).toContain("collected")
+    expect(await exists(path.join(home, "changes", "settled", p.id))).toBe(true)
+    const listed = async () => (await run(change.inventory())).rows.find(r => r.id === p.id)!
+    expect(await listed()).toMatchObject({ applyState: "installed", undoState: "unclaimed", active: false })
+    // The cached row is a convenience: damage it and the listing still tells
+    // the truth, then repairs it.
+    const cache = path.join(home, "changes", "settled", p.id, "inventory-row.json")
+    const original = await readFile(cache, "utf8")
+    await writeFile(cache, "{ torn")
+    expect(await listed()).toMatchObject({ applyState: "installed", undoState: "unclaimed" })
+    expect(await readFile(cache, "utf8")).toBe(original)
+    // Undo works from the settled location and the listing follows it.
+    expect((await run(change.undo(receipt.receiptId))).state).toBe("undone")
+    expect(await readFile(path.join(root, "target"), "utf8")).toBe("old")
+    expect(await listed()).toMatchObject({ applyState: "installed", undoState: "undone" })
   }))
   it("concurrent read/retire/collect is serialized and never falls back to source", () => world(async ({ root, change }) => {
     const p = await proposal(root, change); await run(change.cancel(p.id))
@@ -139,7 +193,7 @@ describe("explicit snapshot lifecycle", () => {
     expect((await run(change.collect(p.id))).state).toBe("collected")
     const inbox = await run(change.inventory())
     expect(inbox.totals.active).toBe(0); expect(inbox.totals.reservedBytes).toBe(0)
-    expect(await exists(path.join(home, "changes", p.id, "proposal.json"))).toBe(true)
+    expect(await exists(path.join(home, "changes", "settled", p.id, "proposal.json"))).toBe(true)
     expect((await run(change.review(p.id))).proposalDigest).toBe(p.proposalDigest)
     await expect(run(change.content({ id: p.id, side: "after", path: "" }))).rejects.toMatchObject({ _tag: "ChangeError", reason: expect.stringContaining("retired") })
   }))
@@ -184,7 +238,7 @@ describe("explicit snapshot lifecycle", () => {
   }))
   it("a collected tombstone never releases reservation for reappeared unsupported private bytes", () => world(async ({ root, home, change }) => {
     const p = await proposal(root, change); await run(change.cancel(p.id)); await retire(change, p.id); await run(change.collect(p.id))
-    await symlink(p.source, path.join(home, "changes", p.id, "candidate"))
+    await symlink(p.source, path.join(home, "changes", "settled", p.id, "candidate"))
     const row = (await run(change.inventory())).rows[0]!
     expect(row.snapshots.state).toBe("recovery-required"); expect(row.active).toBe(true)
     const receipt = await run(change.collect(p.id))

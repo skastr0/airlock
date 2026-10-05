@@ -49,11 +49,10 @@ export const Inventory = Schema.Struct({
   limits: Schema.Struct({ proposals: Schema.Finite, storage: Schema.Finite })
 })
 export type Inventory = typeof Inventory.Type
-/** The final inventory row of a collected proposal, written once. */
-export const SettledBody = Schema.Struct({
-  version: Schema.Literal("change-settled/v1"), storeId: Schema.String, row: InventoryRow
+/** The listing's cached row for a settled proposal, bound to its status file. */
+export const Settled = Schema.Struct({
+  version: Schema.Literal("change-settled/v1"), row: InventoryRow, statusDigest: Schema.NullOr(Schema.String)
 })
-export const Settled = Schema.Struct({ ...SettledBody.fields, digest: ProposalDigest })
 export const SnapshotReceipt = Schema.Struct({
   version: Schema.Literal("change-snapshots/v1"), id: ProposalId, retirementDigest: ProposalDigest,
   state: Schema.Literals(["retired", "collected", "recovery-required"]), holdActIds: Schema.Array(Schema.String),

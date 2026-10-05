@@ -31,9 +31,16 @@ const safeAct = (id: string) => {
   return id
 }
 /** Only these three private names are admissible; no caller-supplied path. */
-export const snapshotSource = (home: string, id: string, binding: SnapshotBinding) => binding.side === "apply-stage"
-  ? path.join(home, "hold", safeAct(binding.sourceActId ?? ""), "stage")
-  : path.join(home, "changes", Schema.decodeUnknownSync(ProposalId)(id), binding.side)
+export const snapshotSource = (home: string, id: string, binding: SnapshotBinding, directory = path.join(home, "changes", Schema.decodeUnknownSync(ProposalId)(id))) =>
+  binding.side === "apply-stage"
+    ? path.join(home, "hold", safeAct(binding.sourceActId ?? ""), "stage")
+    : path.join(directory, binding.side)
+/** A proposal's directory: in the store root while open, under `settled/` once finished. */
+export const proposalDirectory = async (home: string, id: string) => {
+  const open = path.join(home, "changes", Schema.decodeUnknownSync(ProposalId)(id))
+  const settled = path.join(home, "changes", "settled", id)
+  return !(await exists(open)) && await exists(settled) ? settled : open
+}
 export const planDigest = (plan: typeof PlanData.Type) => `sha256:${hash(Schema.encodeSync(Schema.fromJsonString(PlanData))(plan))}`
 export const readSnapshotRecord = async (home: string, id: string): Promise<SnapshotRecord | undefined> => {
   Schema.decodeUnknownSync(ProposalId)(id)
@@ -57,7 +64,7 @@ export const snapshotReceipt = (record: SnapshotRecord, reason?: string): Snapsh
 /** Called under the Hold lease. Inspection never writes or repairs metadata. */
 export const inspectSnapshots = async (home: string, id: string): Promise<SnapshotInspection> => {
   Schema.decodeUnknownSync(ProposalId)(id)
-  const directory = path.join(home, "changes", id)
+  const directory = await proposalDirectory(home, id)
   await canonical(directory)
   const errors: Array<{ operation: string, reason: string }> = []
   const metadata: Array<{ name: string, digest: string | null }> = []
@@ -153,7 +160,7 @@ export const inspectSnapshots = async (home: string, id: string): Promise<Snapsh
       } catch (cause) { snapshotState = "recovery-required"; errors.push({ operation: "retired", reason: describeFailure(cause) }) }
     }
     if (record.phase === "collected") {
-      for (const binding of record.plan.bindings) if (await exists(snapshotSource(home, id, binding))) privateSourcePresent = true
+      for (const binding of record.plan.bindings) if (await exists(snapshotSource(home, id, binding, directory))) privateSourcePresent = true
       if (privateSourcePresent || (record.actId !== undefined && await exists(path.join(home, "hold", record.actId, "payload")))) {
         snapshotState = "recovery-required"
         errors.push({ operation: "collected", reason: "private bytes remain despite collection tombstone" })

@@ -1,4 +1,5 @@
 import { Context, Effect, Layer, Schema } from "effect"
+import { existsSync } from "node:fs"
 import { lstat, mkdir, open, readFile, readdir, rename } from "node:fs/promises"
 import * as path from "node:path"
 import { AirlockHome } from "../AirlockHome.ts"
@@ -6,7 +7,7 @@ import { Hold } from "../Hold.ts"
 import { makeExclusiveFileLock } from "../platform/ExclusiveFileLock.ts"
 import { CheckedOutcome, observeClaim, OperationKey } from "./Checked.ts"
 import { attempt, bindTarget, canonical, ChangeError, checkParent, checkTree, Entry, exists, hash, limits, metadataPolicy, overlaps, scan, snapshot, sync, writeNew } from "./Tree.ts"
-import { ContentPage, ContentRequest, Difference, Inventory, InventoryRow, Proposal, ProposalId, Review, Settled, SettledBody, SnapshotReceipt, Staged, Status } from "./Contracts.ts"
+import { ContentPage, ContentRequest, Difference, Inventory, InventoryRow, Proposal, ProposalId, Review, Settled, SnapshotReceipt, Staged, Status } from "./Contracts.ts"
 import { maximumReservation, readSnapshotRecord } from "./Snapshots.ts"
 import { describeFailure } from "../FailureText.ts"
 
@@ -46,7 +47,10 @@ const make = Effect.gen(function* () {
       await validateStore()
       await sync(home.home)
     }).pipe(Effect.andThen(lock.withLock(Effect.uninterruptible(effect))), Effect.mapError(error))
-  const directory = (id: string) => path.join(root, id)
+  const settledRoot = path.join(root, "settled")
+  /** A proposal lives in the root while open and in `settled/` once finished. */
+  const directory = (id: string) =>
+    !existsSync(path.join(root, id)) && existsSync(path.join(settledRoot, id)) ? path.join(settledRoot, id) : path.join(root, id)
   const candidatePath = (id: string) => path.join(directory(id), "candidate")
   const baselinePath = (id: string) => path.join(directory(id), "baseline")
   const validateId = (id: string) => Schema.decodeUnknownEffect(ProposalId)(id).pipe(Effect.mapError(error))
@@ -104,49 +108,19 @@ const make = Effect.gen(function* () {
   })))
 
   /*
-   * A collected proposal is finished: its snapshots are gone, it reserves
-   * nothing, and nothing about it can change again. Its final inventory row is
-   * written once, bound by digest to this store, so later inventories read
-   * that row instead of re-verifying the proposal through the Hold lease, and
-   * a stage budget does not look at finished proposals at all. A summary that
-   * is missing, torn, or does not verify is ignored and the proposal is
-   * inspected in full, so a damaged summary can only cost time.
+   * A collected proposal is finished: its snapshots are gone and it reserves
+   * nothing. Finished proposals do not stay in the scanned root. The first
+   * full inspection that finds one finished moves its whole directory to
+   * `settled/<id>` with one rename, so a stage budget lists and inspects only
+   * proposals that are still open, and its cost does not depend on history.
+   * Nothing is trusted by name: whatever is in the root is inspected in full
+   * and counted. A crash before the rename leaves the proposal in the root,
+   * where the next stage or listing moves it.
    */
-  const settledRoot = path.join(root, "settled")
-  const settledFile = (id: string) => path.join(settledRoot, `${id}.json`)
-  const settledBody = (storeId: string, row: InventoryRow) =>
-    Schema.encodeSync(Schema.fromJsonString(SettledBody))({ version: "change-settled/v1", storeId, row })
   const isFinished = (row: InventoryRow) =>
     row.snapshots.state === "collected" && !row.active && row.reservationBytes === 0 && row.errors.length === 0
-  const proposalNames = () => attempt("list change inventory", async () =>
-    await exists(root) ? (await readdir(root)).filter(n => n.startsWith("change_")).sort() : [])
-  const settledIds = () => attempt("list settled proposals", async () =>
-    new Set(await exists(settledRoot)
-      ? (await readdir(settledRoot)).filter(n => n.endsWith(".json")).map(n => n.slice(0, -".json".length))
-      : []))
-  const storeBinding = () => attempt("read store binding", async () => {
-    const file = path.join(root, "store-id")
-    return await exists(file) ? await readFile(file, "utf8") : undefined
-  })
-  const readSettled = async (id: string, storeId: string | undefined): Promise<InventoryRow | undefined> => {
-    try {
-      const stored = Schema.decodeUnknownSync(Schema.fromJsonString(Settled))(await readFile(settledFile(id), "utf8"))
-      if (
-        storeId === undefined || stored.storeId !== storeId || stored.row.id !== id || !isFinished(stored.row) ||
-        stored.digest !== `sha256:${hash(settledBody(stored.storeId, stored.row))}`
-      ) return undefined
-      // Finished means no private bytes are left. If any reappear, the summary
-      // no longer describes the proposal and the full inspection must speak.
-      const leftovers = [
-        candidatePath(id), baselinePath(id),
-        ...stored.row.snapshots.holdActIds.map(actId => path.join(home.holdDir, actId, "payload"))
-      ]
-      for (const leftover of leftovers) if (await exists(leftover)) return undefined
-      return stored.row
-    } catch {
-      return undefined
-    }
-  }
+  const proposalsIn = (location: string) => async () =>
+    await exists(location) ? (await readdir(location)).filter(n => n.startsWith("change_")).sort() : []
   const inspectRow = Effect.fnUntraced(function* (id: string) {
     const inspected = yield* hold.inspectChangeSnapshots(id).pipe(Effect.result)
     return inspected._tag === "Success" ? inspected.success.row : {
@@ -155,44 +129,81 @@ const make = Effect.gen(function* () {
       reservationBytes: maximumReservation, active: true, errors: [{ operation: "inventory", reason: String(inspected.failure) }]
     }
   })
-  /** Writes the summary of a proposal that a full inspection finds finished. */
-  const settle = Effect.fnUntraced(function* (id: string) {
-    const storeId = yield* storeBinding()
-    if (storeId === undefined || (yield* attempt("check settled summary", () => exists(settledFile(id))))) return
-    const row = yield* inspectRow(id)
-    if (!isFinished(row)) return
-    yield* attempt("publish settled summary", async () => {
-      await mkdir(settledRoot, { recursive: true, mode: 0o700 })
-      await sync(root)
-      const body = settledBody(storeId, row)
-      await writeNew(settledFile(id), Schema.encodeSync(Schema.fromJsonString(Settled))({
-        version: "change-settled/v1", storeId, row, digest: `sha256:${hash(body)}`
-      }))
-    })
-  })
-  /** What staging needs: only proposals that are not finished can hold budget. */
-  const activeBudget = Effect.fnUntraced(function* () {
-    const settled = yield* settledIds()
-    let active = 0, reservedBytes = 0
-    for (const id of yield* proposalNames()) {
-      if (settled.has(id)) continue
-      const row = yield* inspectRow(id)
-      if (row.active) active += 1
-      reservedBytes += row.reservationBytes
+  /*
+   * The listing's cached row for a settled proposal. It is a convenience for
+   * `inventory` only and is never consulted for a limit. It is bound to the
+   * proposal's current status file, so a later undo makes it stale, and a
+   * cache that is missing, stale or unreadable is replaced from a full
+   * inspection.
+   */
+  const cacheFile = (id: string) => path.join(settledRoot, id, "inventory-row.json")
+  const statusDigest = async (id: string) => {
+    const file = path.join(settledRoot, id, "status.json")
+    return await exists(file) ? hash(await readFile(file, "utf8")) : null
+  }
+  const readCachedRow = async (id: string): Promise<InventoryRow | undefined> => {
+    try {
+      const cached = Schema.decodeUnknownSync(Schema.fromJsonString(Settled))(await readFile(cacheFile(id), "utf8"))
+      if (cached.row.id !== id || !isFinished(cached.row) || cached.statusDigest !== await statusDigest(id)) return undefined
+      for (const side of ["candidate", "baseline"]) if (await exists(path.join(settledRoot, id, side))) return undefined
+      return cached.row
+    } catch {
+      return undefined
     }
-    return { active, reservedBytes }
+  }
+  const writeCachedRow = (row: InventoryRow) => attempt("cache settled inventory row", async () => {
+    const file = cacheFile(row.id), next = `${file}.next`
+    await writeNew(next, Schema.encodeSync(Schema.fromJsonString(Settled))({
+      version: "change-settled/v1", row, statusDigest: await statusDigest(row.id)
+    }), true)
+    await rename(next, file)
+    await sync(path.dirname(file))
+  })
+  const moveToSettled = (row: InventoryRow) => attempt("settle finished proposal", async () => {
+    await mkdir(settledRoot, { recursive: true, mode: 0o700 })
+    await sync(root)
+    await rename(path.join(root, row.id), path.join(settledRoot, row.id))
+    await sync(root)
+    await sync(settledRoot)
+  }).pipe(Effect.andThen(writeCachedRow(row)))
+  /*
+   * Rows of everything still in the root, each from a full inspection. A
+   * finished one is moved out on the way. If the move fails the proposal
+   * stays in the root and is inspected again next time: that costs time and
+   * never hides anything. Callers hold the store lease.
+   */
+  const openRows = Effect.fnUntraced(function* () {
+    const rows: InventoryRow[] = []
+    for (const id of yield* attempt("list open proposals", proposalsIn(root))) {
+      const row = yield* inspectRow(id)
+      if (isFinished(row)) yield* Effect.ignore(moveToSettled(row))
+      rows.push(row)
+    }
+    return rows
+  })
+  /** What staging needs. It never looks at the settled directory. */
+  const activeBudget = Effect.fnUntraced(function* () {
+    const rows = yield* openRows()
+    return { active: rows.filter(r => r.active).length, reservedBytes: rows.reduce((n, r) => n + r.reservationBytes, 0) }
+  })
+  /** History, read only when a listing is asked for. */
+  const settledRows = Effect.fnUntraced(function* (open: ReadonlySet<string>) {
+    const ids = (yield* attempt("list settled proposals", proposalsIn(settledRoot))).filter(id => !open.has(id))
+    const cached = yield* attempt("read settled inventory rows", () => Promise.all(ids.map(readCachedRow)))
+    const rows: InventoryRow[] = []
+    for (const [index, id] of ids.entries()) {
+      const hit = cached[index]
+      if (hit !== undefined) { rows.push(hit); continue }
+      const row = yield* inspectRow(id)
+      if (isFinished(row)) yield* Effect.ignore(writeCachedRow(row))
+      rows.push(row)
+    }
+    return rows
   })
   const inventory = Effect.fnUntraced(function* () {
-    const names = yield* proposalNames()
-    const settled = yield* settledIds()
-    const storeId = yield* storeBinding()
-    const rows: InventoryRow[] = []
-    for (const id of names) {
-      const summary = settled.has(id)
-        ? yield* attempt("read settled summary", () => readSettled(id, storeId))
-        : undefined
-      rows.push(summary ?? (yield* inspectRow(id)))
-    }
+    const open = yield* openRows()
+    const settled = yield* settledRows(new Set(open.map(r => r.id)))
+    const rows = [...open, ...settled].sort((a, b) => a.id < b.id ? -1 : a.id > b.id ? 1 : 0)
     return { version: "change-inventory/v1" as const, rows,
       totals: { rows: rows.length, active: rows.filter(r => r.active).length, reservedBytes: rows.reduce((n, r) => n + r.reservationBytes, 0),
         snapshotBytes: rows.reduce((n, r) => n + r.snapshots.bytes, 0), collected: rows.filter(r => r.snapshots.state === "collected").length,
@@ -372,10 +383,12 @@ const make = Effect.gen(function* () {
   return Change.of({ stage, review: (id, options) => readLocked(review(id, options)), status: (id) => readLocked(readStatus(id)), apply, cancel, undo, recover,
     inventory: () => readLocked(inventory()), content,
     retire: (input) => locked(hold.retireChangeSnapshots(input)),
-    // Settling is bookkeeping for speed: if it fails the proposal is simply
-    // inspected in full next time, so it never turns a collection into a failure.
+    // A proposal that collection finished leaves the root at once; if that
+    // fails here, the next stage or listing moves it.
     collect: (id) => locked(hold.collectChangeSnapshots(id).pipe(
-      Effect.tap((receipt) => receipt.state === "collected" ? Effect.ignore(settle(receipt.id)) : Effect.void))) })
+      Effect.tap((receipt) => receipt.state === "collected"
+        ? Effect.ignore(Effect.flatMap(inspectRow(receipt.id), (row) => isFinished(row) ? moveToSettled(row) : Effect.void))
+        : Effect.void))) })
 })
 
 export const ChangeLayer = Layer.effect(Change, make)
