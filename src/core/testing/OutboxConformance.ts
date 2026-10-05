@@ -544,6 +544,47 @@ export const outboxConformance = (
         same(calls.length, 0)
       }))
 
+    timed("a second Outbox opened during a commit leaves the in-flight emission alone", () =>
+      Effect.gen(function* () {
+        const current = yield* world
+        const started = yield* Deferred.make<void>()
+        const release = yield* Deferred.make<void>()
+        const slow = recordingWire((request) =>
+          Deferred.succeed(started, undefined).pipe(
+            Effect.andThen(Deferred.await(release)),
+            Effect.andThen(echo(request))
+          ))
+        const staged = yield* session(current, slow.wire, (outbox) => outbox.stage(request("a", "slow")))
+
+        // Instance A is inside its handler: the emission is durably `committing`.
+        const committing = yield* Effect.forkChild(
+          session(current, slow.wire, (outbox) => outbox.commit(staged.id, bySupervisor))
+        )
+        yield* Deferred.await(started)
+
+        // Instance B opens over the same store. Its startup recovery settles
+        // every `committing` emission as uncertain, and this one is not
+        // abandoned, it is live. `exclusive` is what tells the two apart: B
+        // must wait for A's section. An adapter whose `exclusive` does not
+        // exclude lets B through here, and the commit below ends uncertain.
+        const other = recordingWire()
+        const second = yield* Effect.forkChild(
+          session(current, other.wire, (outbox) => outbox.inspect(staged.id))
+        )
+        // Real time, not the test clock: a B that is wrongly let through must
+        // have finished its recovery before A is released.
+        yield* Effect.promise(() => new Promise<void>((resolve) => setTimeout(resolve, 250)))
+        yield* Deferred.succeed(release, undefined)
+
+        const committed = yield* Fiber.join(committing)
+        const seen = yield* Fiber.join(second)
+        same(committed.state, "committed", "the in-flight commit completes")
+        same(seen.state, "committed", "the second instance sees it settled, after waiting")
+        const settled = yield* session(current, other.wire, (outbox) => outbox.inspect(staged.id))
+        same(settled.state, "committed")
+        same([slow.calls.length, other.calls.length], [1, 0])
+      }))
+
     timed("a commit whose receipt cannot be recorded is still committed, and says so", () =>
       Effect.gen(function* () {
         const current = yield* world
