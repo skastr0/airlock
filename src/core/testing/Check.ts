@@ -27,5 +27,10 @@ export const holds = (condition: boolean, what: string): void => {
  */
 export interface Runner {
   readonly describe: (name: string, body: () => void) => void
-  readonly test: (name: string, body: () => import("effect").Effect.Effect<void, unknown, import("effect").Scope.Scope>) => void
+  readonly test: (
+    name: string,
+    body: () => import("effect").Effect.Effect<void, unknown, import("effect").Scope.Scope>,
+    /** Milliseconds; a suite passes one only for a test that does many durable writes. */
+    timeout?: number
+  ) => void
 }

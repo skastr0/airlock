@@ -19,6 +19,20 @@ export class DispatchFailed extends Schema.TaggedError<DispatchFailed>()("Dispat
   reason: Schema.String
 }) {}
 
+/**
+ * The handler proves the wire was never reached: the broker rejected the
+ * request before executing it, a connection that must exist does not, the
+ * permit was not live. The kernel records the emission as `refused`.
+ *
+ * The burden of proof is on the handler. Returning this when the far side may
+ * have seen the request is a bug that turns a possible duplicate send into a
+ * claim that nothing happened; when in doubt, fail with `DispatchFailed`.
+ * `reason` is stored and shown: it must carry no dispatch values.
+ */
+export class DispatchRefused extends Schema.TaggedError<DispatchRefused>()("DispatchRefused", {
+  reason: Schema.String
+}) {}
+
 export interface DispatchRequest<Tag extends string, Dispatch> {
   readonly permit: DispatchPermit<Tag>
   readonly dispatch: Dispatch
@@ -33,5 +47,5 @@ export interface DispatchRequest<Tag extends string, Dispatch> {
 export type DispatchHandlers<Kinds extends IntentKinds> = {
   readonly [Tag in keyof Kinds & string]: (
     request: DispatchRequest<Tag, IntentKind.DispatchOf<Kinds[Tag]>>
-  ) => Effect.Effect<Delivery<IntentKind.OutcomeOf<Kinds[Tag]>>, DispatchFailed>
+  ) => Effect.Effect<Delivery<IntentKind.OutcomeOf<Kinds[Tag]>>, DispatchFailed | DispatchRefused>
 }

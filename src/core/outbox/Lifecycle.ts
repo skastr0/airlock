@@ -5,17 +5,21 @@ import { Schema } from "effect"
  * exist: the store signature is typed by it and the runtime check reads it.
  *
  *   staged ──▶ committing ──▶ committed
- *      │            └───────▶ uncertain
+ *      │            ├───────▶ uncertain
+ *      │            └───────▶ refused
  *      └──────▶ cancelled
  *
  * `uncertain` is terminal on purpose: a dispatch that may have reached the
- * wire is never retried by Airlock.
+ * wire is never retried by Airlock. `refused` is the opposite proof: the
+ * handler showed the wire was never reached, so nothing happened and nothing
+ * will. A caller that still wants the act stages it again under a new key.
  */
 export const transitions = {
   staged: ["committing", "cancelled"],
-  committing: ["committed", "uncertain"],
+  committing: ["committed", "uncertain", "refused"],
   committed: [],
   uncertain: [],
+  refused: [],
   cancelled: []
 } as const
 
@@ -25,6 +29,7 @@ export const EmissionState: Schema.Codec<EmissionState> = Schema.Literals([
   "committing",
   "committed",
   "uncertain",
+  "refused",
   "cancelled"
 ])
 

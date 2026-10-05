@@ -134,6 +134,12 @@ export class EmissionDispatchUncertain extends Schema.TaggedError<EmissionDispat
   { id: EmissionId, reason: UncertainReason }
 ) {}
 
+/** The handler proved nothing was sent. Terminal: stage again under a new key to retry. */
+export class EmissionRefused extends Schema.TaggedError<EmissionRefused>()(
+  "EmissionRefused",
+  { id: EmissionId, reason: Schema.String }
+) {}
+
 /**
  * The emission is durably in `status` but a Ledger receipt it owes is not. The
  * state is the truth. The kernel writes the missing receipt the next time
@@ -144,7 +150,7 @@ export class OutboxRecoveryRequired extends Schema.TaggedError<OutboxRecoveryReq
   "OutboxRecoveryRequired",
   {
     id: EmissionId,
-    status: Schema.Literals(["staged", "committing", "committed", "uncertain", "cancelled"]),
+    status: Schema.Literals(["staged", "committing", "committed", "uncertain", "refused", "cancelled"]),
     reason: Schema.String
   }
 ) {}
@@ -164,6 +170,7 @@ export type CommitError =
   | UnknownEmission
   | EmissionNotPending
   | EmissionDispatchUncertain
+  | EmissionRefused
   | OutboxRecoveryRequired
   | DigestUnavailable
   | Unreadable
@@ -391,6 +398,9 @@ export const defineOutbox = <const Kinds extends IntentKinds>(
         }
         if (phase === "cancel" && record.state === "cancelled") {
           return new LedgerEntry({ ...base, at: record.cancelledAt, act: "cancel" })
+        }
+        if (phase === "refuse" && record.state === "refused") {
+          return new LedgerEntry({ ...base, at: record.refusedAt, act: "refuse", detail: record.reason })
         }
         return yield* corrupt(record.id, "record", `a ${record.state} emission owes no ${phase} receipt`)
       })
@@ -625,7 +635,20 @@ export const defineOutbox = <const Kinds extends IntentKinds>(
                 )
           }
           if (Result.isFailure(delivered.value)) {
-            return yield* settleUncertain(id, "dispatch-failed")
+            const failure = delivered.value.failure
+            if (failure._tag !== "DispatchRefused") {
+              return yield* settleUncertain(id, "dispatch-failed")
+            }
+            // Only the handler's explicit proof takes this path. If the
+            // refusal cannot be persisted, the record stays `committing` and
+            // the next startup settles it as uncertain, the safe direction.
+            const refused = yield* store.transition(id, "committing", {
+              state: "refused",
+              reason: failure.reason,
+              refusedAt: yield* DateTime.now
+            }).pipe(Effect.catch(() => settleUncertain(id, "persistence-failed-after-dispatch")))
+            yield* settleReceipts(refused)
+            return yield* new EmissionRefused({ id, reason: failure.reason })
           }
           if (Option.isNone(delivered.value.success)) {
             return yield* settleUncertain(id, "dispatch-timed-out")

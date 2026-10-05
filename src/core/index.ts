@@ -13,7 +13,13 @@ export * as Plan from "./plan/index.ts"
 export * as Tools from "./tools/index.ts"
 export * as WebCrypto from "./WebCrypto.ts"
 export { EffectClass, Ledger, LedgerEntry, LedgerFailed } from "./ledger/Ledger.ts"
-export { type Delivery, DispatchFailed, type DispatchHandlers, type DispatchRequest } from "./outbox/Dispatcher.ts"
+export {
+  type Delivery,
+  DispatchFailed,
+  type DispatchHandlers,
+  DispatchRefused,
+  type DispatchRequest
+} from "./outbox/Dispatcher.ts"
 export { HttpDispatch, HttpIntent, HttpMethod, HttpOutcome, HttpSummary } from "./outbox/HttpIntent.ts"
 export { defineIntentKind, type Intent, type IntentKind, type IntentKinds } from "./outbox/Intent.ts"
 export {
@@ -35,6 +41,7 @@ export {
   type Emission,
   EmissionDispatchUncertain,
   EmissionNotPending,
+  EmissionRefused,
   IdempotencyConflict,
   InvalidDispatchAuthorization,
   InvalidHoldDuration,
@@ -70,6 +77,7 @@ export {
   owedPhases,
   rebuild,
   type RecordIn,
+  RefusedEmission,
   ResponseCapture,
   SealedDispatch,
   StagedEmission,

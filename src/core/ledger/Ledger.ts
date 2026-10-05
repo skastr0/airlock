@@ -19,7 +19,8 @@ export class LedgerEntry extends Schema.Class<LedgerEntry>("LedgerEntry")({
     "retire-runtime-private",
     "stage",
     "commit",
-    "cancel"
+    "cancel",
+    "refuse"
   ]),
   ref: Schema.String,
   detail: Schema.optionalKey(Schema.String),

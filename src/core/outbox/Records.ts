@@ -61,10 +61,10 @@ export class ResponseCapture extends Schema.Class<ResponseCapture>("ResponseCapt
 
 /**
  * The receipts an emission owes the Ledger. `stage` is owed from the moment it
- * is stored; `commit` or `cancel` once it settles that way. An uncertain
- * emission owes no further receipt: there is no outcome to attest.
+ * is stored; `commit`, `cancel` or `refuse` once it settles that way. An
+ * uncertain emission owes no further receipt: there is no outcome to attest.
  */
-export const LedgerPhase = Schema.Literals(["stage", "commit", "cancel"])
+export const LedgerPhase = Schema.Literals(["stage", "commit", "cancel", "refuse"])
 export type LedgerPhase = typeof LedgerPhase.Type
 
 export const UncertainReason = Schema.Literals([
@@ -132,6 +132,15 @@ export class UncertainEmission extends Schema.Class<UncertainEmission>("Uncertai
   uncertainAt: Schema.DateTimeUtcFromString
 }) {}
 
+/** The handler proved the wire was never reached. Nothing was sent. */
+export class RefusedEmission extends Schema.Class<RefusedEmission>("RefusedEmission")({
+  ...committing,
+  state: Schema.tag("refused"),
+  /** The handler's stated reason, safe to keep: it must carry no dispatch values. */
+  reason: Schema.String,
+  refusedAt: Schema.DateTimeUtcFromString
+}) {}
+
 export class CancelledEmission extends Schema.Class<CancelledEmission>("CancelledEmission")({
   ...identity,
   state: Schema.tag("cancelled"),
@@ -143,6 +152,7 @@ export const EmissionRecord = Schema.Union([
   CommittingEmission,
   CommittedEmission,
   UncertainEmission,
+  RefusedEmission,
   CancelledEmission
 ])
 export type EmissionRecord = typeof EmissionRecord.Type
@@ -161,6 +171,7 @@ export interface Arrivals {
     & Pick<CommittedEmission, "state" | "outcome" | "capture" | "completedAt">
     & { readonly response: Uint8Array }
   readonly uncertain: Pick<UncertainEmission, "state" | "reason" | "uncertainAt">
+  readonly refused: Pick<RefusedEmission, "state" | "reason" | "refusedAt">
 }
 export type Arrival<State extends Next<ActiveState>> = Arrivals[State]
 
@@ -225,6 +236,16 @@ const build = (
           uncertainAt: arrival.uncertainAt
         })
       )
+    case "refused":
+      return record.state !== "committing" ? conflict("committing") : Result.succeed(
+        new RefusedEmission({
+          ...identityOf(record),
+          provenance: record.provenance,
+          committingAt: record.committingAt,
+          reason: arrival.reason,
+          refusedAt: arrival.refusedAt
+        })
+      )
   }
 }
 
@@ -252,7 +273,9 @@ export const owedPhases = (record: EmissionRecord): ReadonlyArray<LedgerPhase> =
     ? ["stage", "commit"]
     : record.state === "cancelled"
       ? ["stage", "cancel"]
-      : ["stage"]
+      : record.state === "refused"
+        ? ["stage", "refuse"]
+        : ["stage"]
 
 /**
  * A record class instance from anything shaped like one. The kernel's typed
@@ -287,6 +310,14 @@ export const rebuild = <Record extends EmissionRecord>(record: Record): Record =
         committingAt: record.committingAt,
         reason: record.reason,
         uncertainAt: record.uncertainAt
+      }) as Record
+    case "refused":
+      return new RefusedEmission({
+        ...identity,
+        provenance: record.provenance,
+        committingAt: record.committingAt,
+        reason: record.reason,
+        refusedAt: record.refusedAt
       }) as Record
   }
 }
@@ -333,7 +364,7 @@ export class TransitionConflict extends Schema.TaggedError<TransitionConflict>()
   {
     id: EmissionId,
     expected: Schema.Literals(["staged", "committing"]),
-    actual: Schema.Literals(["staged", "committing", "committed", "uncertain", "cancelled"])
+    actual: Schema.Literals(["staged", "committing", "committed", "uncertain", "refused", "cancelled"])
   }
 ) {}
 

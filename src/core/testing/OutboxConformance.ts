@@ -1,7 +1,7 @@
 import { type Crypto, Deferred, Effect, Fiber, Layer, Option, Result, Schema, type Scope } from "effect"
 import * as TestClock from "effect/testing/TestClock"
 import { Ledger, type LedgerEntry, LedgerFailed } from "../ledger/Ledger.ts"
-import { type Delivery, DispatchFailed, type DispatchRequest } from "../outbox/Dispatcher.ts"
+import { type Delivery, DispatchFailed, DispatchRefused, type DispatchRequest } from "../outbox/Dispatcher.ts"
 import { defineIntentKind } from "../outbox/Intent.ts"
 import {
   defineOutbox,
@@ -68,7 +68,7 @@ const Probe = defineIntentKind({
 const probes = defineOutbox({ probe: Probe })
 type Outbox = OutboxService<typeof probes.kinds>
 type Request = DispatchRequest<"probe", ProbeDispatch>
-type Wire = (request: Request) => Effect.Effect<Delivery<ProbeOutcome>, DispatchFailed>
+type Wire = (request: Request) => Effect.Effect<Delivery<ProbeOutcome>, DispatchFailed | DispatchRefused>
 
 const echo: Wire = (request) =>
   Effect.succeed({
@@ -141,8 +141,11 @@ export const outboxConformance = (
 
   const acts = (entries: ReadonlyArray<LedgerEntry>) => entries.map((entry) => `${entry.act}:${entry.ref}`)
 
-  const timed = (name: string, body: () => Effect.Effect<void, unknown, Scope.Scope>) =>
-    test(name, () => body().pipe(Effect.provide(TestClock.layer())))
+  const timed = (
+    name: string,
+    body: () => Effect.Effect<void, unknown, Scope.Scope>,
+    timeout?: number
+  ) => test(name, () => body().pipe(Effect.provide(TestClock.layer())), timeout)
 
   describe(`Outbox conformance: ${name}`, () => {
     timed("staging records intent and sends nothing", () =>
@@ -339,6 +342,50 @@ export const outboxConformance = (
         holds(Option.isNone(response), "an uncertain emission keeps no response")
         same(acts(entries), [`stage:${staged.id}`])
         same([calls.length, working.calls.length], [1, 0])
+      }))
+
+    timed("a handler's proof that nothing was sent settles as refused, with a receipt", () =>
+      Effect.gen(function* () {
+        const current = yield* world
+        const { calls, wire } = recordingWire(() =>
+          Effect.fail(new DispatchRefused({ reason: "connection not configured" })))
+        const staged = yield* session(current, wire, (outbox) => outbox.stage(request("a")))
+        const refused = yield* session(current, wire, (outbox) =>
+          Effect.flip(outbox.commit(staged.id, bySupervisor)))
+        same(
+          refused._tag === "EmissionRefused" ? refused.reason : refused._tag,
+          "connection not configured"
+        )
+
+        // Refused is terminal: it is not pending, not retried, and a replayed
+        // stage reports it rather than quietly staging the act again.
+        const working = recordingWire()
+        const [emission, retry, cancel, replay, flushed, response, entries] = yield* session(
+          current,
+          working.wire,
+          (outbox, _, ledger) =>
+            Effect.all([
+              outbox.inspect(staged.id),
+              Effect.flip(outbox.commit(staged.id, bySupervisor)),
+              Effect.flip(outbox.cancel(staged.id)),
+              outbox.stage(request("a")),
+              outbox.flush,
+              outbox.response(staged.id),
+              ledger.entries
+            ])
+        )
+        same(emission.state === "refused" ? emission.reason : emission.state, "connection not configured")
+        same([retry._tag, cancel._tag], ["EmissionNotPending", "EmissionNotPending"])
+        same(replay.state, "refused")
+        same(flushed.committed.length, 0)
+        holds(Option.isNone(response), "a refused emission has no response")
+        same(acts(entries), [`stage:${staged.id}`, `refuse:${staged.id}`])
+        same([calls.length, working.calls.length], [1, 0])
+
+        // The same act under a new key is a new emission and may be sent.
+        const again = yield* session(current, working.wire, (outbox) =>
+          Effect.flatMap(outbox.stage(request("a-retry")), (fresh) => outbox.commit(fresh.id, bySupervisor)))
+        same([again.state, again.id === staged.id, working.calls.length], ["committed", false, 1])
       }))
 
     timed("a dispatch interrupted mid-flight settles as uncertain", () =>
@@ -584,7 +631,7 @@ export const outboxConformance = (
           same([...run.entries].sort(), expected(run.a.id, run.b.id), `mark ${call} lost`)
           same([run.a.state, run.b.state, run.calls], ["committed", "cancelled", 1], `mark ${call} lost`)
         }
-      }))
+      }), 120_000)
 
     timed("a substituted dispatch is refused before anything becomes irreversible", () =>
       Effect.gen(function* () {

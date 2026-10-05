@@ -189,6 +189,14 @@ export const outboxStoreConformance = (
               reason: "dispatch-failed",
               uncertainAt: instant(12)
             })
+            yield* store.putIfAbsent(stagedRecord(4), sealedDispatch())
+            yield* store.transition(emissionId(4), "staged", committing)
+            const refused = yield* store.transition(emissionId(4), "committing", {
+              state: "refused",
+              reason: "not configured",
+              refusedAt: instant(12)
+            })
+            same([refused.state, refused.reason], ["refused", "not configured"])
           }))
         const attempts = yield* session(current, (store) =>
           Effect.all([
@@ -199,9 +207,13 @@ export const outboxStoreConformance = (
               uncertainAt: instant(13)
             })),
             Effect.flip(store.transition(emissionId(3), "committing", committed(new Uint8Array([9])))),
-            Effect.flip(store.transition(emissionId(3), "staged", committing))
+            Effect.flip(store.transition(emissionId(3), "staged", committing)),
+            Effect.flip(store.transition(emissionId(4), "committing", committed(new Uint8Array([9])))),
+            Effect.flip(store.transition(emissionId(4), "staged", committing))
           ]))
         same(attempts.map((attempt) => attempt._tag), [
+          "TransitionConflict",
+          "TransitionConflict",
           "TransitionConflict",
           "TransitionConflict",
           "TransitionConflict",
