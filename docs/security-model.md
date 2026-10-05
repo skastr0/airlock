@@ -215,6 +215,19 @@ definition can select a class. It is implemented with local fixture evidence
 ([`evidence/external-read-slice.md`](evidence/external-read-slice.md)), which
 is not vendor or brokerage evidence.
 
+A staged request is stored exactly as it will be sent: its URL, headers and
+body are kept, unencrypted, in the emission's sealed dispatch for as long as
+the emission exists, and a tool call's input is kept the same way. They never
+appear in a summary, a listing, a receipt or the Ledger, but they are at rest.
+Airlock therefore holds no credentials. A request that carries one literally
+(`Authorization`, `Proxy-Authorization`, `Cookie`, a header or query parameter
+whose name contains `key`, `token`, `secret`, `auth`, `password` or `session`,
+or user information in the URL) is refused at staging with an error naming the
+field, and nothing is stored for it. This is a name match and cannot catch a
+secret placed under an ordinary name. Credentials belong to the owner, outside
+the request: in a proxy that adds them, or in a tool implementation's own
+environment.
+
 Current dispatch is direct HTTP with manual redirects. It is not a contained
 EndpointBroker and does not prove DNS, proxy, loopback, Unix-socket,
 descriptor-passing, credential, or protocol-idempotency policy.

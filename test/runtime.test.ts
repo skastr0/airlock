@@ -312,7 +312,7 @@ describe("runtime Plan interpreter", () => {
             method: "POST",
             headers: {
               "content-type": "application/json",
-              authorization: "Bearer never-expose"
+              "x-request-note": "never-expose"
             },
             body: "{\"phase\":\"stage-only\"}",
             holdMillis: 60_000
@@ -329,7 +329,7 @@ describe("runtime Plan interpreter", () => {
         const record = JSON.parse(recordText) as {
           readonly summary: { readonly headerNames: ReadonlyArray<string>; readonly bodyBytes: number }
         }
-        expect(record.summary.headerNames).toEqual(["authorization", "content-type"])
+        expect(record.summary.headerNames).toEqual(["content-type", "x-request-note"])
         expect(record.summary.bodyBytes).toBe(new TextEncoder().encode("{\"phase\":\"stage-only\"}").byteLength)
         // The public record summarizes the request; no header value or body
         // text reaches it in any field.

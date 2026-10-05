@@ -227,21 +227,35 @@ describe("host HTTP dispatcher", () => {
       const secrets = ["header-secret-value", "query-secret-value", "body-secret-value", "user-secret"]
       yield* Effect.gen(function* () {
         const outbox = yield* Outbox
-        const staged = yield* stage(`${origin}/hook?token=query-secret-value`, {
-          headers: { authorization: "Bearer header-secret-value" },
+        // Ordinary positions: a credential-named header or parameter would be
+        // refused at staging, which the next assertions cover.
+        const staged = yield* stage(`${origin}/hook?cursor=query-secret-value`, {
+          headers: { "x-request-note": "header-secret-value" },
           body: "body-secret-value"
         })
         const committed = yield* outbox.commit(staged.id, supervisor)
-        // Credentials in a URL are redacted at staging. This one stays staged:
-        // the platform's fetch refuses to send a URL that carries them.
-        const withUserinfo = yield* stage(
+        // A literal credential is refused at staging, and the refusal does not
+        // repeat it.
+        const withUserinfo = yield* Effect.flip(stage(
           `${origin.replace("http://", "http://user-secret:pw@")}/login`
-        )
+        ))
+        expect(withUserinfo._tag).toBe("InvalidIntent")
+        const withHeader = yield* Effect.flip(stage(`${origin}/hook`, {
+          headers: { authorization: "Bearer header-secret-value" }
+        }))
+        const withQuery = yield* Effect.flip(stage(`${origin}/hook?token=query-secret-value`))
+        expect([withHeader, withQuery]).toMatchObject([
+          { _tag: "InvalidIntent", field: "headers.authorization" },
+          { _tag: "InvalidIntent", field: "url query parameter token" }
+        ])
+        expect((yield* outbox.pending).length).toBe(0)
         const ledger = yield* FileLedger
         const visible = JSON.stringify([
           staged,
           committed,
           withUserinfo,
+          withHeader,
+          withQuery,
           yield* outbox.inspect(staged.id),
           yield* outbox.pending,
           yield* ledger.entries

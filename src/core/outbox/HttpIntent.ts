@@ -38,6 +38,32 @@ const invalid = (field: string, reason: string) =>
   Result.fail(new InvalidIntent({ kind: "http", field, reason }))
 
 /**
+ * A request is stored exactly as it will be sent, so a credential written into
+ * it would sit in the store in plain text. Airlock holds no credentials: they
+ * belong to the owner, in whatever sends on their behalf (a proxy that adds
+ * the header, or a tool implementation reading its own environment). A request
+ * that carries one literally is refused before anything is stored.
+ *
+ * This is a name match and cannot catch everything: a secret under a header
+ * called `X-Trace` passes. It refuses the well-known positions so that the
+ * ordinary mistake fails loudly.
+ */
+const credentialName = /key|token|secret|auth|password|passwd|credential|session|cookie|signature/i
+
+const credentialPosition = (dispatch: HttpDispatch, url: URL): { field: string; what: string } | undefined => {
+  if (url.username !== "" || url.password !== "") {
+    return { field: "url", what: "user information in the URL" }
+  }
+  for (const name of url.searchParams.keys()) {
+    if (credentialName.test(name)) return { field: `url query parameter ${name}`, what: `query parameter ${name}` }
+  }
+  for (const name of Object.keys(dispatch.headers)) {
+    if (credentialName.test(name)) return { field: `headers.${name}`, what: `header ${name}` }
+  }
+  return undefined
+}
+
+/**
  * HTTP as an intent kind. Everything here is pure: the handler that performs
  * the request is a host's Dispatcher Layer.
  */
@@ -54,9 +80,15 @@ export const HttpIntent = defineIntentKind({
     if (url.protocol !== "http:" && url.protocol !== "https:") {
       return invalid("url", "expected an absolute http or https URL")
     }
+    const credential = credentialPosition(dispatch, url)
+    if (credential !== undefined) {
+      return invalid(
+        credential.field,
+        `${credential.what} looks like a credential, and requests are stored as sent; ` +
+          "have the owner's proxy or the tool implementation add it instead"
+      )
+    }
     const target = `${url.protocol}//${url.host}${url.pathname}`
-    url.username = ""
-    url.password = ""
     for (const key of new Set(url.searchParams.keys())) url.searchParams.set(key, "[redacted]")
     url.hash = ""
     return Result.succeed({
