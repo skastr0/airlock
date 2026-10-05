@@ -59,16 +59,10 @@ export class ArtifactTemplate extends Schema.TaggedClass<ArtifactTemplate>()("Ar
   path: Schema.Array(Schema.String)
 }) {}
 
-export class SecretTemplate extends Schema.TaggedClass<SecretTemplate>()("Secret", {
-  /** A named secret reference, resolved only during admission. */
-  path: Schema.Array(Schema.String)
-}) {}
-
 export const TemplateValue = Schema.Union([
   LiteralTemplate,
   InputTemplate,
-  ArtifactTemplate,
-  SecretTemplate
+  ArtifactTemplate
 ])
 export type TemplateValue = typeof TemplateValue.Type
 
@@ -88,10 +82,9 @@ const ToolRequestMethod = Schema.Literals(["GET", "POST", "PUT", "PATCH", "DELET
 
 /**
  * The inert mapping from a Schema-validated action input onto the fields of a
- * `RequestExternalNode`. It carries templates, never resolved values: a
- * `Secret` template names a credential reference and is legal only in a
- * position whose bytes are carried into the owner-only private dispatch
- * document (headers and body), never in the agent-visible endpoint.
+ * `RequestExternalNode`. It carries templates, never resolved values, and it
+ * has no way to name a credential: a request that needs one gets it from the
+ * owner's side, and a literal credential is refused when the request is staged.
  */
 export class ToolRequestTemplate extends Schema.Class<ToolRequestTemplate>(
   "ToolRequestTemplate"
@@ -312,13 +305,6 @@ export class ToolGrantAssertionRejected
     { id: Schema.String, field: Schema.String, reason: Schema.String }
   ) {}
 
-/** A `Secret` template placed where its bytes would become agent-visible. */
-export class ToolSecretPlacementRejected
-  extends Schema.TaggedError<ToolSecretPlacementRejected>()(
-    "ToolSecretPlacementRejected",
-    { id: Schema.String, action: Schema.String, field: Schema.String, reason: Schema.String }
-  ) {}
-
 /** A request template that cannot map totally onto a `RequestExternalNode`. */
 export class ToolEnqueueContractRejected
   extends Schema.TaggedError<ToolEnqueueContractRejected>()(
@@ -330,7 +316,6 @@ export type ToolDefinitionValidationError =
   | InvalidToolDefinition
   | DuplicateToolAction
   | ToolGrantAssertionRejected
-  | ToolSecretPlacementRejected
   | ToolEnqueueContractRejected
 
 export type ToolDefinitionError =
@@ -342,7 +327,6 @@ export type ToolDefinitionError =
   | ToolSchemaRejected
   | ToolActionNameCollision
   | ToolGrantAssertionRejected
-  | ToolSecretPlacementRejected
   | ToolEnqueueContractRejected
 
 /** A reader is an integration seam. Implementations may use any storage. */
@@ -517,40 +501,22 @@ export const validateToolValue = (
   value: unknown
 ) => validateToolSchemaValue(definition.id, action.name, schema, value)
 
-/**
- * `Secret` templates are legal only where the resolved bytes are carried into
- * the owner-only private dispatch document — headers and body. Anywhere the
- * value stays agent-visible (notably the endpoint, which admission matches as
- * a selector) the placement is refused outright.
- */
+/** A request position accepts a literal or an input field; nothing else is bound yet. */
 const validateRequestTemplate = (
   definition: DefinitionIdentity,
   action: ActionIdentity,
   field: string,
-  template: TemplateValue,
-  secretCarrier: boolean
-): Effect.Effect<void, InvalidToolDefinition | ToolSecretPlacementRejected> => {
-  if (template._tag === "Artifact") {
-    return Effect.fail(
-      new InvalidToolDefinition({
-        id: definition.id,
-        field: `actions.${action.name}.${field}`,
-        reason: "Artifact templates are reserved until runtime binding is implemented"
-      })
-    )
-  }
-  if (template._tag === "Secret" && !secretCarrier) {
-    return Effect.fail(
-      new ToolSecretPlacementRejected({
-        id: definition.id,
-        action: action.name,
-        field: `actions.${action.name}.${field}`,
-        reason: "Secret templates are legal only in a position carried into the private dispatch document"
-      })
-    )
-  }
-  return Effect.void
-}
+  template: TemplateValue
+): Effect.Effect<void, InvalidToolDefinition> =>
+  template._tag === "Artifact"
+    ? Effect.fail(
+        new InvalidToolDefinition({
+          id: definition.id,
+          field: `actions.${action.name}.${field}`,
+          reason: "Artifact templates are reserved until runtime binding is implemented"
+        })
+      )
+    : Effect.void
 
 /** RFC 7230 field-name token: no control characters, whitespace, or colon. */
 const headerToken = /^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/
@@ -589,7 +555,7 @@ const validateEnqueueAction = (
   action: ToolEnqueueActionDefinition
 ): Effect.Effect<
   void,
-  InvalidToolDefinition | ToolEnqueueContractRejected | ToolSecretPlacementRejected
+  InvalidToolDefinition | ToolEnqueueContractRejected
 > =>
   Effect.gen(function* () {
     const reject = (field: string, reason: string) =>
@@ -638,7 +604,7 @@ const validateEnqueueAction = (
       )
     }
     const request = action.request
-    yield* validateRequestTemplate(definition, action, "request.endpoint", request.endpoint, false)
+    yield* validateRequestTemplate(definition, action, "request.endpoint", request.endpoint)
     if (request.endpoint._tag === "Literal") {
       const endpointReason = endpointRejection(request.endpoint.value)
       if (endpointReason !== undefined) {
@@ -649,10 +615,10 @@ const validateEnqueueAction = (
       if (!headerToken.test(key)) {
         return yield* reject("request.headers", `header name ${JSON.stringify(key)} is not a token`)
       }
-      yield* validateRequestTemplate(definition, action, `request.headers.${key}`, template, true)
+      yield* validateRequestTemplate(definition, action, `request.headers.${key}`, template)
     }
     if (request.body !== undefined) {
-      yield* validateRequestTemplate(definition, action, "request.body", request.body, true)
+      yield* validateRequestTemplate(definition, action, "request.body", request.body)
     }
     if (!Number.isSafeInteger(request.holdMillis) || request.holdMillis < 0) {
       return yield* reject("request.holdMillis", "must be a non-negative safe integer")

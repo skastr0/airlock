@@ -420,16 +420,6 @@ describe("inert tool action lowering", () => {
           }
         },
         {
-          field: "actions.secret.environment.TOKEN",
-          action: {
-            ...base,
-            name: "secret",
-            environment: {
-              TOKEN: { _tag: "Secret", path: ["token"] }
-            }
-          }
-        },
-        {
           field: "actions.artifact_stdin.stdin",
           action: {
             ...base,
@@ -446,6 +436,16 @@ describe("inert tool action lowering", () => {
         expect(error).toBeInstanceOf(InvalidToolDefinition)
         expect(error).toMatchObject({ field: testCase.field })
       }
+
+      // A definition has no way to name a credential: there is no such template.
+      const secret = yield* load(
+        archiveDefinition([{
+          ...base,
+          name: "secret",
+          environment: { TOKEN: { _tag: "Secret", path: ["token"] } }
+        }])
+      ).pipe(Effect.flip)
+      expect(secret._tag).toBe("ToolDefinitionDecodeFailed")
     })
   )
 

@@ -121,7 +121,7 @@ export class ToolTemplateRejected extends Schema.TaggedError<ToolTemplateRejecte
     action: Schema.String,
     field: Schema.String,
     path: Schema.Array(Schema.String),
-    template: Schema.Literals(["Input", "Artifact", "Secret"]),
+    template: Schema.Literals(["Input", "Artifact"]),
     reason: ToolTemplateRejectionReason,
     actual: Schema.optional(Schema.String)
   }
@@ -174,18 +174,6 @@ export type ToolActionLoweringError =
   | ToolRequestLoweringRejected
   | ToolInputRejected
 
-/**
- * The opaque carrier a `Secret` template lowers to. It names the credential
- * reference and carries no bytes: the Plan node, the redacted public manifest,
- * receipts, logs, and errors see only this placeholder. Resolution happens
- * once, inside trusted staging, when the owner-only private dispatch document
- * is constructed.
- */
-export const SECRET_REFERENCE_PREFIX = "airlock-secret-ref:"
-
-const secretReference = (path: ReadonlyArray<string>) =>
-  `${SECRET_REFERENCE_PREFIX}${path.join(".")}`
-
 type JsonScalar = string | number | boolean
 
 const actualKind = (value: unknown): string => {
@@ -210,7 +198,7 @@ interface TemplateContext {
 const rejectedTemplate = (
   context: TemplateContext,
   field: string,
-  template: "Input" | "Artifact" | "Secret",
+  template: "Input" | "Artifact",
   path: ReadonlyArray<string>,
   reason: ToolTemplateRejectionReason,
   actual?: string
@@ -299,40 +287,10 @@ const resolveTemplate = (
         Effect.map((value) => scalarAtom(value)!)
       )
     case "Artifact":
-    case "Secret":
       return Effect.fail(
-        rejectedTemplate(
-          context,
-          field,
-          template._tag,
-          template.path,
-          "runtime-binding-required"
-        )
+        rejectedTemplate(context, field, "Artifact", template.path, "runtime-binding-required")
       )
   }
-}
-
-/**
- * Request-position resolution. It differs from argv resolution in exactly one
- * way: a `Secret` lowers to an opaque reference instead of being refused,
- * because the placement check at definition load already proved this position
- * is carried into the private dispatch document. No bytes are read here — this
- * component holds no credential store and cannot resolve one.
- */
-const resolveRequestTemplate = (
-  context: TemplateContext,
-  field: string,
-  template: TemplateValue,
-  secretCarrier: boolean
-): Effect.Effect<string, ToolTemplateRejected> => {
-  if (template._tag === "Secret") {
-    return secretCarrier
-      ? Effect.succeed(secretReference(template.path))
-      : Effect.fail(
-        rejectedTemplate(context, field, "Secret", template.path, "runtime-binding-required")
-      )
-  }
-  return resolveTemplate(context, field, template)
 }
 
 const resolveResource = (
@@ -540,23 +498,21 @@ const lowerEnqueueAction = <E, R>(
       action: action.name,
       input: request.input
     }
-    const endpoint = yield* resolveRequestTemplate(
+    const endpoint = yield* resolveTemplate(
       context,
       "request.endpoint",
-      template.endpoint,
-      false
-    )
+      template.endpoint)
     const headerEntries = yield* Effect.forEach(
       Object.entries(template.headers),
       ([key, value]) =>
-        resolveRequestTemplate(context, `request.headers.${key}`, value, true).pipe(
+        resolveTemplate(context, `request.headers.${key}`, value).pipe(
           Effect.map((resolved) => [key, resolved] as const)
         ),
       { concurrency: 1 }
     )
     const body = template.body === undefined
       ? undefined
-      : yield* resolveRequestTemplate(context, "request.body", template.body, true)
+      : yield* resolveTemplate(context, "request.body", template.body)
 
     // Resolved atoms first, then the full finite input shape: a template
     // failure names the offending field, a schema failure names the contract.

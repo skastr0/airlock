@@ -3,14 +3,12 @@ import { effect } from "./support/CoreTest.ts"
 import { Effect } from "effect"
 import {
   InvalidToolDefinition,
-  SECRET_REFERENCE_PREFIX,
   ToolActionLoweringRequest,
   ToolDefinitionDocument,
   ToolDefinitionLocation,
   ToolGrantAssertionRejected,
   ToolEnqueueContractRejected,
   ToolRequestLoweringRejected,
-  ToolSecretPlacementRejected,
   ToolTemplateRejected,
   decodeToolDefinition,
   lowerToolAction
@@ -48,7 +46,6 @@ const enqueueAction = (overrides: Record<string, unknown> = {}) => ({
     method: "POST",
     endpoint: { _tag: "Literal", value: "https://api.example.test/v2/tasks" },
     headers: {
-      authorization: { _tag: "Secret", path: ["credentials", "example"] },
       "content-type": { _tag: "Literal", value: "application/json" },
       "x-airlock-project": { _tag: "Input", path: ["project"] }
     },
@@ -146,36 +143,18 @@ describe("tool definition v2: enqueue lowering", () => {
     })
   )
 
-  effect("lowers a Secret template to an opaque reference carrying no bytes", () =>
+  effect("gives a definition no way to name a credential", () =>
     Effect.gen(function* () {
-      const loaded = yield* load(v2Definition())
-      const lowered = yield* lowerToolAction(
-        request(loaded, { title: "no bytes here", project: "airlock" })
-      )
-      const call = lowered.call
-      if (call.action !== "http.stage") throw new Error("expected an http.stage call")
-
-      expect(call.headers.authorization).toBe(
-        `${SECRET_REFERENCE_PREFIX}credentials.example`
-      )
-      // Nothing in the definition or the lowered intent can carry credential
-      // bytes: the reference names a path, and resolution happens only inside
-      // trusted staging when the private dispatch document is constructed.
-      expect(JSON.stringify(lowered)).not.toContain("Bearer ")
-      expect(JSON.stringify(loaded.definition)).not.toContain("Bearer ")
-    })
-  )
-
-  effect("refuses a Secret template in an agent-visible position", () =>
-    Effect.gen(function* () {
-      const secretEndpoint = yield* load(
-        withRequest({ endpoint: { _tag: "Secret", path: ["credentials", "example"] } })
-      ).pipe(Effect.flip)
-      expect(secretEndpoint).toBeInstanceOf(ToolSecretPlacementRejected)
-      expect(secretEndpoint).toMatchObject({
-        action: "tasks.create",
-        field: "actions.tasks.create.request.endpoint"
-      })
+      // There is no Secret template. A definition that uses one does not decode,
+      // in a header or anywhere else.
+      for (const request of [
+        { headers: { authorization: { _tag: "Secret", path: ["credentials", "example"] } } },
+        { endpoint: { _tag: "Secret", path: ["credentials", "example"] } },
+        { body: { _tag: "Secret", path: ["credentials", "example"] } }
+      ]) {
+        const refused = yield* load(withRequest(request)).pipe(Effect.flip)
+        expect(refused._tag).toBe("ToolDefinitionDecodeFailed")
+      }
     })
   )
 
