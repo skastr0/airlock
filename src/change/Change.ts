@@ -1,6 +1,6 @@
 import { Context, Effect, Layer, Schema } from "effect"
 import { existsSync } from "node:fs"
-import { lstat, mkdir, open, readFile, readdir, rename } from "node:fs/promises"
+import { lstat, mkdir, open, readFile, readdir, rename, writeFile } from "node:fs/promises"
 import * as path from "node:path"
 import { AirlockHome } from "../AirlockHome.ts"
 import { Hold } from "../Hold.ts"
@@ -151,20 +151,20 @@ const make = Effect.gen(function* () {
       return undefined
     }
   }
+  // Neither the cache nor the move is flushed to disk. Losing either in a
+  // crash is harmless and self-correcting: a lost cache is rebuilt by the
+  // next listing, and a proposal whose move was lost is found in the root,
+  // inspected in full and moved again.
   const writeCachedRow = (row: InventoryRow) => attempt("cache settled inventory row", async () => {
     const file = cacheFile(row.id), next = `${file}.next`
-    await writeNew(next, Schema.encodeSync(Schema.fromJsonString(Settled))({
+    await writeFile(next, Schema.encodeSync(Schema.fromJsonString(Settled))({
       version: "change-settled/v1", row, statusDigest: await statusDigest(row.id)
-    }), true)
+    }), { mode: 0o600 })
     await rename(next, file)
-    await sync(path.dirname(file))
   })
   const moveToSettled = (row: InventoryRow) => attempt("settle finished proposal", async () => {
     await mkdir(settledRoot, { recursive: true, mode: 0o700 })
-    await sync(root)
     await rename(path.join(root, row.id), path.join(settledRoot, row.id))
-    await sync(root)
-    await sync(settledRoot)
   }).pipe(Effect.andThen(writeCachedRow(row)))
   /*
    * Rows of everything still in the root, each from a full inspection. A
