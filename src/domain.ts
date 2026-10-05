@@ -1,4 +1,4 @@
-import { Effect, Schema } from "effect"
+import { Schema } from "effect"
 
 // ── identifiers ─────────────────────────────────────────────────────────────
 
@@ -29,7 +29,7 @@ export type EffectClass = typeof EffectClass.Type
 
 // ── held mutations ──────────────────────────────────────────────────────────
 
-export const HoldPurpose = Schema.Literal("runtime-private")
+export const HoldPurpose = Schema.Literals(["managed", "runtime-private"])
 export type HoldPurpose = typeof HoldPurpose.Type
 
 export class HeldManifest extends Schema.Class<HeldManifest>("HeldManifest")({
@@ -43,10 +43,8 @@ export class HeldManifest extends Schema.Class<HeldManifest>("HeldManifest")({
   // a manifest with no payload marks a creation: undoing it displaces the
   // created file rather than renaming a payload back
   hasPayload: Schema.Boolean,
-  // Missing means managed state. Persisting only the exceptional purpose keeps
-  // every pre-purpose journal backward compatible while making runtime-private
-  // retention explicit and non-undoable.
-  purpose: Schema.optional(HoldPurpose),
+  // Runtime-private retention is explicit and non-undoable.
+  purpose: HoldPurpose,
   status: Schema.Literals(["held", "restored"]),
   at: Schema.DateTimeUtcFromString
 }) {}
@@ -84,29 +82,6 @@ export class UndoReceipt extends Schema.Class<UndoReceipt>("UndoReceipt")({
 export class ReapReport extends Schema.Class<ReapReport>("ReapReport")({
   reaped: Schema.Array(ActId),
   at: Schema.DateTimeUtcFromString
-}) {}
-
-// ── staged emissions ────────────────────────────────────────────────────────
-
-export class EmissionRequest extends Schema.Class<EmissionRequest>("EmissionRequest")({
-  url: Schema.String,
-  method: Schema.Literals(["GET", "POST", "PUT", "PATCH", "DELETE"]),
-  body: Schema.optional(Schema.String),
-  headers: Schema.Record(Schema.String, Schema.String).pipe(
-    Schema.withDecodingDefault(Effect.succeed({})),
-    Schema.withConstructorDefault(Effect.succeed({}))
-  )
-}) {}
-
-export class StagedEmission extends Schema.Class<StagedEmission>("StagedEmission")({
-  id: EmissionId,
-  request: EmissionRequest,
-  status: Schema.Literals(["staged", "committed", "cancelled"]),
-  stagedAt: Schema.DateTimeUtcFromString,
-  holdUntil: Schema.DateTimeUtcFromString,
-  outcome: Schema.optional(
-    Schema.Struct({ status: Schema.Number, body: Schema.String })
-  )
 }) {}
 
 // ── ledger ──────────────────────────────────────────────────────────────────
@@ -180,9 +155,4 @@ export class UnknownEmission extends Schema.TaggedError<UnknownEmission>()(
 export class EmissionNotPending extends Schema.TaggedError<EmissionNotPending>()(
   "EmissionNotPending",
   { id: Schema.String, status: Schema.String }
-) {}
-
-export class EmissionFailed extends Schema.TaggedError<EmissionFailed>()(
-  "EmissionFailed",
-  { id: Schema.String, cause: Schema.String }
 ) {}
