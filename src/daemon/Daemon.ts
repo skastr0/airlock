@@ -197,7 +197,7 @@ const tickWithServices = (
 
     if (commitImmediately || scheduleDue) {
       const discovered = yield* outbox.pendingAuthorized(
-        Canonical.Sha256Digest.make(config.seal.grantDigest)
+        config.seal.grantDigest
       )
       const seen = new Set<string>()
       const authorized = discovered.filter((emission) => {

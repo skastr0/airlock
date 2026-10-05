@@ -12,9 +12,10 @@ import {
   runDaemonHealthServer,
   unixDaemonHealthTransport
 } from "../src/daemon/index.ts"
+import { Sha256Digest } from "../src/core/Canonical.ts"
 
 const digest = (character: string) =>
-  `sha256:${character.repeat(64)}` as const
+  Sha256Digest.make(`sha256:${character.repeat(64)}`)
 
 const withServer = <A, E>(
   body: (socketPath: string) => Effect.Effect<A, E>

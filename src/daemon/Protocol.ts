@@ -1,5 +1,5 @@
 import { Effect, Schema } from "effect"
-import { BoxGrantSha256 } from "../core/admission/BoxGrant.ts"
+import { Sha256Digest } from "../core/Canonical.ts"
 
 /** The complete request vocabulary. There is intentionally one fixed query. */
 export class DaemonHealthRequest extends Schema.Class<DaemonHealthRequest>(
@@ -12,12 +12,12 @@ export class DaemonHealthRequest extends Schema.Class<DaemonHealthRequest>(
 export class DaemonHealthResponse extends Schema.Class<DaemonHealthResponse>(
   "DaemonHealthResponse"
 )({
-  grantDigest: BoxGrantSha256,
+  grantDigest: Sha256Digest,
   ready: Schema.Boolean
 }) {}
 
 export interface DaemonHealthState {
-  readonly grantDigest: BoxGrantSha256
+  readonly grantDigest: Sha256Digest
   readonly ready: boolean
 }
 
@@ -35,8 +35,8 @@ export class DaemonHealthCheckFailed
     "DaemonHealthCheckFailed",
     {
       reason: Schema.Literals(["not-ready", "grant-digest-mismatch"]),
-      expectedGrantDigest: BoxGrantSha256,
-      actualGrantDigest: BoxGrantSha256
+      expectedGrantDigest: Sha256Digest,
+      actualGrantDigest: Sha256Digest
     }
   ) {}
 
@@ -85,7 +85,7 @@ export const handleDaemonRequest = (
  */
 export const requireDaemonHealth = (
   input: unknown,
-  expectedGrantDigest: BoxGrantSha256
+  expectedGrantDigest: Sha256Digest
 ): Effect.Effect<
   DaemonHealthResponse,
   DaemonProtocolRejected | DaemonHealthCheckFailed
@@ -120,7 +120,7 @@ export interface DaemonHealthTransport<E, R = never> {
 /** Send the single fixed query and require a ready daemon under the same seal. */
 export const checkDaemonLiveness = <E, R>(
   transport: DaemonHealthTransport<E, R>,
-  expectedGrantDigest: BoxGrantSha256
+  expectedGrantDigest: Sha256Digest
 ): Effect.Effect<
   DaemonHealthResponse,
   E | DaemonProtocolRejected | DaemonHealthCheckFailed,

@@ -5,9 +5,9 @@ import {
   AdmissionPolicy,
   BoxGrant,
   EndpointGrantPolicy,
-  type BoxGrantDaemonOp,
-  type BoxGrantSha256
+  type BoxGrantDaemonOp
 } from "../src/core/admission/index.ts"
+import type { Sha256Digest } from "../src/core/Canonical.ts"
 import {
   checkDaemonLiveness,
   daemonTick,
@@ -36,8 +36,8 @@ import {
   VerifiedSeal
 } from "../src/seal/index.ts"
 
-const sealDigest = `sha256:${"a".repeat(64)}` as BoxGrantSha256
-const otherDigest = `sha256:${"b".repeat(64)}` as BoxGrantSha256
+const sealDigest = `sha256:${"a".repeat(64)}` as Sha256Digest
+const otherDigest = `sha256:${"b".repeat(64)}` as Sha256Digest
 const instant = (value: string) => DateTime.makeUnsafe(new Date(value))
 const at = instant("2026-01-01T00:00:00.000Z")
 
@@ -83,7 +83,7 @@ const emissionId = (suffix: string) =>
 const emission = (
   suffix: string,
   options: {
-    readonly digest?: BoxGrantSha256
+    readonly digest?: Sha256Digest
     readonly holdUntil?: ReturnType<typeof instant>
     readonly authorized?: boolean
     readonly grantSelector?: string

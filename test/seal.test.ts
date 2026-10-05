@@ -26,12 +26,13 @@ import {
   loadStartupSeal,
   reverifySeal
 } from "../src/seal/index.ts"
+import { Sha256Digest } from "../src/core/Canonical.ts"
 
 const binary = new TextEncoder().encode("airlock compiled fixture v1\n")
 const flippedBinary = new TextEncoder().encode("airlock compiled fixture v2\n")
 
 const digest = (bytes: Uint8Array) =>
-  `sha256:${createHash("sha256").update(bytes).digest("hex")}`
+  Sha256Digest.make(`sha256:${createHash("sha256").update(bytes).digest("hex")}`)
 
 const admission = {
   schemaVersion: "airlock/admission-policy/v2" as const,
@@ -244,7 +245,7 @@ describe("startup seal verification", () => {
   })
 
   it("uses a digest filename and never a grant id as a path fragment", () => {
-    const sha256 = `sha256:${"a".repeat(64)}` as const
+    const sha256 = Sha256Digest.make(`sha256:${"a".repeat(64)}`)
     expect(catalogFileNameForPin({ sha256 })).toBe(
       `sha256-${"a".repeat(64)}.airlock-tool.json`
     )

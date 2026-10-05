@@ -1,4 +1,4 @@
-import { type DigestUnavailable, sha256Canonical } from "../Canonical.ts"
+import { type DigestUnavailable, Sha256Digest, sha256Canonical } from "../Canonical.ts"
 import { type Crypto, Effect, Schema } from "effect"
 import { NativeActionName } from "../actions/index.ts"
 import { AdmissionPolicy } from "./Admission.ts"
@@ -44,19 +44,11 @@ export const BoxGrantDaemonOp = Schema.Literals([
 ])
 export type BoxGrantDaemonOp = typeof BoxGrantDaemonOp.Type
 
-/** Digests are wire identities, never loose labels or platform path strings. */
-export const BoxGrantSha256 = Schema.String.pipe(
-  Schema.check(Schema.isPattern(/^sha256:[0-9a-f]{64}$/, {
-    message: "must be sha256:<64 lowercase hex>"
-  }))
-)
-export type BoxGrantSha256 = typeof BoxGrantSha256.Type
-
 export class BoxGrantCatalogPin extends Schema.Class<BoxGrantCatalogPin>(
   "BoxGrantCatalogPin"
 )({
   id: Schema.String,
-  sha256: BoxGrantSha256
+  sha256: Sha256Digest
 }) {}
 
 const unique = <A>(
@@ -99,7 +91,7 @@ export class BoxGrant extends Schema.Class<BoxGrant>("BoxGrant")({
   nativeActions: UniqueNativeActions,
   catalog: UniqueCatalogPins,
   daemonOps: UniqueDaemonOps,
-  binaryDigest: BoxGrantSha256
+  binaryDigest: Sha256Digest
 }) {}
 
 /** Strictly decode an untrusted JSON value into a Box Grant. */
@@ -129,7 +121,7 @@ const canonicalBoxGrantContent = (grant: BoxGrant) => ({
  */
 export const hashBoxGrant = (
   grant: BoxGrant
-): Effect.Effect<BoxGrantSha256, DigestUnavailable, Crypto.Crypto> =>
+): Effect.Effect<Sha256Digest, DigestUnavailable, Crypto.Crypto> =>
   sha256Canonical(canonicalBoxGrantContent(grant))
 
 /** Decode first, then hash only the accepted semantic document. */

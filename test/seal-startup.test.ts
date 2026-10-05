@@ -20,6 +20,7 @@ import {
   boxGrantDigest,
   boxGrantSigningPayload
 } from "../src/seal/index.ts"
+import { Sha256Digest } from "../src/core/Canonical.ts"
 
 const repository = resolve(import.meta.dirname, "..")
 const root = mkdtempSync(join(tmpdir(), "airlock-seal-startup-"))
@@ -41,7 +42,7 @@ beforeAll(() => {
 }, 60_000)
 
 const digest = (bytes: Uint8Array) =>
-  `sha256:${createHash("sha256").update(bytes).digest("hex")}` as const
+  Sha256Digest.make(`sha256:${createHash("sha256").update(bytes).digest("hex")}`)
 
 const makeSeal = (name: string, options: {
   readonly wrongBinary?: boolean
@@ -76,7 +77,7 @@ const makeSeal = (name: string, options: {
     catalog: [],
     daemonOps: [],
     binaryDigest: options.wrongBinary
-      ? `sha256:${"0".repeat(64)}`
+      ? Sha256Digest.make(`sha256:${"0".repeat(64)}`)
       : actualBinaryDigest
   })
   writeFileSync(join(directory, BOX_GRANT_FILE), `${JSON.stringify(grant, null, 2)}\n`)

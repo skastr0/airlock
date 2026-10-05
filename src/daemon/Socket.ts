@@ -7,7 +7,7 @@ import {
   type Socket
 } from "node:net"
 import { Effect, Schema } from "effect"
-import type { BoxGrantSha256 } from "../core/admission/BoxGrant.ts"
+import type { Sha256Digest } from "../core/Canonical.ts"
 import {
   type DaemonHealthState,
   checkDaemonLiveness,
@@ -273,7 +273,7 @@ export const unixDaemonHealthTransport = (
 /** Same-seal readiness or a typed refusal; there is no local fallback. */
 export const checkDaemonSocket = (
   socketPath: string,
-  expectedGrantDigest: BoxGrantSha256,
+  expectedGrantDigest: Sha256Digest,
   timeoutMillis = 2_000
 ) => checkDaemonLiveness(
   unixDaemonHealthTransport(socketPath, timeoutMillis),

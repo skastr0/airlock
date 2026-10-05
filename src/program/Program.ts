@@ -1538,7 +1538,7 @@ export type ProgramDispatchAuthority = (
 
 /** A verified-seal identity selects daemon-owned, never inline, dispatch. */
 export interface ProgramSealedDispatch {
-  readonly sealDigest: `sha256:${string}`
+  readonly sealDigest: Canonical.Sha256Digest
 }
 
 const stagedOnlyDispatchAuthority: ProgramDispatchAuthority = () => []
@@ -1563,7 +1563,7 @@ export const supervisorDispatchAuthority = (
         endpoint: authorized.endpoint,
         ...(sealedDispatch === undefined ? {} : {
           stagedAuthorization: new DispatchAuthorization({
-            sealDigest: Canonical.Sha256Digest.make(sealedDispatch.sealDigest),
+            sealDigest: sealedDispatch.sealDigest,
             grantId: authorized.grantId,
             grantSelector: authorized.grantSelector,
             dispatchClass: authorized.effectiveClass,

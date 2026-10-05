@@ -77,6 +77,7 @@ import {
   verifyInstalledReadiness
 } from "./seal/index.ts"
 import { describeFailure, reasonOf } from "./FailureText.ts"
+import type { Sha256Digest } from "./core/Canonical.ts"
 
 /**
  * CLI is deliberately an adapter: it parses agent-facing atoms, invokes typed
@@ -1348,7 +1349,7 @@ const executeProgram = (
           toolActions,
           profile,
           new Set(seal.grant.nativeActions),
-          { sealDigest: seal.grantDigest as `sha256:${string}` },
+          { sealDigest: seal.grantDigest },
           bindPath
         )
       : ProgramExecutionWithToolsLive(
@@ -1754,7 +1755,7 @@ const startupSeal = async (): Promise<SealContext | undefined> => {
   const startup = loadStartupSeal(
     expectedOperatorKeyDigest === undefined
       ? {}
-      : { expectedOperatorKeyDigest: expectedOperatorKeyDigest as `sha256:${string}` }
+      : { expectedOperatorKeyDigest: expectedOperatorKeyDigest as Sha256Digest }
   ).pipe(
     Effect.flatMap((seal) =>
       readinessPath !== undefined && seal._tag === "VerifiedSeal"

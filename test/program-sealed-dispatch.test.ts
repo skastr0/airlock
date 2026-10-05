@@ -1,6 +1,7 @@
 import { describe, expect, it } from "@effect/vitest"
 import { effect } from "./support/CoreTest.ts"
 import { Effect } from "effect"
+import { Sha256Digest } from "../src/core/Canonical.ts"
 import {
   AdmissionPolicy,
   EndpointGrantPolicy,
@@ -64,7 +65,7 @@ describe("sealed Program dispatch authority", () => {
     Effect.gen(function* () {
       const admission = yield* admit(draft, policy)
       const authority = yield* bindAdmissionForUse(admission)
-      const sealDigest = `sha256:${"b".repeat(64)}` as const
+      const sealDigest = Sha256Digest.make(`sha256:${"b".repeat(64)}`)
       const dispatch = supervisorDispatchAuthority(policy, { sealDigest })(authority)
 
       expect(dispatch).toHaveLength(1)

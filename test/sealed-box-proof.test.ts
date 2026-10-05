@@ -30,6 +30,7 @@ import {
   reverifySeal,
   verifySealAtPath
 } from "../src/seal/index.ts"
+import { Sha256Digest } from "../src/core/Canonical.ts"
 
 const repository = resolve(import.meta.dirname, "..")
 const root = mkdtempSync(join(tmpdir(), "airlock-sealed-proof-"))
@@ -50,7 +51,7 @@ let grant: BoxGrant
 let healthFiber: Fiber.Fiber<never, unknown> | undefined
 
 const sha256 = (bytes: Uint8Array) =>
-  `sha256:${createHash("sha256").update(bytes).digest("hex")}` as const
+  Sha256Digest.make(`sha256:${createHash("sha256").update(bytes).digest("hex")}`)
 
 beforeAll(async () => {
   mkdirSync(join(generation, "bin"), { recursive: true })

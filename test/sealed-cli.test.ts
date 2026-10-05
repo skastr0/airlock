@@ -29,6 +29,7 @@ import {
   boxGrantSigningPayload,
   catalogFileNameForPin
 } from "../src/seal/index.ts"
+import { Sha256Digest } from "../src/core/Canonical.ts"
 
 const repository = resolve(import.meta.dirname, "..")
 const root = mkdtempSync(join(tmpdir(), "airlock-sealed-cli-"))
@@ -50,7 +51,7 @@ beforeAll(() => {
 }, 60_000)
 
 const digest = (bytes: Uint8Array) =>
-  `sha256:${createHash("sha256").update(bytes).digest("hex")}` as const
+  Sha256Digest.make(`sha256:${createHash("sha256").update(bytes).digest("hex")}`)
 
 const defaultAdmission = () => new AdmissionPolicy({
   schemaVersion: "airlock/admission-policy/v2",
