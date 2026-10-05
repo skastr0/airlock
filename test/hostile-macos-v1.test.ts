@@ -506,7 +506,7 @@ describe.skipIf(!supported)("hostile macOS v1 — actual agent entrypoint", () =
         const pending = runAgent(["pending"], fixture)
         expect(pending.status, pending.stderr).toBe(0)
         expect(JSON.parse(pending.stdout)).toEqual([
-          expect.objectContaining({ status: "staged" })
+          expect.objectContaining({ state: "staged" })
         ])
         const commit = runAgent(["commit", "not-agent-authority"], fixture)
         expect(commit.status).not.toBe(0)
