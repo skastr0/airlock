@@ -19,7 +19,7 @@ import {
   type IdempotencyKey,
   InvalidIntent,
   OutboxStateCorrupt,
-  type OutboxStoreFailed,
+  OutboxStoreFailed,
   type RecordIn,
   ResponseCapture,
   SealedDispatch,
@@ -234,6 +234,20 @@ const emissionIdFor = (key: IdempotencyKey) =>
     Effect.map((digest) => EmissionId.make(`emi_${digest.slice("sha256:".length, "sha256:".length + 32)}`))
   )
 
+/** Identifies everything a caller asked `stage` for; a record must keep matching it. */
+const requestDigestOf = (
+  kind: string,
+  dispatchDigest: Sha256Digest,
+  holdMillis: number,
+  authorization: DispatchAuthorization | undefined
+) =>
+  sha256Canonical({
+    kind,
+    dispatchDigest,
+    holdMillis,
+    authorization: authorization === undefined ? null : { ...authorization }
+  })
+
 const corrupt = (id: string, part: OutboxStateCorrupt["part"], reason: string) =>
   new OutboxStateCorrupt({ id, part, reason })
 
@@ -316,6 +330,33 @@ export const defineOutbox = <const Kinds extends IntentKinds>(
       })
     )
 
+    /**
+     * A staged record is acted on only while it still says what was staged:
+     * its request digest must recompute and its authorization must name the
+     * intent's own target. Anything else is corrupt, and nothing is sent.
+     */
+    const intact = (record: StagedEmission) =>
+      Effect.gen(function* () {
+        const emission = yield* view<"staged">(record)
+        const kind = yield* kindOf(record)
+        const expected = yield* requestDigestOf(
+          record.kind,
+          record.dispatchDigest,
+          DateTime.toEpochMillis(record.holdUntil) - DateTime.toEpochMillis(record.stagedAt),
+          record.authorization
+        ).pipe(withCrypto)
+        if (expected !== record.requestDigest) {
+          return yield* corrupt(record.id, "record", "staged record does not match its request digest")
+        }
+        if (
+          record.authorization !== undefined &&
+          record.authorization.target !== kind.target(emission.summary)
+        ) {
+          return yield* corrupt(record.id, "record", "authorization names a different target")
+        }
+        return emission
+      })
+
     const existing = (id: EmissionId) =>
       store.read(id).pipe(
         Effect.flatMap(Option.match({
@@ -354,14 +395,12 @@ export const defineOutbox = <const Kinds extends IntentKinds>(
         Effect.mapError(invalid("summary"))
       )
       const dispatchDigest = yield* sha256Text(canonical).pipe(withCrypto)
-      const requestDigest = yield* sha256Canonical({
-        kind: tag,
+      const requestDigest = yield* requestDigestOf(
+        tag,
         dispatchDigest,
-        holdMillis: request.holdMillis,
-        authorization: request.authorization === undefined
-          ? null
-          : { ...request.authorization }
-      }).pipe(withCrypto)
+        request.holdMillis,
+        request.authorization
+      ).pipe(withCrypto)
       const id = yield* emissionIdFor(request.key).pipe(withCrypto)
       const stagedAt = yield* DateTime.now
       const record = new StagedEmission({
@@ -427,6 +466,7 @@ export const defineOutbox = <const Kinds extends IntentKinds>(
           if (staged.state !== "staged") {
             return yield* new EmissionNotPending({ id, state: staged.state })
           }
+          yield* intact(staged)
           const kind = yield* kindOf(staged)
           const tag = kind.tag as Tag
           // Verify the sealed material before anything becomes irreversible.
@@ -555,10 +595,15 @@ export const defineOutbox = <const Kinds extends IntentKinds>(
     )
 
     const pendingAuthorized: OutboxService<Kinds>["pendingAuthorized"] = (sealDigest) =>
-      pending.pipe(
-        Effect.map((emissions) =>
-          emissions.filter((emission) => emission.authorization?.sealDigest === sealDigest)
-        )
+      store.list("staged").pipe(
+        Effect.map((records) =>
+          records
+            .filter((record) => record.authorization?.sealDigest === sealDigest)
+            .sort((a, b) => DateTime.toEpochMillis(a.stagedAt) - DateTime.toEpochMillis(b.stagedAt))
+        ),
+        Effect.flatMap(Effect.forEach(intact)),
+        Effect.catchTag("DigestUnavailable", (error) =>
+          Effect.fail(new OutboxStoreFailed({ operation: "verify-pending", reason: error.reason })))
       )
 
     const flush: OutboxService<Kinds>["flush"] = Effect.gen(function* () {

@@ -10,4 +10,5 @@ export {
   type MemoryOutboxState,
   memoryOutboxStore
 } from "./MemoryOutboxStore.ts"
+export { outboxConformance, type OutboxWorld } from "./OutboxConformance.ts"
 export { outboxStoreConformance, type OutboxStoreWorld } from "./OutboxStoreConformance.ts"
