@@ -1,4 +1,5 @@
 import { describe, expect, it } from "@effect/vitest"
+import { effect } from "./support/CoreTest.ts"
 import { Effect, Layer, Schema } from "effect"
 import { readFile } from "node:fs/promises"
 import {
@@ -151,7 +152,7 @@ const compatibilityPolicy = new AdmissionPolicy({
 })
 
 describe("representative shell-to-Airlock contract corpus", () => {
-  it.effect(
+  effect(
     "labels 50+ distinct Unix-informed shapes as contract coverage, not execution evidence",
     () =>
       Effect.gen(function* () {
@@ -189,7 +190,7 @@ describe("representative shell-to-Airlock contract corpus", () => {
       })
   )
 
-  it.effect(
+  effect(
     "decodes every accepted shape through the language and native schemas, validates its Plan, and closes admission",
     () =>
       Effect.gen(function* () {
@@ -317,7 +318,7 @@ describe("representative shell-to-Airlock contract corpus", () => {
       })
   )
 
-  it.effect(
+  effect(
     "rejects only explicitly published unsupported core action classes",
     () =>
       Effect.gen(function* () {

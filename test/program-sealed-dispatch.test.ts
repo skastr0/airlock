@@ -1,4 +1,5 @@
 import { describe, expect, it } from "@effect/vitest"
+import { effect } from "./support/CoreTest.ts"
 import { Effect } from "effect"
 import {
   AdmissionPolicy,
@@ -59,7 +60,7 @@ const draft = new PlanDraft({
 })
 
 describe("sealed Program dispatch authority", () => {
-  it.effect("translates only an admitted read auto-grant into seal-bound staging evidence", () =>
+  effect("translates only an admitted read auto-grant into seal-bound staging evidence", () =>
     Effect.gen(function* () {
       const admission = yield* admit(draft, policy)
       const authority = yield* bindAdmissionForUse(admission)
