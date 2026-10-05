@@ -16,13 +16,13 @@ import {
   BoxGrantSha256,
   decodeBoxGrant,
   hashBoxGrant
-} from "../admission/BoxGrant.ts"
+} from "../core/admission/BoxGrant.ts"
 import {
   ToolDefinition,
   ToolDefinitionDocument,
   ToolDefinitionLocation,
   decodeToolDefinition
-} from "../tools/Definitions.ts"
+} from "../core/tools/Definitions.ts"
 import {
   DEFAULT_TOOL_DEFINITION_MAX_BYTES,
   TOOL_DEFINITION_FILE_SUFFIX

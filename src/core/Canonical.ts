@@ -28,9 +28,13 @@ const sortKeys = (value: Schema.Json): Schema.Json => {
   )
 }
 
-/** One byte sequence per JSON value: object keys sorted, no insignificant space. */
-export const canonicalJson = (value: Schema.Json): string =>
-  JSON.stringify(sortKeys(value))
+/**
+ * One byte sequence per value: its JSON form (what `JSON.stringify` keeps, so
+ * `toJSON` applies and `undefined` properties vanish) with object keys sorted
+ * and no insignificant space.
+ */
+export const canonicalJson = (value: unknown): string =>
+  JSON.stringify(sortKeys(JSON.parse(JSON.stringify(value)) as Schema.Json))
 
 const encoder = new TextEncoder()
 
@@ -44,4 +48,4 @@ export const sha256Bytes = (
 
 export const sha256Text = (text: string) => sha256Bytes(encoder.encode(text))
 
-export const sha256Canonical = (value: Schema.Json) => sha256Text(canonicalJson(value))
+export const sha256Canonical = (value: unknown) => sha256Text(canonicalJson(value))

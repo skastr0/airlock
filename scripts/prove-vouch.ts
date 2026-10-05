@@ -17,7 +17,7 @@ import {
   admit,
   bindAdmissionForUse,
   EndpointGrantPolicy
-} from "../src/admission/index.ts"
+} from "../src/core/admission/index.ts"
 import { CellLive } from "../src/cell/index.ts"
 import { Hold } from "../src/Hold.ts"
 import { HoldLive } from "../src/HoldLive.ts"
@@ -34,7 +34,7 @@ import {
   RequestExternalNode,
   RequirementId,
   ResourceRequirement
-} from "../src/plan/index.ts"
+} from "../src/core/plan/index.ts"
 import { LinuxPlatformLive } from "../src/platform/linux/index.ts"
 import { MacosPlatformLive } from "../src/platform/macos/index.ts"
 import { ProcessRunnerLive } from "../src/process/Process.ts"

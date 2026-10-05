@@ -14,7 +14,7 @@ import {
   type ExecutionAuthority,
   type NodeAuthorityBinding,
   revalidateNodeAuthority
-} from "../admission/index.ts"
+} from "../core/admission/index.ts"
 import {
   Cell,
   CellExecutableBinding,
@@ -23,7 +23,7 @@ import {
   WorkspaceDeltaCandidate
 } from "../cell/index.ts"
 import { Hold, HoldRecoveryRequired } from "../Hold.ts"
-import { ActId, RemoveReceipt } from "../domain.ts"
+import { ActId, RemoveReceipt } from "../core/domain.ts"
 import {
   NativeFileSystem,
   NativeListEntry,
@@ -53,7 +53,7 @@ import {
   type PlanNode,
   Receipt,
   type ReceiptId
-} from "../plan/index.ts"
+} from "../core/plan/index.ts"
 import {
   ProcessInputBytes,
   ProcessCancelled,

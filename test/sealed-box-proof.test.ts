@@ -14,7 +14,7 @@ import {
   BoxGrantCatalogPin,
   EndpointGrantPolicy,
   hashBoxGrant
-} from "../src/admission/index.ts"
+} from "../src/core/admission/index.ts"
 import { daemonTick, runDaemonHealthServer } from "../src/daemon/index.ts"
 import { HoldLive } from "../src/HoldLive.ts"
 import { FileLedgerLive } from "../src/host/FileLedger.ts"

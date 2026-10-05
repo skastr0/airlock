@@ -6,7 +6,7 @@ import {
   bindAdmissionForUse,
   ExecutionAuthority,
   nodeAuthorityNeeds
-} from "../../src/admission/index.ts"
+} from "../../src/core/admission/index.ts"
 import {
   ApplyNode,
   AuthorityAdmission,
@@ -20,7 +20,7 @@ import {
   RequestExternalNode,
   RequirementId,
   ResourceRequirement
-} from "../../src/plan/index.ts"
+} from "../../src/core/plan/index.ts"
 
 const timestamp = DateTime.fromDateUnsafe(
   new Date("2026-07-29T00:00:00.000Z")

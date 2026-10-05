@@ -1,5 +1,5 @@
-import { createHash } from "node:crypto"
-import { Effect, Schema } from "effect"
+import { sha256Text } from "../Canonical.ts"
+import { type Crypto, Effect, Schema } from "effect"
 import {
   HttpStageAction,
   NativeActionLowering,
@@ -466,7 +466,7 @@ const canonicalJson = (value: unknown): string => {
 
 const digestDefinition = (
   loaded: LoadedToolDefinition
-): Effect.Effect<Digest, ToolDefinitionDigestFailed> =>
+): Effect.Effect<Digest, ToolDefinitionDigestFailed, Crypto.Crypto> =>
   Schema.encodeEffect(ToolDefinition)(loaded.definition).pipe(
     Effect.mapError(
       () =>
@@ -477,16 +477,23 @@ const digestDefinition = (
     ),
     Effect.flatMap((encoded) =>
       Effect.try({
-        try: () =>
-          Digest.make(
-            `sha256:${createHash("sha256").update(canonicalJson(encoded)).digest("hex")}`
-          ),
+        try: () => canonicalJson(encoded),
         catch: () =>
           new ToolDefinitionDigestFailed({
             definitionId: loaded.definition.id,
             reason: "validated definition is not canonical inert JSON"
           })
       })
+    ),
+    Effect.flatMap((canonical) =>
+      sha256Text(canonical).pipe(
+        Effect.map((sha256) => Digest.make(sha256)),
+        Effect.mapError((error) =>
+          new ToolDefinitionDigestFailed({
+            definitionId: loaded.definition.id,
+            reason: error.reason
+          }))
+      )
     )
   )
 
@@ -518,7 +525,7 @@ const lowerEnqueueAction = <E, R>(
   definition: ToolDefinition,
   action: ToolEnqueueActionDefinition,
   bindPath: NativePathSelectorBinder<E, R>
-): Effect.Effect<ToolActionLoweringResult, ToolActionLoweringError | E, R> =>
+): Effect.Effect<ToolActionLoweringResult, ToolActionLoweringError | E, R | Crypto.Crypto> =>
   Effect.gen(function* () {
     const template = action.request
     if (template === undefined) {
@@ -614,7 +621,7 @@ export const lowerToolAction = <E = never, R = never>(
   request: ToolActionLoweringRequest,
   bindPath: NativePathSelectorBinder<E, R> =
     unchangedNativePathSelector as NativePathSelectorBinder<E, R>
-): Effect.Effect<ToolActionLoweringResult, ToolActionLoweringError | E, R> =>
+): Effect.Effect<ToolActionLoweringResult, ToolActionLoweringError | E, R | Crypto.Crypto> =>
   Effect.gen(function* () {
     const definition = request.loaded.definition
     const action = yield* actionNamed(request.loaded, request.action)

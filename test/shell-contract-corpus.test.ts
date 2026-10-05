@@ -4,13 +4,13 @@ import { readFile } from "node:fs/promises"
 import {
   ActionCallDecodeFailed,
   decodeAndLowerNativeAction
-} from "../src/actions/index.ts"
-import { AdmissionPolicy, admit } from "../src/admission/index.ts"
+} from "../src/core/actions/index.ts"
+import { AdmissionPolicy, admit } from "../src/core/admission/index.ts"
 import {
   LanguageValueSchema,
   type LanguageValue
-} from "../src/language/evaluator.ts"
-import { ArtifactId, orderPlan } from "../src/plan/index.ts"
+} from "../src/core/language/evaluator.ts"
+import { ArtifactId, orderPlan } from "../src/core/plan/index.ts"
 import {
   InlineArtifact,
   ProgramActionExecutor,

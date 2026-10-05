@@ -1,6 +1,6 @@
 import { describe, expect, it } from "@effect/vitest"
 import { Effect } from "effect"
-import { parseSync } from "../src/language/parser.ts"
+import { parseSync } from "../src/core/language/parser.ts"
 import {
   AssertionFailed,
   InvalidCallTarget,
@@ -10,7 +10,7 @@ import {
   evaluate,
   type ActionResolver,
   type LanguageValue
-} from "../src/language/evaluator.ts"
+} from "../src/core/language/evaluator.ts"
 
 const resolver: ActionResolver = {
   resolve: (action, args) => Effect.sync(() => {

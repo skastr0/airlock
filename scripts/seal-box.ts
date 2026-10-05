@@ -43,11 +43,11 @@ import {
   sep
 } from "node:path"
 import { Effect, Schema } from "effect"
-import { decodeBoxGrant } from "../src/admission/BoxGrant.ts"
+import { decodeBoxGrant } from "../src/core/admission/BoxGrant.ts"
 import {
   AdmissionPolicy,
   AdmissionPolicy
-} from "../src/admission/Admission.ts"
+} from "../src/core/admission/Admission.ts"
 import { checkDaemonSocket } from "../src/daemon/index.ts"
 import {
   BOX_GRANT_FILE,
@@ -63,7 +63,7 @@ import {
   ToolDefinitionDocument,
   ToolDefinitionLocation,
   decodeToolDefinition
-} from "../src/tools/Definitions.ts"
+} from "../src/core/tools/Definitions.ts"
 import { DEFAULT_TOOL_DEFINITION_MAX_BYTES } from "../src/tools/FileReader.ts"
 
 const usage = `usage: bun scripts/seal-box.ts <command> [options]

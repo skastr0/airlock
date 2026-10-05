@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest"
 import { Effect } from "effect"
-import { format, parse, parseSync, restoreOrchestration, tokenize } from "../src/language/index.ts"
+import { format, parse, parseSync, restoreOrchestration, tokenize } from "../src/core/language/index.ts"
 
 describe("Airlock language", () => {
   it("parses the full structured expression and control-flow surface", () => {

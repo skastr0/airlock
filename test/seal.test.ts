@@ -9,7 +9,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { describe, expect, it } from "@effect/vitest"
 import { Effect } from "effect"
-import { decodeBoxGrant } from "../src/admission/BoxGrant.ts"
+import { decodeBoxGrant } from "../src/core/admission/BoxGrant.ts"
 import { DEFAULT_TOOL_DEFINITION_MAX_BYTES } from "../src/tools/FileReader.ts"
 import {
   AIRLOCK_SEAL_ENV,

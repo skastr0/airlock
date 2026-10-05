@@ -4,7 +4,7 @@ import { homedir } from "node:os"
 import { dirname, join } from "node:path"
 import { fileURLToPath } from "node:url"
 import { Effect, Schema } from "effect"
-import { NativeActionCatalog } from "../actions/index.ts"
+import { NativeActionCatalog } from "../core/actions/index.ts"
 import {
   LoadedToolDefinition,
   ToolDefinitionDirectories,
@@ -15,7 +15,7 @@ import {
   exportToolActions,
   knownToolDefinitionLocations,
   type ExportedToolAction
-} from "../tools/Definitions.ts"
+} from "../core/tools/Definitions.ts"
 import { TOOL_DEFINITION_FILE_SUFFIX } from "../tools/FileReader.ts"
 import type { VerifiedCatalogDocument, VerifiedSeal } from "./Seal.ts"
 

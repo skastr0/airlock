@@ -1,7 +1,7 @@
 import { Context, DateTime, Effect, Layer, Schema } from "effect"
-import { policyDispatchDecision } from "../admission/Admission.ts"
-import { type BoxGrantDaemonOp } from "../admission/BoxGrant.ts"
-import { ActId, EmissionId } from "../domain.ts"
+import { policyDispatchDecision } from "../core/admission/Admission.ts"
+import { type BoxGrantDaemonOp } from "../core/admission/BoxGrant.ts"
+import { ActId, EmissionId } from "../core/domain.ts"
 import {
   Hold,
   HoldFilesystemError,

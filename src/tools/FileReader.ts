@@ -7,7 +7,7 @@ import {
   ToolDefinitionReadFailed,
   type ToolDefinitionReader,
   type ToolDefinitionLocation
-} from "./Definitions.ts"
+} from "../core/tools/Definitions.ts"
 
 /**
  * This adapter reads inert JSON documents from one already-authorized

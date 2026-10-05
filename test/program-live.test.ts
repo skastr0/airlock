@@ -1,6 +1,6 @@
 import { DateTime, Effect, Layer, Schema } from "effect"
 import { describe, expect, it } from "vitest"
-import { AdmissionPolicy } from "../src/admission/index.ts"
+import { AdmissionPolicy } from "../src/core/admission/index.ts"
 import {
   NativeMkdirReceipt,
   NativeMoveReceipt,
@@ -15,7 +15,7 @@ import {
   ReceiptId,
   type InvokeNode,
   type PlanNode
-} from "../src/plan/index.ts"
+} from "../src/core/plan/index.ts"
 import {
   canonicalizeProgramAction,
   InlineArtifact,
@@ -35,7 +35,7 @@ import { OutboxEmission } from "../src/Outbox.ts"
 import {
   HttpIntentSummary,
 } from "../src/outbox/Contract.ts"
-import { ActId, EmissionId, RemoveReceipt } from "../src/domain.ts"
+import { ActId, EmissionId, RemoveReceipt } from "../src/core/domain.ts"
 import { HoldRecoveryRequired } from "../src/Hold.ts"
 import { ProcessReceipt } from "../src/process/Process.ts"
 

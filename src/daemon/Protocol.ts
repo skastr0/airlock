@@ -1,5 +1,5 @@
 import { Effect, Schema } from "effect"
-import { BoxGrantSha256 } from "../admission/BoxGrant.ts"
+import { BoxGrantSha256 } from "../core/admission/BoxGrant.ts"
 
 /** The complete request vocabulary. There is intentionally one fixed query. */
 export class DaemonHealthRequest extends Schema.Class<DaemonHealthRequest>(

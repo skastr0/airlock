@@ -21,7 +21,7 @@ import { OutboxLive } from "../src/Outbox.ts"
 import {
   InvokeNode,
   NodeId
-} from "../src/plan/index.ts"
+} from "../src/core/plan/index.ts"
 import {
   ProcessReceipt,
   ProcessRequest,

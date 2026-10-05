@@ -13,7 +13,7 @@ import {
   policyDispatchDecision,
   refuseGrantAssertion,
   stricterDispatchClass
-} from "../src/admission/index.ts"
+} from "../src/core/admission/index.ts"
 import {
   NodeId,
   PlanDraft,
@@ -21,7 +21,7 @@ import {
   RequestExternalNode,
   RequirementId,
   ResourceRequirement
-} from "../src/plan/index.ts"
+} from "../src/core/plan/index.ts"
 
 const endpoint = "https://status.internal.example/v1/health"
 const readSelector = "https://status.internal.example/v1/*"

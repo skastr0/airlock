@@ -1,6 +1,6 @@
 import { Effect, FileSystem, Path } from "effect"
 import { AirlockHome } from "../AirlockHome.ts"
-import { EmissionId } from "../domain.ts"
+import { EmissionId } from "../core/domain.ts"
 import { makeExclusiveFileLock } from "../platform/ExclusiveFileLock.ts"
 import {
   OutboxState,

@@ -1,5 +1,4 @@
 import { Effect, Schema } from "effect"
-import * as nodePath from "node:path"
 import { ArtifactId, CellProfile, HandleKind, Right } from "../plan/index.ts"
 
 /**
@@ -303,7 +302,7 @@ export const mapNativeActionPathSelectors = <
       case "process.run":
         return mapped({
           ...call,
-          cwd: nodePath.isAbsolute(call.cwd)
+          cwd: call.cwd.startsWith("/")
             ? yield* path(call.cwd)
             : call.cwd,
           readable: yield* resources(call.readable),

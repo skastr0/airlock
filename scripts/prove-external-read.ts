@@ -24,7 +24,7 @@ import {
   AdmissionPolicy,
   type AdmissionPolicy,
   EndpointGrantPolicy
-} from "../src/admission/index.ts"
+} from "../src/core/admission/index.ts"
 import { layer as airlockHomeLayer } from "../src/AirlockHome.ts"
 import { CellLive } from "../src/cell/index.ts"
 import { FileLedgerLive } from "../src/host/FileLedger.ts"
@@ -50,7 +50,7 @@ import {
   ToolDefinitionRegistry,
   decodeToolDefinition,
   exportToolActions
-} from "../src/tools/index.ts"
+} from "../src/core/tools/index.ts"
 import {
   FIXTURE_LARGE_RESPONSE_BYTES,
   startFixtureEndpointProvider

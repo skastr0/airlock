@@ -13,7 +13,7 @@ import {
   ToolDefinitionDocument,
   ToolDefinitionLocation,
   ToolResultDecodeFailed
-} from "../src/tools/index.ts"
+} from "../src/core/tools/index.ts"
 
 const location = new ToolDefinitionLocation({
   kind: "builtin",

@@ -9,7 +9,7 @@ import {
   decodeAndLowerNativeAction,
   mapNativeActionPathSelectors,
   nativeAction
-} from "../src/actions/index.ts"
+} from "../src/core/actions/index.ts"
 
 const lower = (input: unknown) =>
   decodeAndLowerNativeAction("test/native-action", input)

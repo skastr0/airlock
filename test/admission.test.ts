@@ -12,7 +12,7 @@ import {
   admit,
   bindAdmissionForUse,
   revalidateNodeAuthority,
-} from "../src/admission/index.ts"
+} from "../src/core/admission/index.ts"
 import {
   ApplyNode,
   ArtifactId,
@@ -24,7 +24,7 @@ import {
   RequestExternalNode,
   RequirementId,
   ResourceRequirement
-} from "../src/plan/index.ts"
+} from "../src/core/plan/index.ts"
 
 const id = (value: string) => NodeId.make(value)
 const req = (value: string) => RequirementId.make(value)

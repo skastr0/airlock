@@ -34,7 +34,7 @@ import {
   orderPlan,
   transitionNode,
   transitionPlan
-} from "../src/plan/index.ts"
+} from "../src/core/plan/index.ts"
 
 const id = (value: string) => NodeId.make(value)
 const req = (value: string) => RequirementId.make(value)

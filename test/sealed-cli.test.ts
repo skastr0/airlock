@@ -19,8 +19,8 @@ import {
   BoxGrantCatalogPin,
   type BoxGrantVerb,
   EndpointGrantPolicy
-} from "../src/admission/index.ts"
-import { type NativeActionName } from "../src/actions/index.ts"
+} from "../src/core/admission/index.ts"
+import { type NativeActionName } from "../src/core/actions/index.ts"
 import {
   BOX_GRANT_FILE,
   BOX_GRANT_SIGNATURE_FILE,

@@ -17,16 +17,6 @@ export type ActId = typeof ActId.Type
 export const EmissionId = Schema.String.pipe(Schema.brand("EmissionId"))
 export type EmissionId = typeof EmissionId.Type
 
-// ── the four effect classes (see DESIGN.md) ─────────────────────────────────
-
-export const EffectClass = Schema.Literals([
-  "observation",
-  "mutation",
-  "emission",
-  "computation"
-])
-export type EffectClass = typeof EffectClass.Type
-
 // ── held mutations ──────────────────────────────────────────────────────────
 
 export const HoldPurpose = Schema.Literals(["managed", "runtime-private"])
@@ -82,25 +72,6 @@ export class UndoReceipt extends Schema.Class<UndoReceipt>("UndoReceipt")({
 export class ReapReport extends Schema.Class<ReapReport>("ReapReport")({
   reaped: Schema.Array(ActId),
   at: Schema.DateTimeUtcFromString
-}) {}
-
-// ── ledger ──────────────────────────────────────────────────────────────────
-
-export class LedgerEntry extends Schema.Class<LedgerEntry>("LedgerEntry")({
-  at: Schema.DateTimeUtcFromString,
-  effect: EffectClass,
-  act: Schema.Literals([
-    "remove",
-    "overwrite",
-    "undo",
-    "reap",
-    "retire-runtime-private",
-    "stage",
-    "commit",
-    "cancel"
-  ]),
-  ref: Schema.String,
-  detail: Schema.optional(Schema.String)
 }) {}
 
 // ── errors ──────────────────────────────────────────────────────────────────

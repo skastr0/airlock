@@ -1,6 +1,6 @@
 import { describe, expect, it } from "@effect/vitest"
 import { Effect, Schema } from "effect"
-import { ActId } from "../src/domain.ts"
+import { ActId } from "../src/core/domain.ts"
 
 const decodeActId = Schema.decodeUnknownEffect(ActId)
 

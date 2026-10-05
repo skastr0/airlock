@@ -7,7 +7,7 @@ import {
   EndpointGrantPolicy,
   type BoxGrantDaemonOp,
   type BoxGrantSha256
-} from "../src/admission/index.ts"
+} from "../src/core/admission/index.ts"
 import {
   checkDaemonLiveness,
   daemonTick,
@@ -18,7 +18,7 @@ import {
   handleDaemonRequest,
   requireDaemonHealth
 } from "../src/daemon/index.ts"
-import { ActId, EmissionId, ReapReport } from "../src/domain.ts"
+import { ActId, EmissionId, ReapReport } from "../src/core/domain.ts"
 import { Hold } from "../src/Hold.ts"
 import {
   EmissionDispatchUncertain,

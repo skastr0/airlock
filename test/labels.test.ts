@@ -17,7 +17,7 @@ import {
   declassify,
   derive,
   endorse
-} from "../src/labels/index.ts"
+} from "../src/core/labels/index.ts"
 
 const at = new Date("2026-07-29T12:00:00.000Z")
 const future = DateTime.fromDateUnsafe(new Date("2026-07-30T12:00:00.000Z"))

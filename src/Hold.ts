@@ -17,7 +17,7 @@ import {
   UndoConflict,
   UndoReceipt,
   UnknownAct
-} from "./domain.ts"
+} from "./core/domain.ts"
 import { LedgerEntry } from "./core/ledger/Ledger.ts"
 import { FileLedger, type LedgerError } from "./host/FileLedger.ts"
 import {

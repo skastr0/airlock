@@ -1,5 +1,5 @@
-import { createHash } from "node:crypto"
-import { Effect, Schema } from "effect"
+import { type DigestUnavailable, sha256Canonical } from "../Canonical.ts"
+import { type Crypto, Effect, Schema } from "effect"
 import { NativeActionName } from "../actions/index.ts"
 import { AdmissionPolicy } from "./Admission.ts"
 
@@ -106,16 +106,6 @@ export class BoxGrant extends Schema.Class<BoxGrant>("BoxGrant")({
 export const decodeBoxGrant = (input: unknown) =>
   Schema.decodeUnknownEffect(BoxGrant, { onExcessProperty: "error" })(input)
 
-const canonical = (value: unknown): string => {
-  if (value === null || typeof value !== "object") return JSON.stringify(value)
-  if (Array.isArray(value)) return `[${value.map(canonical).join(",")}]`
-  const record = value as Record<string, unknown>
-  return `{${Object.keys(record)
-    .sort()
-    .map((key) => `${JSON.stringify(key)}:${canonical(record[key])}`)
-    .join(",")}}`
-}
-
 const lexical = (left: string, right: string) =>
   left < right ? -1 : left > right ? 1 : 0
 
@@ -139,13 +129,12 @@ const canonicalBoxGrantContent = (grant: BoxGrant) => ({
  */
 export const hashBoxGrant = (
   grant: BoxGrant
-): BoxGrantSha256 =>
-  `sha256:${createHash("sha256")
-    .update(canonical(canonicalBoxGrantContent(grant)))
-    .digest("hex")}` as BoxGrantSha256
+): Effect.Effect<BoxGrantSha256, DigestUnavailable, Crypto.Crypto> =>
+  sha256Canonical(canonicalBoxGrantContent(grant))
 
 /** Decode first, then hash only the accepted semantic document. */
 export const decodeAndHashBoxGrant = (input: unknown) =>
   decodeBoxGrant(input).pipe(
-    Effect.map((grant) => ({ grant, digest: hashBoxGrant(grant) }))
+    Effect.flatMap((grant) =>
+      Effect.map(hashBoxGrant(grant), (digest) => ({ grant, digest })))
   )

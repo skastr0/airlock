@@ -6,9 +6,9 @@ import {
   bindAdmissionForUse,
   type ExecutionAuthority,
   supervisorAutoCommits
-} from "../admission/index.ts"
-import { parse, type Program, type Statement, type Expression } from "../language/index.ts"
-import { LanguageDiagnostic } from "../language/lexer.ts"
+} from "../core/admission/index.ts"
+import { parse, type Program, type Statement, type Expression } from "../core/language/index.ts"
+import { LanguageDiagnostic } from "../core/language/lexer.ts"
 import {
   type ActionResolver,
   evaluate,
@@ -17,7 +17,7 @@ import {
   type LanguageRecord,
   type LanguageValue,
   LanguageValueSchema
-} from "../language/evaluator.ts"
+} from "../core/language/evaluator.ts"
 import {
   NativeActionCall,
   type NativeActionCall as NativeActionCallValue,
@@ -26,7 +26,7 @@ import {
   lowerNativeAction,
   mapNativeActionPathSelectors,
   ResourceNeed
-} from "../actions/index.ts"
+} from "../core/actions/index.ts"
 import {
   NativeEntryKind,
   NativeListEntry,
@@ -38,7 +38,7 @@ import {
 import { reasonOf } from "../FailureText.ts"
 import { OutboxEmission, StagedDispatchAuthorization } from "../Outbox.ts"
 import { CommitAuthority, OutboxState } from "../outbox/Contract.ts"
-import { ActId, EmissionId, RemoveReceipt } from "../domain.ts"
+import { ActId, EmissionId, RemoveReceipt } from "../core/domain.ts"
 import {
   ApplyNode,
   ArtifactId,
@@ -54,7 +54,7 @@ import {
   RequestExternalNode,
   RequirementId,
   ResourceRequirement
-} from "../plan/index.ts"
+} from "../core/plan/index.ts"
 import {
   Runtime,
   RuntimeDispatchAuthorization,
@@ -71,7 +71,7 @@ import {
   exportedToolActionName,
   isEnqueueAction,
   lowerToolAction
-} from "../tools/index.ts"
+} from "../core/tools/index.ts"
 
 /**
  * Program is the candidate bridge from the pure Airlock language to plans.

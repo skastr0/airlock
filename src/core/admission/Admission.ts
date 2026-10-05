@@ -1,8 +1,7 @@
-import { createHash } from "node:crypto"
-import { posix } from "node:path"
-import { DateTime, Effect, Result, Schema } from "effect"
+import { type Crypto, DateTime, Effect, Result, Schema } from "effect"
+import { type DigestUnavailable, sha256Canonical } from "../Canonical.ts"
 import {
-  type Digest,
+  Digest,
   Grant,
   GrantId,
   Handle,
@@ -172,25 +171,30 @@ export type AdmissionError =
   | PlanValidationError
   | RequirementUnresolved
   | HandleGrantMismatch
+  | DigestUnavailable
 
 export type ExecutionAuthorityError =
   | AdmissionContractInvalid
   | HandleNotResolved
   | HandleExpired
   | UndeclaredNodeAuthority
+  | DigestUnavailable
 
-const canonical = (value: unknown): string => {
-  if (value === null || typeof value !== "object") return JSON.stringify(value)
-  if (Array.isArray(value)) return `[${value.map(canonical).join(",")}]`
-  const record = value as Record<string, unknown>
-  return `{${Object.keys(record).sort().map((key) => `${JSON.stringify(key)}:${canonical(record[key])}`).join(",")}}`
-}
-
-const digest = (value: unknown): Digest =>
-  `sha256:${createHash("sha256").update(canonical(value)).digest("hex")}` as Digest
+const digest = (value: unknown) =>
+  sha256Canonical(value).pipe(Effect.map((sha256) => Digest.make(sha256)))
 
 const isAbsolutePath = (value: string) => value.startsWith("/")
-const lexicalPath = (value: string) => isAbsolutePath(value) ? posix.resolve("/", value) : undefined
+/** Resolves `.` and `..` segments of an absolute POSIX path without touching a filesystem. */
+const normalizeAbsolute = (value: string) => {
+  const segments: Array<string> = []
+  for (const segment of value.split("/")) {
+    if (segment === "" || segment === ".") continue
+    if (segment === "..") segments.pop()
+    else segments.push(segment)
+  }
+  return `/${segments.join("/")}`
+}
+const lexicalPath = (value: string) => isAbsolutePath(value) ? normalizeAbsolute(value) : undefined
 
 /** Lexical containment only. Filesystem identity is intentionally deferred to the Cell. */
 const pathContains = (scope: string, selector: string) => {
@@ -497,9 +501,10 @@ const makeIdentity = (requirement: ResourceRequirement) =>
 export const admit = (
   draft: PlanDraft,
   policy: AdmissionPolicy,
-  now: Date = new Date()
-): Effect.Effect<AdmissionResult, AdmissionError> =>
+  at?: Date
+): Effect.Effect<AdmissionResult, AdmissionError, Crypto.Crypto> =>
   Effect.gen(function* () {
+    const now = at ?? (yield* DateTime.nowAsDate)
     if (policy.profile === "vm-enclosed") {
       return yield* new ProfileUnavailable({
         profile: policy.profile,
@@ -568,7 +573,7 @@ export const admit = (
         }
       }
     }
-    const policyDigest = digest({
+    const policyDigest = yield* digest({
       schemaVersion: policy.schemaVersion,
       profile: policy.profile,
       principal: policy.principal,
@@ -680,9 +685,9 @@ export const admit = (
       admittedAt: DateTime.fromDateUnsafe(now),
       policyDigest
     })
-    const planDigest = digest({ draft, policyDigest, grants, handles, resolutions })
+    const planDigest = yield* digest({ draft, policyDigest, grants, handles, resolutions })
     const plan = yield* closeExecution(draft, handles, resolutions, grants, admission, planDigest)
-    const closureDigest = digest({ plan, grants, policyDigest, profile: policy.profile })
+    const closureDigest = yield* digest({ plan, grants, policyDigest, profile: policy.profile })
     return new AdmissionResult({
       plan,
       grants,
@@ -695,10 +700,10 @@ export const admit = (
 const validateClosure = (
   result: AdmissionResult,
   now: Date
-): Effect.Effect<void, AdmissionContractInvalid | HandleExpired> =>
+): Effect.Effect<void, AdmissionContractInvalid | HandleExpired | DigestUnavailable, Crypto.Crypto> =>
   Effect.gen(function* () {
     const { plan } = result
-    const expectedDigest = digest({
+    const expectedDigest = yield* digest({
       plan,
       grants: result.grants,
       policyDigest: result.policyDigest,
@@ -875,9 +880,10 @@ const bindNode = (
  */
 export const bindAdmissionForUse = (
   result: AdmissionResult,
-  now: Date = new Date()
-): Effect.Effect<ExecutionAuthority, ExecutionAuthorityError> =>
+  at?: Date
+): Effect.Effect<ExecutionAuthority, ExecutionAuthorityError, Crypto.Crypto> =>
   Effect.gen(function* () {
+    const now = at ?? (yield* DateTime.nowAsDate)
     yield* validateClosure(result, now)
     const bindings = yield* Effect.forEach(
       result.plan.nodes,
@@ -896,9 +902,10 @@ export const bindAdmissionForUse = (
 export const revalidateNodeAuthority = (
   authority: ExecutionAuthority,
   nodeId: NodeId,
-  now: Date = new Date()
-): Effect.Effect<NodeAuthorityBinding, ExecutionAuthorityError> =>
+  at?: Date
+): Effect.Effect<NodeAuthorityBinding, ExecutionAuthorityError, Crypto.Crypto> =>
   Effect.gen(function* () {
+    const now = at ?? (yield* DateTime.nowAsDate)
     yield* validateClosure(authority.admission, now)
     const node = authority.admission.plan.nodes.find(
       (candidate) => candidate.id === nodeId

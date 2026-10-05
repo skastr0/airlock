@@ -214,9 +214,10 @@ export const declassify = (
   capability: SupervisorCapability,
   target: Confidentiality,
   receiptId: LabelReceiptId,
-  at: Date = new Date()
+  now?: Date
 ): Effect.Effect<readonly [LabeledReference, LabelTransitionReceipt], LabelTransitionError> =>
   Effect.gen(function* () {
+    const at = now ?? (yield* DateTime.nowAsDate)
     yield* validateCapability(capability, subject, "declassify", at)
     if (capability.declassifyTo !== target || capability.endorseTo !== undefined) {
       return yield* Effect.fail(capabilityError(capability, "target"))
@@ -245,9 +246,10 @@ export const endorse = (
   capability: SupervisorCapability,
   target: Integrity,
   receiptId: LabelReceiptId,
-  at: Date = new Date()
+  now?: Date
 ): Effect.Effect<readonly [LabeledReference, LabelTransitionReceipt], LabelTransitionError> =>
   Effect.gen(function* () {
+    const at = now ?? (yield* DateTime.nowAsDate)
     yield* validateCapability(capability, subject, "endorse", at)
     if (capability.endorseTo !== target || capability.declassifyTo !== undefined) {
       return yield* Effect.fail(capabilityError(capability, "target"))

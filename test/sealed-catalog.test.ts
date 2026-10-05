@@ -16,7 +16,7 @@ import {
   type BoxGrantSha256,
   decodeBoxGrant,
   hashBoxGrant
-} from "../src/admission/BoxGrant.ts"
+} from "../src/core/admission/BoxGrant.ts"
 import {
   UnsealedToolDefinitionPathRejected,
   UnsealedToolDefinitionTamper,
@@ -38,7 +38,7 @@ import {
   ToolDefinitionLocation,
   decodeToolDefinition,
   lowerToolAction
-} from "../src/tools/index.ts"
+} from "../src/core/tools/index.ts"
 
 const bytes = (value: unknown) =>
   new TextEncoder().encode(JSON.stringify(value))

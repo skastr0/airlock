@@ -3,7 +3,7 @@ import { Effect, Layer } from "effect"
 import {
   AdmissionPolicy,
   type ExecutionAuthority
-} from "../src/admission/index.ts"
+} from "../src/core/admission/index.ts"
 import {
   canonicalizeProgramAction,
   draftForAction,

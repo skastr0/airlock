@@ -3,13 +3,13 @@ import { describe, expect, it } from "@effect/vitest"
 import { Context, DateTime, Effect, Layer } from "effect"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { ExecutionAuthority } from "../src/admission/index.ts"
+import { ExecutionAuthority } from "../src/core/admission/index.ts"
 import { Cell } from "../src/cell/index.ts"
 import {
   ActId,
   EmissionId,
   RemoveReceipt
-} from "../src/domain.ts"
+} from "../src/core/domain.ts"
 import { Hold } from "../src/Hold.ts"
 import {
   NativeFileSystem,
@@ -35,7 +35,7 @@ import {
   NodeId,
   type PlanNode,
   RequestExternalNode
-} from "../src/plan/index.ts"
+} from "../src/core/plan/index.ts"
 import {
   ProcessReceipt,
   ProcessRequest,

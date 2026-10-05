@@ -7,7 +7,7 @@ import {
   ToolDefinitionLocation,
   ToolDefinitionReadFailed,
   decodeToolDefinition
-} from "../src/tools/Definitions.ts"
+} from "../src/core/tools/Definitions.ts"
 import {
   makeFileToolDefinitionReader,
   TOOL_DEFINITION_FILE_SUFFIX

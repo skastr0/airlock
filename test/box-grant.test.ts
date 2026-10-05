@@ -7,8 +7,8 @@ import {
   decodeAndHashBoxGrant,
   decodeBoxGrant,
   hashBoxGrant
-} from "../src/admission/index.ts"
-import { NativeActionCatalog } from "../src/actions/index.ts"
+} from "../src/core/admission/index.ts"
+import { NativeActionCatalog } from "../src/core/actions/index.ts"
 
 const sha = (hex: string) => `sha256:${hex.repeat(64)}`
 

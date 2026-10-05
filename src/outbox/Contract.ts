@@ -1,5 +1,5 @@
 import { Effect, Schema } from "effect"
-import { EmissionId } from "../domain.ts"
+import { EmissionId } from "../core/domain.ts"
 
 export const OutboxState = Schema.Literals([
   "staged",

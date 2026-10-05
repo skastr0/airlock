@@ -3,7 +3,7 @@ import { BunServices } from "@effect/platform-bun"
 import { describe, expect, it } from "@effect/vitest"
 import { readFile } from "node:fs/promises"
 import * as AirlockHome from "../src/AirlockHome.ts"
-import { ActId } from "../src/domain.ts"
+import { ActId } from "../src/core/domain.ts"
 import { Hold, HoldLayer } from "../src/Hold.ts"
 import { FileLedgerLive } from "../src/host/FileLedger.ts"
 import {

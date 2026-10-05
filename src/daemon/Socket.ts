@@ -7,7 +7,7 @@ import {
   type Socket
 } from "node:net"
 import { Effect, Schema } from "effect"
-import type { BoxGrantSha256 } from "../admission/BoxGrant.ts"
+import type { BoxGrantSha256 } from "../core/admission/BoxGrant.ts"
 import {
   type DaemonHealthState,
   checkDaemonLiveness,

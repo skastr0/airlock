@@ -16,7 +16,7 @@ import {
   knownToolDefinitionLocations,
   loadKnownToolDefinitions,
   validateToolValue
-} from "../src/tools/index.ts"
+} from "../src/core/tools/index.ts"
 
 const directories = new ToolDefinitionDirectories({
   builtin: "/runtime/tools",

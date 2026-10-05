@@ -9,16 +9,16 @@ import {
   AdmissionPolicy,
   type BoxGrantVerb,
   admit
-} from "./admission/index.ts"
+} from "./core/admission/index.ts"
 import {
   NativeActionCatalog,
   type NativeActionCall as NativeActionCallValue,
   type NativeActionName,
   mapNativeActionPathSelectors,
   nativeActionSchema
-} from "./actions/index.ts"
+} from "./core/actions/index.ts"
 import { AirlockHome, layerFromEnv } from "./AirlockHome.ts"
-import { ActId, EmissionId, ScopeEscape } from "./domain.ts"
+import { ActId, EmissionId, ScopeEscape } from "./core/domain.ts"
 import { Hold } from "./Hold.ts"
 import { HoldLive } from "./HoldLive.ts"
 import { Change, ChangeLive } from "./change/Change.ts"
@@ -26,7 +26,7 @@ import { formatContent, formatInventory, formatReview } from "./change-view.ts"
 import {
   type LanguageValue,
   LanguageValueSchema
-} from "./language/evaluator.ts"
+} from "./core/language/evaluator.ts"
 import { FileLedger, FileLedgerLive } from "./host/FileLedger.ts"
 import { Cell, CellLive, CellRequest } from "./cell/index.ts"
 import { LinuxPlatform, LinuxPlatformLive } from "./platform/linux/index.ts"
@@ -59,9 +59,9 @@ import {
   ToolDefinitionDirectories,
   type ExportedToolAction,
   exportToolActions,
-  loadKnownToolDefinitions,
-  makeFileToolDefinitionReader
-} from "./tools/index.ts"
+  loadKnownToolDefinitions
+} from "./core/tools/index.ts"
+import { makeFileToolDefinitionReader } from "./tools/FileReader.ts"
 import {
   makeFileRuntimeRunJournal,
   RuntimeConfig,

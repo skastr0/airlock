@@ -19,7 +19,7 @@ import {
   type RemoveReceipt,
   ScopeEscape,
   type TargetNotFound
-} from "../domain.ts"
+} from "../core/domain.ts"
 import type { LedgerError } from "../host/FileLedger.ts"
 import { reasonOf } from "../FailureText.ts"
 

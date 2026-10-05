@@ -10,8 +10,8 @@ import {
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
 import { beforeAll, describe, expect, it } from "vitest"
-import { NativeActionCatalog } from "../src/actions/index.ts"
-import { AdmissionPolicy, BoxGrant, hashBoxGrant } from "../src/admission/index.ts"
+import { NativeActionCatalog } from "../src/core/actions/index.ts"
+import { AdmissionPolicy, BoxGrant, hashBoxGrant } from "../src/core/admission/index.ts"
 import {
   BOX_GRANT_FILE,
   BOX_GRANT_SIGNATURE_FILE,

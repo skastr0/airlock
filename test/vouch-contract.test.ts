@@ -13,18 +13,18 @@ import {
   RequirementId,
   ResourceRequirement,
   orderPlan
-} from "../src/plan/index.ts"
+} from "../src/core/plan/index.ts"
 import {
   parseSync,
   type CallExpression,
   type Expression,
   type Program,
   type Statement
-} from "../src/language/index.ts"
+} from "../src/core/language/index.ts"
 import type {
   LanguageRecord,
   LanguageValue
-} from "../src/language/evaluator.ts"
+} from "../src/core/language/evaluator.ts"
 import {
   InlineArtifact,
   ProgramActionExecutor,

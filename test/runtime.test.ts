@@ -6,7 +6,7 @@ import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSyn
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import * as AirlockHome from "../src/AirlockHome.ts"
-import type { ExecutionAuthority } from "../src/admission/index.ts"
+import type { ExecutionAuthority } from "../src/core/admission/index.ts"
 import {
   Cell,
   CellLive,
@@ -27,7 +27,7 @@ import {
 import { OutboxLive } from "../src/Outbox.ts"
 import {
   ArtifactId, CaptureNode, NodeId, RequestExternalNode, ApplyNode, InvokeNode
-} from "../src/plan/index.ts"
+} from "../src/core/plan/index.ts"
 import { ProcessReceipt, ProcessRunner, ProcessRunnerLive } from "../src/process/Process.ts"
 import {
   Runtime,

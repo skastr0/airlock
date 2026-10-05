@@ -1,5 +1,5 @@
 import { type Crypto, Deferred, Effect, Fiber, Layer, Option, Result, Schema, type Scope } from "effect"
-import { TestClock } from "effect/testing"
+import * as TestClock from "effect/testing/TestClock"
 import { Ledger, type LedgerEntry, LedgerFailed } from "../ledger/Ledger.ts"
 import { type Delivery, DispatchFailed, type DispatchRequest } from "../outbox/Dispatcher.ts"
 import { defineIntentKind } from "../outbox/Intent.ts"
