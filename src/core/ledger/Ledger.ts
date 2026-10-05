@@ -22,7 +22,13 @@ export class LedgerEntry extends Schema.Class<LedgerEntry>("LedgerEntry")({
     "cancel"
   ]),
   ref: Schema.String,
-  detail: Schema.optionalKey(Schema.String)
+  detail: Schema.optionalKey(Schema.String),
+  /**
+   * Names this entry for replay. Recording a key the ledger already holds is a
+   * successful no-op, so a writer that cannot know whether its last append
+   * landed may simply record again.
+   */
+  key: Schema.optionalKey(Schema.String)
 }) {}
 
 /**
@@ -38,7 +44,9 @@ export class LedgerFailed extends Schema.TaggedError<LedgerFailed>()("LedgerFail
 
 /**
  * Append-only receipt history. A successful `record` means the entry is
- * durable and will appear, in order, in every later `entries`.
+ * durable and will appear, in order, in every later `entries`. `record` is
+ * idempotent on `entry.key`: a keyed entry appears exactly once however many
+ * times it is recorded. An entry without a key is appended every time.
  */
 export class Ledger extends Context.Service<
   Ledger,

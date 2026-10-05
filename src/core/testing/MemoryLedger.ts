@@ -10,6 +10,10 @@ export const makeMemoryLedgerState = (): MemoryLedgerState => ({ entries: [] })
 
 export const memoryLedger = (state: MemoryLedgerState): Layer.Layer<Ledger> =>
   Layer.succeed(Ledger, Ledger.of({
-    record: (entry) => Effect.sync(() => void state.entries.push(entry)),
+    record: (entry) =>
+      Effect.sync(() => {
+        if (entry.key !== undefined && state.entries.some((held) => held.key === entry.key)) return
+        state.entries.push(entry)
+      }),
     entries: Effect.sync(() => [...state.entries])
   }))

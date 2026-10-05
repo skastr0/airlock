@@ -12,10 +12,11 @@ import { emissionId, encoded, instant, sealedDispatch, stagedRecord } from "./Fi
 export interface OutboxStoreWorld {
   readonly store: Layer.Layer<OutboxStore, unknown>
   /**
-   * Damages the stored record for `id` so that it no longer decodes. Omit only
-   * if this adapter cannot hold undecodable state at all.
+   * Damages the stored record for `id` so that it no longer decodes, the way
+   * a bad disk or a hostile writer would. Required: an adapter that cannot be
+   * shown to fail closed does not conform.
    */
-  readonly corruptRecord?: (id: EmissionId) => Effect.Effect<void, unknown>
+  readonly corruptRecord: (id: EmissionId) => Effect.Effect<void, unknown>
 }
 
 type Store = OutboxStore["Service"]
@@ -211,6 +212,22 @@ export const outboxStoreConformance = (
         holds(Option.isNone(stray), "nothing is stored")
       }))
 
+    test("marks a ledgered phase without changing state, once", () =>
+      Effect.gen(function* () {
+        const current = yield* world
+        const record = stagedRecord(1)
+        yield* session(current, (store) => store.putIfAbsent(record, sealedDispatch()))
+        const marked = yield* session(current, (store) => store.acknowledge(record.id, "stage"))
+        same([marked.state, marked.ledgered], ["staged", ["stage"]])
+        yield* session(current, (store) => store.acknowledge(record.id, "stage"))
+        const moved = yield* session(current, (store) => store.transition(record.id, "staged", committing))
+        same(moved.ledgered, ["stage"], "a transition keeps what was already ledgered")
+        const unknown = yield* session(current, (store) => Effect.flip(store.acknowledge(emissionId(9), "stage")))
+        same(unknown._tag, "UnknownEmission")
+        const reread = yield* session(current, (store) => store.read(record.id))
+        same(Option.map(reread, (found) => found.ledgered), Option.some(["stage"]))
+      }))
+
     test("lists by state", () =>
       Effect.gen(function* () {
         const current = yield* world
@@ -252,18 +269,19 @@ export const outboxStoreConformance = (
     test("fails closed on a record that no longer decodes", () =>
       Effect.gen(function* () {
         const current = yield* world
-        if (current.corruptRecord === undefined) return
         const record = stagedRecord(1)
         yield* session(current, (store) => store.putIfAbsent(record, sealedDispatch()))
         yield* current.corruptRecord(record.id)
-        const [read, listed, put, moved] = yield* session(current, (store) =>
+        const [read, listed, put, moved, marked] = yield* session(current, (store) =>
           Effect.all([
             Effect.flip(store.read(record.id)),
             Effect.flip(store.list()),
             Effect.flip(store.putIfAbsent(record, sealedDispatch())),
-            Effect.flip(store.transition(record.id, "staged", committing))
+            Effect.flip(store.transition(record.id, "staged", committing)),
+            Effect.flip(store.acknowledge(record.id, "stage"))
           ]))
-        same([read._tag, listed._tag, put._tag, moved._tag], [
+        same([read._tag, listed._tag, put._tag, moved._tag, marked._tag], [
+          "OutboxStateCorrupt",
           "OutboxStateCorrupt",
           "OutboxStateCorrupt",
           "OutboxStateCorrupt",

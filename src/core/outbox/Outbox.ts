@@ -12,13 +12,16 @@ import type { Intent, IntentKind, IntentKinds } from "./Intent.ts"
 import type { EmissionState } from "./Lifecycle.ts"
 import { OutboxStore } from "./OutboxStore.ts"
 import {
+  acknowledge,
   type DispatchAuthorization,
   DispatchProvenance,
   EmissionId,
   type EmissionRecord,
   type IdempotencyKey,
   InvalidIntent,
+  type LedgerPhase,
   OutboxStateCorrupt,
+  owedPhases,
   OutboxStoreFailed,
   type RecordIn,
   ResponseCapture,
@@ -131,14 +134,16 @@ export class EmissionDispatchUncertain extends Schema.TaggedError<EmissionDispat
 ) {}
 
 /**
- * The emission reached `status` durably but its Ledger entry did not. The
- * state is the truth; the missing receipt is what needs recovery.
+ * The emission is durably in `status` but a Ledger receipt it owes is not. The
+ * state is the truth. The kernel writes the missing receipt the next time
+ * anything loads the emission, so the remedy is to restore the Ledger and
+ * retry or restart.
  */
 export class OutboxRecoveryRequired extends Schema.TaggedError<OutboxRecoveryRequired>()(
   "OutboxRecoveryRequired",
   {
     id: EmissionId,
-    status: Schema.Literals(["staged", "committed", "cancelled"]),
+    status: Schema.Literals(["staged", "committing", "committed", "uncertain", "cancelled"]),
     reason: Schema.String
   }
 ) {}
@@ -251,11 +256,12 @@ const requestDigestOf = (
 const corrupt = (id: string, part: OutboxStateCorrupt["part"], reason: string) =>
   new OutboxStateCorrupt({ id, part, reason })
 
-const recovery = (
-  id: EmissionId,
-  status: OutboxRecoveryRequired["status"]
-) => (failure: LedgerFailed) =>
-  new OutboxRecoveryRequired({ id, status, reason: `${failure.cause}: ${failure.reason}` })
+const recovery = (record: EmissionRecord) => (failure: LedgerFailed) =>
+  new OutboxRecoveryRequired({
+    id: record.id,
+    status: record.state,
+    reason: `${failure.cause}: ${failure.reason}`
+  })
 
 /**
  * Builds one Outbox over a closed set of intent kinds. Adding a kind is
@@ -309,6 +315,64 @@ export const defineOutbox = <const Kinds extends IntentKinds>(
     const crypto = yield* Crypto.Crypto
     const withCrypto = Effect.provideService(Crypto.Crypto, crypto)
 
+    /** The Ledger entry for one phase, derived only from the stored record. */
+    const receiptFor = (record: EmissionRecord, phase: LedgerPhase) =>
+      Effect.gen(function* () {
+        const base = { effect: "emission", ref: record.id, key: `${record.id}:${phase}` } as const
+        if (phase === "stage") {
+          const kind = yield* kindOf(record)
+          const summary = yield* Schema.decodeUnknownEffect(kind.summary)(record.summary).pipe(
+            Effect.mapError((error) => corrupt(record.id, "record", `summary: ${error.message}`))
+          )
+          return new LedgerEntry({
+            ...base,
+            at: record.stagedAt,
+            act: "stage",
+            detail: `${record.kind} ${kind.target(summary)}`
+          })
+        }
+        if (phase === "commit" && record.state === "committed") {
+          const { provenance } = record
+          return new LedgerEntry({
+            ...base,
+            at: record.completedAt,
+            act: "commit",
+            detail:
+              `${record.kind} [by=${provenance.committedBy}` +
+              `${provenance.dispatchClass === undefined ? "" : ` class=${provenance.dispatchClass}`}` +
+              `${provenance.grantId === undefined ? "" : ` grant=${provenance.grantId}`}` +
+              `${provenance.grantSelector === undefined ? "" : ` selector=${provenance.grantSelector}`}]`
+          })
+        }
+        if (phase === "cancel" && record.state === "cancelled") {
+          return new LedgerEntry({ ...base, at: record.cancelledAt, act: "cancel" })
+        }
+        return yield* corrupt(record.id, "record", `a ${record.state} emission owes no ${phase} receipt`)
+      })
+
+    /**
+     * Writes every receipt the record's state owes and has not yet durably
+     * recorded, then marks it. The Ledger is idempotent on the entry key, so a
+     * crash between the append and the mark costs one repeated, harmless
+     * append: the Ledger converges to exactly one entry per phase.
+     */
+    const settleReceipts = <Record extends EmissionRecord>(
+      record: Record
+    ): Effect.Effect<Record, OutboxRecoveryRequired | OutboxStoreFailed | OutboxStateCorrupt> =>
+      Effect.gen(function* () {
+        let settled = record
+        for (const phase of owedPhases(record)) {
+          if (settled.ledgered.includes(phase)) continue
+          yield* ledger.record(yield* receiptFor(settled, phase)).pipe(Effect.mapError(recovery(settled)))
+          yield* store.acknowledge(record.id, phase).pipe(
+            Effect.catchTag("UnknownEmission", () =>
+              Effect.fail(corrupt(record.id, "record", "emission vanished while its receipt was recorded")))
+          )
+          settled = acknowledge(settled, phase)
+        }
+        return settled
+      })
+
     // A durable `committing` means a dispatch may have begun before a previous
     // runtime stopped. The only honest settlement is `uncertain`.
     yield* store.exclusive(
@@ -325,6 +389,14 @@ export const defineOutbox = <const Kinds extends IntentKinds>(
             }).pipe(
               Effect.catchTag(["UnknownEmission", "TransitionConflict"], () => Effect.void)
             ),
+          { discard: true }
+        )
+        // Receipts a previous runtime did not get to write. A Ledger that is
+        // still down does not stop startup: every later path that loads one
+        // of these emissions settles its receipts before acting.
+        yield* Effect.forEach(
+          yield* store.list(),
+          (record) => settleReceipts(record).pipe(Effect.catchTag("OutboxRecoveryRequired", () => Effect.void)),
           { discard: true }
         )
       })
@@ -412,29 +484,26 @@ export const defineOutbox = <const Kinds extends IntentKinds>(
         summary: encodedSummary,
         stagedAt,
         holdUntil: DateTime.add(stagedAt, { milliseconds: request.holdMillis }),
-        ...(request.authorization === undefined ? {} : { authorization: request.authorization })
+        ...(request.authorization === undefined ? {} : { authorization: request.authorization }),
+        ledgered: []
       })
       // Publishing the record and publishing its receipt are one cancellation
       // boundary: an interrupt cannot leave a staged emission the caller was
       // never told about.
       return yield* Effect.uninterruptible(
         Effect.gen(function* () {
-          const put = yield* store.exclusive(
-            store.putIfAbsent(record, new SealedDispatch({ digest: dispatchDigest, canonical }))
+          return yield* store.exclusive(
+            Effect.gen(function* () {
+              const put = yield* store.putIfAbsent(
+                record,
+                new SealedDispatch({ digest: dispatchDigest, canonical })
+              )
+              if (put.record.requestDigest !== requestDigest) {
+                return yield* new IdempotencyConflict({ id, key: request.key })
+              }
+              return yield* view(yield* settleReceipts(put.record))
+            })
           )
-          if (put.record.requestDigest !== requestDigest) {
-            return yield* new IdempotencyConflict({ id, key: request.key })
-          }
-          if (put.created) {
-            yield* ledger.record(new LedgerEntry({
-              at: stagedAt,
-              effect: "emission",
-              act: "stage",
-              ref: id,
-              detail: `${tag} ${target}`
-            })).pipe(Effect.mapError(recovery(id, "staged")))
-          }
-          return yield* view(put.record)
         })
       )
     })
@@ -462,7 +531,7 @@ export const defineOutbox = <const Kinds extends IntentKinds>(
     ) {
       return yield* store.exclusive(Effect.uninterruptibleMask((restore) =>
         Effect.gen(function* () {
-          const staged = yield* existing(id)
+          const staged = yield* Effect.flatMap(existing(id), settleReceipts)
           if (staged.state !== "staged") {
             return yield* new EmissionNotPending({ id, state: staged.state })
           }
@@ -538,18 +607,7 @@ export const defineOutbox = <const Kinds extends IntentKinds>(
             ),
             Effect.catch(() => settleUncertain(id, "persistence-failed-after-dispatch"))
           )
-          yield* ledger.record(new LedgerEntry({
-            at: completedAt,
-            effect: "emission",
-            act: "commit",
-            ref: id,
-            detail:
-              `${tag} [by=${provenance.committedBy}` +
-              `${provenance.dispatchClass === undefined ? "" : ` class=${provenance.dispatchClass}`}` +
-              `${provenance.grantId === undefined ? "" : ` grant=${provenance.grantId}`}` +
-              `${provenance.grantSelector === undefined ? "" : ` selector=${provenance.grantSelector}`}]`
-          })).pipe(Effect.mapError(recovery(id, "committed")))
-          return yield* view(committed)
+          return yield* view(yield* settleReceipts(committed))
         })
       ))
     })
@@ -557,7 +615,7 @@ export const defineOutbox = <const Kinds extends IntentKinds>(
     const cancel: OutboxService<Kinds>["cancel"] = Effect.fn("Outbox.cancel")(function* (id) {
       return yield* store.exclusive(Effect.uninterruptible(
         Effect.gen(function* () {
-          const staged = yield* existing(id)
+          const staged = yield* Effect.flatMap(existing(id), settleReceipts)
           if (staged.state !== "staged") {
             return yield* new EmissionNotPending({ id, state: staged.state })
           }
@@ -569,13 +627,7 @@ export const defineOutbox = <const Kinds extends IntentKinds>(
             Effect.catchTag("TransitionConflict", (conflict) =>
               Effect.fail(new EmissionNotPending({ id, state: conflict.actual })))
           )
-          yield* ledger.record(new LedgerEntry({
-            at: cancelledAt,
-            effect: "emission",
-            act: "cancel",
-            ref: id
-          })).pipe(Effect.mapError(recovery(id, "cancelled")))
-          return yield* view(cancelled)
+          return yield* view(yield* settleReceipts(cancelled))
         })
       ))
     })

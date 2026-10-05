@@ -49,6 +49,28 @@ export const ledgerConformance = (
         same(entries.map((found) => found.at.toString()), [1, 2, 3, 4].map((n) => instant(n).toString()))
       }))
 
+    test("records a keyed entry exactly once, however often it is recorded", () =>
+      Effect.gen(function* () {
+        const current = yield* world
+        const keyed = (n: number, key: string) => new LedgerEntry({ ...entry(n), key })
+        yield* session(current, (ledger) =>
+          Effect.forEach(
+            [keyed(1, "emi:stage"), keyed(1, "emi:stage"), entry(2), entry(2), keyed(3, "emi:commit")],
+            (item) => ledger.record(item),
+            { discard: true }
+          ))
+        // A writer that crashed before learning its append landed records again.
+        yield* session(current, (ledger) =>
+          Effect.all(
+            Array.from({ length: 6 }, (_, index) =>
+              ledger.record(keyed(index % 2 === 0 ? 1 : 3, index % 2 === 0 ? "emi:stage" : "emi:commit"))),
+            { concurrency: "unbounded", discard: true }
+          ))
+        const entries = yield* session(current, (ledger) => ledger.entries)
+        same(refs(entries), ["ref-1", "ref-2", "ref-2", "ref-3"])
+        same(entries.map((found) => found.key), ["emi:stage", undefined, undefined, "emi:commit"])
+      }))
+
     test("loses no entry under concurrent recording", () =>
       Effect.gen(function* () {
         const current = yield* world

@@ -1,11 +1,12 @@
 import { describe, it } from "@effect/vitest"
 import { Effect } from "effect"
-import { SealedDispatch, WebCrypto } from "../src/core/index.ts"
+import { WebCrypto } from "../src/core/index.ts"
 import {
   ledgerConformance,
   makeMemoryLedgerState,
   makeMemoryOutboxState,
   memoryLedger,
+  memoryOutboxFaults,
   memoryOutboxStore,
   outboxConformance,
   outboxStoreConformance
@@ -16,7 +17,10 @@ const runner = { describe, test: it.effect }
 outboxStoreConformance(
   runner,
   "in-memory reference adapter",
-  Effect.sync(() => ({ store: memoryOutboxStore(makeMemoryOutboxState()) }))
+  Effect.sync(() => {
+    const state = makeMemoryOutboxState()
+    return { store: memoryOutboxStore(state), ...memoryOutboxFaults(state) }
+  })
 )
 
 ledgerConformance(
@@ -29,21 +33,12 @@ outboxConformance(
   runner,
   "in-memory reference adapters",
   Effect.sync(() => {
-    const outbox = makeMemoryOutboxState()
+    const state = makeMemoryOutboxState()
     return {
-      store: memoryOutboxStore(outbox),
+      store: memoryOutboxStore(state),
       ledger: memoryLedger(makeMemoryLedgerState()),
       crypto: WebCrypto.layer,
-      tamperDispatch: (id) =>
-        Effect.sync(() => {
-          const sealed = outbox.dispatches.get(id)
-          if (sealed !== undefined) {
-            outbox.dispatches.set(id, new SealedDispatch({
-              digest: sealed.digest,
-              canonical: sealed.canonical.replace("hello", "HELLO")
-            }))
-          }
-        })
+      ...memoryOutboxFaults(state)
     }
   })
 )

@@ -7,6 +7,7 @@ export { ledgerConformance, type LedgerWorld } from "./LedgerConformance.ts"
 export { makeMemoryLedgerState, type MemoryLedgerState, memoryLedger } from "./MemoryLedger.ts"
 export {
   makeMemoryOutboxState,
+  memoryOutboxFaults,
   type MemoryOutboxState,
   memoryOutboxStore
 } from "./MemoryOutboxStore.ts"

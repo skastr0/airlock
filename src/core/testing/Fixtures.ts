@@ -23,7 +23,8 @@ export const stagedRecord = (n: number, summary: Schema.Json = { n }) =>
     requestDigest: digestOf("b"),
     summary,
     stagedAt: instant(n),
-    holdUntil: instant(n + 1_000)
+    holdUntil: instant(n + 1_000),
+    ledgered: []
   })
 
 export const sealedDispatch = (canonical = "{\"n\":1}") =>

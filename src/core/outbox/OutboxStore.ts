@@ -4,6 +4,7 @@ import type {
   Arrival,
   EmissionId,
   EmissionRecord,
+  LedgerPhase,
   OutboxStateCorrupt,
   OutboxStoreFailed,
   RecordIn,
@@ -65,6 +66,14 @@ export class OutboxStore extends Context.Service<
       RecordIn<To["state"]>,
       UnknownEmission | TransitionConflict | OutboxStoreFailed | OutboxStateCorrupt
     >
+    /**
+     * Marks one Ledger phase as durably recorded, persisting
+     * `acknowledge(record, phase)`. It changes no state and is idempotent.
+     */
+    readonly acknowledge: (
+      id: EmissionId,
+      phase: LedgerPhase
+    ) => Effect.Effect<EmissionRecord, UnknownEmission | OutboxStoreFailed | OutboxStateCorrupt>
     /** The bounded response blob of a committed emission. */
     readonly readResponse: (
       id: EmissionId

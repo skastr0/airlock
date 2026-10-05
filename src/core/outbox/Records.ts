@@ -59,6 +59,14 @@ export class ResponseCapture extends Schema.Class<ResponseCapture>("ResponseCapt
   limitBytes: Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))
 }) {}
 
+/**
+ * The receipts an emission owes the Ledger. `stage` is owed from the moment it
+ * is stored; `commit` or `cancel` once it settles that way. An uncertain
+ * emission owes no further receipt: there is no outcome to attest.
+ */
+export const LedgerPhase = Schema.Literals(["stage", "commit", "cancel"])
+export type LedgerPhase = typeof LedgerPhase.Type
+
 export const UncertainReason = Schema.Literals([
   "dispatch-failed",
   "dispatch-timed-out",
@@ -83,7 +91,13 @@ const identity = {
   summary: Schema.Json,
   stagedAt: Schema.DateTimeUtcFromString,
   holdUntil: Schema.DateTimeUtcFromString,
-  authorization: Schema.optionalKey(DispatchAuthorization)
+  authorization: Schema.optionalKey(DispatchAuthorization),
+  /**
+   * The phases whose Ledger entry is known to be durable. A phase the state
+   * owes that is missing here is recorded before the kernel does anything
+   * else with the emission.
+   */
+  ledgered: Schema.Array(LedgerPhase)
 }
 
 const committing = {
@@ -167,7 +181,8 @@ const identityOf = (record: EmissionRecord) => ({
   summary: record.summary,
   stagedAt: record.stagedAt,
   holdUntil: record.holdUntil,
-  ...(record.authorization === undefined ? {} : { authorization: record.authorization })
+  ...(record.authorization === undefined ? {} : { authorization: record.authorization }),
+  ledgered: record.ledgered
 })
 
 const build = (
@@ -229,6 +244,54 @@ export const advance = <From extends ActiveState, const To extends Arrival<Next<
   // `build` returns the variant named by `arrival.state`; the generic return
   // type restates that correlation, which a switch cannot carry.
   return build(record, arrival) as Result.Result<RecordIn<To["state"]>, TransitionConflict>
+}
+
+/** The phases a record's state owes the Ledger, in the order they happened. */
+export const owedPhases = (record: EmissionRecord): ReadonlyArray<LedgerPhase> =>
+  record.state === "committed"
+    ? ["stage", "commit"]
+    : record.state === "cancelled"
+      ? ["stage", "cancel"]
+      : ["stage"]
+
+/**
+ * The record with `phase` marked as ledgered. Like `advance`, a store persists
+ * exactly this; marking a phase twice changes nothing.
+ */
+export const acknowledge = <Record extends EmissionRecord>(record: Record, phase: LedgerPhase): Record => {
+  if (record.ledgered.includes(phase)) return record
+  const ledgered = [...record.ledgered, phase]
+  switch (record.state) {
+    case "staged": return new StagedEmission({ ...identityOf(record), ledgered }) as Record
+    case "cancelled":
+      return new CancelledEmission({ ...identityOf(record), ledgered, cancelledAt: record.cancelledAt }) as Record
+    case "committing":
+      return new CommittingEmission({
+        ...identityOf(record),
+        ledgered,
+        provenance: record.provenance,
+        committingAt: record.committingAt
+      }) as Record
+    case "committed":
+      return new CommittedEmission({
+        ...identityOf(record),
+        ledgered,
+        provenance: record.provenance,
+        committingAt: record.committingAt,
+        outcome: record.outcome,
+        capture: record.capture,
+        completedAt: record.completedAt
+      }) as Record
+    case "uncertain":
+      return new UncertainEmission({
+        ...identityOf(record),
+        ledgered,
+        provenance: record.provenance,
+        committingAt: record.committingAt,
+        reason: record.reason,
+        uncertainAt: record.uncertainAt
+      }) as Record
+  }
 }
 
 // ── errors ──────────────────────────────────────────────────────────────────

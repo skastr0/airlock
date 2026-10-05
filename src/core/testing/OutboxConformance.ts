@@ -32,10 +32,12 @@ export interface OutboxWorld {
   readonly crypto: Layer.Layer<Crypto.Crypto, unknown>
   /**
    * Replaces the sealed dispatch stored for `id` with different bytes, the way
-   * an attacker with write access to the store would. Omit only if this
-   * adapter gives nothing that power.
+   * an attacker with write access to the store would. Required: an adapter
+   * that cannot be shown to fail closed does not conform.
    */
-  readonly tamperDispatch?: (id: EmissionId) => Effect.Effect<void, unknown>
+  readonly tamperDispatch: (id: EmissionId) => Effect.Effect<void, unknown>
+  /** Damages the stored record for `id` so that it no longer decodes. Required. */
+  readonly corruptRecord: (id: EmissionId) => Effect.Effect<void, unknown>
 }
 
 // ── a kind and a wire the suite controls ────────────────────────────────────
@@ -116,7 +118,8 @@ export const outboxConformance = (
     current: OutboxWorld,
     wire: Wire,
     body: (outbox: Outbox, store: OutboxStore["Service"], ledger: Ledger["Service"]) => Effect.Effect<A, E>,
-    ledger: Layer.Layer<Ledger, unknown> = current.ledger
+    ledger: Layer.Layer<Ledger, unknown> = current.ledger,
+    store: Layer.Layer<OutboxStore, unknown> = current.store
   ) =>
     Effect.gen(function* () {
       return yield* body(yield* probes.Outbox, yield* OutboxStore, yield* Ledger)
@@ -125,7 +128,7 @@ export const outboxConformance = (
         probes.layer.pipe(
           Layer.provideMerge(
             Layer.mergeAll(
-              current.store,
+              store,
               ledger,
               current.crypto,
               Layer.succeed(probes.Dispatcher, { probe: wire })
@@ -461,10 +464,112 @@ export const outboxConformance = (
         same(calls.length, 0)
       }))
 
+    timed("a record that no longer decodes stops every operation on it, and sends nothing", () =>
+      Effect.gen(function* () {
+        const current = yield* world
+        const { calls, wire } = recordingWire()
+        const staged = yield* session(current, wire, (outbox) => outbox.stage(request("a")))
+        yield* current.corruptRecord(staged.id)
+        const failures = yield* session(current, wire, (outbox) =>
+          Effect.all([
+            Effect.flip(outbox.inspect(staged.id)),
+            Effect.flip(outbox.commit(staged.id, bySupervisor)),
+            Effect.flip(outbox.cancel(staged.id)),
+            Effect.flip(outbox.stage(request("a"))),
+            Effect.flip(outbox.pending),
+            Effect.flip(outbox.flush)
+          ])).pipe(Effect.result)
+        // Either the kernel starts and refuses each operation, or it refuses to
+        // start at all. Both are closed; neither reaches the wire.
+        if (Result.isSuccess(failures)) {
+          same(failures.success.map((failure) => failure._tag), [
+            "OutboxStateCorrupt",
+            "OutboxStateCorrupt",
+            "OutboxStateCorrupt",
+            "OutboxStateCorrupt",
+            "OutboxStateCorrupt",
+            "OutboxStateCorrupt"
+          ])
+        }
+        same(calls.length, 0)
+      }))
+
+    timed("the Ledger converges to one entry per phase whichever write is lost", () =>
+      Effect.gen(function* () {
+        const expected = (a: EmissionId, b: EmissionId) =>
+          [`cancel:${b}`, `commit:${a}`, `stage:${a}`, `stage:${b}`]
+
+        /** One full history, a restart between every step, with one injected fault. */
+        const history = (fault: { readonly ledgerCall?: number; readonly acknowledgeCall?: number }) =>
+          Effect.gen(function* () {
+            const current = yield* world
+            const { calls, wire } = recordingWire()
+            let ledgerCalls = 0
+            let acknowledgeCalls = 0
+            // The append is lost: the Ledger fails once, at the chosen call.
+            const ledger = Layer.effect(
+              Ledger,
+              Effect.map(Ledger, (inner) =>
+                Ledger.of({
+                  entries: inner.entries,
+                  record: (entry) =>
+                    ledgerCalls++ === fault.ledgerCall
+                      ? Effect.fail(new LedgerFailed({ operation: "record", cause: "Injected", reason: "lost append" }))
+                      : inner.record(entry)
+                }))
+            ).pipe(Layer.provide(current.ledger))
+            // The append lands but the process dies before it is marked.
+            const store = Layer.effect(
+              OutboxStore,
+              Effect.map(OutboxStore, (inner) =>
+                OutboxStore.of({
+                  ...inner,
+                  acknowledge: (id, phase) =>
+                    acknowledgeCalls++ === fault.acknowledgeCall
+                      ? Effect.die("process died after the Ledger append")
+                      : inner.acknowledge(id, phase)
+                }))
+            ).pipe(Layer.provide(current.store))
+
+            const step = <A, E>(body: (outbox: Outbox) => Effect.Effect<A, E>) =>
+              session(current, wire, body, ledger, store).pipe(Effect.exit)
+            yield* step((outbox) => outbox.stage(request("a")))
+            yield* step((outbox) => Effect.flatMap(outbox.stage(request("a")), (a) => outbox.commit(a.id, bySupervisor)))
+            yield* step((outbox) => outbox.stage(request("b", "bye", 60_000)))
+            yield* step((outbox) => Effect.flatMap(outbox.stage(request("b", "bye", 60_000)), (b) => outbox.cancel(b.id)))
+
+            // A healthy restart, and each emission is loaded once more.
+            const [a, b, entries] = yield* session(current, wire, (outbox, _, healthy) =>
+              Effect.all([
+                outbox.stage(request("a")),
+                outbox.stage(request("b", "bye", 60_000)),
+                healthy.entries
+              ]))
+            const settled = yield* session(current, wire, (_, __, healthy) => healthy.entries)
+            return { a, b, entries: acts(settled), early: acts(entries), calls: calls.length, ledgerCalls, acknowledgeCalls }
+          })
+
+        const clean = yield* history({})
+        same([clean.a.state, clean.b.state], ["committed", "cancelled"])
+        same([...clean.entries].sort(), expected(clean.a.id, clean.b.id))
+        same(clean.calls, 1)
+        holds(clean.ledgerCalls >= 4 && clean.acknowledgeCalls >= 4, "the history exercises every receipt")
+
+        for (let call = 0; call < clean.ledgerCalls; call++) {
+          const run = yield* history({ ledgerCall: call })
+          same([...run.entries].sort(), expected(run.a.id, run.b.id), `Ledger append ${call} lost`)
+          same([run.a.state, run.b.state, run.calls], ["committed", "cancelled", 1], `Ledger append ${call} lost`)
+        }
+        for (let call = 0; call < clean.acknowledgeCalls; call++) {
+          const run = yield* history({ acknowledgeCall: call })
+          same([...run.entries].sort(), expected(run.a.id, run.b.id), `mark ${call} lost`)
+          same([run.a.state, run.b.state, run.calls], ["committed", "cancelled", 1], `mark ${call} lost`)
+        }
+      }))
+
     timed("a substituted dispatch is refused before anything becomes irreversible", () =>
       Effect.gen(function* () {
         const current = yield* world
-        if (current.tamperDispatch === undefined) return
         const { calls, wire } = recordingWire()
         const staged = yield* session(current, wire, (outbox) => outbox.stage(request("a")))
         yield* current.tamperDispatch(staged.id)
