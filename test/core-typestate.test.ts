@@ -1,9 +1,12 @@
 import { describe, expect, it } from "@effect/vitest"
 import { Effect, Layer, Result, Schema } from "effect"
 import {
+  Admission,
   Canonical,
   defineIntentKind,
   defineOutbox,
+  defineToolContract,
+  type Emission,
   type DispatchPermit,
   DispatchProvenance,
   EmissionId,
@@ -11,9 +14,17 @@ import {
   isLegalTransition,
   isLivePermit,
   type Next,
+  type OutboxService,
   OutboxStore,
   WebCrypto
 } from "../src/core/index.ts"
+import {
+  exampleContracts,
+  LabelAdd,
+  LabelRemove,
+  MailList,
+  MailSend
+} from "../src/core/testing/ExampleContracts.ts"
 import { digestOf, emissionId, instant } from "../src/core/testing/Fixtures.ts"
 
 /**
@@ -79,6 +90,77 @@ describe("core: what the types rule out", () => {
       ping: () => Effect.succeed({ outcome: { ok: true }, response: new Uint8Array(0), truncated: false })
     })
     expect([Layer.isLayer(missing), Layer.isLayer(total)]).toEqual([true, true])
+  })
+
+  it("requires a handler for every tool contract", () => {
+    const tools = defineOutbox(exampleContracts)
+    const done = <Outcome>(outcome: Outcome) =>
+      Effect.succeed({ outcome, response: new Uint8Array(0), truncated: false })
+    // @ts-expect-error label.remove has no handler
+    const missing = Layer.succeed(tools.Dispatcher, {
+      "mail.list": () => done({ ids: [] }),
+      "mail.send": () => done({ messageId: "m" }),
+      "label.add": () => done({ added: true })
+    })
+    const mistyped = Layer.succeed(tools.Dispatcher, {
+      "mail.list": () => done({ ids: [] }),
+      "mail.send": () => done({ messageId: "m" }),
+      "label.add": () => done({ added: true }),
+      // @ts-expect-error a handler must return its own tool's outcome
+      "label.remove": () => done({ added: true })
+    })
+    expect([Layer.isLayer(missing), Layer.isLayer(mistyped)]).toEqual([true, true])
+  })
+
+  it("accepts a compensation only toward a declared tool, with that tool's input", () => {
+    // @ts-expect-error the answering contract label.remove is not in this registry
+    expect(() => defineOutbox({ "label.add": LabelAdd, "mail.list": MailList })).toThrow()
+    const Wrong = () =>
+      defineToolContract({
+        name: "label.add.wrong",
+        version: "1",
+        input: Schema.Struct({ messageId: Schema.String, label: Schema.String }),
+        output: Schema.Struct({ added: Schema.Boolean }),
+        compensate: {
+          with: LabelRemove,
+          // @ts-expect-error label.remove takes a messageId and a label, not a recipient
+          intent: ({ dispatch }) => ({ to: dispatch.messageId })
+        }
+      })
+    expect(typeof Wrong).toBe("function")
+  })
+
+  it("accepts for compensation only a committed emission of an answerable tool", () => {
+    const tools = defineOutbox(exampleContracts)
+    type Service = OutboxService<typeof tools.kinds>
+    const program = (
+      outbox: Service,
+      addStaged: Emission<Pick<typeof tools.kinds, "label.add">, "staged">,
+      addCommitted: Emission<Pick<typeof tools.kinds, "label.add">, "committed">,
+      sendCommitted: Emission<Pick<typeof tools.kinds, "mail.send">, "committed">,
+      removeCommitted: Emission<Pick<typeof tools.kinds, "label.remove">, "committed">
+    ) =>
+      Effect.all([
+        outbox.compensate(addCommitted, { holdMillis: 0 }),
+        // @ts-expect-error a staged emission has nothing to answer
+        outbox.compensate(addStaged, { holdMillis: 0 }),
+        // @ts-expect-error mail.send declares no compensation: it is irreversible
+        outbox.compensate(sendCommitted, { holdMillis: 0 }),
+        // @ts-expect-error label.remove declares no compensation of its own
+        outbox.compensate(removeCommitted, { holdMillis: 0 })
+      ])
+    expect(typeof program).toBe("function")
+  })
+
+  it("lets a grant name only a tool's public fields", () => {
+    const allowed = Admission.toolGrant(MailSend, { where: { to: { endsWith: "@example.com" } } })
+    // @ts-expect-error body is private: no grant can see or constrain it
+    const denied = Admission.toolGrant(MailSend, { where: { body: { equals: "x" } } })
+    expect(Admission.validateToolGrants([allowed], exampleContracts)).toBeUndefined()
+    // Built past the types, it still fails closed.
+    expect(Admission.validateToolGrants([denied], exampleContracts)?.field).toBe(
+      "policy.toolGrants[0].where.body"
+    )
   })
 
   it("gives no module outside the kernel a way to make a live permit", () => {

@@ -6,6 +6,11 @@
 export * as Actions from "./actions/index.ts"
 export * as Admission from "./admission/index.ts"
 export * as Canonical from "./Canonical.ts"
+export {
+  defineToolContract,
+  type ToolContract,
+  ToolSummary
+} from "./contract/ToolContract.ts"
 export * as Hold from "./domain.ts"
 export * as Labels from "./labels/index.ts"
 export * as Language from "./language/index.ts"
@@ -21,7 +26,16 @@ export {
   type DispatchRequest
 } from "./outbox/Dispatcher.ts"
 export { HttpDispatch, HttpIntent, HttpMethod, HttpOutcome, HttpSummary } from "./outbox/HttpIntent.ts"
-export { defineIntentKind, type Intent, type IntentKind, type IntentKinds } from "./outbox/Intent.ts"
+export {
+  type ClosedUnderCompensation,
+  type CompensableTag,
+  type Compensation,
+  compensateWith,
+  defineIntentKind,
+  type Intent,
+  type IntentKind,
+  type IntentKinds
+} from "./outbox/Intent.ts"
 export {
   type ActiveState,
   EmissionState,
@@ -34,6 +48,7 @@ export {
 export {
   type CancelError,
   type CommitError,
+  type CompensateError,
   defineOutbox,
   DISPATCH_TIMEOUT_MILLIS,
   type DispatcherOf,
@@ -46,10 +61,13 @@ export {
   InvalidDispatchAuthorization,
   InvalidHoldDuration,
   isLivePermit,
+  NotCompensable,
   type OutboxDefinition,
   type OutboxOf,
   OutboxRecoveryRequired,
   type OutboxService,
+  type Performed,
+  type PerformError,
   type ReadError,
   RESPONSE_LIMIT_BYTES,
   type StageError,

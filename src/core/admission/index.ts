@@ -10,3 +10,6 @@ export * from "./DispatchPolicy.ts"
 // The supervisor-plane answer to "which staged nodes may commit without a
 // further human act", shaped so no consumer can widen or re-derive a class.
 export * from "./SupervisorDispatch.ts"
+// Grants for typed tool contracts: a tool, a class, and conditions on the
+// fields its contract declares public.
+export * from "./ToolGrant.ts"

@@ -3,6 +3,7 @@
  * by passing the suite for its port.
  */
 export { holds, InvariantViolated, type Runner, same } from "./Check.ts"
+export { exampleContracts, LabelAdd, LabelRemove, MailList, MailSend } from "./ExampleContracts.ts"
 export { ledgerConformance, type LedgerWorld } from "./LedgerConformance.ts"
 export { makeMemoryLedgerState, type MemoryLedgerState, memoryLedger } from "./MemoryLedger.ts"
 export {

@@ -1,7 +1,13 @@
 import { type Crypto, Deferred, Effect, Fiber, Layer, Option, Result, Schema, type Scope } from "effect"
 import * as TestClock from "effect/testing/TestClock"
 import { Ledger, type LedgerEntry, LedgerFailed } from "../ledger/Ledger.ts"
-import { type Delivery, DispatchFailed, DispatchRefused, type DispatchRequest } from "../outbox/Dispatcher.ts"
+import {
+  type Delivery,
+  DispatchFailed,
+  type DispatchHandlers,
+  DispatchRefused,
+  type DispatchRequest
+} from "../outbox/Dispatcher.ts"
 import { defineIntentKind } from "../outbox/Intent.ts"
 import {
   defineOutbox,
@@ -20,6 +26,7 @@ import {
   InvalidIntent
 } from "../outbox/Records.ts"
 import { holds, type Runner, same } from "./Check.ts"
+import { exampleContracts } from "./ExampleContracts.ts"
 import { digestOf, encoded, instant } from "./Fixtures.ts"
 
 /**
@@ -93,6 +100,46 @@ const recordingWire = (wire: Wire = echo) => {
   }
 }
 
+// ── tool contracts, declared outside the kernel ─────────────────────────────
+
+const tools = defineOutbox(exampleContracts)
+type Tools = OutboxService<typeof tools.kinds>
+type ToolHandlers = DispatchHandlers<typeof tools.kinds>
+
+/** A wire for the example contracts that records every call it receives. */
+const toolWire = (overrides: Partial<ToolHandlers> = {}) => {
+  const calls: Array<{ readonly tool: string; readonly input: unknown }> = []
+  const reply = <Outcome>(outcome: Outcome, body: string) =>
+    Effect.succeed({ outcome, response: encoder.encode(body), truncated: false })
+  const defaults: ToolHandlers = {
+    "mail.list": (request) =>
+      reply({ ids: [`m-${calls.length}`, request.dispatch.mailbox] }, `listing ${calls.length}`),
+    "mail.send": () => reply({ messageId: "sent-1" }, "sent"),
+    "label.add": () => reply({ added: true }, "added"),
+    "label.remove": () => reply({ removed: true }, "removed")
+  }
+  const wire = { ...defaults, ...overrides }
+  const handlers: ToolHandlers = {
+    "mail.list": (request) => {
+      calls.push({ tool: "mail.list", input: request.dispatch })
+      return wire["mail.list"](request)
+    },
+    "mail.send": (request) => {
+      calls.push({ tool: "mail.send", input: request.dispatch })
+      return wire["mail.send"](request)
+    },
+    "label.add": (request) => {
+      calls.push({ tool: "label.add", input: request.dispatch })
+      return wire["label.add"](request)
+    },
+    "label.remove": (request) => {
+      calls.push({ tool: "label.remove", input: request.dispatch })
+      return wire["label.remove"](request)
+    }
+  }
+  return { calls, handlers }
+}
+
 const bySupervisor = new DispatchProvenance({ committedBy: "supervisor" })
 const key = (name: string) => IdempotencyKey.make(name)
 const request = (name: string, payload = "hello", holdMillis = 0) => ({
@@ -133,6 +180,29 @@ export const outboxConformance = (
               ledger,
               current.crypto,
               Layer.succeed(probes.Dispatcher, { probe: wire })
+            )
+          )
+        )
+      )
+    )
+
+  /** One process lifetime of the tool-contract Outbox over the same world. */
+  const toolSession = <A, E>(
+    current: OutboxWorld,
+    handlers: ToolHandlers,
+    body: (outbox: Tools, store: OutboxStore["Service"], ledger: Ledger["Service"]) => Effect.Effect<A, E>
+  ) =>
+    Effect.gen(function* () {
+      return yield* body(yield* tools.Outbox, yield* OutboxStore, yield* Ledger)
+    }).pipe(
+      Effect.provide(
+        tools.layer.pipe(
+          Layer.provideMerge(
+            Layer.mergeAll(
+              current.store,
+              current.ledger,
+              current.crypto,
+              Layer.succeed(tools.Dispatcher, handlers)
             )
           )
         )
@@ -528,6 +598,190 @@ export const outboxConformance = (
         same(mine[0]?.authorization?.grantId, "grant/read")
         same(other.length, 0)
         same(calls.length, 0)
+      }))
+
+    timed("a tool call is summarized by names, sizes and public fields, never private values", () =>
+      Effect.gen(function* () {
+        const current = yield* world
+        const { calls, handlers } = toolWire()
+        const staged = yield* toolSession(current, handlers, (outbox) =>
+          outbox.stage({
+            key: key("send-1"),
+            intent: {
+              kind: "mail.send",
+              dispatch: { to: "ada@example.com", subject: "quarterly numbers", body: "the secret figures" }
+            },
+            holdMillis: 0
+          }))
+        same(staged.kind === "mail.send" ? staged.summary : staged.kind, {
+          tool: "mail.send",
+          version: "1",
+          target: "tool:mail.send",
+          fields: ["body", "subject", "to"],
+          inputBytes: 82,
+          public: { to: "ada@example.com" }
+        })
+        const [record, entries] = yield* toolSession(current, handlers, (_, store, ledger) =>
+          Effect.all([store.read(staged.id), ledger.entries]))
+        const visible = JSON.stringify([staged, Option.map(record, encoded), entries])
+        holds(visible.includes("ada@example.com"), "a public field is visible")
+        holds(!visible.includes("quarterly numbers"), "a private field never leaves the sealed dispatch")
+        holds(!visible.includes("the secret figures"), "a private field never leaves the sealed dispatch")
+        same(calls.length, 0)
+      }))
+
+    timed("a recorded read returns the same outcome and bytes on every replay, with one dispatch", () =>
+      Effect.gen(function* () {
+        const current = yield* world
+        const { calls, handlers } = toolWire()
+        const read = {
+          key: key("guest-run-7/step-3"),
+          intent: { kind: "mail.list", dispatch: { mailbox: "inbox", query: "from:ada" } },
+          holdMillis: 0
+        } as const
+        const provenance = new DispatchProvenance({ committedBy: "policy-auto", dispatchClass: "read" })
+        const first = yield* toolSession(current, handlers, (outbox) => outbox.perform(read, provenance))
+        same(first.emission.outcome, { ids: ["m-1", "inbox"] })
+        same(new TextDecoder().decode(first.response), "listing 1")
+
+        // A re-executed caller, after a restart, asks again under the same key.
+        const replay = yield* toolSession(current, handlers, (outbox) => outbox.perform(read, provenance))
+        const again = yield* toolSession(current, handlers, (outbox) =>
+          Effect.all([outbox.perform(read, provenance), outbox.perform(read, provenance)], {
+            concurrency: "unbounded"
+          }))
+        for (const performed of [replay, ...again]) {
+          same(performed.emission.id, first.emission.id)
+          same(performed.emission.outcome, first.emission.outcome)
+          same([...performed.response], [...first.response])
+        }
+        same(calls.length, 1, "exactly one dispatch")
+
+        // The key records one act. Asking it for something else is refused.
+        const different = yield* toolSession(current, handlers, (outbox) =>
+          Effect.flip(outbox.perform(
+            { ...read, intent: { kind: "mail.list", dispatch: { mailbox: "inbox", query: "from:bob" } } },
+            provenance
+          )))
+        same(different._tag, "IdempotencyConflict")
+        same(calls.length, 1)
+      }))
+
+    timed("perform races to one dispatch and replays a failed act as failed", () =>
+      Effect.gen(function* () {
+        const current = yield* world
+        const { calls, handlers } = toolWire()
+        const read = (name: string) => ({
+          key: key(name),
+          intent: { kind: "mail.list", dispatch: { mailbox: "inbox", query: "q" } },
+          holdMillis: 0
+        } as const)
+        const raced = yield* toolSession(current, handlers, (outbox) =>
+          Effect.all(
+            Array.from({ length: 6 }, () => outbox.perform(read("race"), bySupervisor)),
+            { concurrency: "unbounded" }
+          ))
+        same(new Set(raced.map((performed) => new TextDecoder().decode(performed.response))).size, 1)
+        same(calls.length, 1)
+
+        const failing = toolWire({ "mail.list": () => Effect.fail(new DispatchFailed({ reason: "reset" })) })
+        const refusing = toolWire({ "mail.list": () => Effect.fail(new DispatchRefused({ reason: "no connection" })) })
+        const uncertain = yield* toolSession(current, failing.handlers, (outbox) =>
+          Effect.flip(outbox.perform(read("fails"), bySupervisor)))
+        const refused = yield* toolSession(current, refusing.handlers, (outbox) =>
+          Effect.flip(outbox.perform(read("refuses"), bySupervisor)))
+        // Replays under a working wire report the recorded settlement and send nothing.
+        const working = toolWire()
+        const [uncertainAgain, refusedAgain] = yield* toolSession(current, working.handlers, (outbox) =>
+          Effect.all([
+            Effect.flip(outbox.perform(read("fails"), bySupervisor)),
+            Effect.flip(outbox.perform(read("refuses"), bySupervisor))
+          ]))
+        same(
+          [uncertain._tag, uncertainAgain._tag, refused._tag, refusedAgain._tag],
+          ["EmissionDispatchUncertain", "EmissionDispatchUncertain", "EmissionRefused", "EmissionRefused"]
+        )
+        same(working.calls.length, 0)
+      }))
+
+    timed("a compensation is a new linked emission, staged once, for a committed act only", () =>
+      Effect.gen(function* () {
+        const current = yield* world
+        const { calls, handlers } = toolWire()
+        const add = {
+          key: key("label-1"),
+          intent: { kind: "label.add", dispatch: { messageId: "m-9", label: "urgent" } },
+          holdMillis: 0
+        } as const
+        const added = yield* toolSession(current, handlers, (outbox) => outbox.perform(add, bySupervisor))
+
+        const answer = yield* toolSession(current, handlers, (outbox) =>
+          outbox.compensate(added.emission, { holdMillis: 5_000 }))
+        same([answer.kind, answer.state, answer.compensates], ["label.remove", "staged", added.emission.id])
+        same(answer.kind === "label.remove" ? answer.summary.public : null, { label: "urgent" })
+        same(calls.map((call) => call.tool), ["label.add"], "staging a compensation sends nothing")
+
+        // Answering twice, after a restart, names the same emission.
+        const [second, all] = yield* toolSession(current, handlers, (outbox, store) =>
+          Effect.all([outbox.compensate(added.emission, { holdMillis: 5_000 }), store.list()]))
+        same(second.id, answer.id)
+        same(all.length, 2)
+
+        // It is admitted and committed like any other emission, and then the
+        // answering handler receives the input its contract declared.
+        const removed = yield* toolSession(current, handlers, (outbox) => outbox.commit(answer.id, bySupervisor))
+        same([removed.state, removed.compensates], ["committed", added.emission.id])
+        same(calls.map((call) => [call.tool, call.input]), [
+          ["label.add", { messageId: "m-9", label: "urgent" }],
+          ["label.remove", { messageId: "m-9", label: "urgent" }]
+        ])
+        const after = yield* toolSession(current, handlers, (outbox) =>
+          outbox.compensate(added.emission, { holdMillis: 5_000 }))
+        same([after.id, after.state], [answer.id, "committed"], "an answered act is not answered again")
+        same(calls.length, 2)
+      }))
+
+    timed("nothing but a committed, answerable emission can be compensated", () =>
+      Effect.gen(function* () {
+        const current = yield* world
+        const { calls, handlers } = toolWire()
+        const staged = yield* toolSession(current, handlers, (outbox) =>
+          outbox.stage({
+            key: key("label-held"),
+            intent: { kind: "label.add", dispatch: { messageId: "m-1", label: "later" } },
+            holdMillis: 60_000
+          }))
+        const removed = yield* toolSession(current, handlers, (outbox) =>
+          outbox.perform({
+            key: key("remove-1"),
+            intent: { kind: "label.remove", dispatch: { messageId: "m-1", label: "old" } },
+            holdMillis: 0
+          }, bySupervisor))
+        // The types refuse both calls; a caller that casts past them is still refused.
+        type Compensable = Parameters<Tools["compensate"]>[0]
+        const [notCommitted, irreversible, unknown] = yield* toolSession(current, handlers, (outbox) =>
+          Effect.all([
+            Effect.flip(outbox.compensate(staged as unknown as Compensable, { holdMillis: 0 })),
+            Effect.flip(outbox.compensate(removed.emission as unknown as Compensable, { holdMillis: 0 })),
+            Effect.flip(outbox.compensate(
+              { ...removed.emission, id: staged.id.replace(/.$/, "0") } as unknown as Compensable,
+              { holdMillis: 0 }
+            ))
+          ]))
+        same(
+          [
+            notCommitted._tag === "NotCompensable" ? notCommitted.reason : notCommitted._tag,
+            irreversible._tag === "NotCompensable" ? irreversible.reason : irreversible._tag
+          ],
+          ["not-committed", "irreversible"]
+        )
+        holds(
+          unknown._tag === "UnknownEmission" || unknown._tag === "NotCompensable",
+          "a compensation is built from the stored record, not from the value passed in"
+        )
+        const all = yield* toolSession(current, handlers, (_, store) => store.list())
+        same(all.length, 2, "no compensation was staged")
+        same(calls.map((call) => call.tool), ["label.remove"])
       }))
 
     timed("a record that no longer decodes stops every operation on it, and sends nothing", () =>
