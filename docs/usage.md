@@ -710,7 +710,7 @@ grant, per endpoint, that a staged read may be committed immediately.
 
 ### Classes are grant-side facts, and only grant-side
 
-The vocabulary lives in `src/admission/DispatchPolicy.ts` and nowhere else. No
+The vocabulary lives in `src/core/admission/DispatchPolicy.ts` and nowhere else. No
 Plan node, program text, tool definition, or third-party annotation carries it
 or can widen it.
 
@@ -811,8 +811,10 @@ Read the rows as five things:
    after `Outbox.stage` has durably returned for that node. There is no branch
    in which dispatch happens without a prior durable `staged` state.
 2. **Auto-commit is a caller of `Outbox.commit`, not a second dispatcher.** The
-   only `fetch(` in `src/Outbox.ts` stays lexically inside `commit`, guarded by a
-   construction test in `test/outbox-hardening.test.ts`.
+   only `fetch(` in the repository is the host HTTP handler
+   (`src/host/HttpDispatcher.ts`), which acts only on a permit minted inside
+   `commit`; `test/authority-sites.test.ts` and `test/core-permit.test.ts` hold
+   both facts.
 3. **Receipts name the authority.** `committed_by = policy-auto` (versus
    `supervisor` for a human commit), plus `dispatch_class`, `grant_id`, the
    policy `grant_selector` verbatim, the endpoint actually dispatched to, and
@@ -1016,9 +1018,10 @@ example out-of-tree adopters with no privileged position.
 
 ## 5. Hold and Outbox operations (supervisor)
 
-Two laws shape this section. **`Hold.reap` contains the repository's only
-irreversible removal site.** **`Outbox.commit` contains the only runtime
-wire-capable call.** Everything below is a consequence.
+Two facts shape this section, each held by a construction test.
+**`Hold.reap` contains the repository's only irreversible removal site.**
+**The host HTTP handler contains the only network call, and it acts only on a
+permit the Outbox kernel mints at commit.**
 
 ### Hold: write, held, undo
 
@@ -1701,7 +1704,7 @@ airlock pending                     # is an intent sitting staged?
 ## See also
 
 - [`install.md`](install.md) — requirements, install paths, the paired-binary model, Linux status
-- [`../DESIGN.md`](../DESIGN.md) — the four effect classes and the two repository laws
+- [`../ARCHITECTURE.md`](../ARCHITECTURE.md) — the design as built: kernel, ports, host adapters
 - [`../ARCHITECTURE.md`](../ARCHITECTURE.md) — implemented architecture and epistemic status
 - [`macos-v1.md`](macos-v1.md) — the profile envelope in full
 - [`security-model.md`](security-model.md) — execution closure, endpoint brokerage, information labels

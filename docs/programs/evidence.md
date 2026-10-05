@@ -64,7 +64,7 @@ passing. The first compatibility example also executed through
 
 ## Primary sources
 
-- [`DESIGN.md`](../../DESIGN.md) — effect classes and repository laws.
+- [`ARCHITECTURE.md`](../../ARCHITECTURE.md) — effect classes and repository laws.
 - [`ARCHITECTURE.md`](../../ARCHITECTURE.md) — candidate architecture and
   epistemic status.
 - [`macos-v1.md`](../macos-v1.md) — implemented profile mechanisms and current

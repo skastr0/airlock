@@ -7,10 +7,9 @@ Airlock's documentation separates implemented proof from release contracts:
 - [`usage.md`](usage.md) — proof-run walkthrough of the `.air` language, the
   action vocabulary, profiles and policy, dispatch classes, Hold/Outbox
   operations, harness integration, the corpus harness, and the failure taxonomy.
-- [`DESIGN.md`](../DESIGN.md) — product thesis, four effect classes, the two
-  repository laws, and the shared host-native profile direction.
-- [`ARCHITECTURE.md`](../ARCHITECTURE.md) — complete candidate architecture and
-  epistemic status.
+- [`ARCHITECTURE.md`](../ARCHITECTURE.md) — the design as built: the
+  storage-agnostic kernel, its ports, the host adapters, and the tests that
+  hold each property.
 - [`contracts/plan-runtime.md`](contracts/plan-runtime.md) — versioned
   Plan/runtime seam and total-lowering obligations.
 - [`macos-v1.md`](macos-v1.md) — the macOS compatibility/native-contained

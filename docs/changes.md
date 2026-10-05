@@ -250,7 +250,7 @@ immutability means later edits to the original source are irrelevant, not that
 same-UID attackers cannot modify private state.
 
 The implementation composes Hold directly with **supervisor-managed Apply
-semantics**. It does not claim Plan lowering or add a fifth Plan node. The
-[two laws](../DESIGN.md#the-two-laws) continue to govern managed mutations and
-optional restrictions. Compatibility mode, `.air`, Cell, and Outbox remain
+semantics**. It does not claim Plan lowering or add a fifth Plan node. Managed
+mutations still go through Hold, and restrictions remain opt-in
+([architecture](../ARCHITECTURE.md)). Compatibility mode, `.air`, Cell, and Outbox remain
 separate optional features with their existing, narrower guarantees.

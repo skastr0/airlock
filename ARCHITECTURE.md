@@ -1,1130 +1,225 @@
 # Airlock architecture
 
-> Status: implementation map plus design direction.
->
-> This document separates repository laws, implemented behavior, release
-> acceptance conditions, candidate design, and open questions. Only the two
-> laws in [`DESIGN.md`](DESIGN.md) are frozen architectural invariants.
+This document describes the code as it is built. The code and its tests are
+the source of truth; when they disagree with this file, this file is wrong.
+Nothing here is a frozen rule. Properties Airlock relies on are enforced by
+types and by tests, and each one below names the test that holds it.
 
-## Summary
+## What Airlock is
 
-Airlock is an optional tool for consequential local changes on macOS and Linux.
-Bash, Python, and existing tools prepare a replacement; `change` snapshots it
-against one target, exposes its exact digest for review, and lets a supervisor
-apply or recover it through checked Hold transitions. This direct workflow
-does not need a Plan, an `.air` program, or native containment.
+Airlock is an optional tool for consequential work an agent does on a machine.
+It sits beside Bash, Python and ordinary Unix programs rather than replacing
+them, and gives three things for the effects routed through it:
 
-The structured runtime remains an optional integration: an Airlock program
-calls typed generic actions, which lower to a closed four-node Plan, pass
-through admission, and execute through trusted services. A harness may choose
-to expose only that surface, but removing the agent's shell is not a product
-prerequisite. Optional safety tooling and enforced reference monitoring are
-different claims; the latter requires an external authority boundary.
+- **Managed local changes are recoverable.** A replaced or removed file or
+  directory is renamed into a hold, and can be restored until it is reaped.
+- **External requests are two-phase.** A request is staged durably and sends
+  nothing; a separate, authorized commit performs it exactly once.
+- **Every act leaves a receipt** in an append-only ledger.
 
-Airlock does not replace Unix algorithms:
+Work is expressed as a Plan over four node kinds, one per effect class:
 
-```text
-tar stays tar
-git stays git
-sqlite3 stays sqlite3
-curl stays curl
-openshell stays openshell
+| effect class | Plan node | what happens |
+|---|---|---|
+| observation | `Capture` | information enters the program |
+| computation | `Invoke` | an existing executable runs, as separate executable and argument atoms |
+| mutation | `Apply` | managed local state changes through Hold |
+| emission | `RequestExternal` | an external request is staged in the Outbox |
+
+Execution has profiles. `compatibility` is the zero-configuration default and
+is Bash parity: a child process keeps the invoking user's ambient authority,
+and what it does on its own is not mediated. `native-contained` is an explicit
+opt-in that runs computation in a private workspace with a platform sandbox
+(Seatbelt on macOS; Bubblewrap, Landlock and seccomp on Linux). Restrictions
+are opt-in; the default never becomes stricter than Bash.
+
+## Two halves: a kernel and a host
+
+```
+src/core/     the kernel: storage-agnostic, runs anywhere Effect runs
+src/          the host: files, processes, the operating system, the CLI
 ```
 
-Airlock owns the structured invocation and the physics around it. The existing
-program still owns archive parsing, version-control semantics, SQL, HTTP, or
-remote-sandbox behavior.
+### The kernel, `src/core`
 
-The current implementation has two usable execution profiles:
+The kernel imports only `effect` and its own files. It names no Node or Bun
+module, no platform package and no host global, so the same code runs under
+Bun, in a browser-style isolate, or in a Cloudflare Worker. It is published as
+`@skastr0/airlock/core`, with conformance suites and in-memory adapters at
+`@skastr0/airlock/core/testing`.
 
-- `compatibility` runs structured executable-plus-argument requests with the
-  invoking user's host authority and makes no containment claim.
-- `native-contained` runs supported work in a private host workspace, fences
-  declared direct executable edges, denies live-workspace writes and network,
-  computes a delta, and applies admitted top-level file/directory changes
-  through Hold. macOS uses Seatbelt; Linux uses Bubblewrap, Landlock, and
-  seccomp.
+It contains:
 
-The native profile is deliberately narrower than a VM. It permits ambient host
-reads so existing loaders and Unix programs work; it therefore does not provide
-confidentiality. A VM-enclosed backend remains future work.
+- **The pure modules**: `domain`, `plan`, `labels`, `language` (the `.air`
+  parser and evaluator), `admission` (policy, grants, dispatch classes),
+  `actions` (the native action catalog) and `tools` (tool definitions and
+  their lowering to Plans).
+- **`Canonical`**: canonical JSON and SHA-256 digests over `effect/Crypto`.
+  Identity and digests are computed here once, so every host derives the same
+  value for the same content.
+- **The Outbox kernel** (`outbox/`): the emission lifecycle, staging, commit,
+  cancellation, recovery and Ledger convergence.
+- **The ports** the kernel needs from a host, as Effect services.
 
-### Platform strategy
+### The ports
 
-macOS was the first product environment and remains a distinct documented
-release envelope. Linux now implements the same shared contracts with native
-host mechanisms rather than borrowing macOS claims. Developer Macs and Linux
-workstations can both place an agent beside valuable credentials, repositories,
-databases, and application state under one user identity.
+| port | what it is | what a host supplies |
+|---|---|---|
+| `OutboxStore` | a transactional emission store: put-if-absent by id, read, compare-and-set transition, acknowledge, bounded response blob, list by state, and one `exclusive` section | durable storage and a way to serialize holders |
+| `Ledger` | append-only receipts; a keyed entry is recorded exactly once however often it is recorded | durable append and read |
+| `Dispatcher` | the wire: one handler per intent kind | the code that actually reaches the outside world |
+| `effect/Crypto` | digests and randomness | the platform's implementation |
 
-Platform adapters deliberately differ. macOS handles canonical aliases, APFS
-clone/copy behavior, Seatbelt, and code signing. Linux handles glibc host builds,
-GNU copy behavior, unprivileged namespace policy, Bubblewrap setup, Landlock
-object semantics, seccomp, and external runtime prerequisites. Plan, authority,
-Hold/Outbox finality, and receipt semantics remain shared.
+Time comes from the Effect `Clock`. A store adapter persists the records the
+kernel hands it and returns them unchanged; it never encodes dispatch
+material, hashes anything, or decides what a state contains. The kernel builds
+every next record itself (`advance`, `acknowledge`), so the only thing an
+adapter decides is how to make "read, change, write" atomic.
 
-## Status vocabulary
+### The emission lifecycle
 
-| Status | Meaning |
-| --- | --- |
-| **Law** | Frozen repository invariant guarded by construction tests. |
-| **Implemented** | Present in the current source and exercised by named tests. |
-| **Acceptance condition** | Evidence required before a public claim; not evidence that the condition already holds. |
-| **Design direction** | Intended product shape that may guide work but is not a repository law. |
-| **Candidate** | A concrete mechanism or contract still seeking integration or adversarial evidence. |
-| **Open question** | Intentionally unresolved; code and docs must not treat it as settled. |
-
-### Current status at a glance
-
-| Subject | Status and evidence boundary |
-| --- | --- |
-| only the reaper unlinks | **Law**; a test counts one `fs.remove` site in `src/`, inside `Hold.reap` |
-| zero-config Bash capability parity; restrictions are opt-in | **Law**; compatibility is the CLI default and native containment requires explicit profile/policy input |
-| Airlock-owned external wire site | **Implemented construction property**; the sole runtime `fetch` site is lexically inside `Outbox.commit`; compatibility children retain ambient network and receive no Outbox mediation claim |
-| four Plan nodes | **Implemented candidate seam**; `Capture`, `Invoke`, `Apply`, and `RequestExternal` have Schema models, ordering, admission, and runtime interpretation |
-| agent/runtime algebra split | **Implemented in the integrated program path, candidate as a complete reference monitor**; agents author action calls and Plans, while admission, Outbox claim/dispatch/cancel, Hold, reconciliation, and reap remain trusted transitions |
-| execution authority | **Implemented candidate seam**; Runtime accepts only `ExecutionAuthority` (closed Plan plus retained Grants/bindings), rejects malformed authority, and refreshes closure, Grant lifetime, and handles immediately before each runnable node |
-| single-use Plan execution | **Implemented interaction seam**; a persistent run journal plus kernel-backed per-Plan claim precedes adapter work, and any durable prior snapshot rejects concurrent or sequential replay |
-| reviewed local changes | **Implemented bounded workflow**; independent candidate/baseline snapshots, exact-digest supervisor application, checked Hold mutation/undo, and explicit no-clobber recovery; no arbitrary command runs during apply |
-| Airlock program runner | **Implemented**; `airlock run` parses, evaluates, lowers, admits, and executes native actions |
-| agent-only binary | **Implemented product boundary**; `airlock-agent` omits terminal-authority maintenance commands, but the external harness must still prove that it exposed no alternate effect path |
-| compatibility profile | **Implemented**; no containment claim |
-| native-contained profile | **Implemented narrow subset**; private view, source-write fence, network denial, delta/Apply path |
-| native executable-edge fence | **Implemented bounded mechanism**; root `invoke` and root-scoped descendant `execute` requirements lower to exact Seatbelt paths on macOS or pinned Landlock executable objects on Linux, with resolved binding evidence in Cell/Runtime receipts |
-| in-process interpretation boundary | **Implemented and proved as a limitation**; an admitted `/bin/bash` can source agent-owned `BASH_ENV` without another exec, while its live-write and network attempts remain denied and private writes remain a delta |
-| native workspace identity | **Implemented at the trusted CLI boundary**; native execution canonicalizes the workspace and existing absolute policy scopes before admission, while general path-race-safe resource identity remains incomplete |
-| private Cell lifecycle | **Implemented normal path**; exact Cell workspace identity is transferred to a non-undoable runtime-private Hold act on completion, failure, or cancellation, then only Reaper may discard it |
-| VM-enclosed profile | **Future design direction**; the CLI and runtime refuse it because no backend is installed |
-| Hold | **Implemented domain nucleus**; files/directories, same-volume rename admission, bounded cross-process locking, staged journal promotion, undo conflict handling, and typed Reaper cancellation recovery after confirmed removal |
-| Outbox | **Implemented domain nucleus**; durable HTTP stage/cancel/commit, bounded cross-process locking, and honest `uncertain` recovery |
-| Ledger | **Implemented durable append seam**; cross-process locking, file/directory sync, and typed torn-tail repair/quarantine are established, but a complete compaction/tamper-evident multi-component Journal is not |
-| labels | **Implemented pure candidate**; lattice, sink checks, scoped declassification/endorsement, and tests exist, but the runtime does not yet enforce them end to end |
-| endpoint broker | **Dispatch-class slice implemented and fixture-proven; general broker remains candidate**; supervisor-side v2 endpoint grants class dispatch consequence, and a `read`-class `commit: "auto"` grant auto-commits a staged intent through the existing `Outbox.commit` (single dispatch site preserved), while DNS, redirects, proxying, loopback, budgets, credential authority, and actual-destination receipts remain unimplemented; native Cells still deny network and Outbox dispatches HTTP itself |
-| complete execution closure | **Acceptance condition, not established** |
-| inert tool definitions | **Implemented integration**; accepted JSON definitions lower totally through the same Plan/admission/runtime path and cannot mint authority — `invoke` actions run a declared executable, and `enqueue` actions lower onto the staged `RequestExternal` seam without gaining dispatch |
-| agent discovery and compact output | **Implemented agent UX seam**; native action JSON Schemas derive from the decoding Schemas, `run`/`eval --compact` projects evidence, and recent-run listing is bounded to 1–100 entries |
-| Vouch evidence | **Implemented local proofs**; one restore/apply/stage/undo fixture plus a 12-action host-operation workflow, not a real OpenShell or remote replacement |
-| Unix contract corpus | **Implemented contract-shape evidence**; 72 accepted shapes across 10 families parse, decode, lower, validate, and compatibility-admit, with 8 explicit unsupported classes; they are not executed tasks or model-success evidence |
-| 50-execution agent proof | **Implemented repeatability evidence**; 10 deterministic scripted cases run five times each through real agent CLI subprocesses (40 compatibility, 10 native-contained), not 50 unique/model-generated tasks, a shell A/B, or a holdout corpus |
-| macOS distribution | **Implemented local release path**; paired supervisor/agent binaries are hashed, ad-hoc signed, verified, transactionally installed, and probed; Developer ID signing and notarization remain release gates |
-| Linux distribution | **Implemented local release path**; host-architecture glibc supervisor/agent binaries plus the native launcher are hashed, metadata-checked, transactionally installed/rolled back, probed, and executed; Bubblewrap 0.12+ remains an external prerequisite |
-| shell-replacement confidence | **Not earned**; the checked-in fixtures are useful but not a representative corpus, complete crash matrix, or red-team result |
-
-## Product direction
-
-The primary journey composes ordinary tools with one consequential transition:
-
-```text
-Bash/Python preparation → immutable proposal → review exact digest
-  → supervisor checked Hold replacement → receipt → checked undo/recovery
+```
+staged ──▶ committing ──▶ committed
+   │            └───────▶ uncertain
+   └──────▶ cancelled
 ```
 
-The optional structured runtime remains generic and independent of Vouch:
-
-```text
-agent program
-  → typed action call
-  → inert PlanDraft
-  → AdmissionPolicy
-  → admitted Plan
-  → runtime interpretation
-  → receipts and artifacts
-```
-
-Existing programs retain application semantics:
-
-```text
-tar stays tar
-git stays git
-sqlite3 stays sqlite3
-curl stays curl
-openshell stays openshell
-```
-
-Airlock owns structured invocation, authority admission, the private execution
-view, managed-state finality, external staging, and evidence. It does not
-become an archive library, Git implementation, package manager, database
-engine, or Vouch-specific runtime.
-
-The Plan IR and runtime are the structured-program seam. The Airlock DSL is
-one agent-oriented frontend over that seam, not the authority boundary itself.
-Structured RPC/tool calls and future frontends may produce the same
-`PlanDraft`; none may bypass admission or invent runtime operations. The
-current small language is implemented, but its syntax and pure composition
-forms should evolve from measured model-generation success, token cost, error
-rate, and task completion—not from a goal of resembling a human shell.
-
-`airlock-agent change` exposes staging and inspection, not application or
-recovery. An agent that retains equivalent direct filesystem authority can
-bypass this optional tool. The separate shell-replacement acceptance corpus
-measures a stronger harness configuration, not a requirement for adopting
-reviewed changes.
-
-### Reviewed change ownership
-
-`src/change/Tree.ts` owns bounded regular-tree snapshots and canonical digests;
-`src/change/Change.ts` owns proposal identity, review, and single-use lifecycle.
-`Contracts.ts` is the shared schema source; `Snapshots.ts` derives approved
-private retirement bindings. `src/change-view.ts` renders safe terminal data,
-while CLI approval captures the displayed proposal digest without inventing
-another transition path. Frozen content pages never read preparation sources.
-The existing Hold lease encloses checked baseline validation, retained-object
-verification, no-replace installation, undo, and recovery. Correlated checked
-journals pin unresolved recovery bytes against Reaper. This introduces neither
-a fifth Plan node nor a second unlink or wire authority.
-
-Explicit snapshot retirement and collection share the Change/Hold lock order.
-They retain historical proposal/receipt metadata and original-world undo
-payloads. Only the reaper removes the specifically retired private bundle;
-collection releases snapshot/private-stage reservation, not total disk usage.
-The inbox distinguishes historical apply, undo, and snapshot lifecycle state.
-
-The envelope is quiescent local targets, ordinary files/directories, and bytes
-plus ordinary POSIX modes. A whole-root replacement takes two renames, not an
-atomic swap. External writers, other Airlock homes, live databases, remote
-deployment, and malicious same-UID state tampering are not made safe by this
-workflow. See [the command contract](docs/changes.md).
-
-## The two laws
-
-### Only the reaper unlinks
-
-Every Airlock-owned managed live mutation displaces filesystem bindings by
-rename. Prior state enters Hold before removal or replacement. Undo also
-preserves a conflicting current binding rather than destroying it.
-
-`Hold.reap` contains the only irreversible removal site in `src/`. The law
-applies to unique bytes in managed live state. A process may remove disposable
-files inside a private Cell view because that absence cannot reach live state
-until a separate `Apply` transition passes through Hold.
-
-The law governs Airlock's managed mutation surface. A compatibility child runs
-with ambient host authority and may issue filesystem syscalls that Airlock does
-not mediate as `Apply`; those effects are outside Hold's recovery contract.
-
-### The ratchet law
-
-Zero-configuration behavior preserves broad Bash-like host capability. Safety
-that does not remove capability—structured argv, staging, recovery material,
-receipts, and visibility—may be present by default. Restrictions require an
-explicit profile or policy and can only narrow authority.
-
-Consequences in the current CLI:
-
-- `compatibility` is the default;
-- `native-contained` program execution requires `AIRLOCK_POLICY_FILE`;
-- the policy profile must equal the selected CLI profile;
-- `vm-enclosed` is refused rather than mapped to a weaker backend; and
-- unknown tools are not rejected merely because the definition registry is
-  incomplete.
-
-## Four effect classes and the Plan seam
-
-There are two related algebras. Keeping them separate prevents a privileged
-runtime transition from accidentally becoming an agent-language primitive.
-
-The candidate closed **agent Plan algebra** is implemented as:
-
-```text
-PlanNode = Capture | Invoke | Apply | RequestExternal
-```
-
-“Closed” describes the Schema and interpreter surface. Completeness across
-representative Unix work remains a falsifiable hypothesis: a workload that
-cannot lower honestly is evidence to narrow or version the algebra, not a
-reason to declare the counterexample covered by fiat.
-
-| Node | Role | Current interpreter behavior |
-| --- | --- | --- |
-| `Capture` | observation enters the program | captures supported file data/artifacts |
-| `Invoke` | existing code computes | runs through compatibility `ProcessRunner` or the native `Cell` |
-| `Apply` | managed local state changes | delegates supported transitions to Hold |
-| `RequestExternal` | external intent is requested | stages a durable HTTP request in Outbox; it does not dispatch |
-
-Pure expressions, `let`, `if`, finite literal `for`, `assert`, records, lists,
-and return values compose these nodes without creating another world-effect
-constructor.
-
-The **trusted runtime transition algebra** is not agent-authored:
-
-```text
-RuntimeTransition =
-    Resolve | Admit | Bind | Revalidate | ClaimPlan
-  | Observe | Spawn | ProposeDelta | HoldTransition | StageExternal
-  | ClaimExternal | DispatchExternal | CancelExternal
-  | AppendReceipt | Reconcile | Reap | Deny
-
-Outbox.commit = ClaimExternal → DispatchExternal
-Outbox.cancel = CancelExternal  // staged only
-```
-
-`ClaimPlan` is a different authority boundary from `ClaimExternal`. Runtime
-requires a persistent run journal, acquires a kernel-backed claim for the Plan
-identity before node adapter or world work, and durably publishes `running`
-before executing nodes. Any existing snapshot—including recovered `running`,
-`finalizing`, or terminal state—causes a tagged
-`RuntimeExecutionClaimRejected` instead of replay. The claim serializes
-contenders; the journal makes the Plan identity single-use across later
-processes.
-
-This is not a fifth Plan node. It is the reference monitor's state-transition
-vocabulary. In particular:
-
-- `Apply` asks for managed mutation; Hold performs the live binding
-  transition.
-- `RequestExternal` asks for inert durable intent; `Outbox.commit` performs
-  `ClaimExternal` and then `DispatchExternal`.
-- `CancelExternal` is a supervisor transition that is legal only before an
-  Outbox claim.
-- undo and reconciliation are supervisor/runtime transitions.
-- only the supervisor-facing surface can commit, cancel, undo, or reap;
-  reconciliation remains runtime-owned and may run during startup.
-
-An agent may construct a request that reaches one of these transitions only
-through a closed, admitted Plan. A tool definition, platform adapter, or
-project integration cannot add another mutation or dispatch gateway.
-
-The executable contract is structured:
-
-```text
-{
-  executable,
-  args,
-  cwd,
-  env,
-  stdin,
-  stdout,
-  stderr,
-  timeout,
-  outputLimit,
-  cellProfile
-}
-```
-
-`executable` is separate from `args`; there is no command-string form,
-interpolation, word splitting, command substitution, or implicit shell.
-
-### Terms
-
-| Term | Meaning |
-| --- | --- |
-| **ActionCall** | Agent-facing typed request. It has no authority by itself. |
-| **PlanDraft** | Inert four-node graph plus complete modeled resource requirements and definition digests. |
-| **AdmissionPolicy** | Supervisor input describing the profile and authority selectors that may be granted. |
-| **Grant** | Time-bounded or policy-lifetime authority issued by Admission for one principal, realm, selector, rights set, and constraints. |
-| **Handle** | Runtime reference that binds one admitted requirement to one Grant and public provenance. |
-| **ExecutionAuthority** | The only Runtime input for execution: closed Plan, retained Grants, exact handle resolutions, per-node bindings, policy/profile identity, and closure digest carried together. |
-| **Executable edge set** | The implemented root executable plus exact descendant executable paths admitted for that root. It is narrower than a full execution closure. |
-| **Cell** | Owned computation environment. It may produce artifacts and a private delta; it does not install that delta into managed live state. |
-| **Artifact** | Explicit bytes plus digest, media type, and provenance used for Plan dataflow. |
-| **Hold act** | Recovery material and transition record for a managed binding or runtime-private workspace. |
-| **ExternalIntent** | Durable, cancellable-before-dispatch request stored by Outbox. |
-| **Receipt** | Evidence of what Airlock admitted, attempted, observed, staged, or changed; not a semantic proof that an opaque program did the intended thing. |
-
-### Current native action vocabulary
-
-```text
-Capture
-  file.inspect
-  file.read
-  file.list
-  file.glob
-  file.stat
-
-Apply
-  file.write
-  file.remove
-  file.move
-  file.copy
-  file.mkdir
-
-Invoke
-  process.run
-
-RequestExternal
-  http.stage
-```
-
-Definitions may add typed names over existing executables, but they are JSON
-data. An `invoke` action runs a declared absolute executable selector. An
-`enqueue` action's request template lowers onto the existing
-`http.stage`/`RequestExternal` staging seam. An enqueue action declares an
-`emissionEffect` that can only narrow a supervisor grant's dispatch class, and
-any definition text naming grant-side class or commit vocabulary is a typed
-`ToolGrantAssertionRejected`. The loader validates known
-locations, callable names, duplicate identities, schemas, templates, limits,
-result decoders, and the declared footprint. For every accepted action,
-lowering is total: an `invoke` action produces an existing structured Invoke
-action and PlanDraft, an `enqueue` action produces the staged-intent
-`http.stage` call, or a typed rejection is returned. Definition and Plan
-digests bind the selected data into the execution report.
-
-Definitions cannot execute while loading, contain callbacks, discover an
-executable, mint grants, add Plan constructors, dispatch, or bypass runtime
-result validation. They may request modeled resources; Admission alone decides
-whether those requests receive Grants. Installed definitions now execute end
-to end through the same program, Plan, Admission, Runtime, and Schema-decoder
-path. This is an extension mechanism for vocabulary and contracts, not for
-physics.
-
-Native action discovery is generated from the same Effect Schemas that decode
-those actions, rather than a parallel handwritten schema catalog. The agent
-surface can request one action schema directly. `run` and `eval` also provide a
-compact, deduplicated projection of action, Plan, node, artifact, and failure
-evidence; process output and the returned program value remain subject to their
-own configured limits rather than a separate compact-output byte ceiling.
-Recent-run listing defaults to ten snapshots and accepts an explicit bound from
-1 through 100.
-
-Unknown programs remain available through structured `process.run` in
-compatibility. Curated definitions improve model affordance and precision;
-they are not a completeness gate.
-
-### Design direction: bounded machine discovery
-
-A machine-wide tool-search failure exposed two safety axes that should not be
-collapsed. **Scope invention** is an agent silently widening a search root,
-following a new mount or symlink domain, or substituting a machine-wide
-enumeration for the supervisor's requested scope. It can happen through
-read-only operations. **Destructiveness** concerns mutation, finality, and
-recovery. A narrowly authorized removal may be destructive while a read-only
-`find /` invents scope. Hold physics addresses the former; it does not by
-itself make the latter legitimate.
-
-The candidate discovery path should prefer supervisor-known facts before
-machine traversal:
-
-1. resolve from a supervisor-known executable inventory;
-2. resolve installed inert tool definitions;
-3. resolve supervisor/harness-known skill manifests; then
-4. if still necessary, request a bounded `Capture` traversal.
-
-A bounded traversal contract should make its search authority legible:
-
-```text
-root
-maximum depth
-maximum entries inspected
-maximum results returned
-maximum bytes observed or returned
-maximum elapsed time
-symlink-following posture
-mount-crossing posture
-```
-
-Budget exhaustion should return a typed result that lets the agent request
-explicit supervisor escalation. It must not silently widen the root, follow
-additional mounts, or switch to an ambient search path.
-
-This is a **design direction**, not an implemented feature or a new law.
-Current `file.glob` does not expose this complete multi-budget traversal
-contract. The current native Cell also permits ambient host reads, so a strict
-discovery profile must not grant generic `find` or an interpreter merely to
-perform discovery: either can traverse outside the modeled `Capture` scope
-from inside the admitted process. Compatibility may retain those broad ambient
-tools under the ratchet, but then Airlock makes no containment or bounded-
-discovery claim for their reads.
-
-### Finality: Hold and Outbox
-
-Hold and Outbox model different boundaries:
-
-```text
-local:    private work → proposed delta → Hold-backed live transition
-external: request       → staged intent  → privileged dispatch
-```
-
-For a supported Airlock-managed local binding, Airlock can retain the displaced
-state and make a later restoration possible. Recovery material remains until
-Reaper performs the sole irreversible discard. “Recoverable” is bounded by that
-material, filesystem envelope, retention policy, and intervening conflicts; it
-is not a claim that a multi-path operation is ACID or that compatibility-child
-writes are intercepted.
-
-For an external effect, Airlock can cancel only while the intent remains
-staged. Once dispatch starts, it cannot promise reversal or exactly once. A
-crash after the recipient may have observed the request yields `uncertain`,
-and uncertainty is not silently retried. This local-recovery/external-staging
-duality is the product's finality model; it is more precise than calling every
-effect “undoable.”
-
-## Authority and admission
-
-An action first produces a `PlanDraft` with resource requirements. Admission
-decodes a supervisor policy and binds each requirement to grants, handles,
-resource identities, a policy digest, and an admitted Plan. The integrated
-program path then binds that result as `ExecutionAuthority`; a bare
-`ActionCall`, definition, or `PlanDraft` is never authority.
-
-The current `AdmissionPolicy` includes:
-
-```text
-schemaVersion
-profile
-principal
-realm
-admittedBy
-grantTtlMillis?
-pathAllowlist
-executableAllowlist
-executableEdges
-endpointGrants
-```
-
-The document is `airlock/admission-policy/v2`. `endpointGrants` are structured
-(selector, methods, supervisor-side dispatch class, commit mode, hold and
-budget bounds). A grant that omits class and commit grants the floor: an
-irreversible send that stays staged until an explicit
-supervisor commit. No program, definition, or agent-side document can name or
-widen a class.
-
-Compatibility admits the Plan's declared requirements without an allowlist
-restriction under the ratchet; the invoked process may then use ambient host
-authority that is not modeled by those requirements. Contained profiles
-require their executable, path, and endpoint requirements to fit the policy.
-
-Consequently, writes or network calls made internally by a compatibility child
-are not converted into `Apply` or `RequestExternal`, do not pass through Hold or
-Outbox, and receive no containment, recovery, cancellation, or dispatch-
-uncertainty guarantee from Airlock.
-
-The implemented v1 closure enumerates every authority-bearing operand that the
-current Plan schema models:
-
-| Node | Modeled authority operands |
-| --- | --- |
-| `Capture(file)` | locator `read` |
-| `Invoke` | root executable `invoke`; each declared descendant executable `execute`; explicit cwd `read` |
-| `Apply` | target `write`; copy source `read`; move source `read + write` |
-| `RequestExternal` | endpoint `connect + emit` |
-
-The endpoint rights on `RequestExternal` admit one inert intent and bind its
-declared destination. They are not a socket or wire capability held by agent
-code. Only a separately authorized Outbox commit may exercise runtime dispatch
-authority.
-
-Admission rejects unused requirements, duplicate identities/rights, missing
-operand requirements, and handles that do not exactly match their retained
-Grant. `ExecutionAuthority` carries the Plan, Grants, bindings, policy/profile
-identity, and a closure digest together. Runtime accepts this authority value,
-not a bare Plan. Before each dependency-ready node, it revalidates the closure
-and optional Grant lifetime and refreshes the node's handles. Tampering or
-expiry produces a failed `RuntimeAuthorityInvalid` node receipt without calling
-the filesystem, process, Hold, or Outbox adapter; dependents then cancel.
-
-For native-contained work, `executableEdges` binds each descendant selector to
-one separately admitted root. A descendant-only `execute` Grant cannot select
-that helper as a later root Invoke. Compatibility accepts declared
-requirements without applying this restriction, preserving the ratchet.
-
-“Every modeled operand” is deliberately narrower than “every resource the
-executable may use.” The edge set fences new exec transitions, but argv may
-name paths, dynamic libraries load through file reads, an admitted interpreter
-may execute data in-process, environment and configuration can select behavior,
-and descriptors or credentials may introduce other authority. Full execution
-closure and general identity-safe binding remain acceptance work.
-
-For native program execution, the trusted CLI now canonicalizes the selected
-workspace and existing absolute policy scopes before admission, replaces the
-conventional `workspace` binding with that canonical identity, and refuses a
-symlink-ancestor alias unless the supervisor grants the physical directory.
-Runtime separately binds the exact generated private Cell directory to the
-Cell receipt by device/inode before retaining it. These close the demonstrated
-workspace-alias and lifecycle substitution paths; they do not make Admission a
-general symlink-, mount-, or rename-race-safe resolver for every resource.
-
-## Execution profiles
-
-### Compatibility: implemented
-
-Compatibility uses the structured `ProcessRunner` directly:
-
-- the executable is an explicit value;
-- arguments are distinct atoms;
-- cwd, environment overlay, stdin, streams, timeout, and output limit are
-  explicit;
-- the runner owns a process group, waits for same-group descendants, captures
-  a receipt, and bounds timeout, cancellation, and output; and
-- the process otherwise has the invoking user's ambient host reads, writes,
-  network, configuration, descendants, and descriptors.
-
-It is a migration and coverage profile. It is not containment.
-
-### Native-contained: implemented narrow subset
-
-The current native Cell:
-
-1. receives the canonical workspace identity bound at the trusted CLI seam;
-2. fingerprints the source workspace;
-3. creates a fresh private workspace using the platform clone-or-copy adapter;
-4. registers that exact path for lifecycle retention;
-5. binds the admitted root and root-scoped declared descendants into the active
-   platform's executable-edge mechanism;
-6. permits ambient host reads;
-7. creates a private per-Invoke temp directory, exports it through `TMPDIR`,
-   `TMP`, and `TEMP`, and excludes it from the proposed delta;
-8. permits writes only in the private workspace and declared temporary paths;
-9. denies network;
-10. runs the requested executable in the private workspace;
-11. fingerprints the live and private trees;
-12. reports private delta candidates and any live drift;
-13. leaves live mutation to a later `Apply.merge`; and
-14. on completion, typed failure, or cancellation, verifies the Cell-reported
-    private directory identity and transfers it into Hold as
-    `purpose: runtime-private`.
-
-The macOS adapter renders a Seatbelt profile over an APFS clone/copy. The Linux
-adapter pins source/private/temp/launcher/executable objects with
-`O_PATH | O_NOFOLLOW`, asks Bubblewrap 0.12+ for user/mount/PID/network/IPC/UTS/
-cgroup namespaces and a read-only host root, then uses a C launcher to install
-Landlock EXECUTE+REFER and seccomp before exposing target environment or
-executing the target. It closes every backend descriptor before target code
-runs. See [`docs/linux-v1.md`](docs/linux-v1.md) for the exact Linux syscall and
-deployment envelope.
-
-Before the first live mutation, the runtime revalidates the Cell baseline and
-preflights every delta entry. The current merge envelope is top-level regular
-files and directories. Symlinks, special files, unsupported topology, overlap,
-source drift, and target drift are refused. Each accepted entry is installed
-or removed through Hold.
-
-The profile's precise limitations matter:
-
-- ambient host reads are allowed, so confidentiality is not provided;
-- process-group cancellation is bounded but not proven against every
-  daemonization or descendant-escape technique;
-- exact executable-edge fencing does not mediate dynamic-library loads,
-  agent-owned code interpreted in-process, configuration, plugins, or other
-  behavior that occurs without a new exec;
-- Linux Landlock rules follow executable filesystem objects, so hardlink aliases
-  share authority, and an admitted ELF loader can interpret an unadmitted ELF
-  passed as data without another mediated exec;
-- external executable binding records requested, launch, and allowed paths;
-  Linux pins setup objects while macOS does not establish immutable code bytes
-  across every path replacement race;
-- network is denied rather than brokered, and no native backend installs CPU,
-  memory, process-count, disk, or I/O quotas;
-- a multi-entry merge performs individually recoverable Hold transitions but
-  is not claimed as one atomic transaction;
-- runtime-private trees remain retained until a supervisor reaps them, and a
-  process crash before lifecycle finalization still needs startup
-  reconciliation; and
-- ACLs, xattrs, hardlinks, sparse files, special files, mounts, live writers,
-  and protocol state remain outside the established envelope.
-
-Runtime-private Hold acts are visible in lifecycle receipts, excluded from
-ordinary “undo last,” and not directly undoable. Runtime never sweeps a path
-prefix; it transfers only the registered exact identity. Reaper remains the
-only operation that discards the retained tree.
-
-The mechanism is intentionally expensive today. A measured repository no-op
-before retirement took about 6.1 seconds and created about 212 MiB of logical
-private-tree data for one Invoke. Retirement itself is a same-volume rename,
-but each Invoke still pays for private-view construction and multiple
-full-tree fingerprints; changed clone pages or copy fallback consume storage
-until reap. Persistent Cells, incremental fingerprints, batching, and working
-set/checkpoint semantics are open performance work, not hidden v1 properties.
-
-### VM-enclosed: future stronger backend
-
-No VM Cell backend is bundled. `airlock doctor` reports it as not provided,
-and `airlock exec/run --profile vm-enclosed` refuses host fallback.
-
-A future VM backend may provide stronger confidentiality, broader unknown-tool
-containment, guest-only ambient authority, and brokered host seams. Those are
-design goals, not current behavior and not a macOS v1 release gate.
-
-## Managed local state: Hold
-
-Hold is an Effect service with Schema values and tagged failures. Its public
-operations include remove, overwrite, replace-from-stage, undo, list held
-acts, and reap.
-
-Implemented properties include:
-
-- same-volume admission before a managed rename;
-- atomic no-replace installation/restoration through
-  `renamex_np(RENAME_EXCL)` on macOS or `renameat2(RENAME_NOREPLACE)` on Linux,
-  with a typed fail-closed platform capability;
-- protection for filesystem root and Airlock state;
-- file/directory modeling with fail-closed symlink handling on replacement;
-- journaled runtime-private staging reserved before native adapters populate
-  candidate files/directories;
-- prepared/held/restored journal states and startup reconciliation;
-- expected-state checks for undo conflicts;
-- recoverable replacement of an occupied target;
-- no direct unlink in native filesystem actions; and
-- one construction-counted irreversible removal site in `Hold.reap`.
-
-The Hold root is protected by a bounded, cancellable cross-process
-exclusive-file lease.
-Journal publication stages and syncs a candidate before rename, startup picks
-the best valid journal candidate, and recovery can promote a staged-only
-candidate after an injected publication failure. Tests exercise competing
-processes, interrupted waiters, stale-owner reclamation, and bounded
-lock-directory growth. The direct mechanism proof launches 16 independent Bun
-processes against one stable lock inode; every contender completes, a separate
-kernel `O_EXCL` sentinel records no overlap, and the Schema-decoded event trace
-has maximum occupancy exactly one. The replacing rename used to publish a
-journal replica is deliberately separate from the no-replace primitive used
-to install live managed bytes. A concurrent foreign target is preserved and
-returned as a typed conflict rather than overwritten.
-
-Native write/copy/move/mkdir glue no longer creates an untracked staging path.
-It asks Hold to reserve a runtime-private act first, then populates the supplied
-stage and installs through the ordinary replacement transition. A failed,
-interrupted, or abandoned population remains enumerable recovery material for
-Reaper rather than orphan adapter state.
-
-Reaper cancellation has an explicit terminal boundary. Waiting for the Hold
-lease remains interruptible and leaves the act held. After Reaper takes
-terminal removal authority, removal and directory sync are uninterruptible.
-If cancellation interrupts the subsequent Ledger publication, the operation
-returns `HoldReapRecoveryRequired` with `phase: "ledger"`, confirmed current
-removal, and the exact reaped/current evidence rather than reporting a normal
-failure that could invite an unsafe retry. This characterizes the tested
-cancellation windows; it does not establish every crash point.
-
-The current evidence still does not establish crash safety at every filesystem
-and kernel point, every overlapping Apply/undo/reap schedule, metadata
-fidelity, live protocol-state safety, or atomic multi-entry Apply.
-
-## External intent: Outbox
-
-Outbox stores a redacted public manifest and an owner-only private HTTP
-dispatch document. Staging writes durable local state and a Ledger entry.
-Cancellation renames staged state without contacting the network.
-
-Outbox uses the same bounded, cancellable Airlock-home exclusive-file lease to
-serialize stage, claim, and recovery transitions across processes. A recovered
-`committing` directory remains `uncertain`; the lease does not turn ambiguous
-external delivery into a retryable success/failure result.
-
-For Airlock-owned `RequestExternal` intents, `Outbox.commit` performs the only
-runtime wire-capable call:
-
-- it claims a staged entry by renaming it to `committing`;
-- reads the private request;
-- uses `fetch` with `redirect: "manual"`;
-- cancels the response body rather than buffering attacker-controlled bytes;
-- records completed, failed, or uncertain outcome; and
-- treats a recovered `committing` directory as `uncertain`.
-
-The commit first claims staged state; cancellation is legal only before that
-claim. This is an HTTP dispatcher, not the candidate EndpointBroker. It does
-not yet mediate DNS rebinding, proxies, every redirect, host loopback, Unix
-sockets, descriptor passing, protocol idempotency, credential capabilities, or
-contained-process egress. Native Cells currently receive no network at all.
-Compatibility children retain ambient host network, so their own sends are not
-Outbox dispatches and carry none of these staging or uncertainty guarantees.
-
-## Programs, artifacts, and receipts
-
-`airlock run` is the current integrated path:
-
-```text
-source + JSON bindings
-  → parser/evaluator
-  → canonical native action or accepted inert definition action
-  → PlanDraft
-  → Admission
-  → ExecutionAuthority
-  → trusted action/runtime adapter
-  → result + Plan summary + artifact metadata
-```
-
-Captured and generated bytes move as explicit artifacts. A later Invoke can
-bind an artifact as stdin, and a later `http.stage` can bind body data. The CLI
-returns artifact identity, media type, byte length, and provenance; it does
-not copy artifact bytes into the JSON summary.
-
-Runtime node receipts record sequence, node state, admitted resource
-identities, input digests, and output artifact references. Hold and Outbox also
-append domain entries to Ledger. Ledger now serializes cross-process appends,
-fsyncs the file and parent directory, repairs a valid torn final newline, and
-durably quarantines an invalid tail with typed evidence. It is still not a
-fully specified compaction or tamper-evident multi-component Journal.
-Native Runtime results also carry typed lifecycle receipts for the exact
-private workspace that was held, already absent, or failed retention.
-
-Runtime's separate persistent run journal publishes `running`, `finalizing`,
-and terminal snapshots. A SHA-256-derived per-Plan claim file under its
-`.claims` directory is held through the full lifecycle with the kernel-backed
-exclusive-file lease. Missing persistent storage, claim acquisition failure,
-or a prior snapshot is reported as `RuntimeExecutionClaimRejected` with
-`persistent-journal-required`, `acquire`, or `replay`; no node adapter runs on
-those paths.
-
-Program results have a versioned `succeeded | failed | partial` envelope. If a
-later action or language assertion fails, the CLI exits nonzero while retaining
-the completed action records, Plan drafts, artifact metadata, and a typed
-failure phase/cause. This is an honest partial execution report; it does not
-make the sequence transactional or prove that a failing runtime node has a
-durable receipt after every crash point.
-
-The installed `airlock-agent` entrypoint intentionally exposes a narrower
-surface than the supervisor binary: program/schema/capability and read-only
-state inspection remain available, while raw exec, direct mutation,
-dispatch/cancel, undo/reap, and flush are absent. Its program commands have no
-agent-controlled profile option; the supervisor may pin
-`AIRLOCK_AGENT_PROFILE`, with compatibility as the default. Programs can
-request structured Invoke/Apply nodes inside that profile. A node-level
-downgrade is denied with a failed `RuntimeCapabilityDenied` receipt rather
-than executed. This is evidence for the intended harness boundary, not proof
-that an external harness supplied no alternate machine-effect tool.
-
-## Execution closure and cross-plan flow
-
-The implemented native mechanism is an **executable edge set**:
-
-```text
-root executable (`invoke`)
-  → exact descendant executable paths for that root (`execute`)
-```
-
-Admission prevents a descendant-only Grant from becoming root authority.
-Seatbelt limits `process-exec` to resolved paths on macOS. Linux pins each
-selected file and its ELF loader into the mount namespace, then grants Landlock
-EXECUTE to those objects. Workspace-local executables are rebased into the
-private view; receipts retain requested, launch, allowed-path, role, and rebase
-evidence. This blocks an undeclared ordinary helper exec and is useful
-containment. It is not a semantic description of all code that runs.
-
-An executable path or binary digest is not a complete description of what
-runs. The stronger candidate contract is a full **execution closure**:
-
-```text
-root/image identity
-+ executable identity and interpreter/shebang chain
-+ loader and dynamic-library policy
-+ environment and configuration policy
-+ descendants, helpers, hooks, plugins, pagers, editors, lifecycle scripts
-+ filesystem, endpoint, stream, artifact, and credential Grants
-+ budgets, expiry, cancellation, and receipt obligations
-```
-
-The current native Cell does not bind this full closure. Dynamic libraries and
-configuration arrive through allowed file reads; an admitted interpreter can
-execute agent-owned bytes in-process; plugins may execute within an already
-admitted process; Linux hardlinks share Landlock object authority and an
-admitted ELF loader can interpret an unadmitted ELF passed as data; external
-executable paths may race with mutable code bytes; and process-group ownership
-does not prove every daemonization path.
-Definitions describe invoke contracts but do not attest the opaque program or
-its transitive dependencies.
-
-The checked-in macOS Bun proof makes this boundary concrete: `/bin/bash`,
-admitted as the only executable, sources an agent-owned `BASH_ENV` without a
-second exec while Seatbelt still confines its writes/network. The Linux suite
-separately demonstrates an admitted ELF loader interpreting an undeclared
-`/usr/bin/touch` ELF as data while the write remains private. These successful
-adversarial cases are evidence for direct executable-edge fencing plus resource
-confinement, not evidence of a full execution closure.
-
-Authority also composes across time. A low-network/no-network Plan can write a
-Git hook, package lifecycle script, build file, rc file, executable, trust
-store, or credential-helper configuration. A later Plan with stronger
-authority can consume those persisted bytes. Per-Plan admission cannot detect
-that history merely by inspecting the later executable path.
-
-This **persistent authority laundering** problem is a first-class design
-pressure, not a new law with a presumed complete solution. Candidate
-mitigations include:
-
-- classifying execution-adjacent paths distinctly from ordinary project data;
-- tool contracts that disable or bind ambient config, hooks, helpers, pagers,
-  editors, and lifecycle scripts;
-- conservative provenance/integrity on derived artifacts;
-- explicit supervisor endorsement before untrusted bytes become trusted
-  execution, policy, definition, or credential material; and
-- immutable execution roots or VM images for stronger profiles.
-
-### Confidentiality and integrity direction
-
-The candidate information-flow component uses two independent orderings:
-
-```text
-Confidentiality: public < project < private < secret
-Integrity:       untrusted < project < operator < runtime
-```
-
-Derivation moves conservatively: an output takes the highest confidentiality
-of its inputs and the lowest integrity of its inputs. Ordinary computation
-cannot silently declassify confidential data or endorse untrusted data. An
-external sink would require a scoped declassification capability when its
-ceiling is lower; a trusted executable/config/policy sink would require a
-separate endorsement capability when its floor is higher.
-
-This need not imply byte-level taint tracking. Node/artifact labels can provide
-a useful conservative first contract. Today the pure Schema-first lattice,
-checks, and typed transition receipts exist, but Plans, Cells, Outbox, and
-persisted filesystem state do not propagate or enforce them end to end.
-Accordingly Airlock does not yet prevent confidential-read plus external-write
-exfiltration or untrusted-write plus later privileged-execution laundering.
-
-### Endpoint and credential brokerage
-
-Contained network and high-value credentials are future capabilities. The
-candidate EndpointBroker would own DNS, redirects, proxy selection, loopback
-and link-local policy, Unix-socket and descriptor-import policy, byte/time
-budgets, revocation, and receipts for the actual destination. It would grant a
-bounded dispatch lease, not ambient sockets. Current native Cells instead deny
-network, and current Outbox dispatches a bounded HTTP intent itself.
-
-One bounded slice of this direction is implemented and fixture-proven: the v2
-admission policy's supervisor-side endpoint grants carry a dispatch class
-(`read | mutate | irreversible-send`) and a commit mode, and a `read`-class
-`commit: "auto"` grant lets the trusted runtime auto-commit an admitted,
-durably staged intent by calling the existing `Outbox.commit` — staging is
-never skipped, the receipt names `policy-auto` provenance, and the single
-wire-capable dispatch site is preserved. Programs and definitions cannot name
-or widen a class; a definition's declared `emissionEffect` can only narrow the
-decision. The evidence is a local fixture provider
-([`docs/evidence/external-read-slice.md`](docs/evidence/external-read-slice.md));
-it says nothing about real vendor endpoints, and the general EndpointBroker
-scope above remains candidate.
-
-For credentials, the preferred stronger shape is a non-extractable capability:
-“sign this admitted request” or “attach this credential only to this admitted
-destination,” rather than handing raw secret bytes to an opaque executable.
-Raw secret projection may remain a compatibility mechanism, but once an
-executable receives those bytes Airlock cannot claim to prevent their
-disclosure through another admitted channel. Neither broker is implemented.
-
-## Effect and PCMI strata
-
-Airlock uses Effect as the typed substrate and follows Pristine Components,
-Messy Integrations (PCMI):
-
-> Pristine capabilities, rigorous seams, disposable glue.
-
-### Domain capabilities
-
-Stable meaning belongs in narrow services and pure modules:
-
-- Hold and Outbox are implemented nuclei with Schema contracts, tagged
-  failures, and executable invariants.
-- Plan, Admission, native action lowering, label flow, and tool-definition
-  lowering are implemented candidate capabilities whose boundaries still need
-  corpus and adversarial evidence.
-- Ledger is an implemented durable append seam with bounded recovery evidence,
-  not yet a complete compaction or tamper-evident multi-component Journal.
-
-Pristine status is earned and revocable. A component name is not proof that
-its operational envelope is complete.
-
-### Interaction seams
-
-Plan nodes, requirements, grants, handles, artifacts, Cell reports, deltas,
-receipts, Outbox transitions, and capability reports are Schema-first. Expected
-failures use tagged errors in Effect's typed error channel. Service
-requirements expose capabilities at composition time.
-
-Ordering, authorization, cancellation, idempotency, uncertainty, crash
-reconciliation, and receipt correlation belong in these seams. They must not
-be reimplemented ad hoc in CLI or platform glue.
-
-### Adapter implementations
-
-The CLI, Bun process runner, Seatbelt renderer, APFS/GNU-copy adapters,
-Bubblewrap argument builder, Linux launcher, definition reader, Vouch harness,
-and future VM/broker implementations are plastic adapters. They may be local
-and repetitive. They must remain tested and observable, but they do not need
-generic integration frameworks.
-
-Linux also implements `renameat2(RENAME_NOREPLACE)`, a `flock(2)` exclusive
-lease, host-native private workspace preparation, and a Bubblewrap/Landlock/
-seccomp Cell under `src/platform/linux/`. Selection is by host platform only;
-programs, profiles, and definitions cannot choose an adapter. The native and
-distribution boundaries are directly exercised on Linux
-([`docs/evidence/linux-beachhead.md`](docs/evidence/linux-beachhead.md)).
-
-The current CLI composes services through one application Layer graph and
-runtime. It does not yet run a persistent daemon or expose the future local RPC
-surface.
-
-## Security model: current guarantees and directions
-
-Implemented, bounded properties:
-
-- structured executable and argv data avoid shell-text construction;
-- the integrated program seam retains and validates the exact
-  Plan/Grant/Handle closure as `ExecutionAuthority`;
-- native Admission separates root `invoke` from root-scoped descendant
-  `execute`, and Seatbelt or Landlock fences ordinary new execs to the resolved
-  executable edge set;
-- Cell and Runtime receipts retain executable binding roles and resolved path
-  evidence;
-- native workspace aliases are canonicalized before admission and the
-  conventional workspace binding is supervisor-owned;
-- the native Cell separates private process writes from later live Apply;
-- each native Invoke receives a private temp directory whose runtime-owned
-  path is excluded from the proposed merge delta;
-- native Cell network is denied;
-- exact private Cell directories enter runtime-private Hold lifecycle on the
-  normal completion/failure/cancellation path;
-- Hold owns supported managed replacements;
-- Outbox owns HTTP dispatch;
-- profile mismatch and missing enforcement fail closed;
-- accepted tool definitions are inert data with total lowering into the
-  existing Plan path — `invoke` actions and `enqueue` staging actions
-  that cannot name a dispatch class or commit mode; and
-- the pure label module prevents ordinary derivation from lowering
-  confidentiality or raising integrity.
-
-Acceptance conditions, not current guarantees:
-
-- complete mediation by an agent harness with no alternate effect tool;
-- complete transitive execution closure;
-- immutable identity-safe resolution for every path, executable byte
-  sequence, mount, and descriptor under races;
-- end-to-end confidentiality and integrity enforcement;
-- persistent authority-laundering prevention across runs;
-- endpoint brokerage for contained work;
-- exhaustive crash-safe and concurrent durable transitions beyond the
-  bounded Hold/Outbox evidence already present; and
-- resource-exhaustion containment.
-
-See [`docs/security-model.md`](docs/security-model.md) for the precise boundary.
-
-## Vouch evidence
-
-Vouch is the first workload, not an ontology. The proof in
-`scripts/prove-vouch.ts` constructs and admits one generic restore Plan:
-
-```text
-Capture archive
-  → Invoke /usr/bin/tar in native Cell
-  → Capture live state before Apply
-  → Apply private delta through Hold
-  → RequestExternal staged in Outbox
-  → Hold undo
-```
-
-The fixture proves that the process did not change live state before Apply,
-that the restore delta installs and can be undone, that the replacement request
-remains staged with zero fetch calls, and that node/resource receipts exist.
-
-The second proof, `scripts/prove-vouch-operations.ts`, executes a checked-in
-Airlock program with 12 actions and 16 Plan nodes. It covers file
-capture/list/glob, native mkdir, tar snapshot and listing, an artifact pipe,
-OpenShell-shaped argv atoms, copy/move/remove, staged HTTP, targeted undo,
-timeout, cancellation, and a 128-byte output-limit partial process receipt.
-Its CLI receipt schema is versioned.
-
-Neither proof runs Vouch or OpenShell, a remote sandbox, a live SQLite backup,
-unwritable collision handling, endpoint brokerage, dispatch, or an actual
-replacement. Together they are stronger local evidence for the generic
-decomposition and native host path, not a representative corpus or strong
-confidence in the full product.
-
-## macOS v1 acceptance direction
-
-“Shell parity” here is task-level parity for agents inside a published
-enforcement envelope. It does not mean human shell syntax, universal Unix
-semantics, or that compatibility and native containment make the same claim.
-
-macOS v1 is judged on what this release implements:
-
-- compatibility preserves the zero-config capability ratchet and reports no
-  containment;
-- native-contained must pass every task it advertises, fail unsupported work
-  explicitly, and never downgrade; and
-- the agent-only acceptance corpus must measure real task completion without
-  direct shell or alternate effect authority.
-
-The repository now contains five different kinds of evidence that must not be
-collapsed:
-
-1. 72 Unix-informed **contract shapes** across 10 families parse, decode, lower
-   to Plans, validate, and compatibility-admit. Eight unsupported classes are
-   explicit. This shows breadth of the current vocabulary and contracts, not
-   that a model completed 72 tasks or that the runtime executed them.
-2. Eleven **executed parity workloads** comprise five foundational top-level
-   file/process/control/native-rewrite fixtures, five agent-only repository,
-   edit, archive, local-Git, and build-descendant fixtures, and one destructive
-   native-removal fixture.
-3. Two **Vouch-derived local proofs** exercise the generic restore and host
-   workflow decomposition without running real Vouch/OpenShell remote work.
-   Both pass as individual tests in the final integrated gate. No repeated-run
-   report is checked in, so they are not described as repetition campaigns.
-4. Host-native boundary proofs exercise private write/network/temp fences,
-   exact executable descendants and shebang chains, descriptor closure,
-   hostile syscalls, daemon teardown, and admitted interpreter/loader
-   in-process-code limits on their respective backends.
-5. One [**50-execution repeatability
-   campaign**](docs/evidence/parity-50.md) launches the real agent CLI as a
-   fresh Bun subprocess for exactly ten deterministic scripted cases, five
-   repetitions each: 40 compatibility and 10 native-contained successes. The
-   automated gate enforces a five-minute cold-campaign ceiling. It is not 50
-   unique/model-generated tasks, a direct-shell A/B, or a held-out corpus.
-
-The integrated `bun run verify` gate runs the complete platform-selected suite
-plus explicit Bun ProcessRunner and host-native boundary evidence. The Linux
-gate additionally builds a fresh launcher and release unit, runs the adversarial
-Linux Cell and distribution proofs, and executes shared native workloads. These
-tests do not transform fixtures into representative agent-task evidence.
-Bounded evidence documents under `docs/evidence/` retain their own claim
-boundaries and do not change this classification.
-
-The published native exclusions include unstructured command strings, symlink
-Apply, special files/devices, mount mutation, interactive PTY/job control,
-contained endpoint access, daemon/session escape, and remote-filesystem Apply.
-The broader honest gap list also includes hardlink/ACL/xattr/sparse fidelity,
-live foreign-writer or SQLite/WAL state, atomic multi-entry merge, complete
-execution closure, confidentiality, endpoint/credential brokerage, root/GUI
-administration, and crash recovery before Cell lifecycle finalization.
-
-The future VM backend may later widen the enforceable set and strengthen
-confidentiality. It is not used to postpone or manufacture the v1 claim.
-
-No moderate or strong shell-replacement claim is available today. The current
-evidence supports a usable, substantial local developer preview, but it lacks
-the frozen 50-task model/harness corpus and direct-shell baseline, repeated
-platform runs, exhaustive fault/overlap campaigns, and adversarial security
-evidence described in
-[`docs/acceptance.md`](docs/acceptance.md).
-
-## Open questions
-
-The following remain unresolved:
-
-- the smallest model-reliable Airlock language beyond current implemented
-  forms;
-- exact path, hardlink, metadata, mount, liveness, and multi-entry transaction
-  semantics;
-- startup reconciliation for stranded Cells, plus persistent Cell,
-  incremental working-set, and checkpoint semantics;
-- end-to-end artifact storage and Journal durability protocol;
-- selector, issuance, revocation, and persistence semantics for labels and
-  supervisor capabilities;
-- execution-adjacent resource classification across runs;
-- immutable executable identity and full loader/config/plugin interpretation
-  policy beyond the current exact executable-edge set;
-- protocol-aware endpoint brokerage and non-extractable credentials;
-- tool-definition signing, precedence, distribution, and decoder power;
-- remote-realm authentication and ambiguous-result reconciliation;
-- the VM image/backend and which stronger guarantees it can actually support;
-  and
-- the representative and hostile corpora that determine where native
-  containment has earned a claim.
-
-An open question may narrow or version a candidate seam. It may not weaken the
-two laws or silently create another mutation, dispatch, or authority path.
-
-## Non-goals
-
-Airlock does not:
-
-- target human interactive shell use or reproduce shell textual semantics;
-- reimplement Unix tools or their application protocols;
-- infer an agent's true intent;
-- claim universal Unix capability parity outside an advertised task/resource
-  envelope;
-- promise that external effects are reversible or exactly once;
-- provide a distributed transaction;
-- protect against kernel, administrator, hypervisor, or physical compromise;
-- treat installed code or definitions as trustworthy by existence;
-- claim confidentiality from the current native profile;
-- claim a VM that is not implemented; or
-- describe the current Vouch/parity fixtures as a representative corpus.
+One table (`outbox/Lifecycle.ts`) is the whole truth about which moves exist.
+The store's `transition(id, from, arrival)` is typed by it, so an illegal move
+does not compile (`test/core-typestate.test.ts`), and the same table drives
+the runtime check.
+
+- **Staging is replay-idempotent.** The caller supplies an idempotency key; the
+  emission id is derived from it by digest. Staging the same key with the same
+  content returns the existing emission in whatever state it has reached. The
+  same key with different content is an `IdempotencyConflict`. A key is stored
+  and listed, so it must not carry a URL or a secret.
+- **`uncertain` is terminal.** Once a dispatch may have reached the wire and
+  its result is unknown, Airlock never sends it again. A `committing` record
+  found at startup is settled as `uncertain`.
+- **The Ledger converges.** Each record remembers which of its receipts have
+  been written. Any path that loads an emission writes the receipts it still
+  owes first, so a lost Ledger append or a crash between the store and the
+  Ledger is repaired on the next touch, without a second dispatch.
+
+### Wire authority is a value
+
+Reaching the outside world requires a `DispatchPermit`. The permit is minted
+in exactly one place, the kernel's `commit`, and only after `staged →
+committing` has been persisted; it is revoked when that dispatch settles. Its
+brand never leaves the kernel module, so no other code can construct one.
+
+A `Dispatcher` is a record with one handler per registered intent kind, and a
+handler receives the permit with the request. A kind without a handler does
+not compile, and a handler checks `isLivePermit` before it builds a request,
+so a forged, replayed or settled permit is refused even if a cast got it past
+the types (`test/core-permit.test.ts`, `test/http-dispatcher.test.ts`).
+
+### Intent kinds
+
+The set of things an Outbox can send is closed at the type level and extended
+by declaration. An intent kind supplies a tag, the private dispatch schema,
+the redacted public summary, the outcome schema, and the canonical target a
+grant is matched against. `defineOutbox({ ...kinds })` returns the Outbox
+service, its Dispatcher service and the kernel Layer for exactly those kinds.
+HTTP is one kind (`outbox/HttpIntent.ts`); adding another, such as a typed
+tool action, is declaring it and writing its handler, with no kernel edit.
+
+### Conformance
+
+Each port ships a suite in `src/core/testing` that takes a Layer and registers
+the invariant tests: durable put-if-absent, compare-and-set under races,
+terminal states, response bound, exclusive sections, idempotent replay,
+uncertain never retried, corrupt or tampered state failing closed, and a
+crash-point sweep that loses each Ledger write and each mark in turn. The
+suites take the test runner as an argument, so the kernel depends on no test
+framework. An adapter is fit to run under the kernel when it passes them; the
+in-memory reference adapters and this host's file adapters pass the same
+suites.
+
+## The host
+
+Everything shaped like a file, a process or an operating system lives outside
+`src/core`.
+
+### Adapters for the kernel's ports, `src/host`
+
+- **`FileOutboxStore`**: one directory per emission, named `<id>.<state>`,
+  holding the record for that state, the sealed dispatch and the response
+  capture. A state change writes and syncs what the new state needs inside the
+  directory and then renames the directory; the rename is the compare-and-set,
+  and a crash before it leaves the previous state intact. Sections and single
+  operations are serialized across processes with kernel-held file leases.
+- **`FileLedger`**: an fsynced JSONL journal under a cross-process lease. A
+  torn final record that still decodes is completed; one that does not is
+  quarantined beside the journal before the journal is shortened. The module
+  provides the kernel's `Ledger` port and also a richer service that Hold and
+  the CLI use to report those cases.
+- **`HttpDispatcher`**: the handler for the HTTP kind and the only place in
+  the repository that calls the network. It refuses a permit that is not live,
+  never follows a redirect, and retains at most the kernel's response bound.
+
+`src/Outbox.ts` composes them: the kernel for this host's kinds over the file
+store, the file ledger and the HTTP handler.
+
+### Hold
+
+Hold is a host component: its subject is filesystem bytes. A managed change is
+a rename into `hold/<act>/`, journaled so that a crash between the rename and
+the receipt is reconciled at the next start. `Hold.reap` is the only place a
+retained payload is deleted. Reviewed changes (`src/change`) freeze a
+candidate and a baseline, apply by exact digest, and undo against what was
+installed.
+
+### Runtime, Program, CLI and daemon
+
+- **Runtime** interprets an admitted Plan node by node: `Capture` and `Apply`
+  through the native filesystem and Hold, `Invoke` through the process runner
+  or a Cell, `RequestExternal` by staging in the Outbox (and committing inline
+  only when the supervisor's policy pre-authorized that node).
+- **Program** runs `.air` source: each action becomes a Plan fragment that is
+  admitted and executed, and its result is projected back to the language.
+- **CLI** (`airlock`, `airlock-agent`) is glue over those components. A
+  verified seal narrows the command graph to what the operator signed.
+- **Daemon** is the sealed supervisor loop: it commits pre-authorized read
+  emissions and reaps, re-verifying the seal immediately before each terminal
+  act.
+
+## Properties and the tests that hold them
+
+| property | held by |
+|---|---|
+| The kernel imports only `effect` and itself, and names no host global | `test/core-boundary.test.ts` |
+| The kernel bundles with no Node built-in and runs with no `process`, `Bun`, `Buffer` or `require` | `scripts/prove-core-portable.ts` (part of `bun run verify`) |
+| `./core` and `./core/testing` work by package name with no platform Layer | `test/core-exports.test.ts` |
+| Illegal lifecycle moves, a missing handler and a handwritten permit do not compile | `test/core-typestate.test.ts` |
+| A permit is minted in one place, after the committing transition, and revoked after | `test/core-permit.test.ts` |
+| Exactly one network call exists, in the host HTTP handler, after the permit check; none in the kernel | `test/authority-sites.test.ts` |
+| Exactly one deletion site exists, in `Hold.reap` | `test/authority-sites.test.ts` |
+| The file store, the file ledger and the two together satisfy the kernel's ports | `test/file-outbox-store.test.ts`, `test/file-ledger.test.ts`, `test/file-outbox.test.ts` |
+| The HTTP wire sends nothing at staging, refuses forged and settled permits, does not follow redirects, bounds the response, and keeps header values, query values and the body out of everything but the sealed dispatch | `test/http-dispatcher.test.ts` |
+
+`bun run verify` runs the typecheck, the test suite, the Bun and platform
+integration gates, and the portability proof.
+
+## Adding to Airlock
+
+- **A new host** (for example a Durable Object): write Layers for
+  `OutboxStore`, `Ledger`, the `Dispatcher` handlers and `effect/Crypto`, and
+  run the three conformance suites against them. Nothing in `src/core`
+  changes.
+- **A new thing to send**: declare an intent kind, add it to `defineOutbox`,
+  and write its handler. The compiler lists every place that must change.
+- **A new restriction**: make it an opt-in profile or flag. The default stays
+  Bash parity.
+
+## Further reading
+
+- [`docs/usage.md`](docs/usage.md): the language, actions, profiles and policy.
+- [`docs/changes.md`](docs/changes.md): reviewed local changes.
+- [`docs/security-model.md`](docs/security-model.md): what is and is not
+  defended.
+- [`docs/macos-v1.md`](docs/macos-v1.md), [`docs/linux-v1.md`](docs/linux-v1.md):
+  the platform sandboxes.
+- [`docs/rfc`](docs/rfc) and [`docs/evidence`](docs/evidence): design history
+  and recorded proof runs. They describe what was true when they were written.

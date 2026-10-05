@@ -222,7 +222,8 @@ All applicable gates must pass:
 
 1. `Hold.reap` owns the only irreversible removal of retained managed bytes.
 2. Every supported live binding replacement uses Hold.
-3. The only wire-capable site is inside `Outbox.commit`.
+3. The only network call is the host HTTP handler, reachable only with a
+   permit the Outbox kernel mints inside `commit`.
 4. `RequestExternal` stages and cannot dispatch from program lowering.
 5. Compatibility remains the zero-config profile.
 6. A selected contained profile cannot downgrade.

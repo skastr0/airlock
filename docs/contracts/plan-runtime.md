@@ -1,9 +1,9 @@
 # Plan and runtime contract
 
-> Status: implemented candidate seam. The current Schema fields and four-node
-> interpretation run in the repository. Only the two laws in
-> [`DESIGN.md`](../../DESIGN.md) are frozen invariants; the completeness of
-> these algebras remains evidence-seeking.
+> Status: implemented. The Schema fields and four-node interpretation
+> described here run in the repository; the code and its tests are the source
+> of truth, and this document follows them. See
+> [`ARCHITECTURE.md`](../../ARCHITECTURE.md) for the kernel and host split.
 
 ## Purpose
 

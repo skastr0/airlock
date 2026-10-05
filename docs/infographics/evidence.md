@@ -16,20 +16,20 @@
 
 | infographic claim | status | source |
 |---|---|---|
-| Airlock is the chamber between agents and the world | direct | [`DESIGN.md`](../../DESIGN.md#airlock--design) |
-| Agents author structured actions; Airlock composes existing Unix programs | direct | [`DESIGN.md`](../../DESIGN.md#airlock--design) |
+| Airlock is the chamber between agents and the world | direct | [`ARCHITECTURE.md`](../../ARCHITECTURE.md) |
+| Agents author structured actions; Airlock composes existing Unix programs | direct | [`ARCHITECTURE.md`](../../ARCHITECTURE.md) |
 | Admission binds an admitted Plan, Grants, and resource bindings into ExecutionAuthority; Runtime receives that authority object | direct | [`src/admission/Admission.ts`](../../src/admission/Admission.ts), [`src/runtime/Runtime.ts`](../../src/runtime/Runtime.ts) |
-| The candidate Plan algebra is exactly Capture, Invoke, Apply, and RequestExternal | direct | [`DESIGN.md`](../../DESIGN.md#plan-algebra-and-runtime-vocabulary), [`src/plan/Plan.ts`](../../src/plan/Plan.ts) |
-| Capture is observation, Invoke computation, Apply managed mutation, and RequestExternal emission intent | direct | [`DESIGN.md`](../../DESIGN.md#the-four-effect-classes) |
-| Invoke uses separate executable and argument fields; there is no command-string form | direct | [`DESIGN.md`](../../DESIGN.md#plan-algebra-and-runtime-vocabulary), [`src/process/Process.ts`](../../src/process/Process.ts) |
-| Apply routes Airlock-owned managed changes through Hold | direct | [`DESIGN.md`](../../DESIGN.md#the-two-laws), [`src/Hold.ts`](../../src/Hold.ts) |
-| RequestExternal stages inert intent; authorized Outbox commit crosses the wire | direct | [`DESIGN.md`](../../DESIGN.md#two-phase-everywhere), [`src/Outbox.ts`](../../src/Outbox.ts) |
-| Possible external dispatch may end as uncertain and is not silently retried | direct | [`DESIGN.md`](../../DESIGN.md#two-phase-everywhere), [`src/Outbox.ts`](../../src/Outbox.ts) |
+| The candidate Plan algebra is exactly Capture, Invoke, Apply, and RequestExternal | direct | [`ARCHITECTURE.md`](../../ARCHITECTURE.md), [`src/plan/Plan.ts`](../../src/plan/Plan.ts) |
+| Capture is observation, Invoke computation, Apply managed mutation, and RequestExternal emission intent | direct | [`ARCHITECTURE.md`](../../ARCHITECTURE.md) |
+| Invoke uses separate executable and argument fields; there is no command-string form | direct | [`ARCHITECTURE.md`](../../ARCHITECTURE.md), [`src/process/Process.ts`](../../src/process/Process.ts) |
+| Apply routes Airlock-owned managed changes through Hold | direct | [`ARCHITECTURE.md`](../../ARCHITECTURE.md), [`src/Hold.ts`](../../src/Hold.ts) |
+| RequestExternal stages inert intent; authorized Outbox commit crosses the wire | direct | [`ARCHITECTURE.md`](../../ARCHITECTURE.md), [`src/Outbox.ts`](../../src/Outbox.ts) |
+| Possible external dispatch may end as uncertain and is not silently retried | direct | [`ARCHITECTURE.md`](../../ARCHITECTURE.md), [`src/Outbox.ts`](../../src/Outbox.ts) |
 | Receipts are operational evidence rather than proof of semantic correctness | direct | [`ARCHITECTURE.md`](../../ARCHITECTURE.md#terms) |
-| Only the Reaper unlinks | law, construction-tested | [`DESIGN.md`](../../DESIGN.md#1-only-the-reaper-unlinks), [`test/hold.test.ts`](../../test/hold.test.ts) |
-| Explicit profiles may narrow authority and agent programs cannot widen it | law | [`DESIGN.md`](../../DESIGN.md#2-the-ratchet-law) |
-| Compatibility retains ambient host authority and makes no containment claim | direct | [`DESIGN.md`](../../DESIGN.md#host-native-v1), [`docs/macos-v1.md`](../macos-v1.md), [`docs/linux-v1.md`](../linux-v1.md) |
-| Native-contained uses a private workspace and denied network, but is not confidential or VM-equivalent | direct | [`DESIGN.md`](../../DESIGN.md#host-native-v1), [`docs/macos-v1.md`](../macos-v1.md), [`docs/linux-v1.md`](../linux-v1.md) |
+| Only the Reaper unlinks | law, construction-tested | [`ARCHITECTURE.md`](../../ARCHITECTURE.md), [`test/hold.test.ts`](../../test/hold.test.ts) |
+| Explicit profiles may narrow authority and agent programs cannot widen it | law | [`ARCHITECTURE.md`](../../ARCHITECTURE.md) |
+| Compatibility retains ambient host authority and makes no containment claim | direct | [`ARCHITECTURE.md`](../../ARCHITECTURE.md), [`docs/macos-v1.md`](../macos-v1.md), [`docs/linux-v1.md`](../linux-v1.md) |
+| Native-contained uses a private workspace and denied network, but is not confidential or VM-equivalent | direct | [`ARCHITECTURE.md`](../../ARCHITECTURE.md), [`docs/macos-v1.md`](../macos-v1.md), [`docs/linux-v1.md`](../linux-v1.md) |
 
 ## Important caveats
 

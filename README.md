@@ -97,8 +97,10 @@ child writes and network sends do not acquire Hold or Outbox guarantees.
 workspace computation. Its Linux prerequisites belong to that feature, not to
 the new direct `change` journey. **VM-enclosed** remains future direction.
 
-Two laws remain unchanged: **only the reaper unlinks managed retained bytes**,
-and **restrictions are opt-in ratchet turns**. See [DESIGN.md](DESIGN.md).
+Airlock is built as a storage-agnostic kernel (`src/core`, published as
+`@skastr0/airlock/core`) and a host that supplies files, processes and the
+network. Its guarantees are enforced by types and tests rather than by
+convention; [ARCHITECTURE.md](ARCHITECTURE.md) describes the design as built.
 
 ## Documentation and development
 

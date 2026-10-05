@@ -6,7 +6,7 @@
 > native backend is a write/network fence around a private workspace, not a
 > confidentiality sandbox.
 >
-> Only the reaper and ratchet laws in [`DESIGN.md`](../DESIGN.md) are frozen.
+> Nothing in this document is a frozen rule; the code and its tests decide.
 > The execution-closure, information-flow, two-phase, endpoint, and persistent-
 > authority material below is implemented only where explicitly stated; the
 > rest is candidate design or acceptance work.

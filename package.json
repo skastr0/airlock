@@ -37,7 +37,6 @@
     "scripts/install-linux.sh",
     "scripts/uninstall-linux.sh",
     "ARCHITECTURE.md",
-    "DESIGN.md",
     "README.md",
     "LICENSE"
   ],
