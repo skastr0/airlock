@@ -34,7 +34,7 @@ const make = Effect.gen(function* () {
   const error = (cause: unknown) => new ChangeError({ operation: "change workflow", reason: describeFailure(cause) })
   // Construction has no store reads/writes; corrupt proposals cannot disable
   // unrelated commands. The lease serializes stage budgets, claim and cancel.
-  const lock = makeExclusiveFileLock({ root, active: path.join(root, "lock"), released: path.join(root, "released"), abandoned: path.join(root, "abandoned"), onError: (_op, _p, cause) => error(cause) })
+  const lock = makeExclusiveFileLock({ root, active: path.join(root, "lock"), onError: (_op, _p, cause) => error(cause) })
   const validateStore = async () => {
     const stat = await lstat(root)
     if (!stat.isDirectory() || stat.isSymbolicLink() || (stat.mode & 0o077) !== 0) throw new Error("change store must be a private directory")

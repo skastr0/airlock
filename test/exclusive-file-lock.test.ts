@@ -27,10 +27,7 @@ describe("ExclusiveFileLock", () => {
       const lock = makeExclusiveFileLock({
         root,
         active,
-        released: join(root, "released"),
-        abandoned: join(root, "abandoned"),
         timeoutMillis: 1_200,
-        malformedGraceMillis: 100,
         onError: (operation, target, cause) =>
           new Error(`${operation} ${target}: ${String(cause)}`)
       })
@@ -73,8 +70,6 @@ describe("ExclusiveFileLock", () => {
       const lock = makeExclusiveFileLock({
         root,
         active,
-        released: join(root, "released"),
-        abandoned: join(root, "abandoned"),
         onError: (operation, target, cause) => ({
           _tag: "TestLockFailure" as const,
           operation,
@@ -129,10 +124,7 @@ describe("ExclusiveFileLock", () => {
         // after the owner body is already durable.
         root: missingSyncRoot,
         active,
-        released: join(lockFiles, "released"),
-        abandoned: join(lockFiles, "abandoned"),
         timeoutMillis: 1_200,
-        malformedGraceMillis: 100,
         onError: (operation, target, cause) => ({
           _tag: "TestLockFailure" as const,
           operation,
@@ -171,8 +163,6 @@ describe("ExclusiveFileLock", () => {
       const recovered = makeExclusiveFileLock({
         root: lockFiles,
         active,
-        released: join(lockFiles, "released"),
-        abandoned: join(lockFiles, "abandoned"),
         timeoutMillis: 1_200,
         onError: (operation, target, cause) => ({
           _tag: "TestLockFailure" as const,
@@ -207,10 +197,7 @@ describe("ExclusiveFileLock", () => {
       const lock = makeExclusiveFileLock({
         root,
         active,
-        released: join(root, "released"),
-        abandoned: join(root, "abandoned"),
         timeoutMillis: 4_000,
-        malformedGraceMillis: 0,
         onError: (operation, target, cause) => ({
           _tag: "TestLockFailure" as const,
           operation,

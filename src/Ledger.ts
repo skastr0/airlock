@@ -444,8 +444,6 @@ export const LedgerLive = Layer.effect(
     const lock = makeExclusiveFileLock<LedgerFilesystemError>({
       root: lockRoot,
       active: lockFile,
-      released: `${lockFile}.released`,
-      abandoned: `${lockFile}.abandoned`,
       onError: (operation, path, cause) =>
         new LedgerFilesystemError({
           operation: "lock",

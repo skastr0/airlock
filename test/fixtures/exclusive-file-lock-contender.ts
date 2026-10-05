@@ -144,8 +144,6 @@ const program = Effect.gen(function* () {
   const lock = makeExclusiveFileLock({
     root: input.lockRoot,
     active: input.active,
-    released: join(input.lockRoot, "released"),
-    abandoned: join(input.lockRoot, "abandoned"),
     timeoutMillis: 12_000,
     onError: (operation, target, cause) =>
       new FixtureFailure({

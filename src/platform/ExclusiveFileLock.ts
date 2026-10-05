@@ -15,16 +15,7 @@ type LockOwner = Readonly<{
 export interface ExclusiveFileLockOptions<E> {
   readonly root: string
   readonly active: string
-  /**
-   * Retained for the persisted v0 layout. The descriptor-backed macOS protocol
-   * never renames the stable lock inode, so these tombstones are no longer
-   * written.
-   */
-  readonly released: string
-  readonly abandoned: string
   readonly timeoutMillis?: number
-  /** @deprecated Kernel-owned leases need no malformed-owner grace period. */
-  readonly malformedGraceMillis?: number
   readonly onError: (
     operation: string,
     target: string,

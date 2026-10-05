@@ -464,8 +464,6 @@ const proveLeaseRecovery = (recoveryRoot: string) =>
       const lock = makeExclusiveFileLock({
         root: recoveryRoot,
         active,
-        released: join(recoveryRoot, "released"),
-        abandoned: join(recoveryRoot, "abandoned"),
         timeoutMillis: 5_000,
         onError: (operation, target, cause) =>
           new Error(`${operation} ${target}: ${reasonOf(cause)}`)
