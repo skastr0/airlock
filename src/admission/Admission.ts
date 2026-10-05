@@ -56,8 +56,14 @@ export const ExecutableEdgePolicy = Schema.Struct({
 })
 export type ExecutableEdgePolicy = typeof ExecutableEdgePolicy.Type
 
+/**
+ * The supervisor's admission policy. Endpoints are structured grants carrying a
+ * dispatch class and commit mode; selectors and intents are canonicalized
+ * (§ `canonicalizeEndpoint`) because a raw string prefix cannot be the sole
+ * load-bearing check once auto-commit removes the human.
+ */
 export class AdmissionPolicy extends Schema.Class<AdmissionPolicy>("AdmissionPolicy")({
-  schemaVersion: Schema.Literal("airlock/admission-policy/v1"),
+  schemaVersion: Schema.Literal("airlock/admission-policy/v2"),
   profile: AdmissionProfile,
   principal: Schema.String,
   realm: Schema.String,
@@ -73,65 +79,12 @@ export class AdmissionPolicy extends Schema.Class<AdmissionPolicy>("AdmissionPol
    * Keeping this distinct prevents a helper grant from becoming a new root
    * Invoke authority in a later agent-authored Plan.
    */
-  executableEdges: Schema.Array(ExecutableEdgePolicy).pipe(
-    Schema.withDecodingDefault(Effect.succeed([])),
-    Schema.withConstructorDefault(Effect.succeed([]))
-  ),
-  /** Explicit endpoint selectors. Exact match or a trailing `*` prefix selector. */
-  endpointAllowlist: Schema.Array(Schema.String),
+  executableEdges: Schema.Array(ExecutableEdgePolicy),
+  /** Structured endpoint grants. Classes live here and nowhere else. */
+  endpointGrants: Schema.Array(EndpointGrantPolicy)
   // VM backend discovery belongs to the privileged runtime, not agent-provided
   // policy. This build therefore refuses vm-enclosed unconditionally below.
 }) {}
-
-/**
- * Admission policy v2. Every v1 field carries over unchanged except the flat
- * `endpointAllowlist`, which is superseded (not aliased) by structured
- * endpoint grants carrying a supervisor dispatch class and commit mode.
- *
- * A grant that names neither behaves exactly as a v1 allowlist entry does: an
- * irreversible-send floor that stays staged until an explicit supervisor
- * commit. The one deliberate difference is matching — v2 selectors and intents
- * are canonicalized (§ `canonicalizeEndpoint`) because a raw string prefix
- * cannot be the sole load-bearing check once auto-commit removes the human.
- */
-export class AdmissionPolicyV2 extends Schema.Class<AdmissionPolicyV2>("AdmissionPolicyV2")({
-  schemaVersion: Schema.Literal("airlock/admission-policy/v2"),
-  profile: AdmissionProfile,
-  principal: Schema.String,
-  realm: Schema.String,
-  admittedBy: Schema.String,
-  grantTtlMillis: Schema.optional(Schema.Number.check(Schema.isGreaterThan(0))),
-  pathAllowlist: Schema.Array(Schema.String),
-  executableAllowlist: Schema.Array(Schema.String),
-  executableEdges: Schema.Array(ExecutableEdgePolicy).pipe(
-    Schema.withDecodingDefault(Effect.succeed([])),
-    Schema.withConstructorDefault(Effect.succeed([]))
-  ),
-  /** Structured endpoint grants. Classes live here and nowhere else. */
-  endpointGrants: Schema.Array(EndpointGrantPolicy)
-}) {}
-
-/**
- * Either supervisor policy version. v1 documents keep decoding unchanged; the
- * union discriminates on the `schemaVersion` literal.
- */
-export const AdmissionPolicyDocument = Schema.Union([AdmissionPolicy, AdmissionPolicyV2])
-export type AdmissionPolicyDocument = typeof AdmissionPolicyDocument.Type
-
-export const isAdmissionPolicyV2 = (
-  policy: AdmissionPolicyDocument
-): policy is AdmissionPolicyV2 =>
-  policy.schemaVersion === "airlock/admission-policy/v2"
-
-/**
- * The endpoint grants a policy carries. A v1 document carries none: it has no
- * class vocabulary, so every one of its staged intents awaits a supervisor
- * commit exactly as today.
- */
-export const endpointGrantsOf = (
-  policy: AdmissionPolicyDocument
-): ReadonlyArray<EndpointGrantPolicy> =>
-  isAdmissionPolicyV2(policy) ? policy.endpointGrants : []
 
 /**
  * Whether a durably staged intent is eligible for a supervisor-policy
@@ -139,9 +92,9 @@ export const endpointGrantsOf = (
  * ordinary `Outbox.commit`; this decision adds no dispatch path of its own.
  */
 export const policyDispatchDecision = (
-  policy: AdmissionPolicyDocument,
+  policy: AdmissionPolicy,
   intent: StagedIntentFacts
-): DispatchDecision => dispatchDecision(endpointGrantsOf(policy), intent)
+): DispatchDecision => dispatchDecision(policy.endpointGrants, intent)
 
 export class AdmissionResult extends Schema.Class<AdmissionResult>("AdmissionResult")({
   plan: Plan,
@@ -247,24 +200,17 @@ const pathContains = (scope: string, selector: string) => {
   return target === root || target.startsWith(`${root}/`)
 }
 
-const endpointAllows = (scope: string, selector: string) =>
-  scope.endsWith("*") ? selector.startsWith(scope.slice(0, -1)) : scope === selector
-
 /**
- * v1 keeps its raw string prefix verbatim. v2 matches on the canonical
- * `scheme://host/path`, so a selector can never be satisfied by a URL that
- * `fetch` would normalize to a different resource.
+ * Matches on the canonical `scheme://host/path`, so a selector can never be
+ * satisfied by a URL that `fetch` would normalize to a different resource.
  */
-const endpointAdmitted = (policy: AdmissionPolicyDocument, selector: string) => {
-  if (!isAdmissionPolicyV2(policy)) {
-    return policy.endpointAllowlist.some((scope) => endpointAllows(scope, selector))
-  }
+const endpointAdmitted = (policy: AdmissionPolicy, selector: string) => {
   const canonical = canonicalizeEndpoint(selector)
   if (Result.isFailure(canonical)) return false
   return fittingEndpointGrants(policy.endpointGrants, canonical.success).length > 0
 }
 
-const allowedBy = (policy: AdmissionPolicyDocument, requirement: ResourceRequirement) => {
+const allowedBy = (policy: AdmissionPolicy, requirement: ResourceRequirement) => {
   if (policy.profile === "compatibility") return true
   switch (requirement.kind) {
     case "path":
@@ -550,7 +496,7 @@ const makeIdentity = (requirement: ResourceRequirement) =>
  */
 export const admit = (
   draft: PlanDraft,
-  policy: AdmissionPolicyDocument,
+  policy: AdmissionPolicy,
   now: Date = new Date()
 ): Effect.Effect<AdmissionResult, AdmissionError> =>
   Effect.gen(function* () {
@@ -561,11 +507,9 @@ export const admit = (
       })
     }
     yield* validateNodeRequirements(draft)
-    if (isAdmissionPolicyV2(policy)) {
-      const rejection = validateEndpointGrants(policy.endpointGrants)
-      if (rejection !== undefined) {
-        return yield* contractInvalid(draft.id, rejection.field, rejection.reason)
-      }
+    const rejection = validateEndpointGrants(policy.endpointGrants)
+    if (rejection !== undefined) {
+      return yield* contractInvalid(draft.id, rejection.field, rejection.reason)
     }
     if (policy.profile !== "compatibility") {
       const duplicateRoot = duplicates(
@@ -633,11 +577,7 @@ export const admit = (
       pathAllowlist: policy.pathAllowlist,
       executableAllowlist: policy.executableAllowlist,
       executableEdges: policy.executableEdges,
-      // v1 digests stay byte-identical: the endpoint field a policy actually
-      // carries is the one that enters its digest.
-      ...(isAdmissionPolicyV2(policy)
-        ? { endpointGrants: policy.endpointGrants }
-        : { endpointAllowlist: policy.endpointAllowlist })
+      endpointGrants: policy.endpointGrants
     })
     const validUntil = policy.grantTtlMillis === undefined
       ? undefined
@@ -656,7 +596,7 @@ export const admit = (
         })
       }
     }
-    if (policy.profile !== "compatibility" && isAdmissionPolicyV2(policy)) {
+    if (policy.profile !== "compatibility") {
       yield* validateEndpointGrantFit(draft, policy.endpointGrants)
     }
     if (policy.profile !== "compatibility") {
@@ -971,27 +911,4 @@ export const revalidateNodeAuthority = (
       )
     }
     return yield* bindNode(authority.admission, node, now)
-  })
-
-/** Rechecks one legacy requirement lookup against the retained grant closure. */
-export const resolveHandle = (
-  result: AdmissionResult,
-  requirementId: RequirementId,
-  now: Date = new Date()
-): Effect.Effect<
-  Handle,
-  HandleNotResolved | HandleExpired | AdmissionContractInvalid
-> =>
-  Effect.gen(function* () {
-    yield* validateClosure(result, now)
-    const resolution = result.plan.resolutions.find(
-      (candidate) => candidate.requirementId === requirementId
-    )
-    const handle = resolution === undefined
-      ? undefined
-      : result.plan.handles.find(
-          (candidate) => candidate.id === resolution.handleId
-        )
-    if (handle === undefined) return yield* new HandleNotResolved({ requirementId })
-    return handle
   })

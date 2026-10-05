@@ -1,7 +1,7 @@
 import { Result, Schema } from "effect"
 import { NodeId } from "../plan/index.ts"
 import {
-  type AdmissionPolicyDocument,
+  type AdmissionPolicy,
   type ExecutionAuthority,
   policyDispatchDecision
 } from "./Admission.ts"
@@ -59,7 +59,7 @@ export class SupervisorAutoCommit extends Schema.Class<SupervisorAutoCommit>(
  * signature would have to change before that is true.
  */
 export const supervisorAutoCommits = (
-  policy: AdmissionPolicyDocument,
+  policy: AdmissionPolicy,
   authority: ExecutionAuthority,
   declaredEmissionEffect?: DispatchClass
 ): ReadonlyArray<SupervisorAutoCommit> => {

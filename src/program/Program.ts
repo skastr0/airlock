@@ -2,7 +2,7 @@ import { Context, Effect, Layer, Schema } from "effect"
 import { createHash } from "node:crypto"
 import {
   admit,
-  type AdmissionPolicyDocument,
+  type AdmissionPolicy,
   bindAdmissionForUse,
   type ExecutionAuthority,
   supervisorAutoCommits
@@ -285,7 +285,7 @@ const runtimeExecutionFailure = (
  * Admission remains its own typed seam. This layer only adapts the richer
  * Admission error vocabulary to the language-facing execution boundary.
  */
-export const ProgramAdmissionLive = (policy: AdmissionPolicyDocument) =>
+export const ProgramAdmissionLive = (policy: AdmissionPolicy) =>
   Layer.succeed(ProgramAdmission, ProgramAdmission.of({
     admit: (draft) => admit(draft, policy).pipe(
       Effect.flatMap((result) => bindAdmissionForUse(result)),
@@ -1520,7 +1520,7 @@ const externalFor = (
  * How this interpreter learns which staged nodes the supervisor already
  * authorized to commit. It never decides: the decision is made where the policy
  * lives, and this seam only carries the answer to the runtime. A program
- * without a policy gets an empty list — the v1 posture, where everything waits
+ * without a policy gets an empty list, so everything waits
  * for an explicit supervisor act.
  */
 export type ProgramDispatchAuthority = (
@@ -1540,7 +1540,7 @@ const stagedOnlyDispatchAuthority: ProgramDispatchAuthority = () => []
  * translation and nothing else: no gate, no class arithmetic, no policy read.
  */
 export const supervisorDispatchAuthority = (
-  policy: AdmissionPolicyDocument,
+  policy: AdmissionPolicy,
   sealedDispatch?: ProgramSealedDispatch
 ): ProgramDispatchAuthority =>
 (authority, declaredEmissionEffect) =>
@@ -1891,7 +1891,7 @@ const makeProgramPlanRuntimeLive = (dispatch: ProgramDispatchAuthority) => Layer
 
 /**
  * Staged-only interpreter: no policy, so no pre-authorization and no
- * auto-commit. This is the v1 posture and remains the default export.
+ * auto-commit.
  */
 export const ProgramPlanRuntimeLive = makeProgramPlanRuntimeLive(
   stagedOnlyDispatchAuthority
@@ -1899,7 +1899,7 @@ export const ProgramPlanRuntimeLive = makeProgramPlanRuntimeLive(
 
 /** The same interpreter, told which auto-commits the supervisor already granted. */
 export const ProgramPlanRuntimeWithPolicyLive = (
-  policy: AdmissionPolicyDocument,
+  policy: AdmissionPolicy,
   sealedDispatch?: ProgramSealedDispatch
 ) => makeProgramPlanRuntimeLive(supervisorDispatchAuthority(policy, sealedDispatch))
 
@@ -1909,7 +1909,7 @@ export const ProgramPlanRuntimeWithPolicyLive = (
  * interpreter and cannot acquire a second native authority path.
  */
 export const ProgramExecutionLive = (
-  policy: AdmissionPolicyDocument,
+  policy: AdmissionPolicy,
   nativeActions: NativeActionSurface = ALL_NATIVE_ACTIONS,
   sealedDispatch?: ProgramSealedDispatch,
   bindPath: ProgramPathSelectorBinder = unchangedProgramPathSelector
@@ -1924,7 +1924,7 @@ export const ProgramExecutionLive = (
 }
 
 export const ProgramExecutionWithToolsLive = (
-  policy: AdmissionPolicyDocument,
+  policy: AdmissionPolicy,
   actions: ReadonlyMap<string, ExportedToolAction>,
   cellProfile: CellProfile,
   nativeActions: NativeActionSurface = ALL_NATIVE_ACTIONS,

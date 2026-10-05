@@ -291,10 +291,7 @@ export class Artifact extends Schema.Class<Artifact>("Artifact")({
 }) {}
 
 export class Receipt extends Schema.Class<Receipt>("Receipt")({
-  schemaVersion: Schema.Literal("airlock/receipt/v1").pipe(
-    Schema.withDecodingDefault(Effect.succeed("airlock/receipt/v1" as const)),
-    Schema.withConstructorDefault(Effect.succeed("airlock/receipt/v1" as const))
-  ),
+  schemaVersion: Schema.tag("airlock/receipt/v1"),
   id: ReceiptId,
   planId: PlanId,
   nodeId: NodeId,

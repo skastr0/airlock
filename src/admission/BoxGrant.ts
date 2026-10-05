@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto"
 import { Effect, Schema } from "effect"
 import { NativeActionName } from "../actions/index.ts"
-import { AdmissionPolicyDocument } from "./Admission.ts"
+import { AdmissionPolicy } from "./Admission.ts"
 
 /**
  * A Box Grant is supervisor-authored authority for one Airlock binary and one
@@ -94,7 +94,7 @@ const UniqueDaemonOps = Schema.Array(BoxGrantDaemonOp).pipe(
  */
 export class BoxGrant extends Schema.Class<BoxGrant>("BoxGrant")({
   schemaVersion: Schema.Literal("airlock/box-grant/v1"),
-  admission: AdmissionPolicyDocument,
+  admission: AdmissionPolicy,
   verbs: UniqueBoxGrantVerbs,
   nativeActions: UniqueNativeActions,
   catalog: UniqueCatalogPins,

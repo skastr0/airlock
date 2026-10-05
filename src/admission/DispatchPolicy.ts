@@ -71,16 +71,16 @@ export const EndpointBudget = Schema.Struct({
 export type EndpointBudget = typeof EndpointBudget.Type
 
 /**
- * One endpoint grant entry. Omitting `class` and `commit` reproduces the v1
- * posture exactly: an irreversible-send floor that stays staged until an
- * explicit supervisor commit.
+ * One endpoint grant entry. An entry that names neither `class` nor `commit`
+ * grants the floor: an irreversible-send that stays staged until an explicit
+ * supervisor commit.
  */
 export class EndpointGrantPolicy extends Schema.Class<EndpointGrantPolicy>(
   "EndpointGrantPolicy"
 )({
   /** Exact endpoint or a trailing `*` prefix, matched after canonicalization. */
   selector: Schema.String,
-  /** Omitted means method-agnostic, as in v1. `commit: "auto"` requires an explicit list. */
+  /** Omitted means method-agnostic. `commit: "auto"` requires an explicit list. */
   methods: Schema.optional(Schema.Array(EndpointMethod)),
   class: DispatchClass.pipe(
     Schema.withDecodingDefault(Effect.succeed("irreversible-send" as const)),
@@ -257,8 +257,7 @@ export const fittingEndpointGrants = (
 
 /**
  * A grant entry rejected before it can bind anything. Reported through
- * `AdmissionContractInvalid` at admission so the admission error union is
- * unchanged.
+ * `AdmissionContractInvalid` at admission.
  */
 export type EndpointGrantRejection = Readonly<{
   readonly field: string
