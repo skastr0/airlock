@@ -1,4 +1,5 @@
 import { describe, expect, it } from "@effect/vitest"
+import { effect } from "./support/CoreTest.ts"
 import { Effect } from "effect"
 import {
   InvalidToolDefinition,
@@ -102,7 +103,7 @@ const request = (
   })
 
 describe("tool definition v2: enqueue lowering", () => {
-  it.effect("maps a validated action input onto one staged external intent", () =>
+  effect("maps a validated action input onto one staged external intent", () =>
     Effect.gen(function* () {
       const loaded = yield* load(v2Definition())
       const lowered = yield* lowerToolAction(
@@ -145,7 +146,7 @@ describe("tool definition v2: enqueue lowering", () => {
     })
   )
 
-  it.effect("lowers a Secret template to an opaque reference carrying no bytes", () =>
+  effect("lowers a Secret template to an opaque reference carrying no bytes", () =>
     Effect.gen(function* () {
       const loaded = yield* load(v2Definition())
       const lowered = yield* lowerToolAction(
@@ -165,7 +166,7 @@ describe("tool definition v2: enqueue lowering", () => {
     })
   )
 
-  it.effect("refuses a Secret template in an agent-visible position", () =>
+  effect("refuses a Secret template in an agent-visible position", () =>
     Effect.gen(function* () {
       const secretEndpoint = yield* load(
         withRequest({ endpoint: { _tag: "Secret", path: ["credentials", "example"] } })
@@ -178,7 +179,7 @@ describe("tool definition v2: enqueue lowering", () => {
     })
   )
 
-  it.effect("refuses Artifact templates in a request until runtime binding exists", () =>
+  effect("refuses Artifact templates in a request until runtime binding exists", () =>
     Effect.gen(function* () {
       const artifactBody = yield* load(
         withRequest({ body: { _tag: "Artifact", path: ["payload"] } })
@@ -188,7 +189,7 @@ describe("tool definition v2: enqueue lowering", () => {
     })
   )
 
-  it.effect("requires a total request contract before an action becomes callable", () =>
+  effect("requires a total request contract before an action becomes callable", () =>
     Effect.gen(function* () {
       const cases: ReadonlyArray<readonly [string, Record<string, unknown>, string]> = [
         ["no request", { request: undefined }, "actions.tasks.create.request"],
@@ -223,7 +224,7 @@ describe("tool definition v2: enqueue lowering", () => {
     })
   )
 
-  it.effect("refuses endpoints that admission could not match as a selector", () =>
+  effect("refuses endpoints that admission could not match as a selector", () =>
     Effect.gen(function* () {
       const cases: ReadonlyArray<readonly [string, string]> = [
         ["/v2/tasks", "must be an absolute URL"],
@@ -281,7 +282,7 @@ describe("tool definition v2: enqueue lowering", () => {
     })
   )
 
-  it.effect("validates the declared input schema before producing an intent", () =>
+  effect("validates the declared input schema before producing an intent", () =>
     Effect.gen(function* () {
       const loaded = yield* load(v2Definition())
       const missing = yield* lowerToolAction(
@@ -305,7 +306,7 @@ describe("tool definition v2: enqueue lowering", () => {
 })
 
 describe("tool definition v2: authority stays grant-side", () => {
-  it.effect("refuses a definition that names a consequence class or grant property", () =>
+  effect("refuses a definition that names a consequence class or grant property", () =>
     Effect.gen(function* () {
       const cases: ReadonlyArray<readonly [string, Record<string, unknown>]> = [
         ["class", { class: "read" }],
@@ -327,7 +328,7 @@ describe("tool definition v2: authority stays grant-side", () => {
     })
   )
 
-  it.effect("lets a definition narrow the consequence but never widen it", () =>
+  effect("lets a definition narrow the consequence but never widen it", () =>
     Effect.gen(function* () {
       for (const declared of ["read", "mutate"]) {
         const loaded = yield* load(
@@ -351,7 +352,7 @@ describe("tool definition v2: authority stays grant-side", () => {
     })
   )
 
-  it.effect("does not mistake an action's own input schema for a grant assertion", () =>
+  effect("does not mistake an action's own input schema for a grant assertion", () =>
     Effect.gen(function* () {
       const loaded = yield* load(
         v2Definition({
@@ -376,7 +377,7 @@ describe("tool definition v2: authority stays grant-side", () => {
     })
   )
 
-  it.effect("keeps emissionEffect a description the definition cannot widen", () =>
+  effect("keeps emissionEffect a description the definition cannot widen", () =>
     Effect.gen(function* () {
       const loaded = yield* load(v2Definition())
       const action = loaded.definition.actions[0]!
@@ -404,7 +405,7 @@ describe("tool definition v2: authority stays grant-side", () => {
 })
 
 describe("tool definition: invoke and enqueue actions together", () => {
-  it.effect("lowers an invoke action to process.run", () =>
+  effect("lowers an invoke action to process.run", () =>
     Effect.gen(function* () {
       const loaded = yield* load(
         v2Definition({
@@ -431,7 +432,7 @@ describe("tool definition: invoke and enqueue actions together", () => {
     })
   )
 
-  it.effect("requires an executable only when a definition exports an invoke action", () =>
+  effect("requires an executable only when a definition exports an invoke action", () =>
     Effect.gen(function* () {
       const enqueueOnly = yield* load(v2Definition())
       expect(enqueueOnly.definition.executables).toEqual([])

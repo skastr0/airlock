@@ -1,4 +1,5 @@
 import { describe, expect, it } from "@effect/vitest"
+import { effect } from "./support/CoreTest.ts"
 import { Effect } from "effect"
 import {
   ToolActionLoweringRequest,
@@ -99,7 +100,7 @@ const request = (
   })
 
 describe("inert tool action lowering", () => {
-  it.effect("composes tar generically while keeping hostile input in one argv atom", () =>
+  effect("composes tar generically while keeping hostile input in one argv atom", () =>
     Effect.gen(function* () {
       const loaded = yield* load(archiveDefinition())
       const hostileArchive = "state.tgz; rm -rf / && echo pwned"
@@ -158,7 +159,7 @@ describe("inert tool action lowering", () => {
     })
   )
 
-  it.effect("rejects executable identities the definition did not constrain", () =>
+  effect("rejects executable identities the definition did not constrain", () =>
     Effect.gen(function* () {
       const loaded = yield* load(archiveDefinition())
       const input = {
@@ -205,7 +206,7 @@ describe("inert tool action lowering", () => {
     })
   )
 
-  it.effect("binds declared descendants without allowing them to become roots", () =>
+  effect("binds declared descendants without allowing them to become roots", () =>
     Effect.gen(function* () {
       const base = archiveDefinition().actions[0]!
       const helperResource = {
@@ -290,7 +291,7 @@ describe("inert tool action lowering", () => {
     })
   )
 
-  it.effect("rejects unknown actions and an enqueue action without a request at load time", () =>
+  effect("rejects unknown actions and an enqueue action without a request at load time", () =>
     Effect.gen(function* () {
       const enqueue = {
         ...archiveDefinition().actions[0]!,
@@ -323,7 +324,7 @@ describe("inert tool action lowering", () => {
     })
   )
 
-  it.effect("rejects missing, non-scalar, and accessor inputs at lowering", () =>
+  effect("rejects missing, non-scalar, and accessor inputs at lowering", () =>
     Effect.gen(function* () {
       const base = archiveDefinition().actions[0]!
       const cases: ReadonlyArray<{
@@ -406,7 +407,7 @@ describe("inert tool action lowering", () => {
     })
   )
 
-  it.effect("rejects runtime-bound templates before a definition becomes callable", () =>
+  effect("rejects runtime-bound templates before a definition becomes callable", () =>
     Effect.gen(function* () {
       const base = archiveDefinition().actions[0]!
       const cases = [
@@ -448,7 +449,7 @@ describe("inert tool action lowering", () => {
     })
   )
 
-  it.effect("decodes tool results against the declared output schema", () =>
+  effect("decodes tool results against the declared output schema", () =>
     Effect.gen(function* () {
       const loaded = yield* load(archiveDefinition())
       const lowered = {

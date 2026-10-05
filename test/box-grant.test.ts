@@ -8,6 +8,7 @@ import {
   decodeBoxGrant,
   hashBoxGrant
 } from "../src/core/admission/index.ts"
+import { run } from "./support/CoreTest.ts"
 import { NativeActionCatalog } from "../src/core/actions/index.ts"
 
 const sha = (hex: string) => `sha256:${hex.repeat(64)}`
@@ -70,7 +71,7 @@ describe("box grant v1", () => {
       schemaVersion: "airlock/box-grant/v1"
     })))
 
-    expect(hashBoxGrant(second)).toBe(hashBoxGrant(first))
+    expect(await run(hashBoxGrant(second))).toBe(await run(hashBoxGrant(first)))
 
     const reorderedSets = await decoded(document({
       verbs: ["pending", "held", "run"],
@@ -90,10 +91,10 @@ describe("box grant v1", () => {
       ],
       daemonOps: ["commit", "reap"]
     }))
-    expect(hashBoxGrant(reorderedSets)).toBe(hashBoxGrant(orderedSets))
+    expect(await run(hashBoxGrant(reorderedSets))).toBe(await run(hashBoxGrant(orderedSets)))
 
-    const combined = await Effect.runPromise(decodeAndHashBoxGrant(document()))
-    expect(combined.digest).toBe(hashBoxGrant(combined.grant))
+    const combined = await run(decodeAndHashBoxGrant(document()))
+    expect(combined.digest).toBe(await run(hashBoxGrant(combined.grant)))
     expect(combined.digest).toMatch(/^sha256:[0-9a-f]{64}$/)
   })
 
@@ -172,11 +173,11 @@ describe("box grant v1", () => {
     // the grant component nor carry its versioned document vocabulary. Their
     // bytes can be inputs to admission, but cannot become this supervisor type.
     const agentPlane = [
-      "src/tools/Definitions.ts",
-      "src/tools/Lowering.ts",
+      "src/core/tools/Definitions.ts",
+      "src/core/tools/Lowering.ts",
       "src/program/Program.ts",
-      "src/language/ast.ts",
-      "src/language/parser.ts"
+      "src/core/language/ast.ts",
+      "src/core/language/parser.ts"
     ].map((path) => readFileSync(path, "utf8")).join("\n")
     expect(agentPlane).not.toContain("BoxGrant")
     expect(agentPlane).not.toContain("airlock/box-grant/v1")

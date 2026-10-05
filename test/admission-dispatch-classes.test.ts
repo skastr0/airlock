@@ -1,6 +1,7 @@
 import { readFileSync, readdirSync } from "node:fs"
 import { fileURLToPath } from "node:url"
 import { describe, expect, it } from "@effect/vitest"
+import { effect } from "./support/CoreTest.ts"
 import { Effect, Result, Schema } from "effect"
 import {
   AdmissionContractInvalid,
@@ -79,7 +80,7 @@ const externalDraft = (
 }
 
 describe("admission policy: endpoint grants", () => {
-  it.effect("refuses a document in the removed allowlist shape", () =>
+  effect("refuses a document in the removed allowlist shape", () =>
     Effect.gen(function* () {
       const removed = yield* Schema.decodeUnknownEffect(AdmissionPolicy)({
         schemaVersion: "airlock/admission-policy/v1",
@@ -95,7 +96,7 @@ describe("admission policy: endpoint grants", () => {
     })
   )
 
-  it.effect("leaves the compatibility profile unrestricted by endpoint grants", () =>
+  effect("leaves the compatibility profile unrestricted by endpoint grants", () =>
     Effect.gen(function* () {
       // Compatibility does not match endpoints against grants. Grant shape is
       // still validated, because an
@@ -116,7 +117,7 @@ describe("admission policy: endpoint grants", () => {
     })
   )
 
-  it.effect("defaults an unclassified grant to the staged floor", () =>
+  effect("defaults an unclassified grant to the staged floor", () =>
     Effect.gen(function* () {
       const decoded = yield* Schema.decodeUnknownEffect(AdmissionPolicy)({
         schemaVersion: "airlock/admission-policy/v2",
@@ -146,7 +147,7 @@ describe("admission policy: endpoint grants", () => {
     })
   )
 
-  it.effect("auto-commits only an unambiguous read-class grant whose method fits", () =>
+  effect("auto-commits only an unambiguous read-class grant whose method fits", () =>
     Effect.gen(function* () {
       const policy = policyWith([readGrant])
       yield* admit(externalDraft(), policy)
@@ -179,7 +180,7 @@ describe("admission policy: endpoint grants", () => {
     })
   )
 
-  it.effect("refuses auto-commit for URLs that only string-prefix-match a read grant", () =>
+  effect("refuses auto-commit for URLs that only string-prefix-match a read grant", () =>
     Effect.gen(function* () {
       const policy = policyWith([readGrant])
       const prefix = readSelector.slice(0, -1)
@@ -218,7 +219,7 @@ describe("admission policy: endpoint grants", () => {
     })
   )
 
-  it.effect("rejects a grant that pre-authorizes commit for anything but a read", () =>
+  effect("rejects a grant that pre-authorizes commit for anything but a read", () =>
     Effect.gen(function* () {
       for (const dispatchClass of ["mutate", "irreversible-send"] as const) {
         const invalid = yield* admit(
@@ -249,7 +250,7 @@ describe("admission policy: endpoint grants", () => {
     })
   )
 
-  it.effect("narrows by effective class and never widens one", () =>
+  effect("narrows by effective class and never widens one", () =>
     Effect.gen(function* () {
       const auto = policyWith([readGrant])
       // A definition honestly declaring mutate under a read/auto grant stays
@@ -281,7 +282,7 @@ describe("admission policy: endpoint grants", () => {
     })
   )
 
-  it.effect("enforces the grant hold window and inline body budget at admission", () =>
+  effect("enforces the grant hold window and inline body budget at admission", () =>
     Effect.gen(function* () {
       const bounded = policyWith([
         grant({ methods: ["GET", "POST"], hold: { minMillis: 1_000, maxMillis: 10_000 } })
@@ -313,7 +314,7 @@ describe("dispatch class ratchet", () => {
   it("keeps the class vocabulary out of every program-side module", () => {
     const srcDir = fileURLToPath(new URL("../src", import.meta.url))
     const modules = readdirSync(srcDir, { recursive: true, encoding: "utf8" })
-      .filter((entry) => entry.endsWith(".ts") && !entry.startsWith("admission/"))
+      .filter((entry) => entry.endsWith(".ts") && !entry.startsWith("core/admission/"))
     expect(modules.length).toBeGreaterThan(20)
     for (const module of modules) {
       const source = readFileSync(`${srcDir}/${module}`, "utf8")
@@ -328,7 +329,7 @@ describe("dispatch class ratchet", () => {
     }
   })
 
-  it.effect("gives a Plan node no field in which to name a class", () =>
+  effect("gives a Plan node no field in which to name a class", () =>
     Effect.gen(function* () {
       const smuggled = yield* Schema.decodeUnknownEffect(RequestExternalNode)({
         _tag: "RequestExternal",

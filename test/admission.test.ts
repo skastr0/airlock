@@ -1,4 +1,5 @@
 import { describe, expect, it } from "@effect/vitest"
+import { effect } from "./support/CoreTest.ts"
 import { Effect } from "effect"
 import {
   AdmissionContractInvalid,
@@ -63,7 +64,7 @@ const invoke = new InvokeNode({
 })
 
 describe("Admission candidate", () => {
-  it.effect("mints grants and lexical handles only from explicit declared requirements", () =>
+  effect("mints grants and lexical handles only from explicit declared requirements", () =>
     Effect.gen(function* () {
       const admitted = yield* admit(draft([executable], invoke), policy())
       expect(admitted.plan.handles).toHaveLength(1)
@@ -73,7 +74,7 @@ describe("Admission candidate", () => {
     })
   )
 
-  it.effect("compatibility binds only declared requirements, while contained scopes reject extras", () =>
+  effect("compatibility binds only declared requirements, while contained scopes reject extras", () =>
     Effect.gen(function* () {
       const outside = new ApplyNode({
         id: id("apply"), dependsOn: [], requires: [req("write/outside")], produces: [],
@@ -110,7 +111,7 @@ describe("Admission candidate", () => {
     })
   )
 
-  it.effect("rejects undeclared or non-absolute executable authority before binding", () =>
+  effect("rejects undeclared or non-absolute executable authority before binding", () =>
     Effect.gen(function* () {
       const undeclared = new InvokeNode({ ...invoke, requires: [] })
       const missing = yield* admit(draft([executable], undeclared), policy()).pipe(Effect.flip)
@@ -126,7 +127,7 @@ describe("Admission candidate", () => {
     })
   )
 
-  it.effect("binds each descendant executable to its root and denies ungranted edges", () =>
+  effect("binds each descendant executable to its root and denies ungranted edges", () =>
     Effect.gen(function* () {
       const shell = new ResourceRequirement({
         id: req("exec/sh"),
@@ -248,7 +249,7 @@ describe("Admission candidate", () => {
     })
   )
 
-  it.effect("has stable policy digests, rechecks expiry, and never downgrades unavailable VM containment", () =>
+  effect("has stable policy digests, rechecks expiry, and never downgrades unavailable VM containment", () =>
     Effect.gen(function* () {
       const at = new Date("2026-07-29T00:00:00.000Z")
       const first = yield* admit(draft([executable], invoke), policy({ grantTtlMillis: 10 }), at)
@@ -264,7 +265,7 @@ describe("Admission candidate", () => {
     })
   )
 
-  it.effect("requires authority for every resource-bearing Plan operand", () =>
+  effect("requires authority for every resource-bearing Plan operand", () =>
     Effect.gen(function* () {
       const cwdInvoke = new InvokeNode({
         ...invoke,
@@ -358,7 +359,7 @@ describe("Admission candidate", () => {
     })
   )
 
-  it.effect("retains and revalidates the exact grant closure at node use", () =>
+  effect("retains and revalidates the exact grant closure at node use", () =>
     Effect.gen(function* () {
       const at = new Date("2026-07-29T00:00:00.000Z")
       const admitted = yield* admit(
@@ -396,7 +397,7 @@ describe("Admission candidate", () => {
     })
   )
 
-  it.effect("keeps direct native-contained admission pure and denies unbound relative selectors", () =>
+  effect("keeps direct native-contained admission pure and denies unbound relative selectors", () =>
     Effect.gen(function* () {
       const relative = new ResourceRequirement({
         id: req("path/relative"),
