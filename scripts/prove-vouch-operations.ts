@@ -31,6 +31,8 @@ const fixtureProgram = join(
 )
 const endpoint =
   "https://realm.example.invalid/v1/runtime-events?sensitive=query"
+// A grant names the canonical scheme://host/path; the query is not part of it.
+const endpointSelector = "https://realm.example.invalid/v1/runtime-events"
 const tarDescendants = process.platform === "linux"
   ? ["/bin/sh", "/usr/bin/gzip"]
   : []
@@ -293,7 +295,7 @@ const makeFixture = () => {
     executableEdges: tarDescendants.length === 0
       ? []
       : [{ root: "/usr/bin/tar", descendants: tarDescendants }],
-    endpointGrants: [{ selector: endpoint }]
+    endpointGrants: [{ selector: endpointSelector }]
   }))
   return {
     root,
