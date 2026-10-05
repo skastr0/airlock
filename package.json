@@ -16,6 +16,11 @@
     "airlock": "src/cli.ts",
     "airlock-agent": "src/agent-cli.ts"
   },
+  "exports": {
+    "./core": "./src/core/index.ts",
+    "./core/testing": "./src/core/testing/index.ts",
+    "./package.json": "./package.json"
+  },
   "files": [
     "src",
     "docs",
