@@ -6,7 +6,7 @@ import { Hold } from "../Hold.ts"
 import { makeExclusiveFileLock } from "../platform/ExclusiveFileLock.ts"
 import { CheckedOutcome, observeClaim, OperationKey } from "./Checked.ts"
 import { attempt, bindTarget, canonical, ChangeError, checkParent, checkTree, Entry, exists, hash, limits, metadataPolicy, overlaps, scan, snapshot, sync, writeNew } from "./Tree.ts"
-import { ContentPage, ContentRequest, Difference, Inventory, InventoryRow, Proposal, ProposalId, Review, SnapshotReceipt, Staged, Status } from "./Contracts.ts"
+import { ContentPage, ContentRequest, Difference, Inventory, InventoryRow, Proposal, ProposalId, Review, Settled, SettledBody, SnapshotReceipt, Staged, Status } from "./Contracts.ts"
 import { maximumReservation, readSnapshotRecord } from "./Snapshots.ts"
 import { describeFailure } from "../FailureText.ts"
 
@@ -103,15 +103,95 @@ const make = Effect.gen(function* () {
     reason: `workflow receipt/acknowledgement publication failed: ${describeFailure(cause)}; durable Hold claim retained`
   })))
 
+  /*
+   * A collected proposal is finished: its snapshots are gone, it reserves
+   * nothing, and nothing about it can change again. Its final inventory row is
+   * written once, bound by digest to this store, so later inventories read
+   * that row instead of re-verifying the proposal through the Hold lease, and
+   * a stage budget does not look at finished proposals at all. A summary that
+   * is missing, torn, or does not verify is ignored and the proposal is
+   * inspected in full, so a damaged summary can only cost time.
+   */
+  const settledRoot = path.join(root, "settled")
+  const settledFile = (id: string) => path.join(settledRoot, `${id}.json`)
+  const settledBody = (storeId: string, row: InventoryRow) =>
+    Schema.encodeSync(Schema.fromJsonString(SettledBody))({ version: "change-settled/v1", storeId, row })
+  const isFinished = (row: InventoryRow) =>
+    row.snapshots.state === "collected" && !row.active && row.reservationBytes === 0 && row.errors.length === 0
+  const proposalNames = () => attempt("list change inventory", async () =>
+    await exists(root) ? (await readdir(root)).filter(n => n.startsWith("change_")).sort() : [])
+  const settledIds = () => attempt("list settled proposals", async () =>
+    new Set(await exists(settledRoot)
+      ? (await readdir(settledRoot)).filter(n => n.endsWith(".json")).map(n => n.slice(0, -".json".length))
+      : []))
+  const storeBinding = () => attempt("read store binding", async () => {
+    const file = path.join(root, "store-id")
+    return await exists(file) ? await readFile(file, "utf8") : undefined
+  })
+  const readSettled = async (id: string, storeId: string | undefined): Promise<InventoryRow | undefined> => {
+    try {
+      const stored = Schema.decodeUnknownSync(Schema.fromJsonString(Settled))(await readFile(settledFile(id), "utf8"))
+      if (
+        storeId === undefined || stored.storeId !== storeId || stored.row.id !== id || !isFinished(stored.row) ||
+        stored.digest !== `sha256:${hash(settledBody(stored.storeId, stored.row))}`
+      ) return undefined
+      // Finished means no private bytes are left. If any reappear, the summary
+      // no longer describes the proposal and the full inspection must speak.
+      const leftovers = [
+        candidatePath(id), baselinePath(id),
+        ...stored.row.snapshots.holdActIds.map(actId => path.join(home.holdDir, actId, "payload"))
+      ]
+      for (const leftover of leftovers) if (await exists(leftover)) return undefined
+      return stored.row
+    } catch {
+      return undefined
+    }
+  }
+  const inspectRow = Effect.fnUntraced(function* (id: string) {
+    const inspected = yield* hold.inspectChangeSnapshots(id).pipe(Effect.result)
+    return inspected._tag === "Success" ? inspected.success.row : {
+      id, workflowState: "corrupt" as const, applyState: "unknown" as const, undoState: "unknown" as const,
+      snapshots: { state: "recovery-required" as const, bytes: 0, holdActIds: [] },
+      reservationBytes: maximumReservation, active: true, errors: [{ operation: "inventory", reason: String(inspected.failure) }]
+    }
+  })
+  /** Writes the summary of a proposal that a full inspection finds finished. */
+  const settle = Effect.fnUntraced(function* (id: string) {
+    const storeId = yield* storeBinding()
+    if (storeId === undefined || (yield* attempt("check settled summary", () => exists(settledFile(id))))) return
+    const row = yield* inspectRow(id)
+    if (!isFinished(row)) return
+    yield* attempt("publish settled summary", async () => {
+      await mkdir(settledRoot, { recursive: true, mode: 0o700 })
+      await sync(root)
+      const body = settledBody(storeId, row)
+      await writeNew(settledFile(id), Schema.encodeSync(Schema.fromJsonString(Settled))({
+        version: "change-settled/v1", storeId, row, digest: `sha256:${hash(body)}`
+      }))
+    })
+  })
+  /** What staging needs: only proposals that are not finished can hold budget. */
+  const activeBudget = Effect.fnUntraced(function* () {
+    const settled = yield* settledIds()
+    let active = 0, reservedBytes = 0
+    for (const id of yield* proposalNames()) {
+      if (settled.has(id)) continue
+      const row = yield* inspectRow(id)
+      if (row.active) active += 1
+      reservedBytes += row.reservationBytes
+    }
+    return { active, reservedBytes }
+  })
   const inventory = Effect.fnUntraced(function* () {
-    const names = yield* attempt("list change inventory", async () => await exists(root) ? (await readdir(root)).filter(n => n.startsWith("change_")).sort() : [])
+    const names = yield* proposalNames()
+    const settled = yield* settledIds()
+    const storeId = yield* storeBinding()
     const rows: InventoryRow[] = []
     for (const id of names) {
-      const inspected = yield* hold.inspectChangeSnapshots(id).pipe(Effect.result)
-      rows.push(inspected._tag === "Success" ? inspected.success.row : {
-        id, workflowState: "corrupt", applyState: "unknown", undoState: "unknown", snapshots: { state: "recovery-required", bytes: 0, holdActIds: [] },
-        reservationBytes: maximumReservation, active: true, errors: [{ operation: "inventory", reason: String(inspected.failure) }]
-      })
+      const summary = settled.has(id)
+        ? yield* attempt("read settled summary", () => readSettled(id, storeId))
+        : undefined
+      rows.push(summary ?? (yield* inspectRow(id)))
     }
     return { version: "change-inventory/v1" as const, rows,
       totals: { rows: rows.length, active: rows.filter(r => r.active).length, reservedBytes: rows.reduce((n, r) => n + r.reservationBytes, 0),
@@ -123,7 +203,7 @@ const make = Effect.gen(function* () {
       ? attempt("validate read lease store", validateStore).pipe(Effect.andThen(lock.withLock(effect)))
       : effect), Effect.mapError(error))
   const stage = (input: { source: string, target: string }) => locked(Effect.gen(function* () {
-    const budget = yield* inventory()
+    const budget = yield* activeBudget()
     return yield* attempt("stage immutable proposal", async () => {
     const source = await canonical(input.source)
     const binding = await bindTarget(input.target, home.home)
@@ -132,8 +212,8 @@ const make = Effect.gen(function* () {
     const baseline = await exists(binding.target) ? await scan(binding.target) : null
     if (baseline !== null && baseline.tree.kind !== candidate.tree.kind) throw new Error("same-kind target required")
     if ((await lstat(home.holdDir)).dev !== binding.parent.identity.device || (baseline !== null && baseline.identity.device !== binding.parent.identity.device)) throw new Error("unsupported cross-volume target")
-    if (budget.totals.active >= limits.proposals) throw new Error("active proposal count limit; explicitly retire and collect settled snapshots")
-    const reserved = budget.totals.reservedBytes
+    if (budget.active >= limits.proposals) throw new Error("active proposal count limit; explicitly retire and collect settled snapshots")
+    const reserved = budget.reservedBytes
     // Reserve worst-case retained private copies before writing. Baseline live
     // bytes are moved, not copied into Hold. Failed stages keep their charge.
     const charge = 2 * (candidate.tree.bytes + (baseline?.tree.bytes ?? 0)) + 32 * 1024 * 1024
@@ -291,7 +371,11 @@ const make = Effect.gen(function* () {
   }))
   return Change.of({ stage, review: (id, options) => readLocked(review(id, options)), status: (id) => readLocked(readStatus(id)), apply, cancel, undo, recover,
     inventory: () => readLocked(inventory()), content,
-    retire: (input) => locked(hold.retireChangeSnapshots(input)), collect: (id) => locked(hold.collectChangeSnapshots(id)) })
+    retire: (input) => locked(hold.retireChangeSnapshots(input)),
+    // Settling is bookkeeping for speed: if it fails the proposal is simply
+    // inspected in full next time, so it never turns a collection into a failure.
+    collect: (id) => locked(hold.collectChangeSnapshots(id).pipe(
+      Effect.tap((receipt) => receipt.state === "collected" ? Effect.ignore(settle(receipt.id)) : Effect.void))) })
 })
 
 export const ChangeLayer = Layer.effect(Change, make)

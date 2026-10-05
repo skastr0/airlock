@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest"
 import { BunServices } from "@effect/platform-bun"
 import { Context, Effect, Layer, ManagedRuntime } from "effect"
-import { mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises"
+import { mkdir, mkdtemp, readFile, realpath, rename, rm, symlink, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import * as path from "node:path"
 import * as AirlockHome from "../src/AirlockHome.ts"
@@ -68,6 +68,47 @@ describe("explicit snapshot lifecycle", () => {
     await writeFile(path.join(home, "hold", retired.holdActIds[0]!, "payload", "candidate"), "tampered")
     expect((await run(change.collect(p.id))).state).toBe("recovery-required")
     expect((await run(change.inventory())).totals.reservedBytes).toBeGreaterThan(0)
+  }))
+  it("a collected proposal is summarized once and costs later stages nothing", () => world(async ({ root, home, change }) => {
+    const finished = await proposal(root, change)
+    await run(change.cancel(finished.id)); await retire(change, finished.id)
+    expect((await run(change.collect(finished.id))).state).toBe("collected")
+    const summary = path.join(home, "changes", "settled", `${finished.id}.json`)
+    expect(JSON.parse(await readFile(summary, "utf8"))).toMatchObject({
+      version: "change-settled/v1", row: { id: finished.id, active: false, reservationBytes: 0, snapshots: { state: "collected" } }
+    })
+    // Remove what a full inspection would need. The next stage must not ask
+    // for it: a finished proposal holds no budget.
+    await rename(path.join(home, "hold", "snapshot-retirements", `${finished.id}.json`), path.join(root, "moved-away.json"))
+    const next = await proposal(root, change)
+    const rows = (await run(change.inventory())).rows
+    expect(rows.find(r => r.id === finished.id)).toMatchObject({ active: false, reservationBytes: 0, errors: [] })
+    expect(rows.find(r => r.id === next.id)).toMatchObject({ active: true })
+  }))
+  it("a damaged, foreign or contradicted summary is ignored and the proposal is inspected in full", () => world(async ({ root, home, change }) => {
+    const p = await proposal(root, change)
+    await run(change.cancel(p.id)); await retire(change, p.id)
+    expect((await run(change.collect(p.id))).state).toBe("collected")
+    const summary = path.join(home, "changes", "settled", `${p.id}.json`)
+    const original = await readFile(summary, "utf8")
+    const collectedRow = { id: p.id, active: false, snapshots: { state: "collected" }, errors: [] }
+
+    await writeFile(summary, "{ torn")
+    expect((await run(change.inventory())).rows[0]).toMatchObject(collectedRow)
+    await writeFile(summary, JSON.stringify({ ...JSON.parse(original), storeId: "another-store" }))
+    expect((await run(change.inventory())).rows[0]).toMatchObject(collectedRow)
+    const edited = JSON.parse(original)
+    edited.row.target = "/somewhere/else"
+    await writeFile(summary, JSON.stringify(edited))
+    expect((await run(change.inventory())).rows[0]!.target).not.toBe("/somewhere/else")
+
+    // Private bytes reappear in a finished proposal: the summary still
+    // verifies, but it no longer describes what is on disk.
+    await writeFile(summary, original)
+    await writeFile(path.join(home, "changes", p.id, "candidate"), "back again")
+    const row = (await run(change.inventory())).rows[0]!
+    expect(row.snapshots.state).toBe("recovery-required")
+    expect(row.errors.map(e => e.operation)).toContain("collected")
   }))
   it("concurrent read/retire/collect is serialized and never falls back to source", () => world(async ({ root, change }) => {
     const p = await proposal(root, change); await run(change.cancel(p.id))
