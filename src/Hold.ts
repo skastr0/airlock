@@ -1,5 +1,6 @@
 import { Cause, Context, DateTime, Effect, Exit, FileSystem, Layer, Path, Schema } from "effect"
-import { lstat, open } from "node:fs/promises"
+import { existsSync } from "node:fs"
+import { lstat, mkdir, open, rename } from "node:fs/promises"
 import { AirlockHome } from "./AirlockHome.ts"
 import {
   ActId,
@@ -327,7 +328,18 @@ const make = Effect.gen(function* () {
   const ledger = yield* FileLedger
   const exclusiveRename = yield* ExclusiveRename
 
-  const actDir = (id: string) => path.join(home.holdDir, id)
+  /*
+   * An act whose journal is `restored` is finished: undone or reaped, with no
+   * payload left. Finished acts are renamed into `hold/settled/`, so listing
+   * the hold directory (at construction, for `held`, and for `reap`) reads
+   * only acts that can still change. An act is found by id in whichever
+   * location holds it.
+   */
+  const settledDir = path.join(home.holdDir, "settled")
+  const actDir = (id: string) =>
+    !existsSync(path.join(home.holdDir, id)) && existsSync(path.join(settledDir, id))
+      ? path.join(settledDir, id)
+      : path.join(home.holdDir, id)
   const manifestFile = (id: string) => path.join(actDir(id), "manifest.json")
   const payloadFile = (id: string) => path.join(actDir(id), "payload")
   const stageFile = (id: string) => path.join(actDir(id), "stage")
@@ -1265,23 +1277,48 @@ const make = Effect.gen(function* () {
     }
   })
 
-  const listJournals = fs.readDirectory(home.holdDir).pipe(
-    Effect.mapError(fsError("list hold acts", home.holdDir)),
-    Effect.flatMap((entries) =>
-      Effect.forEach(entries.filter((entry) => entry.startsWith("act_")), (entry) => {
-        const id = ActId.make(entry)
-        return fs.stat(actDir(id)).pipe(
-          Effect.mapError(fsError("stat hold act", actDir(id))),
-          Effect.flatMap((info) =>
-            info.type === "Directory"
-              ? loadRecoverableJournal(id)
-              : Effect.succeed(undefined)
-          )
-        )
+  /**
+   * Moves a finished act out of the scanned directory. Not flushed, and a
+   * failure is ignored: an act left behind is read once more and moved by the
+   * next listing. Callers hold the Hold lease.
+   */
+  const settleFinished = (journal: HoldJournal) =>
+    Effect.gen(function* () {
+      const id = journal.manifest.id
+      if (journal.state !== "restored" || journal.checkedPinned === true) return
+      if ((yield* pathExists(payloadFile(id))) || (yield* pathExists(stageFile(id)))) return
+      const source = path.join(home.holdDir, id)
+      yield* Effect.tryPromise(async () => {
+        await mkdir(settledDir, { recursive: true, mode: 0o700 })
+        await rename(source, path.join(settledDir, id))
       })
-    ),
-    Effect.map((journals) => journals.flatMap((journal) => (journal === undefined ? [] : [journal])))
-  )
+    }).pipe(Effect.ignore)
+
+  const journalsIn = (directory: string, settle: boolean) =>
+    fs.readDirectory(directory).pipe(
+      Effect.mapError(fsError("list hold acts", directory)),
+      Effect.flatMap((entries) =>
+        Effect.forEach(entries.filter((entry) => entry.startsWith("act_")), (entry) => {
+          const id = ActId.make(entry)
+          return fs.stat(actDir(id)).pipe(
+            Effect.mapError(fsError("stat hold act", actDir(id))),
+            Effect.flatMap((info) =>
+              info.type === "Directory"
+                ? Effect.tap(loadRecoverableJournal(id), (journal) => settle ? settleFinished(journal) : Effect.void)
+                : Effect.succeed(undefined)
+            )
+          )
+        })
+      ),
+      Effect.map((journals) => journals.flatMap((journal) => (journal === undefined ? [] : [journal])))
+    )
+
+  /** Acts that can still change. Finished acts found here are moved out. */
+  const listJournals = journalsIn(home.holdDir, true)
+
+  /** Finished acts. Only the reaper reads them, to expire them. */
+  const settledJournals = Effect.flatMap(pathExists(settledDir), (present) =>
+    present ? journalsIn(settledDir, false) : Effect.succeed([]))
 
   const reconcile = listJournals.pipe(
     Effect.flatMap((journals) => Effect.forEach(journals, reconcileJournal))
@@ -1600,7 +1637,7 @@ const make = Effect.gen(function* () {
   const reap = Effect.fn("Hold.reap")(function* (olderThanMillis: number, retirement?: HoldJournal) {
     const now = yield* DateTime.now
     const cutoff = DateTime.subtract(now, { milliseconds: olderThanMillis })
-    const all = retirement === undefined ? yield* listJournals : []
+    const all = retirement === undefined ? [...(yield* listJournals), ...(yield* settledJournals)] : []
     const expired: HoldJournal[] = []
     if (retirement !== undefined) expired.push(retirement)
     for (const journal of all) {
@@ -1626,6 +1663,7 @@ const make = Effect.gen(function* () {
     const reaped: ActId[] = []
     for (const journal of expired) {
       const id = journal.manifest.id
+      const directory = actDir(id)
       /*
        * Selection and lock waiting remain interruptible. Once terminal
        * authority enters this region, however, cancellation cannot surface as
@@ -1637,7 +1675,7 @@ const make = Effect.gen(function* () {
         Effect.gen(function* () {
           // The single physical deletion site in this component.
           yield* fs
-            .remove(retirement === undefined ? actDir(id) : payloadFile(id), { recursive: true })
+            .remove(retirement === undefined ? directory : payloadFile(id), { recursive: true })
             .pipe(
               Effect.mapError((cause) =>
                 new HoldReapRecoveryRequired({
@@ -1652,7 +1690,7 @@ const make = Effect.gen(function* () {
             )
           reaped.push(id)
           yield* syncDirectory(
-            retirement === undefined ? home.holdDir : actDir(id),
+            retirement === undefined ? path.dirname(directory) : directory,
             "reap hold act directory sync"
           ).pipe(
             Effect.mapError((cause) =>

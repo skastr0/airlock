@@ -45,6 +45,48 @@ const world = <A, E>(body: (ctx: World) => Effect.Effect<A, E>) =>
     })
   ).pipe(Effect.provide(BunServices.layer))
 
+describe("Hold — finished acts leave the scanned directory", () => {
+  it.effect("moves an undone act to hold/settled, still answers for it by id, and reaps it", () =>
+    world(({ fs, hold, path, tmp }) =>
+      Effect.gen(function* () {
+        const home = path.join(tmp, "airlock-home")
+        const root = path.join(home, "hold")
+        const settled = path.join(root, "settled")
+        const kept = path.join(tmp, "kept.txt")
+        const undone = path.join(tmp, "undone.txt")
+        yield* fs.writeFileString(kept, "kept")
+        yield* fs.writeFileString(undone, "undone")
+        const keptAct = yield* hold.remove(kept)
+        // Nothing has finished yet, so there is no settled directory.
+        expect(yield* fs.exists(settled)).toBe(false)
+        const undoneAct = yield* hold.remove(undone)
+        yield* hold.undo(undoneAct.id)
+
+        // The next listing finds the finished act and moves it out.
+        expect((yield* hold.held).map((manifest) => manifest.id)).toEqual([keptAct.id])
+        expect(yield* fs.exists(path.join(root, undoneAct.id))).toBe(false)
+        expect(yield* fs.exists(path.join(settled, undoneAct.id))).toBe(true)
+        expect(yield* fs.exists(path.join(root, keptAct.id))).toBe(true)
+        expect((yield* hold.undo(undoneAct.id).pipe(Effect.flip))._tag).toBe("NotHeld")
+
+        // History is not read to start Hold or to list what is held: a
+        // settled journal that does not decode stops neither.
+        const broken = path.join(settled, "act_0000000000000")
+        yield* fs.makeDirectory(broken)
+        yield* fs.writeFileString(path.join(broken, "manifest.json"), "{ not a journal")
+        const reopened = yield* Effect.provide(Hold, layersFor(home))
+        expect((yield* reopened.held).map((manifest) => manifest.id)).toEqual([keptAct.id])
+        yield* fs.rename(broken, path.join(tmp, "broken-aside"))
+
+        // The reaper still expires a settled act.
+        const report = yield* reopened.reap(0)
+        expect([...report.reaped].sort()).toEqual([keptAct.id, undoneAct.id].sort())
+        expect(yield* fs.exists(path.join(settled, undoneAct.id))).toBe(false)
+      })
+    )
+  )
+})
+
 describe("Hold — undoable mutations", () => {
   it.effect("remove then undo restores the exact bytes", () =>
     world(({ fs, hold, path, tmp }) =>
