@@ -460,7 +460,7 @@ const normalizeRequestExternalInput = (
       normalized.holdMillis = holdMillis
     }
     if (body !== undefined) {
-      normalized.body = typeof body === "string" ? body : canonical(body)
+      normalized.body = typeof body === "string" ? body : Canonical.canonicalJson(body)
     }
     return normalized
   })
@@ -601,14 +601,6 @@ const nodeId = (planId: PlanId, index: number) => NodeId.make(`${planId}/node/${
 const artifactId = (planId: PlanId, index: number) => ArtifactId.make(`${planId}/artifact/${index}`)
 const inputArtifactId = (planId: PlanId, name: string) => ArtifactId.make(`${planId}/input/${name}`)
 
-const canonical = (value: unknown): string => {
-  if (value === undefined) return "undefined"
-  if (value === null || typeof value !== "object") return JSON.stringify(value)
-  if (Array.isArray(value)) return `[${value.map(canonical).join(",")}]`
-  const object = value as Readonly<Record<string, unknown>>
-  return `{${Object.keys(object).sort().map((key) => `${JSON.stringify(key)}:${canonical(object[key])}`).join(",")}}`
-}
-
 const bytesDigest = (bytes: Uint8Array) =>
   `sha256:${createHash("sha256").update(bytes).digest("hex")}`
 
@@ -617,7 +609,7 @@ const digestAction = (
   artifacts: ReadonlyArray<InlineArtifact>,
   tool?: ProgramToolBinding
 ): Canonical.Sha256Digest =>
-  Canonical.Sha256Digest.make(`sha256:${createHash("sha256").update(canonical({
+  Canonical.Sha256Digest.make(`sha256:${createHash("sha256").update(Canonical.canonicalJson({
     call,
     ...(tool === undefined ? {} : { tool: {
       name: tool.name,
