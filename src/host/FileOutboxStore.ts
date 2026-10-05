@@ -1,6 +1,6 @@
 import { Effect, FileSystem, Layer, Option, Path, PlatformError, Result, Schema } from "effect"
 import { AirlockHome } from "../AirlockHome.ts"
-import { type EmissionState, transitions } from "../core/outbox/Lifecycle.ts"
+import { type EmissionState, isTerminal, transitions } from "../core/outbox/Lifecycle.ts"
 import { OutboxStore } from "../core/outbox/OutboxStore.ts"
 import {
   acknowledge as markLedgered,
@@ -22,12 +22,19 @@ import { makeExclusiveFileLock } from "../platform/ExclusiveFileLock.ts"
  *   <outbox>/<id>.<state>/record.<state>.json   the record for that state
  *                        /dispatch.json         sealed dispatch, owner-only
  *                        /response.bin          bounded capture, owner-only
+ *   <outbox>/settled/<id>.<state>/...           the same, once settled
  *
  * The directory name is the state, so the compare-and-set is one rename of
  * that directory. Everything a state needs is written and synced inside the
  * directory first; a crash before the rename leaves the emission in its
  * previous state with inert extra files. Nothing here unlinks: superseded
  * record files stay as history until the reaper owns their expiry.
+ *
+ * An emission is settled when its state is terminal and it owes the Ledger
+ * nothing. A settled emission is renamed into `settled/`, so the outbox root
+ * holds only what is still in motion. Finding one emission by id probes its
+ * possible names; nothing lists the root except the operations that ask for
+ * unsettled emissions, and nothing lists history unless history is asked for.
  */
 
 const states = Object.keys(transitions) as ReadonlyArray<EmissionState>
@@ -53,7 +60,12 @@ const reasonOf = (cause: unknown): string =>
 const isNotFound = (cause: PlatformError.PlatformError) =>
   cause.reason._tag === "NotFound"
 
-type Located = Readonly<{ readonly id: EmissionId; readonly state: EmissionState }>
+type Located = Readonly<{
+  readonly id: EmissionId
+  readonly state: EmissionState
+  /** The emission's directory, in the outbox root or under `settled/`. */
+  readonly directory: string
+}>
 
 export const make = Effect.gen(function* () {
   const fs = yield* FileSystem.FileSystem
@@ -73,10 +85,10 @@ export const make = Effect.gen(function* () {
     reason: string
   ) => new OutboxStateCorrupt({ id, part, reason })
 
-  const stateDirectory = (id: EmissionId, state: EmissionState) =>
-    path.join(home.outboxDir, `${id}.${state}`)
-  const recordFile = (id: EmissionId, state: EmissionState) =>
-    path.join(stateDirectory(id, state), `record.${state}.json`)
+  const settledRoot = path.join(home.outboxDir, "settled")
+  const terminalStates = states.filter(isTerminal)
+  const stateDirectory = (id: EmissionId, state: EmissionState, root = home.outboxDir) =>
+    path.join(root, `${id}.${state}`)
 
   const secureDirectory = (directory: string, operation: string) =>
     fs.makeDirectory(directory, { recursive: true, mode: 0o700 }).pipe(
@@ -86,6 +98,7 @@ export const make = Effect.gen(function* () {
 
   const lockRoot = path.join(home.home, "outbox-locks")
   yield* secureDirectory(home.outboxDir, "initialize")
+  yield* secureDirectory(settledRoot, "initialize-settled")
   yield* secureDirectory(lockRoot, "initialize-lock")
 
   const fileLock = (name: string) =>
@@ -145,31 +158,52 @@ export const make = Effect.gen(function* () {
       )
     })
 
-  const located = fs.readDirectory(home.outboxDir).pipe(
-    Effect.mapError(failed("list")),
-    Effect.flatMap((entries) => {
-      const found = new Map<EmissionId, EmissionState>()
-      for (const entry of entries) {
-        const match = entryPattern.exec(entry)
-        if (match === null) continue
-        const id = EmissionId.make(match[1]!)
-        if (found.has(id)) {
-          return Effect.fail(corrupt(id, "record", "more than one state directory"))
-        }
-        found.set(id, match[2] as EmissionState)
-      }
-      return Effect.succeed(found)
-    })
-  )
+  /** Which of `candidates` exist for `id` under `root`: a few name probes. */
+  const present = (root: string, id: EmissionId, candidates: ReadonlyArray<EmissionState>) =>
+    Effect.forEach(
+      candidates,
+      (state) => {
+        const directory = stateDirectory(id, state, root)
+        return Effect.map(fs.exists(directory), (found): Option.Option<Located> =>
+          found ? Option.some({ id, state, directory }) : Option.none())
+      },
+      { concurrency: "unbounded" }
+    ).pipe(
+      Effect.map((found) => found.flatMap(Option.toArray)),
+      Effect.mapError(failed("locate", id))
+    )
 
   const locate = (id: EmissionId) =>
-    Effect.map(located, (found): Option.Option<Located> => {
-      const state = found.get(id)
-      return state === undefined ? Option.none() : Option.some({ id, state })
-    })
+    Effect.all([present(home.outboxDir, id, states), present(settledRoot, id, terminalStates)]).pipe(
+      Effect.flatMap(([open, settled]) => {
+        const found = [...open, ...settled]
+        return found.length > 1
+          ? Effect.fail(corrupt(id, "record", "more than one state directory"))
+          : Effect.succeed(Option.fromNullishOr(found[0]))
+      })
+    )
 
-  const readRecord = ({ id, state }: Located) =>
-    fs.readFileString(recordFile(id, state)).pipe(
+  /** Every emission directly under `root`, by its directory name. */
+  const entriesOf = (root: string) =>
+    fs.readDirectory(root).pipe(
+      Effect.mapError(failed("list")),
+      Effect.flatMap((entries) => {
+        const found = new Map<EmissionId, Located>()
+        for (const entry of entries) {
+          const match = entryPattern.exec(entry)
+          if (match === null) continue
+          const id = EmissionId.make(match[1]!)
+          if (found.has(id)) {
+            return Effect.fail(corrupt(id, "record", "more than one state directory"))
+          }
+          found.set(id, { id, state: match[2] as EmissionState, directory: path.join(root, entry) })
+        }
+        return Effect.succeed([...found.values()])
+      })
+    )
+
+  const readRecord = ({ id, state, directory }: Located) =>
+    fs.readFileString(path.join(directory, `record.${state}.json`)).pipe(
       Effect.mapError((cause): OutboxStoreFailed | OutboxStateCorrupt =>
         isNotFound(cause)
           ? corrupt(id, "record", "state directory has no record")
@@ -185,6 +219,18 @@ export const make = Effect.gen(function* () {
         () => corrupt(id, "record", "record contradicts its state directory")
       )
     )
+
+  const isSettled = (record: EmissionRecord) => isTerminal(record.state) && !owesReceipt(record)
+
+  /**
+   * Moves a settled emission out of the root. The rename is not flushed: if a
+   * crash loses it, the emission is still in the root, where the next listing
+   * of unsettled emissions finds it settled and moves it again.
+   */
+  const settle = (record: EmissionRecord, found: Located) =>
+    found.directory.startsWith(settledRoot) || !isSettled(record)
+      ? Effect.void
+      : fs.rename(found.directory, stateDirectory(record.id, record.state, settledRoot)).pipe(Effect.ignore)
 
   const read = (id: EmissionId) =>
     Effect.flatMap(locate(id), Option.match({
@@ -235,8 +281,8 @@ export const make = Effect.gen(function* () {
     }))
 
   const readDispatch: OutboxStore["Service"]["readDispatch"] = (id) =>
-    Effect.flatMap(require(id), ({ state }) =>
-      fs.readFileString(path.join(stateDirectory(id, state), "dispatch.json")).pipe(
+    Effect.flatMap(require(id), ({ directory }) =>
+      fs.readFileString(path.join(directory, "dispatch.json")).pipe(
         Effect.mapError((cause): OutboxStoreFailed | OutboxStateCorrupt =>
           isNotFound(cause)
             ? corrupt(id, "dispatch", "state directory has no dispatch")
@@ -255,7 +301,7 @@ export const make = Effect.gen(function* () {
       const next = advance(yield* readRecord(found), from, arrival)
       if (Result.isFailure(next)) return yield* next.failure
 
-      const directory = stateDirectory(id, from)
+      const directory = found.directory
       const to = arrival.state
       const recordJson = yield* encodeRecord(next.success).pipe(
         Effect.mapError(failed("encode-record", id))
@@ -276,6 +322,7 @@ export const make = Effect.gen(function* () {
         Effect.mapError(failed(`transition-${from}-to-${to}`, id))
       )
       yield* syncPath(home.outboxDir, "sync-root", id)
+      yield* settle(next.success, { id, state: to, directory: stateDirectory(id, to) })
       return next.success
     }))
 
@@ -285,7 +332,7 @@ export const make = Effect.gen(function* () {
       const current = yield* readRecord(found)
       const marked = markLedgered(current, phase)
       if (marked === current) return current
-      const directory = stateDirectory(id, found.state)
+      const directory = found.directory
       const recordJson = yield* encodeRecord(marked).pipe(
         Effect.mapError(failed("encode-record", id))
       )
@@ -298,6 +345,7 @@ export const make = Effect.gen(function* () {
         id
       )
       yield* syncPath(directory, "sync-emission", id)
+      yield* settle(marked, found)
       return marked
     }))
 
@@ -307,7 +355,7 @@ export const make = Effect.gen(function* () {
       // that never renamed are not a response.
       Option.isNone(found) || found.value.state !== "committed"
         ? Effect.succeed(Option.none<Uint8Array>())
-        : fs.readFile(path.join(stateDirectory(id, "committed"), "response.bin")).pipe(
+        : fs.readFile(path.join(found.value.directory, "response.bin")).pipe(
             Effect.map(Option.some),
             Effect.mapError((cause): OutboxStoreFailed | OutboxStateCorrupt =>
               isNotFound(cause)
@@ -316,24 +364,37 @@ export const make = Effect.gen(function* () {
             )
           ))
 
+  const byStagedAt = (left: EmissionRecord, right: EmissionRecord) =>
+    left.stagedAt.epochMilliseconds - right.stagedAt.epochMilliseconds ||
+    (left.id < right.id ? -1 : left.id > right.id ? 1 : 0)
+
+  /**
+   * Records still in the root: everything unsettled, plus any emission whose
+   * move to `settled/` was lost, which is moved now.
+   */
+  const unsettled = Effect.flatMap(entriesOf(home.outboxDir), (entries) =>
+    Effect.forEach(
+      entries,
+      (found) => Effect.tap(readRecord(found), (record) => settle(record, found)),
+      { concurrency: 1 }
+    ))
+
+  /** History. Read only when a caller asks for terminal or all emissions. */
+  const settled = Effect.flatMap(entriesOf(settledRoot), (entries) =>
+    Effect.forEach(entries, readRecord, { concurrency: 16 }))
+
   const list: OutboxStore["Service"]["list"] = <State extends EmissionState>(wanted?: State) =>
-    Effect.flatMap(located, (found) =>
-      Effect.forEach(
-        [...found].filter(([, state]) => wanted === undefined || state === wanted),
-        ([id, state]) => readRecord({ id, state }),
-        { concurrency: 1 }
-      )).pipe(
-        Effect.map((records) =>
-          records
-            .filter((record): record is RecordIn<State> =>
-              wanted === undefined || record.state === wanted
-            )
-            .sort((left, right) =>
-              left.stagedAt.epochMilliseconds - right.stagedAt.epochMilliseconds ||
-              (left.id < right.id ? -1 : left.id > right.id ? 1 : 0)
-            )
-        )
-      )
+    Effect.gen(function* () {
+      const open = yield* unsettled
+      const history = wanted === undefined || isTerminal(wanted) ? yield* settled : []
+      const seen = new Set(open.map((record) => record.id))
+      return [...open, ...history.filter((record) => !seen.has(record.id))]
+        .filter((record): record is RecordIn<State> => wanted === undefined || record.state === wanted)
+        .sort(byStagedAt)
+    })
+
+  // A settled emission owes nothing by definition, so only the root is read.
+  const listOwing = Effect.map(unsettled, (records) => records.filter(owesReceipt).sort(byStagedAt))
 
   return OutboxStore.of({
     exclusive: (effect) => sectionLock.withLock(effect),
@@ -343,7 +404,7 @@ export const make = Effect.gen(function* () {
     transition,
     acknowledge,
     readResponse,
-    listOwing: Effect.map(list(), (records) => records.filter(owesReceipt)),
+    listOwing,
     list
   })
 })

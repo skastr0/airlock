@@ -320,7 +320,7 @@ describe("runtime Plan interpreter", () => {
         ]), compatibilityLayer(workspace, home))
         expect(result.state).toBe("succeeded")
         expect(existsSync(join(home, "outbox"))).toBe(true)
-        const [stateDirectory] = readdirSync(join(home, "outbox"))
+        const [stateDirectory] = readdirSync(join(home, "outbox")).filter((entry) => entry.startsWith("emi_"))
         expect(stateDirectory).toMatch(/^emi_.+\.staged$/)
         const recordText = readFileSync(
           join(home, "outbox", stateDirectory!, "record.staged.json"),
