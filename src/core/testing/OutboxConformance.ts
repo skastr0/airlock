@@ -15,11 +15,12 @@ import {
   DispatchAuthorization,
   DispatchProvenance,
   type EmissionId,
+  EmissionRecord,
   IdempotencyKey,
   InvalidIntent
 } from "../outbox/Records.ts"
 import { holds, type Runner, same } from "./Check.ts"
-import { digestOf, instant } from "./Fixtures.ts"
+import { digestOf, encoded, instant } from "./Fixtures.ts"
 
 /**
  * One isolated Airlock home for one test: a store and a ledger over the same
@@ -257,6 +258,24 @@ export const outboxConformance = (
 
         const response = yield* session(current, wire, (outbox) => outbox.response(staged.id))
         same(Option.map(response, (bytes) => new TextDecoder().decode(bytes)), Option.some("ok:ping"))
+      }))
+
+    timed("an emission converts to its stored record and back without loss", () =>
+      Effect.gen(function* () {
+        const current = yield* world
+        const { wire } = recordingWire()
+        const staged = yield* session(current, wire, (outbox) => outbox.stage(request("a", "ping")))
+        const committed = yield* session(current, wire, (outbox) => outbox.commit(staged.id, bySupervisor))
+        const stored = yield* session(current, wire, (_, store) => store.read(staged.id))
+        const record = yield* probes.toRecord(committed)
+        same(Option.map(stored, encoded), Option.some(encoded(record)), "toRecord yields the stored record")
+        same(yield* probes.fromRecord(record), committed, "fromRecord is its inverse")
+        // The JSON form survives a trip through text, as an artifact would carry it.
+        const json = JSON.stringify(encoded(record))
+        const decoded = yield* Schema.decodeUnknownEffect(Schema.fromJsonString(EmissionRecord))(json)
+        same(yield* probes.fromRecord(decoded), committed)
+        const stagedRecord = yield* probes.toRecord(staged)
+        same([stagedRecord.state, "outcome" in stagedRecord], ["staged", false])
       }))
 
     timed("lets exactly one of two racing commits reach the wire", () =>

@@ -22,6 +22,7 @@ import {
   type LedgerPhase,
   OutboxStateCorrupt,
   owedPhases,
+  rebuild,
   OutboxStoreFailed,
   type RecordIn,
   ResponseCapture,
@@ -221,6 +222,21 @@ export interface OutboxDefinition<Kinds extends IntentKinds> {
   readonly Outbox: Context.Service<OutboxOf<Kinds>, OutboxService<Kinds>>
   /** The wire. A host provides this Layer; the kernel is its only caller. */
   readonly Dispatcher: Context.Service<DispatcherOf<Kinds>, DispatchHandlers<Kinds>>
+  /**
+   * The typed view of a stored record: its kind's summary and outcome decoded.
+   * A record whose kind is unknown or whose parts do not decode is corrupt.
+   */
+  readonly fromRecord: <State extends EmissionState>(
+    record: RecordIn<State>
+  ) => Effect.Effect<Emission<Kinds, State>, OutboxStateCorrupt>
+  /**
+   * The inverse of `fromRecord`: the storable, encodable record for a typed
+   * emission, with its summary and outcome encoded by the kind's codecs.
+   * `Schema.encode(EmissionRecord)` of the result is the emission's JSON form.
+   */
+  readonly toRecord: <State extends EmissionState>(
+    emission: Emission<Kinds, State>
+  ) => Effect.Effect<RecordIn<State>, OutboxStateCorrupt>
   /** The kernel. Startup settles every interrupted `committing` as `uncertain`. */
   readonly layer: Layer.Layer<
     OutboxOf<Kinds>,
@@ -307,6 +323,35 @@ export const defineOutbox = <const Kinds extends IntentKinds>(
       )
       return { ...stored, summary, outcome }
     }).pipe(Effect.map((typed) => typed as unknown as Emission<Kinds, State>))
+
+  const toRecord = <State extends EmissionState>(
+    emission: Emission<Kinds, State>
+  ): Effect.Effect<RecordIn<State>, OutboxStateCorrupt> =>
+    Effect.gen(function* () {
+      // The view differs from a record only in `summary` and `outcome`, which
+      // hold the kind's decoded types. As in `view`, the registry-derived type
+      // cannot be correlated with a runtime tag, so the shape is asserted once.
+      const typed = emission as unknown as EmissionRecord
+      const kind = yield* kindOf(typed)
+      const reject = (part: string) => (error: Schema.SchemaError) =>
+        corrupt(typed.id, "record", `${part}: ${error.message}`)
+      const summary = yield* Schema.encodeUnknownEffect(kind.summary)(typed.summary).pipe(
+        Effect.mapError(reject("summary"))
+      )
+      const record = typed.state === "committed"
+        ? {
+            ...typed,
+            summary,
+            outcome: yield* Schema.encodeUnknownEffect(kind.outcome)(typed.outcome).pipe(
+              Effect.mapError(reject("outcome"))
+            )
+          }
+        : { ...typed, summary }
+      return yield* Effect.try({
+        try: () => rebuild(record) as RecordIn<State>,
+        catch: () => corrupt(typed.id, "record", "emission is not a valid record")
+      })
+    })
 
   const make = Effect.gen(function* () {
     const store = yield* OutboxStore
@@ -684,5 +729,5 @@ export const defineOutbox = <const Kinds extends IntentKinds>(
     return { stage, inspect, commit, cancel, response, pending, pendingAuthorized, flush }
   })
 
-  return { kinds, Outbox, Dispatcher, layer: Layer.effect(Outbox, make) }
+  return { kinds, Outbox, Dispatcher, fromRecord: view, toRecord, layer: Layer.effect(Outbox, make) }
 }

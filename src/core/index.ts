@@ -50,6 +50,7 @@ export {
 } from "./outbox/Outbox.ts"
 export { OutboxStore } from "./outbox/OutboxStore.ts"
 export {
+  acknowledge,
   advance,
   type Arrival,
   type Arrivals,
@@ -63,8 +64,11 @@ export {
   EmissionRecord,
   IdempotencyKey,
   InvalidIntent,
+  LedgerPhase,
   OutboxStateCorrupt,
   OutboxStoreFailed,
+  owedPhases,
+  rebuild,
   type RecordIn,
   ResponseCapture,
   SealedDispatch,

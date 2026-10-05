@@ -255,27 +255,25 @@ export const owedPhases = (record: EmissionRecord): ReadonlyArray<LedgerPhase> =
       : ["stage"]
 
 /**
- * The record with `phase` marked as ledgered. Like `advance`, a store persists
- * exactly this; marking a phase twice changes nothing.
+ * A record class instance from anything shaped like one. The kernel's typed
+ * view of an emission is a plain object; this is how it becomes a storable,
+ * encodable record again, and it validates every field on the way.
  */
-export const acknowledge = <Record extends EmissionRecord>(record: Record, phase: LedgerPhase): Record => {
-  if (record.ledgered.includes(phase)) return record
-  const ledgered = [...record.ledgered, phase]
+export const rebuild = <Record extends EmissionRecord>(record: Record): Record => {
+  const identity = identityOf(record)
   switch (record.state) {
-    case "staged": return new StagedEmission({ ...identityOf(record), ledgered }) as Record
+    case "staged": return new StagedEmission(identity) as Record
     case "cancelled":
-      return new CancelledEmission({ ...identityOf(record), ledgered, cancelledAt: record.cancelledAt }) as Record
+      return new CancelledEmission({ ...identity, cancelledAt: record.cancelledAt }) as Record
     case "committing":
       return new CommittingEmission({
-        ...identityOf(record),
-        ledgered,
+        ...identity,
         provenance: record.provenance,
         committingAt: record.committingAt
       }) as Record
     case "committed":
       return new CommittedEmission({
-        ...identityOf(record),
-        ledgered,
+        ...identity,
         provenance: record.provenance,
         committingAt: record.committingAt,
         outcome: record.outcome,
@@ -284,8 +282,7 @@ export const acknowledge = <Record extends EmissionRecord>(record: Record, phase
       }) as Record
     case "uncertain":
       return new UncertainEmission({
-        ...identityOf(record),
-        ledgered,
+        ...identity,
         provenance: record.provenance,
         committingAt: record.committingAt,
         reason: record.reason,
@@ -293,6 +290,15 @@ export const acknowledge = <Record extends EmissionRecord>(record: Record, phase
       }) as Record
   }
 }
+
+/**
+ * The record with `phase` marked as ledgered. Like `advance`, a store persists
+ * exactly this; marking a phase twice changes nothing.
+ */
+export const acknowledge = <Record extends EmissionRecord>(record: Record, phase: LedgerPhase): Record =>
+  record.ledgered.includes(phase)
+    ? record
+    : rebuild({ ...record, ledgered: [...record.ledgered, phase] })
 
 // ── errors ──────────────────────────────────────────────────────────────────
 
