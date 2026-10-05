@@ -109,6 +109,7 @@ export {
   OutboxStateCorrupt,
   OutboxStoreFailed,
   owedPhases,
+  owesReceipt,
   rebuild,
   type RecordIn,
   RefusedEmission,

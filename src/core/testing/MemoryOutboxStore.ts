@@ -7,6 +7,7 @@ import {
   type EmissionId,
   type EmissionRecord,
   OutboxStateCorrupt,
+  owesReceipt,
   type RecordIn,
   SealedDispatch,
   UnknownEmission
@@ -104,6 +105,11 @@ export const memoryOutboxStore = (state: MemoryOutboxState): Layer.Layer<OutboxS
       }),
     readResponse: (id) =>
       Effect.sync(() => Option.map(Option.fromNullishOr(state.responses.get(id)), (bytes) => bytes.slice())),
+    listOwing: Effect.suspend(() => {
+      const owing = [...state.records.values()].filter(owesReceipt)
+      const broken = owing.find((record) => state.damaged.has(record.id))
+      return broken === undefined ? Effect.succeed(owing) : Effect.fail(damaged(broken.id))
+    }),
     list: <State extends EmissionState>(wanted?: State) =>
       Effect.suspend(() => {
         const broken = [...state.damaged][0]

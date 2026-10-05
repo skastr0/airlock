@@ -297,6 +297,10 @@ export const owedPhases = (record: EmissionRecord): ReadonlyArray<LedgerPhase> =
         ? ["stage", "refuse"]
         : ["stage"]
 
+/** Whether the record's state owes the Ledger a receipt that is not yet marked durable. */
+export const owesReceipt = (record: EmissionRecord): boolean =>
+  owedPhases(record).some((phase) => !record.ledgered.includes(phase))
+
 /**
  * A record class instance from anything shaped like one. The kernel's typed
  * view of an emission is a plain object; this is how it becomes a storable,

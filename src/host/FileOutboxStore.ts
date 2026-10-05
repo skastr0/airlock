@@ -9,6 +9,7 @@ import {
   EmissionRecord,
   OutboxStateCorrupt,
   OutboxStoreFailed,
+  owesReceipt,
   type RecordIn,
   SealedDispatch,
   UnknownEmission
@@ -342,6 +343,7 @@ export const make = Effect.gen(function* () {
     transition,
     acknowledge,
     readResponse,
+    listOwing: Effect.map(list(), (records) => records.filter(owesReceipt)),
     list
   })
 })

@@ -78,6 +78,12 @@ export class OutboxStore extends Context.Service<
     readonly readResponse: (
       id: EmissionId
     ) => Effect.Effect<Option.Option<Uint8Array>, OutboxStoreFailed | OutboxStateCorrupt>
+    /**
+     * Exactly the emissions for which `owesReceipt` is true. This is what a
+     * starting kernel reads, so its cost must depend on how many emissions owe
+     * a receipt and not on how much settled history the store holds.
+     */
+    readonly listOwing: Effect.Effect<ReadonlyArray<EmissionRecord>, OutboxStoreFailed | OutboxStateCorrupt>
     readonly list: <State extends EmissionState = EmissionState>(
       state?: State
     ) => Effect.Effect<ReadonlyArray<RecordIn<State>>, OutboxStoreFailed | OutboxStateCorrupt>

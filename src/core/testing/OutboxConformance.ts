@@ -585,6 +585,58 @@ export const outboxConformance = (
         same([slow.calls.length, other.calls.length], [1, 0])
       }))
 
+    timed("starting an Outbox reads what is unsettled, never the settled history", () =>
+      Effect.gen(function* () {
+        const current = yield* world
+        const { wire } = recordingWire()
+        // History: one committed, one cancelled, one still staged.
+        const staged = yield* session(current, wire, (outbox) =>
+          Effect.gen(function* () {
+            const done = yield* outbox.stage(request("done"))
+            yield* outbox.commit(done.id, bySupervisor)
+            const dropped = yield* outbox.stage(request("dropped", "x", 60_000))
+            yield* outbox.cancel(dropped.id)
+            return yield* outbox.stage(request("waiting", "y", 60_000))
+          }))
+
+        const reads: Array<string> = []
+        const watched = Layer.effect(
+          OutboxStore,
+          Effect.map(OutboxStore, (inner) =>
+            OutboxStore.of({
+              ...inner,
+              read: (id) =>
+                Effect.suspend(() => {
+                  reads.push(`read:${id}`)
+                  return inner.read(id)
+                }),
+              readDispatch: (id) =>
+                Effect.suspend(() => {
+                  reads.push(`readDispatch:${id}`)
+                  return inner.readDispatch(id)
+                }),
+              listOwing: Effect.suspend(() => {
+                reads.push("listOwing")
+                return inner.listOwing
+              }),
+              // Recorded when the read runs, not when the effect is built.
+              list: (state) =>
+                Effect.suspend(() => {
+                  reads.push(`list:${state ?? "everything"}`)
+                  return inner.list(state)
+                })
+            }))
+        ).pipe(Layer.provide(current.store))
+
+        // Opening the kernel and doing nothing is exactly its startup.
+        yield* session(current, wire, () => Effect.void, current.ledger, watched)
+        same([...reads].sort(), ["list:committing", "listOwing"], "startup asks only for unsettled work")
+        const owing = yield* session(current, wire, (_, store) => store.listOwing)
+        same(owing.length, 0, "every receipt of this history was already recorded")
+        const pending = yield* session(current, wire, (outbox) => outbox.pending)
+        same(pending.map((emission) => emission.id), [staged.id])
+      }))
+
     timed("a commit whose receipt cannot be recorded is still committed, and says so", () =>
       Effect.gen(function* () {
         const current = yield* world

@@ -7,6 +7,7 @@ import {
   OutboxStateCorrupt,
   OutboxStore,
   OutboxStoreFailed,
+  owesReceipt,
   type RecordIn,
   SealedDispatch,
   Canonical,
@@ -45,6 +46,9 @@ const lockFor = (storage: DurableStorage) => {
 }
 
 type Row = { readonly state: string; readonly record: string }
+
+/** The `owing` column: 1 while the record owes the Ledger a receipt. */
+const owing = (record: EmissionRecord): number => (owesReceipt(record) ? 1 : 0)
 
 const encodeRecord = Schema.encodeSync(Schema.fromJsonString(EmissionRecord))
 const decodeRecord = Schema.decodeUnknownResult(Schema.fromJsonString(EmissionRecord))
@@ -128,12 +132,13 @@ export const durableOutboxStore = (storage: DurableStorage): Layer.Layer<OutboxS
               const existing = find(record.id)
               if (Option.isSome(existing)) return { created: false, record: existing.value }
               storage.sql.exec(
-                "INSERT INTO airlock_emission (id, state, record, dispatch_digest, dispatch) VALUES (?, ?, ?, ?, ?)",
+                "INSERT INTO airlock_emission (id, state, record, dispatch_digest, dispatch, owing) VALUES (?, ?, ?, ?, ?, ?)",
                 record.id,
                 record.state,
                 encodeRecord(record),
                 dispatch.digest,
-                dispatch.canonical
+                dispatch.canonical,
+                owing(record)
               )
               return { created: true, record }
             }
@@ -168,15 +173,18 @@ export const durableOutboxStore = (storage: DurableStorage): Layer.Layer<OutboxS
             const response: SqlValue = arrival.state === "committed"
               ? (arrival.response.slice().buffer as ArrayBuffer)
               : null
-            const written = storage.sql.exec(
-              "UPDATE airlock_emission SET state = ?, record = ?, response = ? WHERE id = ? AND state = ?",
+            // `rowsWritten` also counts index rows, so the moved row is counted
+            // by what the statement returns.
+            const moved = storage.sql.exec<{ readonly id: string }>(
+              "UPDATE airlock_emission SET state = ?, record = ?, response = ?, owing = ? WHERE id = ? AND state = ? RETURNING id",
               arrival.state,
               encodeRecord(next.success),
               response,
+              owing(next.success),
               id,
               from
-            ).rowsWritten
-            if (written !== 1) {
+            ).toArray().length
+            if (moved !== 1) {
               throw new Abort(new TransitionConflict({ id, expected: from, actual: required(id).state }))
             }
             return next.success
@@ -186,8 +194,9 @@ export const durableOutboxStore = (storage: DurableStorage): Layer.Layer<OutboxS
           transaction<EmissionRecord, UnknownEmission | OutboxStateCorrupt>("acknowledge", id, () => {
             const next = acknowledge(required(id), phase)
             storage.sql.exec(
-              "UPDATE airlock_emission SET record = ? WHERE id = ? AND state = ?",
+              "UPDATE airlock_emission SET record = ?, owing = ? WHERE id = ? AND state = ?",
               encodeRecord(next),
+              owing(next),
               id,
               next.state
             )
@@ -209,6 +218,14 @@ export const durableOutboxStore = (storage: DurableStorage): Layer.Layer<OutboxS
             }
             return Option.some(new Uint8Array(row.response))
           }),
+
+        listOwing: transaction<ReadonlyArray<EmissionRecord>, OutboxStateCorrupt>("list-owing", undefined, () =>
+          storage.sql
+            .exec<Row & { readonly id: string }>(
+              "SELECT id, state, record FROM airlock_emission WHERE owing = 1 ORDER BY id"
+            )
+            .toArray()
+            .map((row) => decode(row.id, row))),
 
         list: <State extends EmissionState>(wanted?: State) =>
           transaction<ReadonlyArray<RecordIn<State>>, OutboxStateCorrupt>("list", undefined, () => {

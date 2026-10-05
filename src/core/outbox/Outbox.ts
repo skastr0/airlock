@@ -525,7 +525,7 @@ export const defineOutbox = <const Kinds extends IntentKinds>(
         // still down does not stop startup: every later path that loads one
         // of these emissions settles its receipts before acting.
         yield* Effect.forEach(
-          yield* store.list(),
+          yield* store.listOwing,
           (record) => settleReceipts(record).pipe(Effect.catchTag("OutboxRecoveryRequired", () => Effect.void)),
           { discard: true }
         )

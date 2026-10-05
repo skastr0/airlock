@@ -7,7 +7,6 @@ export type SqlValue = ArrayBuffer | string | number | null
 
 export interface SqlCursor<Row> {
   toArray(): Array<Row>
-  readonly rowsWritten: number
 }
 
 export interface DurableSql {
@@ -26,6 +25,9 @@ export interface DurableStorage {
  *
  * `state` is stored beside the record so that the compare-and-set in
  * `transition` and the filter in `list` are done by SQLite, not after decoding.
+ * `owing` is 1 while the emission owes the Ledger a receipt; a partial index
+ * over it is what a starting kernel reads, so startup never scans settled
+ * history.
  * `ledger.key` is unique; SQLite treats NULLs as distinct, so entries without
  * a key are always appended.
  */
@@ -37,9 +39,14 @@ export const ensureSchema = (storage: DurableStorage): void => {
       record TEXT NOT NULL,
       dispatch_digest TEXT NOT NULL,
       dispatch TEXT NOT NULL,
-      response BLOB
+      response BLOB,
+      owing INTEGER NOT NULL
     ) WITHOUT ROWID
   `)
+  storage.sql.exec("CREATE INDEX IF NOT EXISTS airlock_emission_state ON airlock_emission (state)")
+  storage.sql.exec(
+    "CREATE INDEX IF NOT EXISTS airlock_emission_owing ON airlock_emission (id) WHERE owing = 1"
+  )
   storage.sql.exec(`
     CREATE TABLE IF NOT EXISTS airlock_ledger (
       seq INTEGER PRIMARY KEY AUTOINCREMENT,

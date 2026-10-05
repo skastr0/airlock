@@ -240,6 +240,37 @@ export const outboxStoreConformance = (
         same(Option.map(reread, (found) => found.ledgered), Option.some(["stage"]))
       }))
 
+    test("lists exactly the emissions that still owe the Ledger a receipt", () =>
+      Effect.gen(function* () {
+        const current = yield* world
+        const owing = (store: Store) =>
+          Effect.map(store.listOwing, (records) => records.map((record) => record.id).sort())
+        yield* session(current, (store) =>
+          Effect.gen(function* () {
+            for (const n of [1, 2, 3]) yield* store.putIfAbsent(stagedRecord(n), sealedDispatch())
+            same(yield* owing(store), [emissionId(1), emissionId(2), emissionId(3)], "a stored emission owes its stage receipt")
+            yield* store.acknowledge(emissionId(1), "stage")
+            yield* store.acknowledge(emissionId(2), "stage")
+            same(yield* owing(store), [emissionId(3)])
+            // Settling owes one more receipt; an uncertain emission owes none.
+            yield* store.transition(emissionId(1), "staged", committing)
+            same(yield* owing(store), [emissionId(3)], "committing owes nothing new")
+            yield* store.transition(emissionId(1), "committing", committed(new Uint8Array(0)))
+            yield* store.transition(emissionId(2), "staged", { state: "cancelled", cancelledAt: instant(11) })
+            same(yield* owing(store), [emissionId(1), emissionId(2), emissionId(3)])
+          }))
+        // After a restart, and as each receipt is marked, the list drains to nothing.
+        yield* session(current, (store) =>
+          Effect.gen(function* () {
+            same(yield* owing(store), [emissionId(1), emissionId(2), emissionId(3)])
+            yield* store.acknowledge(emissionId(1), "commit")
+            yield* store.acknowledge(emissionId(2), "cancel")
+            yield* store.acknowledge(emissionId(3), "stage")
+            same(yield* owing(store), [])
+            same((yield* store.list()).length, 3, "settled history is still there")
+          }))
+      }))
+
     test("lists by state", () =>
       Effect.gen(function* () {
         const current = yield* world
@@ -284,15 +315,17 @@ export const outboxStoreConformance = (
         const record = stagedRecord(1)
         yield* session(current, (store) => store.putIfAbsent(record, sealedDispatch()))
         yield* current.corruptRecord(record.id)
-        const [read, listed, put, moved, marked] = yield* session(current, (store) =>
+        const [read, listed, put, moved, marked, owed] = yield* session(current, (store) =>
           Effect.all([
             Effect.flip(store.read(record.id)),
             Effect.flip(store.list()),
             Effect.flip(store.putIfAbsent(record, sealedDispatch())),
             Effect.flip(store.transition(record.id, "staged", committing)),
-            Effect.flip(store.acknowledge(record.id, "stage"))
+            Effect.flip(store.acknowledge(record.id, "stage")),
+            Effect.flip(store.listOwing)
           ]))
-        same([read._tag, listed._tag, put._tag, moved._tag, marked._tag], [
+        same([read._tag, listed._tag, put._tag, moved._tag, marked._tag, owed._tag], [
+          "OutboxStateCorrupt",
           "OutboxStateCorrupt",
           "OutboxStateCorrupt",
           "OutboxStateCorrupt",
