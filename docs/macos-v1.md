@@ -105,7 +105,7 @@ Minimal policy shape:
 
 ```json
 {
-  "schemaVersion": "airlock/admission-policy/v1",
+  "schemaVersion": "airlock/admission-policy/v2",
   "profile": "native-contained",
   "principal": "agent:example",
   "realm": "local",
@@ -113,15 +113,13 @@ Minimal policy shape:
   "pathAllowlist": ["/absolute/workspace/**"],
   "executableAllowlist": ["/usr/bin/touch"],
   "executableEdges": [],
-  "endpointAllowlist": []
+  "endpointGrants": []
 }
 ```
 
-Policy documents also decode as `airlock/admission-policy/v2`, which replaces
-`endpointAllowlist` with structured, supervisor-side `endpointGrants` carrying
-a dispatch class and commit mode; a grant that omits both reproduces the v1
-staged-until-supervisor-commit posture, and no program or definition can
-select a class. A `read`-class `commit: "auto"` grant lets the trusted runtime
+`endpointGrants` are structured and supervisor-side: each carries a dispatch
+class and commit mode. A grant that omits both stays staged until an explicit
+supervisor commit, and no program or definition can select a class. A `read`-class `commit: "auto"` grant lets the trusted runtime
 auto-commit a staged intent through the same `Outbox.commit` — implemented
 with local fixture evidence
 ([`evidence/external-read-slice.md`](evidence/external-read-slice.md)); real

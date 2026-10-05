@@ -343,13 +343,8 @@ the typed refusals for a missing or mismatched policy.
 export AIRLOCK_POLICY_FILE="$WORKSPACE/policy.json"
 ```
 
-> Today the CLI decodes **v1 policy documents only**
-> (`Schema.parseJson(AdmissionPolicy)` at `src/cli.ts:392`). A
-> `airlock/admission-policy/v2` document with `endpointGrants` is rejected as a
-> `CliInputError` even though `Admission`, `SupervisorDispatch`, and the CLI's
-> own program layer all accept the union. Dispatch-class grants are therefore
-> reachable in-process only — see
-> [Dispatch classes](usage.md#4-dispatch-classes-and-tool-definitions-v2).
+The policy is an `airlock/admission-policy/v2` document; see
+[Policy document](usage.md#policy-document).
 
 ## Linux native-contained installation
 

@@ -101,7 +101,7 @@ Hold/Outbox finality, and receipt semantics remain shared.
 | labels | **Implemented pure candidate**; lattice, sink checks, scoped declassification/endorsement, and tests exist, but the runtime does not yet enforce them end to end |
 | endpoint broker | **Dispatch-class slice implemented and fixture-proven; general broker remains candidate**; supervisor-side v2 endpoint grants class dispatch consequence, and a `read`-class `commit: "auto"` grant auto-commits a staged intent through the existing `Outbox.commit` (single dispatch site preserved), while DNS, redirects, proxying, loopback, budgets, credential authority, and actual-destination receipts remain unimplemented; native Cells still deny network and Outbox dispatches HTTP itself |
 | complete execution closure | **Acceptance condition, not established** |
-| inert tool definitions | **Implemented v1 + v2 integration**; accepted JSON definitions lower totally through the same Plan/admission/runtime path and cannot mint authority — v1 actions are invoke-only, and v2 adds `enqueue` actions that lower onto the staged `RequestExternal` seam without gaining dispatch |
+| inert tool definitions | **Implemented integration**; accepted JSON definitions lower totally through the same Plan/admission/runtime path and cannot mint authority — `invoke` actions run a declared executable, and `enqueue` actions lower onto the staged `RequestExternal` seam without gaining dispatch |
 | agent discovery and compact output | **Implemented agent UX seam**; native action JSON Schemas derive from the decoding Schemas, `run`/`eval --compact` projects evidence, and recent-run listing is bounded to 1–100 entries |
 | Vouch evidence | **Implemented local proofs**; one restore/apply/stage/undo fixture plus a 12-action host-operation workflow, not a real OpenShell or remote replacement |
 | Unix contract corpus | **Implemented contract-shape evidence**; 72 accepted shapes across 10 families parse, decode, lower, validate, and compatibility-admit, with 8 explicit unsupported classes; they are not executed tasks or model-success evidence |
@@ -346,17 +346,16 @@ RequestExternal
 ```
 
 Definitions may add typed names over existing executables, but they are JSON
-data. The v1 schema requires exactly one absolute executable selector per
-definition and accepts only `invoke` lowering. The v2 schema adds exactly one
-thing: `enqueue` actions whose request templates lower onto the existing
-`http.stage`/`RequestExternal` staging seam. A v2 action declares an
+data. An `invoke` action runs a declared absolute executable selector. An
+`enqueue` action's request template lowers onto the existing
+`http.stage`/`RequestExternal` staging seam. An enqueue action declares an
 `emissionEffect` that can only narrow a supervisor grant's dispatch class, and
 any definition text naming grant-side class or commit vocabulary is a typed
 `ToolGrantAssertionRejected`. The loader validates known
 locations, callable names, duplicate identities, schemas, templates, limits,
 result decoders, and the declared footprint. For every accepted action,
-lowering is total: a v1 `invoke` action produces an existing structured Invoke
-action and PlanDraft, a v2 `enqueue` action produces the staged-intent
+lowering is total: an `invoke` action produces an existing structured Invoke
+action and PlanDraft, an `enqueue` action produces the staged-intent
 `http.stage` call, or a typed rejection is returned. Definition and Plan
 digests bind the selected data into the execution report.
 
@@ -468,15 +467,14 @@ admittedBy
 grantTtlMillis?
 pathAllowlist
 executableAllowlist
-executableEdges?
-endpointAllowlist
+executableEdges
+endpointGrants
 ```
 
-Policy documents decode as this v1 shape or as `airlock/admission-policy/v2`,
-which replaces the flat `endpointAllowlist` with structured `endpointGrants`
+The document is `airlock/admission-policy/v2`. `endpointGrants` are structured
 (selector, methods, supervisor-side dispatch class, commit mode, hold and
-budget bounds). A grant that omits class and commit reproduces the v1
-posture: an irreversible-send floor that stays staged until an explicit
+budget bounds). A grant that omits class and commit grants the floor: an
+irreversible send that stays staged until an explicit
 supervisor commit. No program, definition, or agent-side document can name or
 widen a class.
 
@@ -969,7 +967,7 @@ Implemented, bounded properties:
 - Outbox owns HTTP dispatch;
 - profile mismatch and missing enforcement fail closed;
 - accepted tool definitions are inert data with total lowering into the
-  existing Plan path — v1 invoke-only, v2 adding `enqueue` staging actions
+  existing Plan path — `invoke` actions and `enqueue` staging actions
   that cannot name a dispatch class or commit mode; and
 - the pure label module prevents ordinary derivation from lowering
   confidentiality or raising integrity.

@@ -14,7 +14,7 @@
 1. [First program: the `.air` language in 10 minutes](#1-first-program-the-air-language-in-10-minutes)
 2. [The action vocabulary](#2-the-action-vocabulary)
 3. [Profiles and policy](#3-profiles-and-policy)
-4. [Dispatch classes and tool definitions v2](#4-dispatch-classes-and-tool-definitions-v2)
+4. [Dispatch classes and tool definitions](#4-dispatch-classes-and-tool-definitions)
 5. [Hold and Outbox operations](#5-hold-and-outbox-operations-supervisor)
 6. [Agent-harness integration](#6-agent-harness-integration)
 7. [Corpus harness](#7-corpus-harness-for-evaluating-agents)
@@ -571,14 +571,15 @@ AIR
 
 cat > "$WORKSPACE/policy.json" <<EOF
 {
-  "schemaVersion": "airlock/admission-policy/v1",
+  "schemaVersion": "airlock/admission-policy/v2",
   "profile": "native-contained",
   "principal": "agent:docs",
   "realm": "local",
   "admittedBy": "operator:docs",
   "pathAllowlist": ["$WORKSPACE/**"],
   "executableAllowlist": ["/usr/bin/touch"],
-  "endpointAllowlist": []
+  "executableEdges": [],
+  "endpointGrants": []
 }
 EOF
 
@@ -608,17 +609,17 @@ admitted, `touch` ran in a native Cell against the private view, and the derived
 delta merged through Hold — so the supervisor could take the whole thing back
 with one `undo`.
 
-### Policy document (v1)
+### Policy document
 
 | field | meaning |
 | --- | --- |
-| `schemaVersion` | `airlock/admission-policy/v1` |
+| `schemaVersion` | `airlock/admission-policy/v2` |
 | `profile` | must equal the selected `--profile` |
 | `principal`, `realm`, `admittedBy` | who this policy is for, in which realm, granted by whom |
 | `pathAllowlist` | explicit path selectors; exact or trailing `**` |
 | `executableAllowlist` | absolute executable paths |
 | `executableEdges` | executables admitted **only** as descendants of a named root, so a helper grant never becomes a new root Invoke authority |
-| `endpointAllowlist` | endpoint selectors; exact or trailing `*` prefix |
+| `endpointGrants` | structured endpoint grants; see [Endpoint grants](#endpoint-grants) |
 | `grantTtlMillis` | optional; a positive value issues expiring grants |
 
 ### Typed refusals
@@ -692,7 +693,7 @@ Full envelope: [`macos-v1.md`](macos-v1.md),
 
 ---
 
-## 4. Dispatch classes and tool definitions v2
+## 4. Dispatch classes and tool definitions
 
 **Status: implemented candidate seam with a stated boundary.** Design source:
 [`rfc/dispatch-classes-and-provider-contract.md`](rfc/dispatch-classes-and-provider-contract.md).
@@ -730,10 +731,9 @@ wins** when a grant and a declaration disagree.
 `auto` never skips staging and never adds a second wire-capable call site. It
 requires an explicit `methods` list, and it is only legal on `class: "read"`.
 
-### Admission policy v2
+### Endpoint grants
 
-`airlock/admission-policy/v2` carries every v1 field except the flat
-`endpointAllowlist`, which is **superseded** by structured `endpointGrants`:
+Endpoints are admitted through structured `endpointGrants`:
 
 ```json
 {
@@ -744,6 +744,7 @@ requires an explicit `methods` list, and it is only legal on `class: "read"`.
   "admittedBy": "operator:example",
   "pathAllowlist": [],
   "executableAllowlist": [],
+  "executableEdges": [],
   "endpointGrants": [
     { "selector": "http://127.0.0.1:PORT/v1/*", "methods": ["GET"], "class": "read", "commit": "auto" }
   ]
@@ -754,14 +755,12 @@ A grant entry: `selector` (exact, or a trailing `*` prefix, matched **after
 canonicalization** — query and fragment never participate), optional `methods`,
 `class` (default `irreversible-send`), `commit` (default `supervisor`), optional
 `hold` bounds, optional `budget` (`maxBodyBytes` enforced by admission against
-inline bodies; `maxDispatchesPerRun` owned by the dispatch engine). Omitting
-`class` and `commit` reproduces the v1 posture exactly.
+inline bodies; `maxDispatchesPerRun` owned by the dispatch engine). A grant
+that omits `class` and `commit` grants the floor: an irreversible send that
+stays staged until an explicit supervisor commit.
 
-A v2 document loads through `AIRLOCK_POLICY_FILE` on both surfaces: the CLI
-decodes the `AdmissionPolicyDocument` union (v1 or v2, discriminated on
-`schemaVersion`), and a v1 file keeps decoding unchanged. Executed on both
-`airlock` and `airlock-agent` with a v2 compatibility-profile policy:
-the program ran and reported `succeeded`.
+The policy loads through `AIRLOCK_POLICY_FILE` on both `airlock` and
+`airlock-agent`. A document in any other shape is refused.
 
 ### Walking the proof end to end
 
@@ -830,10 +829,10 @@ Read the rows as five things:
    provider requests. An endpoint fitting no grant is `AdmissionDenied` *before*
    staging. A `mutate`-classed grant never auto-commits. A policy declaring
    `commit: "auto"` on `class: "mutate"` is `AdmissionContractInvalid`. A program
-   naming `class` inside `http.stage` is a `ProgramActionDecodeFailed`. A v2
+   naming `class` inside `http.stage` is a `ProgramActionDecodeFailed`. A
    definition naming `commit` is a `ToolGrantAssertionRejected`. **Fail-closed by
    absence**: the runtime is handed a list of authorizations, never a policy, and
-   an empty list — the default, and everything a v1 policy can produce — means
+   an empty list — the default — means
    every staged intent waits for an explicit supervisor commit.
 
 The narrowing row is worth naming: a definition declaring
@@ -869,12 +868,12 @@ recursively, and only `*.airlock-tool.json` regular files:
 The reader opens each file with `O_NOFOLLOW` and caps it at 256 KiB, so a raced
 symlink replacement fails rather than being read through.
 
-**v1 — `invoke` lowering.**
+**`invoke` lowering.**
 [`examples/tools/printf-json.airlock-tool.json`](../examples/tools/printf-json.airlock-tool.json):
 
 ```json
 {
-  "schemaVersion": "airlock/tool-definition/v1",
+  "schemaVersion": "airlock/tool-definition/v2",
   "id": "printf_json",
   "version": "1.0.0",
   "executables": [ { "realm": "local", "selector": "/usr/bin/printf" } ],
@@ -894,7 +893,7 @@ symlink replacement fails rather than being read through.
 }
 ```
 
-**v2 — `enqueue` lowering with a declared emission effect.**
+**`enqueue` lowering with a declared emission effect.**
 [`examples/tools/fixture-status.airlock-tool.json`](../examples/tools/fixture-status.airlock-tool.json):
 
 ```json
@@ -965,7 +964,7 @@ airlock-agent run "$WORKSPACE/tool.air" --workspace "$WORKSPACE" --compact
 "plans": [ { "actionReference": "printf_json.decode@sha256:…", "nodeCount": 1 } ]
 ```
 
-And the authority point, executed: the v2 `read` action under the CLI's default
+And the authority point, executed: the `read` action under the CLI's default
 compatibility policy — which has **no** endpoint grants — lowers to `http.stage`
 and stays `staged`. The fixture provider log shows it never received the request.
 
@@ -1003,7 +1002,7 @@ out-of-tree.
 EndpointProvider owns:                Airlock owns:
   transport to the vendor API           admission and dispatch classes
   credential custody and refresh        staging (Outbox) and the single wire site
-  vendor catalog -> v2 definitions      commit / cancel / uncertain physics
+  vendor catalog -> definitions         commit / cancel / uncertain physics
   vendor-side semantics and errors      receipts and redaction
 ```
 
@@ -1159,7 +1158,7 @@ airlock commit emi_36203bbd-9f26
 
 The fixture server's own log confirmed receipt of exactly
 `POST /hook {"operation":"snapshot-ready"}`. `committedBy: "supervisor"` is the
-human path; `policy-auto` is the [dispatch-class](#4-dispatch-classes-and-tool-definitions-v2)
+human path; `policy-auto` is the [dispatch-class](#4-dispatch-classes-and-tool-definitions)
 path.
 
 `flush` sends every staged emission whose hold has expired, and reports what it
@@ -1581,9 +1580,6 @@ Before reaching admission, two policy problems surface as `CliInputError`:
 {"field":"AIRLOCK_POLICY_FILE","reason":"is required for native-contained program execution","_tag":"CliInputError"}
 {"field":"AIRLOCK_POLICY_FILE","reason":"policy profile compatibility does not match selected native-contained","_tag":"CliInputError"}
 ```
-
-And a v2 policy document is currently rejected by the CLI decoder — see
-[the note in section 4](#admission-policy-v2).
 
 ### Runtime phase — `RuntimePlanInvalid`
 

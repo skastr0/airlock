@@ -312,8 +312,8 @@ withheld every alternate machine-effect tool.
 Tool definitions are decoded from JSON into a finite Schema:
 
 - no code executes while loading;
-- v1 accepts exactly one absolute executable and only `invoke` lowering;
-- v2 adds `enqueue` actions that lower onto the staged
+- an `invoke` action runs one declared absolute executable;
+- an `enqueue` action lowers onto the staged
   `RequestExternal`/`http.stage` seam, must declare an `emissionEffect` that
   can only narrow a grant's supervisor-side dispatch class, and are refused
   with a typed `ToolGrantAssertionRejected` if any definition text names
@@ -325,8 +325,8 @@ Tool definitions are decoded from JSON into a finite Schema:
 - executable constraints match explicit absolute identities;
 - definitions request requirements but do not grant them; and
 - every accepted action lowers totally to the existing Plan constructors — a
-  structured Invoke action for v1 `invoke`, a staged `http.stage` intent for
-  v2 `enqueue` — or returns a typed error.
+  structured Invoke action for `invoke`, a staged `http.stage` intent for
+  `enqueue` — or returns a typed error.
 
 Accepted definitions execute end to end through the same program, Admission,
 ExecutionAuthority, Runtime, and output Schema validation as native actions.
