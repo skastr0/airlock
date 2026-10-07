@@ -63,11 +63,13 @@ export interface DispatchPermit<Tag extends string = string> {
 }
 
 const livePermits = new WeakSet<object>()
+const permitDispatches = new WeakMap<object, string>()
 
 const mintPermit = <Tag extends string>(
   kind: Tag,
   emissionId: EmissionId,
-  dispatchDigest: Sha256Digest
+  dispatchDigest: Sha256Digest,
+  canonical: string
 ): DispatchPermit<Tag> => {
   const permit: DispatchPermit<Tag> = Object.freeze({
     [PermitTypeId]: kind,
@@ -76,14 +78,29 @@ const mintPermit = <Tag extends string>(
     dispatchDigest
   })
   livePermits.add(permit)
+  permitDispatches.set(permit, canonical)
   return permit
 }
 
 /**
- * For handlers: true only for a permit this kernel minted and has not revoked.
- * A forged or replayed permit fails here even if a cast got it past the types.
+ * True only for a permit this kernel minted and has not revoked. Wire
+ * handlers must also call `consumePermit` to bind and consume its one use.
  */
 export const isLivePermit = (permit: DispatchPermit): boolean => livePermits.has(permit)
+
+/**
+ * For wire handlers, at execution time: consume one live permit for exactly
+ * its staged kind and canonical encoded dispatch. Checking and consuming are
+ * synchronous, so racing uses cannot both pass. A mismatched request consumes
+ * nothing; a consumed or revoked permit never authorizes another request.
+ */
+export const consumePermit = (permit: DispatchPermit, kind: string, canonical: string): boolean => {
+  if (!isLivePermit(permit) || permit.kind !== kind) return false
+  const bound = permitDispatches.get(permit)
+  if (bound === undefined || bound !== canonical) return false
+  permitDispatches.delete(permit)
+  return true
+}
 
 // ── the typed view of an emission ───────────────────────────────────────────
 
@@ -574,7 +591,7 @@ export const defineOutbox = <const Kinds extends IntentKinds>(
         )(sealed.canonical).pipe(
           Effect.mapError((error) => corrupt(record.id, "dispatch", error.message))
         )
-        return dispatch
+        return { dispatch, canonical: sealed.canonical }
       })
 
     const existing = (id: EmissionId) =>
@@ -748,7 +765,8 @@ export const defineOutbox = <const Kinds extends IntentKinds>(
           const kind = yield* kindOf(staged)
           const tag = kind.tag as Tag
           // Verify the sealed material before anything becomes irreversible.
-          const dispatch = yield* sealedDispatchOf(staged)
+          const sealed = yield* sealedDispatchOf(staged)
+          const dispatch = sealed.dispatch
 
           const committing = yield* store.transition(id, "staged", {
             state: "committing",
@@ -762,14 +780,17 @@ export const defineOutbox = <const Kinds extends IntentKinds>(
           // Dispatch is the interruptible portion. Once it has begun,
           // interruption is an honest uncertain outcome, not a bare fiber
           // interruption that erases the caller's receipt.
-          const permit = mintPermit(tag, id, committing.dispatchDigest)
+          const permit = mintPermit(tag, id, committing.dispatchDigest, sealed.canonical)
           const delivered = yield* restore(
-            handlers[tag]({ permit, dispatch, responseLimitBytes: RESPONSE_LIMIT_BYTES }).pipe(
+            Effect.suspend(() => handlers[tag]({ permit, dispatch, responseLimitBytes: RESPONSE_LIMIT_BYTES })).pipe(
               Effect.timeoutOption(DISPATCH_TIMEOUT_MILLIS),
               Effect.result
             )
           ).pipe(
-            Effect.ensuring(Effect.sync(() => livePermits.delete(permit))),
+            Effect.ensuring(Effect.sync(() => {
+              livePermits.delete(permit)
+              permitDispatches.delete(permit)
+            })),
             Effect.exit
           )
           if (Exit.isFailure(delivered)) {
@@ -943,7 +964,7 @@ export const defineOutbox = <const Kinds extends IntentKinds>(
       if (answer === undefined) {
         return yield* new NotCompensable({ id, reason: "irreversible", state: record.state })
       }
-      const dispatch = yield* sealedDispatchOf(record)
+      const { dispatch } = yield* sealedDispatchOf(record)
       const outcome: unknown = yield* Schema.decodeUnknownEffect(kind.outcome)(record.outcome).pipe(
         Effect.mapError((error) => corrupt(id, "record", `outcome: ${error.message}`))
       )

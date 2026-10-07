@@ -111,9 +111,12 @@ brand never leaves the kernel module, so no other code can construct one.
 
 A `Dispatcher` is a record with one handler per registered intent kind, and a
 handler receives the permit with the request. A kind without a handler does
-not compile, and a handler checks `isLivePermit` before it builds a request,
-so a forged, replayed or settled permit is refused even if a cast got it past
-the types (`test/core-permit.test.ts`, `test/http-dispatcher.test.ts`).
+not compile. Before acting, a handler calls `consumePermit` with the kind and
+canonical encoded dispatch: only the staged bytes match, and only one use can
+succeed, even while the permit remains live. Checks run when the handler's
+Effect executes, so an Effect built before revocation cannot act afterwards
+(`test/core-permit.test.ts`, `test/http-dispatcher.test.ts`,
+`test/security-dispatch-permit.test.ts`).
 
 ### Intent kinds
 

@@ -1,9 +1,12 @@
-import { Effect } from "effect"
+import { Effect, Schema } from "effect"
 import {
+  Canonical,
+  consumePermit,
   type Delivery,
   DispatchFailed,
+  DispatchRefused,
   type DispatchRequest,
-  type HttpDispatch,
+  HttpDispatch,
   type HttpOutcome,
   isLivePermit
 } from "../core/index.ts"
@@ -60,11 +63,26 @@ const readBounded = async (
  */
 export const dispatchHttp = Effect.fn("HttpDispatcher.dispatch")(function* (
   request: DispatchRequest<"http", HttpDispatch>
-): Effect.fn.Return<Delivery<HttpOutcome>, DispatchFailed> {
+): Effect.fn.Return<Delivery<HttpOutcome>, DispatchFailed | DispatchRefused> {
   if (!isLivePermit(request.permit)) {
-    return yield* new DispatchFailed({ reason: "dispatch permit is not live" })
+    return yield* new DispatchRefused({ reason: "dispatch permit is not live" })
   }
-  const { dispatch, responseLimitBytes } = request
+  // Encode and detach before consuming: the bytes checked against the permit
+  // must be the same bytes the request below uses, even if the caller mutates.
+  const { dispatch, canonical } = yield* Effect.try({
+    try: () => {
+      const canonical = Canonical.canonicalJson(Schema.encodeSync(HttpDispatch)(request.dispatch))
+      return {
+        canonical,
+        dispatch: Schema.decodeUnknownSync(Schema.fromJsonString(HttpDispatch))(canonical)
+      }
+    },
+    catch: () => new DispatchRefused({ reason: "dispatch does not match the HTTP contract" })
+  })
+  if (!consumePermit(request.permit, "http", canonical)) {
+    return yield* new DispatchRefused({ reason: "dispatch permit does not authorize this request" })
+  }
+  const { responseLimitBytes } = request
   return yield* Effect.tryPromise({
     try: async (signal) => {
       const response = await fetch(dispatch.url, {

@@ -115,7 +115,7 @@ describe("host HTTP dispatcher", () => {
         dispatch: { url: `${origin}/hook`, method: "POST", headers: {} },
         responseLimitBytes: RESPONSE_LIMIT_BYTES
       }).pipe(Effect.flip)
-      expect(refused).toMatchObject({ _tag: "DispatchFailed", reason: "dispatch permit is not live" })
+      expect(refused).toMatchObject({ _tag: "DispatchRefused", reason: "dispatch permit is not live" })
       expect(hits).toBe(0)
     })))
 
@@ -153,7 +153,7 @@ describe("host HTTP dispatcher", () => {
           dispatch: { url: `${origin}/hook`, method: "POST", headers: {} },
           responseLimitBytes: RESPONSE_LIMIT_BYTES
         }).pipe(Effect.flip)
-        expect(replayed).toMatchObject({ _tag: "DispatchFailed", reason: "dispatch permit is not live" })
+        expect(replayed).toMatchObject({ _tag: "DispatchRefused", reason: "dispatch permit is not live" })
         expect(hits).toBe(1)
       }).pipe(Effect.provide(recording))
     })))

@@ -1,4 +1,5 @@
-import { Effect } from "effect"
+import { Effect, Schema } from "effect"
+import { canonicalJson } from "../Canonical.ts"
 import type { ToolContract } from "../contract/ToolContract.ts"
 import {
   type Delivery,
@@ -7,7 +8,7 @@ import {
   DispatchRefused,
   type DispatchRequest
 } from "../outbox/Dispatcher.ts"
-import { isLivePermit } from "../outbox/Outbox.ts"
+import { consumePermit, isLivePermit } from "../outbox/Outbox.ts"
 import type { ToolContracts } from "../session/ToolSession.ts"
 
 const RefusedTypeId: unique symbol = Symbol.for("airlock/Refused")
@@ -76,17 +77,27 @@ export const handlersFor = <Contracts extends ToolContracts, Env>(
   env: Env
 ): DispatchHandlers<Contracts> => {
   const handler = (name: keyof Contracts & string) =>
-    (request: DispatchRequest<string, unknown>): Effect.Effect<Delivery<unknown>, DispatchFailed | DispatchRefused> => {
+    (request: DispatchRequest<string, unknown>): Effect.Effect<Delivery<unknown>, DispatchFailed | DispatchRefused> => Effect.gen(function* () {
       if (!isLivePermit(request.permit)) {
-        return Effect.fail(new DispatchRefused({ reason: "dispatch permit is not live" }))
+        return yield* new DispatchRefused({ reason: "dispatch permit is not live" })
+      }
+      const contract = contracts[name]
+      if (contract === undefined) return yield* new DispatchRefused({ reason: "no contract is registered" })
+      const invalid = () => new DispatchRefused({ reason: "dispatch does not match the tool contract" })
+      const encoded = yield* Schema.encodeUnknownEffect(contract.dispatch)(request.dispatch).pipe(Effect.mapError(invalid))
+      const canonical = yield* Effect.try({ try: () => canonicalJson(encoded), catch: invalid })
+      const input = yield* Schema.decodeUnknownEffect(Schema.fromJsonString(contract.dispatch))(canonical).pipe(Effect.mapError(invalid))
+      if (!consumePermit(request.permit, name, canonical)) {
+        return yield* new DispatchRefused({ reason: "dispatch permit does not authorize this request" })
       }
       // `defineAirlock` typed this record against the contracts; here it is read by name.
       const run = implement[name] as (input: unknown, context: ImplementContext<Env>) => Awaitable<unknown>
       const failed = () => new DispatchFailed({ reason: `${name} implementation failed` })
-      return Effect.tryPromise({
+      return yield* Effect.tryPromise({
         try: (signal) =>
           Promise.resolve().then(() => {
-            const result = run(request.dispatch, {
+            if (signal.aborted || !isLivePermit(request.permit)) throw refused("dispatch permit is not live")
+            const result = run(input, {
               env,
               signal,
               idempotencyKey: request.permit.emissionId
@@ -105,7 +116,7 @@ export const handlersFor = <Contracts extends ToolContracts, Env>(
             : Effect.succeed({ outcome: result, response: encoder.encode(""), truncated: false })
         )
       )
-    }
+    })
   const handlers: { [name: string]: unknown } = {}
   for (const name of Object.keys(contracts)) handlers[name] = handler(name)
   // One handler per registered contract, built by name; the mapped type states

@@ -68,6 +68,7 @@ export {
   type CancelError,
   type CommitError,
   type CompensateError,
+  consumePermit,
   defineOutbox,
   DISPATCH_TIMEOUT_MILLIS,
   type DispatcherOf,
