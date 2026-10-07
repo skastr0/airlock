@@ -2,7 +2,7 @@
 /**
  * Portability proof for the cloud adapters.
  *
- * Bundles `src/cloud` and the test Worker the way a Workers runtime loads
+ * Bundles `src/cloud`, the test Worker and the example Worker the way a Workers runtime loads
  * them: a neutral platform, no Node built-ins, no `nodejs_compat`. A `node:`
  * or `bun:` import anywhere in the graph fails the build, and so does a
  * reference to a host global in the output. Running the bundle is the job of
@@ -26,6 +26,8 @@ const bundle = (entry: string) =>
     target: "es2022",
     // The one module the Workers runtime provides.
     external: ["cloudflare:workers"],
+    // The example imports the package by name; here that is this repository.
+    alias: { "@skastr0/airlock/cloud": resolve(repository, "src/cloud/index.ts") },
     logLevel: "silent"
   }).catch((failure: {
     readonly errors?: ReadonlyArray<{ readonly text: string; readonly location?: { readonly file: string } | null }>
@@ -39,7 +41,7 @@ const bundle = (entry: string) =>
 
 const hostReference = /\b(?:require\s*\(|process\.(?:env|versions|platform|argv)|Bun\.)/
 const sizes: Record<string, number> = {}
-for (const entry of ["src/cloud/index.ts", "test/cloud/worker.ts"]) {
+for (const entry of ["src/cloud/index.ts", "test/cloud/worker.ts", "examples/cloudflare/src/worker.ts"]) {
   const source = (await bundle(entry)).outputFiles[0]!.text
   if (hostReference.test(source)) {
     console.error(`${entry} bundles a reference to a host global`)
