@@ -217,16 +217,24 @@ is not vendor or brokerage evidence.
 
 A staged request is stored exactly as it will be sent: its URL, headers and
 body are kept, unencrypted, in the emission's sealed dispatch for as long as
-the emission exists, and a tool call's input is kept the same way. They never
-appear in a summary, a listing, a receipt or the Ledger, but they are at rest.
-Airlock therefore holds no credentials. A request that carries one literally
-(`Authorization`, `Proxy-Authorization`, `Cookie`, a header or query parameter
-whose name contains `key`, `token`, `secret`, `auth`, `password` or `session`,
-or user information in the URL) is refused at staging with an error naming the
-field, and nothing is stored for it. This is a name match and cannot catch a
-secret placed under an ordinary name. Credentials belong to the owner, outside
-the request: in a proxy that adds them, or in a tool implementation's own
-environment.
+the emission exists, and a tool call's input is kept the same way. HTTP
+summaries redact query values, header values and bodies; tool summaries expose
+only the input fields their contract explicitly declares public. Private
+input values are omitted from listings, receipts and the Ledger, but remain
+in the sealed dispatch at rest.
+
+Credentials belong to the owner, outside Airlock: in a proxy that adds them,
+or in a tool implementation's own environment. The HTTP kind refuses URL
+user information and header or query names containing `key`, `token`,
+`secret`, `auth`, `password`, `passwd`, `credential`, `session`, `cookie` or
+`signature`. It also refuses the whole names `sig`, `pwd`, `jwt`, `bearer`,
+`assertion` and `client_assertion`, and a query `code` alongside `state` (the
+OAuth callback shape). Bare `code`, `pass` and `sas` remain usable as ordinary
+data names. Matching ignores case; query names are percent-decoded once by
+the URL parser. Refusal names the field without its value and stores nothing
+for the request. This is a best-effort name match: it does not inspect bodies,
+generic tool inputs, an OAuth code without `state`, or a secret placed under
+an ordinary name.
 
 Current dispatch is direct HTTP with manual redirects. It is not a contained
 EndpointBroker and does not prove DNS, proxy, loopback, Unix-socket,

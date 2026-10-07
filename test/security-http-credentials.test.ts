@@ -44,9 +44,23 @@ describe("security: standard HTTP credential aliases", () => {
     expect(Result.isSuccess(result)).toBe(true)
   })
 
-  it.each(["pwd", "pass", "jwt", "bearer", "sas", "code", "assertion", "client_assertion"])(
+  it.each(["pwd", "jwt", "bearer", "assertion", "client_assertion"])(
     "refuses the well-known credential alias %s", (parameter) => {
       expect(Result.isFailure(HttpIntent.summarize(request(parameter)))).toBe(true)
+    }
+  )
+
+  it.each(["pass", "sas", "code"])("keeps the ambiguous data name %s usable", (parameter) => {
+    expect(Result.isSuccess(HttpIntent.summarize(request(parameter)))).toBe(true)
+  })
+
+  it.each(["code&state=s", "cOdE&StAtE=s", "%63ode&%73tate=s"])(
+    "refuses an OAuth callback code after decoding (%s)", (parameters) => {
+      const [code, state] = parameters.split("&")
+      const dispatch = request(code!)
+      const result = HttpIntent.summarize({ ...dispatch, url: `${dispatch.url}&${state}` })
+      expect(Result.isFailure(result)).toBe(true)
+      expect(JSON.stringify(result)).not.toContain("sas-canary-secret")
     }
   )
 

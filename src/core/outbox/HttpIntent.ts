@@ -49,14 +49,18 @@ const invalid = (field: string, reason: string) =>
  * ordinary mistake fails loudly.
  */
 // Short aliases are whole names: a `sig` is a credential, a `design` is not.
-const credentialName = /key|token|secret|auth|password|passwd|credential|session|cookie|signature|^(?:sig|pwd|pass|jwt|bearer|sas|code|assertion|client_assertion)$/i
+const credentialName = /key|token|secret|auth|password|passwd|credential|session|cookie|signature|^(?:sig|pwd|jwt|bearer|assertion|client_assertion)$/i
 
 const credentialPosition = (dispatch: HttpDispatch, url: URL): { field: string; what: string } | undefined => {
   if (url.username !== "" || url.password !== "") {
     return { field: "url", what: "user information in the URL" }
   }
+  // `code` also names ordinary data; with `state` it has the OAuth callback shape.
+  const callback = [...url.searchParams.keys()].some((name) => name.toLowerCase() === "state")
   for (const name of url.searchParams.keys()) {
-    if (credentialName.test(name)) return { field: `url query parameter ${name}`, what: `query parameter ${name}` }
+    if (credentialName.test(name) || (callback && name.toLowerCase() === "code")) {
+      return { field: `url query parameter ${name}`, what: `query parameter ${name}` }
+    }
   }
   for (const name of Object.keys(dispatch.headers)) {
     if (credentialName.test(name)) return { field: `headers.${name}`, what: `header ${name}` }
