@@ -37,8 +37,32 @@ describe("security: standard HTTP credential aliases", () => {
     }).toEqual({ state: "Failure", records: 0, entries: 0, dispatches: 0, storesSignature: false })
   }))
 
-  it("accepts unrelated names containing the letters sig", () => {
-    const result = HttpIntent.summarize({ url: "https://example.test/?design=one", method: "GET", headers: {} })
+  it("accepts unrelated names containing short credential aliases", () => {
+    const result = HttpIntent.summarize({
+      url: "https://example.test/?design=one&signal=two&assign=three&codepage=utf8&client_assertion_type=public", method: "GET", headers: {}
+    })
     expect(Result.isSuccess(result)).toBe(true)
+  })
+
+  it.each(["pwd", "pass", "jwt", "bearer", "sas", "code", "assertion", "client_assertion"])(
+    "refuses the well-known credential alias %s", (parameter) => {
+      expect(Result.isFailure(HttpIntent.summarize(request(parameter)))).toBe(true)
+    }
+  )
+
+  it.each([
+    "X-Amz-Signature", "X-Amz-Credential", "X-Amz-Security-Token", "X-Goog-Signature",
+    "signature", "api_key", "apikey", "access_token", "authorization", "password", "session", "cookie"
+  ])("matches percent-decoded mixed-case query names once (%s)", (name) => {
+    const mixed = [...name].map((letter, index) => index % 2 === 0 ? letter.toUpperCase() : letter.toLowerCase()).join("")
+    const encoded = [...mixed].map((letter) => `%${letter.charCodeAt(0).toString(16)}`).join("")
+    const result = HttpIntent.summarize(request(encoded))
+    expect(Result.isFailure(result)).toBe(true)
+    expect(JSON.stringify(result)).not.toContain("sas-canary-secret")
+  })
+
+  it("does not reinterpret double-encoded text as a credential parameter", () => {
+    // The server sees the literal name `%73ig`, not `sig`, after one URL decode.
+    expect(Result.isSuccess(HttpIntent.summarize(request("%2573ig")))).toBe(true)
   })
 })
