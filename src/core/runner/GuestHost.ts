@@ -17,6 +17,67 @@ import {
 const encoder = new TextEncoder()
 const bytes = (text: string) => encoder.encode(text).byteLength
 
+const tooLarge = Symbol("guest value limit")
+const invalid = Symbol("invalid guest value")
+
+/** Own JSON data only, bounded before allocating the complete encoded value. */
+const boundedJson = (value: unknown, maxBytes: number, limits: GuestLimits): string => {
+  let text = ""
+  let size = 0
+  let nodes = 0
+  const append = (token: string) => {
+    if (token.length > maxBytes) throw tooLarge
+    size += bytes(token)
+    if (size > maxBytes) throw tooLarge
+    text += token
+  }
+  const string = (value: string) => {
+    if (value.length > maxBytes) throw tooLarge
+    append(JSON.stringify(value))
+  }
+  const visit = (item: unknown, depth: number): void => {
+    if (++nodes > limits.maxNodes || depth > limits.maxDepth) throw tooLarge
+    if (item === null) return append("null")
+    if (typeof item === "boolean") return append(item ? "true" : "false")
+    if (typeof item === "string") return string(item)
+    if (typeof item === "number") {
+      if (!Number.isFinite(item)) throw invalid
+      return append(JSON.stringify(item))
+    }
+    if (typeof item !== "object") throw invalid
+    if (Array.isArray(item)) {
+      const length = Object.getOwnPropertyDescriptor(item, "length")?.value
+      if (typeof length !== "number" || length > limits.maxNodes) throw tooLarge
+      append("[")
+      for (let index = 0; index < length; index++) {
+        if (index > 0) append(",")
+        const descriptor = Object.getOwnPropertyDescriptor(item, index)
+        if (descriptor === undefined || !Object.hasOwn(descriptor, "value")) throw invalid
+        visit(descriptor.value, depth + 1)
+      }
+      return append("]")
+    }
+    const prototype = Object.getPrototypeOf(item)
+    if (prototype !== Object.prototype && prototype !== null) throw invalid
+    const names = Object.keys(item)
+    if (names.length > limits.maxNodes) throw tooLarge
+    append("{")
+    let written = 0
+    for (const name of names) {
+      const descriptor = Object.getOwnPropertyDescriptor(item, name)
+      if (descriptor === undefined || !Object.hasOwn(descriptor, "value")) throw invalid
+      if (descriptor.value === undefined) continue
+      if (written++ > 0) append(",")
+      string(name)
+      append(":")
+      visit(descriptor.value, depth + 1)
+    }
+    append("}")
+  }
+  visit(value, 0)
+  return text
+}
+
 export const guestLimits = (overrides: Partial<GuestLimits> = {}): GuestLimits => ({
   ...defaultGuestLimits,
   ...overrides
@@ -40,7 +101,7 @@ export interface GuestBridge {
    * the error; a tool's own refusal is an ordinary error the guest may handle.
    */
   readonly call: (tool: string, input: unknown) => Promise<string>
-  /** Revokes the bridge. Every later call fails. */
+  /** Revokes the bridge and interrupts pending tool Effects. Every later call fails. */
   readonly close: () => void
   readonly calls: () => number
   readonly failure: () => GuestFailureReason | undefined
@@ -52,17 +113,20 @@ export const makeGuestBridge = (surface: GuestSurface, limits: GuestLimits): Gue
   let active = true
   let calls = 0
   let failed: GuestFailureReason | undefined
+  const controller = new AbortController()
+  const close = () => {
+    active = false
+    controller.abort()
+  }
   const deny = (reason: GuestFailureReason): never => {
     failed ??= reason
-    active = false
+    close()
     // The reason is read from the bridge, not from this error's text.
     throw new Error("guest run failed")
   }
   return {
     tools: [...granted].sort(),
-    close: () => {
-      active = false
-    },
+    close,
     calls: () => calls,
     failure: () => failed,
     call: async (tool, input) => {
@@ -82,18 +146,26 @@ export const makeGuestBridge = (surface: GuestSurface, limits: GuestLimits): Gue
       } catch {
         return deny("tool_input_invalid")
       }
-      const ended = await Effect.runPromise(Effect.result(surface.call(tool, decoded)))
-      if (!active) return deny("timeout")
+      try {
+        boundedJson(decoded, limits.maxToolInputBytes, limits)
+      } catch (error) {
+        return deny(error === tooLarge ? "tool_input_limit" : "tool_input_invalid")
+      }
+      const ended = await Effect.runPromise(
+        Effect.result(Effect.suspend(() => surface.call(tool, decoded))),
+        { signal: controller.signal }
+      ).catch(() => deny(active ? "execution_failed" : "timeout"))
+      if (!active || Date.now() >= deadline) return deny("timeout")
       if (ended._tag === "Failure") {
         // A spent session budget is the host's limit, not the tool's answer.
         if (ended.failure.code === "budget-exceeded") return deny("tool_call_limit")
         throw new ToolRefused(ended.failure.message.slice(0, 512))
       }
-      const reply = JSON.stringify(ended.success)
-      if (reply.length > limits.maxToolResultBytes || bytes(reply) > limits.maxToolResultBytes) {
-        return deny("tool_result_limit")
+      try {
+        return boundedJson(ended.success, limits.maxToolResultBytes, limits)
+      } catch (error) {
+        return deny(error === tooLarge ? "tool_result_limit" : "execution_failed")
       }
-      return reply
     }
   }
 }
@@ -124,17 +196,19 @@ export const settleGuest = async (options: {
 }): Promise<GuestOutcome> => {
   const { bridge, limits, signal } = options
   const fail = (reason: GuestFailureReason): GuestOutcome => ({ ok: false, reason, toolCalls: bridge.calls() })
-  if (signal?.aborted === true) return fail("aborted")
+  const aborted = () => signal?.aborted === true
   let timer: ReturnType<typeof setTimeout> | undefined
   let onAbort: (() => void) | undefined
-  const stopped = new Promise<GuestFailureReason>((resolve) => {
-    timer = setTimeout(() => resolve("timeout"), limits.wallTimeMs)
-    onAbort = () => resolve("aborted")
-    signal?.addEventListener("abort", onAbort, { once: true })
-  })
   try {
+    if (aborted()) return fail("aborted")
+    const deadline = Date.now() + limits.wallTimeMs
+    const stopped = new Promise<GuestFailureReason>((resolve) => {
+      timer = setTimeout(() => { bridge.close(); resolve("timeout") }, limits.wallTimeMs)
+      onAbort = () => { bridge.close(); resolve("aborted") }
+      signal?.addEventListener("abort", onAbort, { once: true })
+    })
     const raced = await Promise.race([
-      options.start().then((raw) => ({ raw }), () => ({ raw: undefined })),
+      Promise.resolve().then(() => aborted() ? undefined : options.start()).then((raw) => ({ raw }), () => ({ raw: undefined })),
       stopped.then((reason) => ({ reason }))
     ])
     if ("reason" in raced) {
@@ -143,11 +217,20 @@ export const settleGuest = async (options: {
     }
     const violated = bridge.failure()
     if (violated !== undefined) return fail(violated)
+    if (aborted()) return fail("aborted")
+    if (Date.now() >= deadline) return fail("timeout")
     const { raw } = raced
     if (typeof raw !== "string") return fail("execution_failed")
     if (raw.length > limits.maxOutputBytes || bytes(raw) > limits.maxOutputBytes) return fail("output_limit")
     const reply = decodeReply(raw)
     if (reply._tag === "None") return fail("invalid_output")
+    if (reply.value.ok) {
+      try {
+        boundedJson(reply.value.result, limits.maxOutputBytes, limits)
+      } catch (error) {
+        return fail(error === tooLarge ? "output_limit" : "invalid_output")
+      }
+    }
     return reply.value.ok
       ? { ok: true, result: reply.value.result, toolCalls: bridge.calls() }
       : fail(reply.value.error)
@@ -155,6 +238,6 @@ export const settleGuest = async (options: {
     bridge.close()
     if (timer !== undefined) clearTimeout(timer)
     if (onAbort !== undefined) signal?.removeEventListener("abort", onAbort)
-    options.stop?.()
+    try { options.stop?.() } catch { /* Cleanup cannot expose an adapter's exception. */ }
   }
 }
