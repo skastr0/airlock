@@ -267,7 +267,7 @@ export const guestRunnerConformance = (
         const outcome = yield* run(current, fresh(), `
           const attempt = async (act) => { try { await act(); return 'allowed'; } catch { return 'blocked'; } };
           return {
-            fetch: await attempt(async () => { await fetch('https://example.com/'); }),
+            fetch: await attempt(async () => { await globalThis['fetch']('https://example.com/'); }),
             socket: await attempt(async () => {
               const { connect } = await import('cloudflare:' + 'sockets');
               const socket = connect('example.com:443'); await socket.opened;
