@@ -48,7 +48,8 @@ const invalid = (field: string, reason: string) =>
  * called `X-Trace` passes. It refuses the well-known positions so that the
  * ordinary mistake fails loudly.
  */
-const credentialName = /key|token|secret|auth|password|passwd|credential|session|cookie|signature/i
+// `sig` is the authorization signature in an Azure shared access URL.
+const credentialName = /key|token|secret|auth|password|passwd|credential|session|cookie|signature|^sig$/i
 
 const credentialPosition = (dispatch: HttpDispatch, url: URL): { field: string; what: string } | undefined => {
   if (url.username !== "" || url.password !== "") {
