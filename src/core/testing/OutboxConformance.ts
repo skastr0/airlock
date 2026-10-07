@@ -291,6 +291,50 @@ export const outboxConformance = (
         same(kept.summary, { target: "probe://one", payloadBytes: 3 })
       }))
 
+    timed("stores one consistent request even when the caller's object changes under it", () =>
+      Effect.gen(function* () {
+        const current = yield* world
+        const { calls, wire } = recordingWire()
+        // A property that answers differently each time it is read, and an
+        // object the caller rewrites the moment staging has begun.
+        let reads = 0
+        const shifting = {
+          payload: "benign",
+          get target() {
+            reads += 1
+            return reads === 1 ? "probe://one" : "probe://elsewhere"
+          }
+        }
+        const rewritten = { target: "probe://one", payload: "benign" }
+        const [first, second] = yield* session(current, wire, (outbox) =>
+          Effect.gen(function* () {
+            const staged = yield* outbox.stage({
+              key: key("shifting"),
+              intent: { kind: "probe", dispatch: shifting },
+              holdMillis: 0
+            })
+            const pending = yield* Effect.forkChild(outbox.stage({
+              key: key("rewritten"),
+              intent: { kind: "probe", dispatch: rewritten },
+              holdMillis: 0
+            }))
+            yield* Effect.yieldNow
+            rewritten.target = "probe://elsewhere"
+            rewritten.payload = "x".repeat(500)
+            return [staged, yield* Fiber.join(pending)] as const
+          }))
+        same(reads, 1, "the request is read once")
+        for (const staged of [first, second]) {
+          yield* session(current, wire, (outbox) => outbox.commit(staged.id, bySupervisor))
+        }
+        // What was sent is exactly what the summary, and so any grant, described.
+        same(calls.map((call) => call.payload), ["benign", "benign"])
+        same([first.summary, second.summary], [
+          { target: "probe://one", payloadBytes: 6 },
+          { target: "probe://one", payloadBytes: 6 }
+        ])
+      }))
+
     timed("rejects an invalid intent, hold, or authorization before storing anything", () =>
       Effect.gen(function* () {
         const current = yield* world

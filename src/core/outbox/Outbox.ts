@@ -19,9 +19,9 @@ import type { EmissionState } from "./Lifecycle.ts"
 import { OutboxStore } from "./OutboxStore.ts"
 import {
   acknowledge,
-  type DispatchAuthorization,
+  DispatchAuthorization,
   DispatchProvenance,
-  type EmissionAdmission,
+  EmissionAdmission,
   EmissionId,
   type EmissionRecord,
   IdempotencyKey,
@@ -586,6 +586,72 @@ export const defineOutbox = <const Kinds extends IntentKinds>(
       )
 
     /**
+     * The caller's request as values the kernel owns: validated, encoded once,
+     * and copied. Synchronous on purpose.
+     */
+    const own = (request: StageRequest<Kinds>): Result.Result<
+      {
+        readonly tag: Tag
+        readonly canonical: string
+        readonly encodedSummary: Schema.Json
+        readonly holdMillis: number
+        readonly key: IdempotencyKey
+        readonly authorization: DispatchAuthorization | undefined
+        readonly admission: EmissionAdmission | undefined
+      },
+      InvalidHoldDuration | InvalidIntent | InvalidDispatchAuthorization
+    > => {
+      const holdMillis = request.holdMillis
+      if (!validHold(holdMillis)) return Result.fail(new InvalidHoldDuration({ holdMillis }))
+      const tag: Tag = request.intent.kind
+      const registered = kindFor(tag)
+      if (Option.isNone(registered)) {
+        return Result.fail(new InvalidIntent({ kind: tag, field: "kind", reason: "is not a registered intent kind" }))
+      }
+      const kind = registered.value
+      const invalid = (field: string) => (error: Schema.SchemaError) =>
+        new InvalidIntent({ kind: tag, field, reason: error.message })
+      const encoded = Schema.encodeResult(kind.dispatch)(request.intent.dispatch)
+      if (Result.isFailure(encoded)) return Result.fail(invalid("dispatch")(encoded.failure))
+      const canonical = canonicalJson(encoded.success)
+      // The kernel's own copy, decoded from the bytes that will be stored.
+      const dispatch = Schema.decodeUnknownResult(Schema.fromJsonString(kind.dispatch))(canonical)
+      if (Result.isFailure(dispatch)) return Result.fail(invalid("dispatch")(dispatch.failure))
+      const summary = kind.summarize(dispatch.success)
+      if (Result.isFailure(summary)) return Result.fail(summary.failure)
+      const encodedSummary = Schema.encodeResult(kind.summary)(summary.success)
+      if (Result.isFailure(encodedSummary)) return Result.fail(invalid("summary")(encodedSummary.failure))
+      const given = request.authorization
+      const authorization = given === undefined ? undefined : new DispatchAuthorization({
+        sealDigest: given.sealDigest,
+        grantId: given.grantId,
+        grantSelector: given.grantSelector,
+        dispatchClass: given.dispatchClass,
+        target: given.target
+      })
+      if (authorization !== undefined && authorization.target !== kind.target(summary.success)) {
+        return Result.fail(new InvalidDispatchAuthorization({
+          field: "authorization.target",
+          reason: "must equal the staged intent's canonical target"
+        }))
+      }
+      const admitted = request.admission
+      const admission = admitted === undefined ? undefined : new EmissionAdmission({
+        policyDigest: admitted.policyDigest,
+        grantIds: [...admitted.grantIds]
+      })
+      return Result.succeed({
+        tag,
+        canonical,
+        encodedSummary: encodedSummary.success,
+        holdMillis,
+        key: request.key,
+        authorization,
+        admission
+      })
+    }
+
+    /**
      * Staging proper. `origin` says which emission this is: a caller's key, or
      * the answer to a committed emission, which only `compensate` may name.
      */
@@ -593,57 +659,38 @@ export const defineOutbox = <const Kinds extends IntentKinds>(
       request: StageRequest<Kinds>,
       compensates: EmissionId | undefined
     ) {
-      if (!validHold(request.holdMillis)) {
-        return yield* new InvalidHoldDuration({ holdMillis: request.holdMillis })
-      }
-      const tag: Tag = request.intent.kind
-      const registered = kindFor(tag)
-      if (Option.isNone(registered)) {
-        return yield* new InvalidIntent({ kind: tag, field: "kind", reason: "is not a registered intent kind" })
-      }
-      const kind = registered.value
-      const summary = kind.summarize(request.intent.dispatch)
-      if (Result.isFailure(summary)) return yield* summary.failure
-      const target = kind.target(summary.success)
-      if (request.authorization !== undefined && request.authorization.target !== target) {
-        return yield* new InvalidDispatchAuthorization({
-          field: "authorization.target",
-          reason: "must equal the staged intent's canonical target"
-        })
-      }
-      const invalid = (field: string) => (error: Schema.SchemaError) =>
-        new InvalidIntent({ kind: tag, field, reason: error.message })
-      const canonical = canonicalJson(
-        yield* Schema.encodeEffect(kind.dispatch)(request.intent.dispatch).pipe(
-          Effect.mapError(invalid("dispatch"))
-        )
-      )
-      const encodedSummary = yield* Schema.encodeEffect(kind.summary)(summary.success).pipe(
-        Effect.mapError(invalid("summary"))
-      )
+      // Everything staging uses is taken from the caller's request here, in one
+      // synchronous step, before the first suspension. The dispatch is encoded
+      // once; its summary, its target and its digest all derive from that one
+      // encoded form, so nothing the caller does to its object afterwards (or a
+      // property that answers differently on a second read) can make the
+      // stored request and its description disagree.
+      const owned = own(request)
+      if (Result.isFailure(owned)) return yield* owned.failure
+      const { tag, canonical, encodedSummary, holdMillis, key, authorization, admission } = owned.success
       const dispatchDigest = yield* sha256Text(canonical).pipe(withCrypto)
       const requestDigest = yield* requestDigestOf(
         tag,
         dispatchDigest,
-        request.holdMillis,
-        request.authorization,
+        holdMillis,
+        authorization,
         compensates
       ).pipe(withCrypto)
       const id = yield* (
-        compensates === undefined ? emissionIdFor(request.key) : compensationIdFor(compensates)
+        compensates === undefined ? emissionIdFor(key) : compensationIdFor(compensates)
       ).pipe(withCrypto)
       const stagedAt = yield* DateTime.now
       const record = new StagedEmission({
         id,
-        key: request.key,
+        key,
         kind: tag,
         dispatchDigest,
         requestDigest,
         summary: encodedSummary,
         stagedAt,
-        holdUntil: DateTime.add(stagedAt, { milliseconds: request.holdMillis }),
-        ...(request.authorization === undefined ? {} : { authorization: request.authorization }),
-        ...(request.admission === undefined ? {} : { admission: request.admission }),
+        holdUntil: DateTime.add(stagedAt, { milliseconds: holdMillis }),
+        ...(authorization === undefined ? {} : { authorization }),
+        ...(admission === undefined ? {} : { admission }),
         ...(compensates === undefined ? {} : { compensates }),
         ledgered: []
       })
@@ -659,7 +706,7 @@ export const defineOutbox = <const Kinds extends IntentKinds>(
                 new SealedDispatch({ digest: dispatchDigest, canonical })
               )
               if (put.record.requestDigest !== requestDigest) {
-                return yield* new IdempotencyConflict({ id, key: request.key })
+                return yield* new IdempotencyConflict({ id, key })
               }
               return yield* view(yield* settleReceipts(put.record))
             })
