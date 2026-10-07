@@ -5,6 +5,24 @@
  */
 export * as Actions from "./actions/index.ts"
 export * as Admission from "./admission/index.ts"
+export {
+  type Airlock,
+  AirlockFailure,
+  type ByName,
+  defineAirlock,
+  type EmissionView,
+  type GuestSurface,
+  type StagedReceipt,
+  type Supervisor
+} from "./airlock/Airlock.ts"
+export { guestDeclaration, guestDescription } from "./airlock/Declaration.ts"
+export {
+  handlersFor,
+  type ImplementContext,
+  type Implementations,
+  Refused,
+  refused
+} from "./airlock/Implement.ts"
 export * as Canonical from "./Canonical.ts"
 export {
   defineToolContract,

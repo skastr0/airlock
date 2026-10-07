@@ -121,6 +121,24 @@ export const fittingToolGrants = (
     )
   )
 
+/**
+ * Why no grant fitted a call, in terms a person can act on: for each grant on
+ * this tool, the first public field whose condition the call did not meet.
+ * Empty when no grant names the tool at all.
+ */
+export const unmetToolGrants = (
+  grants: ReadonlyArray<ToolGrantPolicy>,
+  call: ToolSummary
+): ReadonlyArray<{ readonly grantId: string; readonly field: string }> =>
+  grants
+    .filter((grant) => grant.tool === call.tool)
+    .flatMap((grant) => {
+      const unmet = Object.entries(grant.where).find(([field, match]) =>
+        !matches(match, Object.hasOwn(call.public, field) ? call.public[field] : undefined)
+      )
+      return unmet === undefined ? [] : [{ grantId: grant.id, field: unmet[0] }]
+    })
+
 const awaitSupervisor = (reason: string): DispatchDecision => ({ _tag: "AwaitSupervisor", reason })
 
 /**

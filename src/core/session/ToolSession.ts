@@ -3,6 +3,7 @@ import {
   fittingToolGrants,
   toolDispatchDecision,
   type ToolGrantPolicy,
+  unmetToolGrants,
   validateToolGrants
 } from "../admission/ToolGrant.ts"
 import { canonicalJson, type DigestUnavailable, sha256Text } from "../Canonical.ts"
@@ -65,7 +66,11 @@ export class InvalidToolInput extends Schema.TaggedError<InvalidToolInput>()(
 /** The tool is granted, but not for these public argument values. Nothing was recorded. */
 export class ToolCallNotGranted extends Schema.TaggedError<ToolCallNotGranted>()(
   "ToolCallNotGranted",
-  { tool: Schema.String }
+  {
+    tool: Schema.String,
+    /** For each grant on this tool, the public field whose condition was not met. */
+    unmet: Schema.Array(Schema.Struct({ grantId: Schema.String, field: Schema.String }))
+  }
 ) {}
 
 /** The session has used what it was given. Nothing was recorded for this call. */
@@ -179,7 +184,10 @@ export const openToolSession = <Contracts extends ToolContracts, Granted extends
 
         const fitting = fittingToolGrants(grants, summary)
         if (fitting.length === 0) {
-          return yield* new ToolCallNotGranted({ tool: contract.tag })
+          return yield* new ToolCallNotGranted({
+            tool: contract.tag,
+            unmet: unmetToolGrants(grants, summary)
+          })
         }
         const grantIds = fitting.map((grant) => grant.id)
 
