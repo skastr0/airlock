@@ -7,7 +7,11 @@ import * as workers from "cloudflare:workers"
 
 /** The part of a Durable Object's state these adapters use. */
 export interface ObjectState {
-  readonly storage: import("./Storage.ts").DurableStorage
+  readonly storage: import("./Storage.ts").DurableStorage & {
+    /** Asks the platform to call the object's `alarm()` at this time, even after a restart. */
+    setAlarm(scheduledTime: number): Promise<void>
+    deleteAlarm(): Promise<void>
+  }
 }
 
 interface WorkersModule {

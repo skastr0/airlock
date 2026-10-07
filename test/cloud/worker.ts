@@ -55,6 +55,7 @@ interface Namespace {
 interface Env {
   readonly CONFORMANCE: Namespace
   readonly AIRLOCK: Namespace
+  readonly ALARMED: Namespace
   readonly LOADER: WorkerLoader
   readonly MAIL_TOKEN: string
 }
@@ -223,6 +224,8 @@ const userAirlock = defineAirlock({
     },
     "mail.send": ({ to }, { env, idempotencyKey }: { env: Env; idempotencyKey: string }) => {
       if (env.MAIL_TOKEN === "") return refused("mail connection is not configured")
+      // A provider that never answers, so a test can kill the object mid-dispatch.
+      if (to === "hang@example.com") return new Promise<never>(() => {})
       remote.push({ tool: "mail.send", detail: `${to} with ${env.MAIL_TOKEN} as ${idempotencyKey}` })
       return { messageId: `sent-${remote.length}` }
     },
@@ -246,6 +249,26 @@ const userAirlock = defineAirlock({
 })
 
 export const ExampleAirlock = airlockDurableObject(userAirlock, { loader: (env: Env) => env.LOADER })
+
+/**
+ * The same Airlock with a short recovery alarm, plus a way to look at the
+ * stored states without opening the Airlock: opening it is itself recovery,
+ * so a test of the alarm must not do that.
+ */
+export class AlarmedAirlock extends airlockDurableObject(userAirlock, {
+  loader: (env: Env) => env.LOADER,
+  recoveryAlarmMillis: 1_500
+}) {
+  readonly #storage: DurableStorage
+  constructor(state: { readonly storage: DurableStorage }, env: Env) {
+    super(state as never, env)
+    this.#storage = state.storage
+  }
+  async fetch(): Promise<Response> {
+    const rows = this.#storage.sql.exec("SELECT state FROM airlock_emission ORDER BY state").toArray()
+    return json(rows.map((row) => row["state"]))
+  }
+}
 
 /** The trusted side of the example, driven over HTTP by the test. */
 const trusted = async (request: Request, env: Env): Promise<Response> => {
@@ -276,6 +299,12 @@ export default {
   fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url)
     if (url.pathname.startsWith("/airlock/")) return trusted(request, env)
+    if (url.pathname.startsWith("/alarmed/")) {
+      if (url.pathname === "/alarmed/states") return env.ALARMED.get(env.ALARMED.idFromName("alarmed")).fetch(request)
+      const rewritten = new URL(request.url)
+      rewritten.pathname = rewritten.pathname.replace("/alarmed/", "/airlock/")
+      return trusted(new Request(rewritten.toString(), request), { ...env, AIRLOCK: env.ALARMED })
+    }
     const name = url.searchParams.get("object") ?? "default"
     return env.CONFORMANCE.get(env.CONFORMANCE.idFromName(name)).fetch(request)
   }

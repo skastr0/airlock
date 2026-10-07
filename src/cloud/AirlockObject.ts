@@ -48,7 +48,15 @@ export interface AirlockObjectOptions<Env> {
   readonly runner?: WorkerLoaderRunnerOptions
   /** Limits for every guest run of this object. */
   readonly limits?: Partial<GuestLimits>
+  /**
+   * How long after an operation starts the object asks to be woken if that
+   * operation never finished. Longer than any dispatch may take.
+   */
+  readonly recoveryAlarmMillis?: number
 }
+
+/** Past the kernel's 30 second dispatch timeout, with room to spare. */
+const RECOVERY_ALARM_MILLIS = 60_000
 
 /**
  * The Durable Object class for an Airlock definition. Export what this
@@ -75,12 +83,16 @@ export const airlockDurableObject = <Contracts extends ToolContracts, Env>(
 
   return class AirlockObject extends DurableObject implements AirlockObjectApi {
     readonly #env: Env
+    readonly #state: ObjectState
+    /** Operations that may dispatch and have not finished. */
+    #working = 0
     /** Built on first use; building it runs the kernel's startup recovery. */
     readonly #runtime: ManagedRuntime.ManagedRuntime<Services, unknown>
 
     constructor(state: ObjectState, env: Env) {
       super(state, env as never)
       this.#env = env
+      this.#state = state
       this.#runtime = ManagedRuntime.make(services(state, env))
     }
 
@@ -99,12 +111,41 @@ export const airlockDurableObject = <Contracts extends ToolContracts, Env>(
       }))
     }
 
+    /**
+     * Runs an operation that may dispatch under a recovery alarm. If the
+     * object dies while a dispatch is in flight, nobody may call it again for
+     * a long time; the alarm wakes it so the interrupted emission is settled
+     * as uncertain and its receipts are written. Finishing normally removes
+     * the alarm.
+     */
+    async #guarded<Value>(operation: () => Promise<Reply<Value>>): Promise<Reply<Value>> {
+      this.#working += 1
+      try {
+        await this.#state.storage.setAlarm(Date.now() + (options.recoveryAlarmMillis ?? RECOVERY_ALARM_MILLIS))
+        return await operation()
+      } catch {
+        return { ok: false, code: "unavailable", message: "this Airlock is unavailable" }
+      } finally {
+        this.#working -= 1
+        if (this.#working === 0) await this.#state.storage.deleteAlarm().catch(() => undefined)
+      }
+    }
+
+    /**
+     * The platform's wake-up. Opening the Airlock is what recovers it: the
+     * kernel settles interrupted emissions and owed receipts on startup. An
+     * alarm never commits anything: a staged write waits for a supervisor.
+     */
+    async alarm(): Promise<void> {
+      await this.#runtime.runPromise(Effect.void).catch(() => undefined)
+    }
+
     run(request: { readonly runId: string; readonly source: string }): Promise<Reply<GuestOutcome>> {
       // Copied out of the RPC argument before anything is awaited.
       const runId = String(request.runId)
       const source = String(request.source)
       const env = this.#env
-      return this.#reply(Effect.gen(function* () {
+      return this.#guarded(() => this.#reply(Effect.gen(function* () {
         const surface = yield* airlock.guest({ runId, env })
         const runner = yield* GuestRunner
         return yield* runner.run({
@@ -112,7 +153,7 @@ export const airlockDurableObject = <Contracts extends ToolContracts, Env>(
           surface,
           ...(options.limits === undefined ? {} : { limits: options.limits })
         })
-      }))
+      })))
     }
 
     describe(): Promise<Reply<GuestDescription>> {
@@ -135,7 +176,8 @@ export const airlockDurableObject = <Contracts extends ToolContracts, Env>(
     }
 
     commit(id: string): Promise<Reply<EmissionView>> {
-      return this.#reply(Effect.flatMap(airlock.supervisor, (supervisor) => supervisor.commit(String(id))))
+      return this.#guarded(() =>
+        this.#reply(Effect.flatMap(airlock.supervisor, (supervisor) => supervisor.commit(String(id)))))
     }
 
     cancel(id: string): Promise<Reply<EmissionView>> {

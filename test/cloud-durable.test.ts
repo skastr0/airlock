@@ -39,7 +39,8 @@ const start = (storage = persist) => {
     compatibilityDate: "2026-07-08",
     durableObjects: {
       CONFORMANCE: { className: "ConformanceObject", useSQLite: true },
-      AIRLOCK: { className: "ExampleAirlock", useSQLite: true }
+      AIRLOCK: { className: "ExampleAirlock", useSQLite: true },
+      ALARMED: { className: "AlarmedAirlock", useSQLite: true }
     },
     // The Worker Loader binding the guest runner uses. No nodejs_compat anywhere.
     workerLoaders: { LOADER: {} },
@@ -202,4 +203,37 @@ describe("cloud: a user's Airlock as a Durable Object", () => {
     expect(await run(`await tools.mail.list({ mailbox: "inbox", query: "x".repeat(20000) }); return 1;`))
       .toMatchObject({ ok: false, reason: "tool_input_limit" })
   })
+})
+
+describe("cloud: the recovery alarm", () => {
+  it("settles a dispatch the object died in, with nobody calling it", async () => {
+    const storage = await mkdtemp(join(tmpdir(), "airlock-cloud-alarm-"))
+    const first = start(storage)
+    const run = await call<{ result: { id: string } }>(first, "/alarmed/run?object=alarmed", {
+      runId: "run-1",
+      source: `const sent = await tools.mail.send({ to: "hang@example.com", subject: "s", body: "b" }); return { id: sent.id };`
+    })
+    // The provider never answers: the commit is in flight when the process dies.
+    void call(first, "/alarmed/commit?object=alarmed", { id: run.result.id }).catch(() => undefined)
+    const states = (instance: Miniflare) => call<ReadonlyArray<string>>(instance, "/alarmed/states")
+    await expect.poll(() => states(first), { timeout: 5_000 }).toEqual(["committing"])
+    await stop(first)
+
+    const second = start(storage)
+    // Only raw storage is read here; the Airlock is opened by its alarm alone.
+    await expect.poll(() => states(second), { timeout: 15_000, interval: 250 }).toEqual(["uncertain"])
+    const view = await call<{ state: string }>(second, "/alarmed/inspect?object=alarmed", { id: run.result.id })
+    expect(view.state).toBe("uncertain")
+    await rm(storage, { recursive: true, force: true })
+  }, 40_000)
+
+  it("commits nothing on a timer: a staged write is still staged after the alarm time", async () => {
+    const run = await call<{ result: { id: string } }>(workerd, "/alarmed/run?object=alarmed", {
+      runId: "run-quiet",
+      source: `const sent = await tools.mail.send({ to: "ada@example.com", subject: "s", body: "b" }); return { id: sent.id };`
+    })
+    await new Promise((resolve) => setTimeout(resolve, 2_500))
+    const view = await call<{ state: string }>(workerd, "/alarmed/inspect?object=alarmed", { id: run.result.id })
+    expect(view.state).toBe("staged")
+  }, 20_000)
 })
