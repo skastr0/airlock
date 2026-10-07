@@ -18,3 +18,17 @@ export {
 } from "./AirlockObject.ts"
 export type { ObjectState, WorkerLoader, WorkerLoaderCode } from "./Platform.ts"
 export { workerLoaderRunner, type WorkerLoaderRunnerOptions } from "./WorkerLoaderRunner.ts"
+
+// Everything a user writes against, from one entry point. Contracts are
+// declared with `Schema`, which is re-exported so a user needs no other import.
+export { Schema } from "effect"
+export {
+  defineAirlock,
+  defineToolContract,
+  type ImplementContext,
+  Refused,
+  refused,
+  ToolPolicy,
+  toolPolicy
+} from "../core/index.ts"
+export { FieldMatch, toolGrant, ToolGrantPolicy } from "../core/admission/ToolGrant.ts"
