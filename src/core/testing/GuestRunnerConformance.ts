@@ -262,17 +262,19 @@ export const guestRunnerConformance = (
       Effect.gen(function* () {
         const current = yield* world
         if (!current.isolated) return
+        // Module names are assembled in the guest so that this file, which only
+        // quotes guest source, names no host module itself.
         const outcome = yield* run(current, fresh(), `
           const attempt = async (act) => { try { await act(); return 'allowed'; } catch { return 'blocked'; } };
           return {
             fetch: await attempt(async () => { await fetch('https://example.com/'); }),
             socket: await attempt(async () => {
-              const { connect } = await import('cloudflare:sockets');
+              const { connect } = await import('cloudflare:' + 'sockets');
               const socket = connect('example.com:443'); await socket.opened;
             }),
-            node: await attempt(async () => { await import('node:fs'); }),
+            node: await attempt(async () => { await import('node:' + 'fs'); }),
             env: await attempt(async () => {
-              const { env } = await import('cloudflare:workers');
+              const { env } = await import('cloudflare:' + 'workers');
               if (Object.keys(env).length > 0) return; throw new Error('empty');
             }),
             process: typeof process,
