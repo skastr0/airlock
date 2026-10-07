@@ -5,6 +5,8 @@ import {
   ledgerConformance,
   makeMemoryLedgerState,
   makeMemoryOutboxState,
+  guestRunnerConformance,
+  memoryGuestRunner,
   memoryLedger,
   memoryOutboxFaults,
   memoryOutboxStore,
@@ -41,4 +43,16 @@ outboxConformance(
       ...memoryOutboxFaults(state)
     }
   })
+)
+
+guestRunnerConformance(
+  runner,
+  "in-process reference (not a sandbox)",
+  Effect.sync(() => ({
+    store: memoryOutboxStore(makeMemoryOutboxState()),
+    ledger: memoryLedger(makeMemoryLedgerState()),
+    crypto: WebCrypto.layer,
+    runner: memoryGuestRunner,
+    isolated: false
+  }))
 )

@@ -94,6 +94,22 @@ export {
 } from "./outbox/Outbox.ts"
 export { OutboxStore } from "./outbox/OutboxStore.ts"
 export {
+  type GuestBridge,
+  guestLimits,
+  invalidSource,
+  makeGuestBridge,
+  settleGuest
+} from "./runner/GuestHost.ts"
+export {
+  defaultGuestLimits,
+  GuestFailureReason,
+  GuestLimits,
+  GuestOutcome,
+  type GuestRun,
+  GuestRunner
+} from "./runner/GuestRunner.ts"
+export { guestRuntimeSource } from "./runner/GuestRuntime.ts"
+export {
   type CallResult,
   InvalidToolInput,
   InvalidToolSession,

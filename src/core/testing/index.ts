@@ -15,3 +15,5 @@ export {
 export { outboxConformance, type OutboxWorld } from "./OutboxConformance.ts"
 export { outboxStoreConformance, type OutboxStoreWorld } from "./OutboxStoreConformance.ts"
 export { expectedTranscript, runWorkedExample, type WorkedExampleAdapters } from "./WorkedExample.ts"
+export { guestRunnerConformance, type GuestRunnerWorld } from "./GuestRunnerConformance.ts"
+export { memoryGuestRunner } from "./MemoryGuestRunner.ts"
