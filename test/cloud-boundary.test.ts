@@ -4,7 +4,7 @@ import { describe, expect, it } from "vitest"
 
 /**
  * The cloud adapters' boundary, enforced by construction. `src/cloud` may
- * depend on `effect`, on the kernel, and on itself. It names no host: no Node
+ * depend on `effect`, on the kernel, on itself, and on `cloudflare:workers`. It names no host: no Node
  * or Bun module, no platform package, no host global, and nothing under
  * `src/host` or anywhere else in the repository.
  */
@@ -44,9 +44,11 @@ describe("cloud adapter boundary", () => {
             ? []
             : [{ file, specifier, reason: "leaves src/cloud and src/core" }]
         }
-        return specifier === "effect" || specifier.startsWith("effect/")
+        // `cloudflare:workers` is the one module the Workers runtime itself
+        // provides: the bases for RPC objects and Durable Objects.
+        return specifier === "effect" || specifier.startsWith("effect/") || specifier === "cloudflare:workers"
           ? []
-          : [{ file, specifier, reason: "not effect" }]
+          : [{ file, specifier, reason: "not effect or the Workers runtime module" }]
       })
     )
     expect(violations).toEqual([])

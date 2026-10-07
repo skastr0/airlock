@@ -24,6 +24,8 @@ const bundle = (entry: string) =>
     mainFields: ["module", "main"],
     conditions: ["worker", "browser", "import"],
     target: "es2022",
+    // The one module the Workers runtime provides.
+    external: ["cloudflare:workers"],
     logLevel: "silent"
   }).catch((failure: {
     readonly errors?: ReadonlyArray<{ readonly text: string; readonly location?: { readonly file: string } | null }>

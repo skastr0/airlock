@@ -7,17 +7,35 @@
  * only through `ctx.storage`.
  */
 import { Effect, Layer, type Scope } from "effect"
-import { durableLedger, durableOutboxStore, type DurableStorage } from "../../src/cloud/index.ts"
 import {
+  airlockClient,
+  airlockDurableObject,
+  AirlockError,
+  durableLedger,
+  durableOutboxStore,
+  type DurableStorage,
+  type WorkerLoader,
+  workerLoaderRunner
+} from "../../src/cloud/index.ts"
+import {
+  Admission,
+  defineAirlock,
   defineOutbox,
   DispatchProvenance,
   type EmissionId,
   IdempotencyKey,
+  refused,
+  toolPolicy,
   WebCrypto
 } from "../../src/core/index.ts"
 import {
   exampleContracts,
+  guestRunnerConformance,
+  LabelAdd,
+  LabelRemove,
   ledgerConformance,
+  MailList,
+  MailSend,
   outboxConformance,
   outboxStoreConformance,
   type Runner,
@@ -36,6 +54,9 @@ interface Namespace {
 }
 interface Env {
   readonly CONFORMANCE: Namespace
+  readonly AIRLOCK: Namespace
+  readonly LOADER: WorkerLoader
+  readonly MAIL_TOKEN: string
 }
 
 type Test = { readonly name: string; readonly body: () => Effect.Effect<void, unknown, Scope.Scope> }
@@ -79,7 +100,7 @@ const worlds = (storage: DurableStorage) => {
 }
 
 /** Collects the suites' tests instead of running them, so each can be run by name. */
-const collect = (storage: DurableStorage): ReadonlyArray<Test> => {
+const collect = (storage: DurableStorage, loader: WorkerLoader): ReadonlyArray<Test> => {
   const tests: Array<Test> = []
   const path: Array<string> = []
   const runner: Runner = {
@@ -94,6 +115,17 @@ const collect = (storage: DurableStorage): ReadonlyArray<Test> => {
   outboxStoreConformance(runner, "Durable Object SQLite", world.store)
   ledgerConformance(runner, "Durable Object SQLite", world.ledger)
   outboxConformance(runner, "Durable Object SQLite", world.outbox)
+  guestRunnerConformance(
+    runner,
+    "Worker Loader isolate",
+    Effect.map(world.outbox, (adapters) => ({
+      store: adapters.store,
+      ledger: adapters.ledger,
+      crypto: adapters.crypto,
+      runner: workerLoaderRunner(loader),
+      isolated: true
+    }))
+  )
   return tests
 }
 
@@ -146,15 +178,15 @@ const recordedRead = (storage: DurableStorage) =>
   )
 
 export class ConformanceObject {
-  constructor(private readonly state: ObjectState) {}
+  constructor(private readonly state: ObjectState, private readonly env: Env) {}
 
   async fetch(request: Request): Promise<Response> {
     const url = new URL(request.url)
     const storage = this.state.storage
     try {
-      if (url.pathname === "/tests") return json(collect(storage).map((test) => test.name))
+      if (url.pathname === "/tests") return json(collect(storage, this.env.LOADER).map((test) => test.name))
       if (url.pathname === "/run") {
-        const test = collect(storage)[Number(url.searchParams.get("index"))]
+        const test = collect(storage, this.env.LOADER)[Number(url.searchParams.get("index"))]
         if (test === undefined) return json({ ok: false, error: "no such test" }, 404)
         return await Effect.runPromise(Effect.scoped(test.body())).then(
           () => json({ ok: true, name: test.name }),
@@ -177,9 +209,74 @@ export class ConformanceObject {
   }
 }
 
+// ── a user's Airlock, as they would write it ───────────────────────────────
+
+/** What the remote side saw, kept in module memory so a restart is observable. */
+const remote: Array<{ readonly tool: string; readonly detail: string }> = []
+
+const userAirlock = defineAirlock({
+  contracts: [MailList, MailSend, LabelAdd, LabelRemove],
+  implement: {
+    "mail.list": ({ mailbox }) => {
+      remote.push({ tool: "mail.list", detail: mailbox })
+      return { ids: [`${mailbox}-1`, `${mailbox}-2`] }
+    },
+    "mail.send": ({ to }, { env, idempotencyKey }: { env: Env; idempotencyKey: string }) => {
+      if (env.MAIL_TOKEN === "") return refused("mail connection is not configured")
+      remote.push({ tool: "mail.send", detail: `${to} with ${env.MAIL_TOKEN} as ${idempotencyKey}` })
+      return { messageId: `sent-${remote.length}` }
+    },
+    "label.add": ({ label }) => {
+      remote.push({ tool: "label.add", detail: label })
+      return { added: true }
+    },
+    "label.remove": ({ label }) => {
+      remote.push({ tool: "label.remove", detail: label })
+      return { removed: true }
+    }
+  },
+  policy: toolPolicy({
+    budget: { maxCalls: 8, maxInputBytes: 4_096 },
+    toolGrants: [
+      Admission.toolGrant(MailList, { id: "read-inbox", class: "read", commit: "auto" }),
+      Admission.toolGrant(MailSend, { id: "support-replies", where: { to: { endsWith: "@example.com" } } }),
+      Admission.toolGrant(LabelAdd, { id: "labels", class: "mutate" })
+    ]
+  })
+})
+
+export const ExampleAirlock = airlockDurableObject(userAirlock, { loader: (env: Env) => env.LOADER })
+
+/** The trusted side of the example, driven over HTTP by the test. */
+const trusted = async (request: Request, env: Env): Promise<Response> => {
+  const url = new URL(request.url)
+  const airlock = airlockClient(env.AIRLOCK, url.searchParams.get("object") ?? "default")
+  const body = request.method === "POST" ? await request.json().catch(() => ({})) as Record<string, unknown> : {}
+  try {
+    switch (url.pathname) {
+      case "/airlock/run":
+        return json(await airlock.run({ runId: String(body["runId"]), source: String(body["source"]) }))
+      case "/airlock/describe": return json(await airlock.describe())
+      case "/airlock/pending": return json(await airlock.pending())
+      case "/airlock/inspect": return json(await airlock.inspect(String(body["id"])))
+      case "/airlock/commit": return json(await airlock.commit(String(body["id"])))
+      case "/airlock/cancel": return json(await airlock.cancel(String(body["id"])))
+      case "/airlock/compensate": return json(await airlock.compensate(String(body["id"])))
+      case "/airlock/remote": return json(remote)
+      default: return json({ error: "unknown route" }, 404)
+    }
+  } catch (error) {
+    return error instanceof AirlockError
+      ? json({ failed: true, code: error.code, message: error.message })
+      : json({ failed: true, code: "crashed", message: String(error) }, 500)
+  }
+}
+
 export default {
   fetch(request: Request, env: Env): Promise<Response> {
-    const name = new URL(request.url).searchParams.get("object") ?? "default"
+    const url = new URL(request.url)
+    if (url.pathname.startsWith("/airlock/")) return trusted(request, env)
+    const name = url.searchParams.get("object") ?? "default"
     return env.CONFORMANCE.get(env.CONFORMANCE.idFromName(name)).fetch(request)
   }
 }
