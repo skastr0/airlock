@@ -22,7 +22,9 @@ export const memoryGuestRunner: Layer.Layer<GuestRunner> = Layer.succeed(
   GuestRunner,
   GuestRunner.of({
     run: ({ source, surface, limits: overrides, signal }) =>
-      Effect.promise(async () => {
+      // Interrupting the fiber aborts the run exactly as the caller's own
+        // signal does: the tools are revoked and the host stops waiting.
+        Effect.promise(async (interrupted) => {
         const limits = guestLimits(overrides)
         const bridge = makeGuestBridge(surface, limits)
         if (invalidSource(source, limits)) return { ok: false, reason: "invalid_code", toolCalls: 0 } as const
@@ -31,7 +33,7 @@ export const memoryGuestRunner: Layer.Layer<GuestRunner> = Layer.succeed(
         return settleGuest({
           bridge,
           limits,
-          ...(signal === undefined ? {} : { signal }),
+          signal: signal === undefined ? interrupted : AbortSignal.any([interrupted, signal]),
           start: async () => {
             const runtime = new Function(`return ${guestRuntimeSource(bridge.tools, limits, false)}`)() as Runtime
             return runtime(methods, async () => new AsyncFunction("tools", source))

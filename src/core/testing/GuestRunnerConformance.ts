@@ -1,4 +1,4 @@
-import { type Crypto, Effect, Layer, type Scope } from "effect"
+import { type Crypto, Effect, Fiber, Layer, type Scope } from "effect"
 import { toolGrant } from "../admission/ToolGrant.ts"
 import { defineAirlock } from "../airlock/Airlock.ts"
 import type { Ledger } from "../ledger/Ledger.ts"
@@ -256,6 +256,19 @@ export const guestRunnerConformance = (
         same(outcome, { ok: false, reason: "timeout", toolCalls: 0 })
         holds(Date.now() - started < 4_000, "the host did not wait for the guest")
         same(env.dispatched, [], "a guest past its deadline can call nothing")
+      }), 20_000)
+
+    test("revokes the tools when the run is interrupted", () =>
+      Effect.gen(function* () {
+        const current = yield* world
+        const env = fresh()
+        const running = yield* Effect.forkChild(run(current, env, `
+          await new Promise((resolve) => setTimeout(resolve, 400));
+          return ${list};`))
+        yield* Effect.promise(() => new Promise((resolve) => setTimeout(resolve, 100)))
+        yield* Fiber.interrupt(running)
+        yield* Effect.promise(() => new Promise((resolve) => setTimeout(resolve, 800)))
+        same(env.dispatched, [], "an interrupted run can call nothing afterwards")
       }), 20_000)
 
     test("gives an isolated guest no network, no bindings and no host", () =>
