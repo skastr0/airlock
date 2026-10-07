@@ -139,12 +139,14 @@ export const openToolSession = <Contracts extends ToolContracts, Granted extends
 > =>
   Effect.gen(function* () {
     const contracts = outbox.kinds
+    const runId = options.runId
+    const holdMillis = options.holdMillis ?? 0
     // The policy is decoded again here, so the session holds its own validated
-    // copy: it keeps no way to reach the caller's object, and no method takes a
-    // grant.
-    const policy = yield* Schema.decodeUnknownEffect(ToolPolicy)(
-      Schema.encodeSync(ToolPolicy)(options.policy)
-    ).pipe(
+    // copy. The JSON round trip also detaches nested FieldMatch JSON values;
+    // a schema encode/decode alone can retain the caller's objects.
+    const policyCodec = Schema.fromJsonString(ToolPolicy)
+    const policy = yield* Schema.encodeEffect(policyCodec)(options.policy).pipe(
+      Effect.flatMap(Schema.decodeUnknownEffect(policyCodec)),
       Effect.mapError((error) => new InvalidToolSession({ field: "policy", reason: error.message }))
     )
     const grants: ReadonlyArray<ToolGrantPolicy> = Object.freeze([...policy.toolGrants])
@@ -155,7 +157,6 @@ export const openToolSession = <Contracts extends ToolContracts, Granted extends
 
     const service = yield* outbox.Outbox
     const crypto = yield* Effect.context<Crypto.Crypto>()
-    const holdMillis = options.holdMillis ?? 0
     let calls = 0
     let inputBytes = 0
 
@@ -169,7 +170,14 @@ export const openToolSession = <Contracts extends ToolContracts, Granted extends
         }
         calls += 1
 
-        const input = yield* Schema.decodeUnknownEffect(contract.input)(wire).pipe(
+        // Own the wire data before decoding or any asynchronous admission
+        // work. Schema.Json may otherwise retain caller-owned nested values
+        // that can change between grant matching and staging.
+        const snapshot = yield* Effect.try({
+          try: () => canonicalJson(wire),
+          catch: () => new InvalidToolInput({ tool: contract.tag, reason: "must be JSON matching the tool's input schema" })
+        })
+        const input = yield* Schema.decodeUnknownEffect(Schema.fromJsonString(contract.input))(snapshot).pipe(
           Effect.mapError((error) => new InvalidToolInput({ tool: contract.tag, reason: error.message }))
         )
         const summarized = contract.summarize(input)
@@ -199,7 +207,7 @@ export const openToolSession = <Contracts extends ToolContracts, Granted extends
         )
         const digest = yield* sha256Text(canonicalJson(encoded)).pipe(Effect.provide(crypto))
         const key = IdempotencyKey.make(
-          `session:${encoder.encode(options.runId).byteLength}:${options.runId}:${index}:${contract.tag}:${digest}`
+          `session:${encoder.encode(runId).byteLength}:${runId}:${index}:${contract.tag}:${digest}`
         )
         const request = {
           key,
