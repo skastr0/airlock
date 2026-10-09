@@ -49,3 +49,34 @@ unsupported schema/arithmetic forms, rather than guessing a type or label.
 An approval never implies declassification or endorsement; the private-mail
 policy is a separately supplied supervisor flow policy permitting private
 data at that sink, with untrusted integrity, not an automatic label lowering.
+
+## Deliberate author rules
+
+The additional tests use the contract-owned `releaseRule` and
+`composeFlowRules` declarations. `Plan.rules` contains the author rules;
+every argument's `flows` lists exact source identity, data/control mode,
+original and effective labels, and applied rule IDs. Original value labels
+are preserved. Refusal explanations name the exact origin, sink policy and
+smallest proposed conditional release or endorsement. Suggestions never
+install rules or give a program authority.
+
+`rules: [bodyRelease]` releases only `mail.read.result.body` as data into
+`mail.send.body`, conditioned on a `companyRecipient` proof on this call's
+exact `to` argument. The forward program still refuses recipient and control
+flows, including control into its fixed subject. `rules: companyForward` is
+the explicit reusable author choice that accepts the example: the set names
+two data releases and six control releases (receipt state and decoded
+recipient into each send field), all conditioned on the same exact recipient
+proof. The control grants deliberately reveal whether the send happens.
+Neither set opens HTTP URLs or mailbox-body-dependent branch choices.
+
+At runtime a scoped release additionally requires kernel-owned exact origin
+tags on data/control, verifies each component against its original source
+envelope, and checks the sibling proof again. Wrong-field substitutions,
+unidentified private provenance and copied proofs stop the guard. The
+accepted forward still has dynamic content and stays staged for later exact
+batch approval. This is a test-only demonstration of author rules, not a
+persisted supervisor authorization or a production tracking interpreter.
+The simple origin resolver intentionally refuses nested/list paths; those
+need the language seat's typed origin tree. Transitive call-argument/control
+origins must also be supplied by that checker/interpreter bridge.

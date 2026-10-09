@@ -2,9 +2,11 @@ import { Effect, Result, Schema } from "effect"
 import { canonicalJson, sha256Canonical, type Sha256Digest } from "../../src/core/Canonical.ts"
 import { fittingToolGrants, ToolGrantPolicy, validateToolGrants } from "../../src/core/admission/ToolGrant.ts"
 import { hasRefinement, isTrackedValue, type TrackedValue } from "../../src/core/contract/Decoder.ts"
+import { FlowRule, validateFlowRules } from "../../src/core/contract/FlowRules.ts"
 import { combine, checkSink, InformationLabel, SinkPolicy } from "../../src/core/labels/Labels.ts"
 import { PlanEffect } from "../../src/core/plan/Plan.ts"
 import { decoderIdentity, type Fact, type Review } from "./air-review.ts"
+import { dischargeFlow, FlowObligation, type FlowExplanation, reviewArgumentFlows } from "./air-flow-review.ts"
 
 /** Test-only lowering of language-owned typed facts. No host imports this. */
 export const ArgumentEnvelope = Schema.Struct({
@@ -13,6 +15,8 @@ export const ArgumentEnvelope = Schema.Struct({
   dependencies: Schema.Array(Schema.String),
   control: Schema.Array(Schema.String),
   label: Schema.optionalKey(InformationLabel),
+  effectiveLabel: Schema.optionalKey(InformationLabel),
+  flows: Schema.Array(FlowObligation),
   proofs: Schema.Array(Schema.String)
 })
 export const CallEnvelope = Schema.Struct({
@@ -28,7 +32,8 @@ export const PrototypePlan = Schema.Struct({
   nodes: Schema.Array(CallEnvelope),
   maximumCalls: Schema.Record(Schema.String, Schema.Int),
   iterations: Schema.Int,
-  contextDigest: Schema.String
+  contextDigest: Schema.String,
+  rules: Schema.Array(FlowRule)
 })
 export type PrototypePlan = typeof PrototypePlan.Type
 export interface ReviewSurface {
@@ -40,15 +45,17 @@ export interface ReviewSurface {
   readonly registryDigest: Sha256Digest
   readonly bindings: Schema.Json
   readonly maxPlanBytes: number
+  readonly rules?: readonly FlowRule[]
 }
 export const ReviewRefusal = Schema.Struct({
   nodeId: Schema.String, field: Schema.String,
-  reason: Schema.Literals(["grant", "unknown-label", "confidentiality", "integrity", "missing-sink", "plan-size"])
+  reason: Schema.Literals(["grant", "rules", "unknown-label", "confidentiality", "integrity", "missing-sink", "plan-size"])
 })
 export type ReviewRefusal = typeof ReviewRefusal.Type
 export interface DemonstrationReview {
   readonly plan: PrototypePlan
   readonly refusals: readonly ReviewRefusal[]
+  readonly explanations: readonly FlowExplanation[]
 }
 interface ContextWitness {
   readonly review: Review
@@ -64,7 +71,7 @@ const environmentDescription = (review: Review) => canonicalJson({
   maxIterations: review.environment.maxIterations, maxListItems: review.environment.maxListItems,
   tools: Object.entries(review.environment.tools).map(([name, tool]) => ({ name, tag: tool.contract.tag,
     version: tool.contract.version, effect: tool.contract.effect, publicFields: tool.contract.publicFields,
-    resources: tool.contract.resources, requires: tool.requires })),
+    resources: tool.contract.resources, flow: tool.contract.flow })),
   decoders: Object.entries(review.environment.decoders).map(([name, decoder]) => ({ name, version: decoder.version }))
 })
 const sameEnvironment = (review: Review, witness: ContextWitness) => environmentDescription(review) === witness.environment &&
@@ -74,10 +81,6 @@ const sameEnvironment = (review: Review, witness: ContextWitness) => environment
       contract.summarize === definition.summarize && contract.target === definition.target
   }) && witness.decoders.every((definition) => review.environment.decoders[definition.name] === definition.decoder)
 const literal = new InformationLabel({ confidentiality: "public", integrity: "runtime", provenance: [] })
-const labelOf = (origins: readonly string[], sources: ReviewSurface["sources"]): InformationLabel | undefined => {
-  const labels = origins.map((origin) => Object.hasOwn(sources, origin) ? sources[origin] : undefined)
-  return labels.some((label) => label === undefined) ? undefined : combine(literal, ...labels as InformationLabel[])
-}
 const fieldsOf = (value: Fact) => value.type.kind === "record" ? [...value.type.fields] : []
 const summary = (review: Review, tool: string, publicFields: Record<string, Schema.Json>) => {
   const contract = review.environment.tools[tool]!.contract
@@ -87,18 +90,26 @@ const summary = (review: Review, tool: string, publicFields: Record<string, Sche
 /** The candidate Plan remains inspectable on refusal; refusal grants no authority. */
 export const lowerReviewPrototype = (source: string, review: Review, surface: ReviewSurface) => Effect.gen(function* () {
   const refusals: ReviewRefusal[] = []
-  const invalid = validateToolGrants(surface.grants, Object.fromEntries(Object.entries(review.environment.tools).map(([name, tool]) => [name, tool.contract])))
+  const contracts = Object.fromEntries(Object.entries(review.environment.tools).map(([name, tool]) => [name, tool.contract]))
+  const invalid = validateToolGrants(surface.grants, contracts)
+  const invalidRules = validateFlowRules(surface.rules ?? [], contracts, review.environment.decoders)
+  const explanations: FlowExplanation[] = []
   const nodes: Array<typeof CallEnvelope.Type> = []
   for (const [index, call] of review.calls.entries()) {
     const contract = review.environment.tools[call.tool]!.contract
     const id = `call:${index + 1}`
     const deny = (field: string, reason: ReviewRefusal["reason"]) => { refusals.push({ nodeId: id, field, reason }) }
-    const args = fieldsOf(call.arguments).map(([field, fact]) => {
-      const label = labelOf([...fact.origins, ...call.control], surface.sources)
-      return { field, ...(fact.constant === undefined ? {} : { fixed: fact.constant }),
+    const args: Array<typeof ArgumentEnvelope.Type> = []
+    for (const [field, fact] of fieldsOf(call.arguments)) {
+      const reviewed = yield* reviewArgumentFlows(id, call, field, review, surface.sources, surface.sinks[call.tool]?.[field], invalidRules === undefined ? surface.rules ?? [] : [])
+      explanations.push(...reviewed.explanations)
+      const labels = reviewed.flows.map((flow) => flow.label)
+      const label = labels.some((value) => value === undefined) ? undefined : combine(literal, ...labels as InformationLabel[])
+      args.push({ field, ...(fact.constant === undefined ? {} : { fixed: fact.constant }),
         dependencies: [...fact.origins], control: [...call.control], ...(label === undefined ? {} : { label }),
-        proofs: [...(review.environment.tools[call.tool]!.requires?.[field] === undefined ? [] : [review.environment.tools[call.tool]!.requires![field]!])] }
-    })
+        ...(reviewed.label === undefined ? {} : { effectiveLabel: reviewed.label }), flows: reviewed.flows,
+        proofs: (contract.flow.requires[field] ?? []).map(decoderIdentity) })
+    }
     // A partial grant can still fit unknown fields, but every known constraint
     // must fit the SAME grant; combining pieces of different grants is forbidden.
     const viable = surface.grants.filter((grant) => grant.tool === call.tool && args.every((arg) => {
@@ -107,13 +118,14 @@ export const lowerReviewPrototype = (source: string, review: Review, surface: Re
       return fittingToolGrants([partial], summary(review, call.tool, { [arg.field]: arg.fixed })).length === 1
     }))
     if (invalid !== undefined || viable.length === 0) deny("$", "grant")
+    if (invalidRules !== undefined) deny("$", "rules")
     for (const arg of args) {
-      if (arg.label === undefined) { deny(arg.field, "unknown-label"); continue }
+      if (arg.label === undefined || arg.effectiveLabel === undefined) { deny(arg.field, "unknown-label"); continue }
       // This demo treats every argument as a sink. Contract metadata will name
       // the production sinks; omission here fails closed.
       const sink = surface.sinks[call.tool]?.[arg.field]
       if (sink === undefined) { deny(arg.field, "missing-sink"); continue }
-      const checked = yield* checkSink(arg.label, sink).pipe(Effect.result)
+      const checked = yield* checkSink(arg.effectiveLabel, sink).pipe(Effect.result)
       if (Result.isFailure(checked)) deny(arg.field, checked.failure.reason)
     }
     nodes.push({ id, tool: call.tool, version: contract.version, effect: contract.effect,
@@ -124,15 +136,15 @@ export const lowerReviewPrototype = (source: string, review: Review, surface: Re
     registryDigest: surface.registryDigest, grants: surface.grants, sources: surface.sources, sinks: surface.sinks,
     limits: { maxCalls: review.environment.maxCalls, maxIterations: review.environment.maxIterations,
       maxListItems: review.environment.maxListItems, maxPlanBytes: surface.maxPlanBytes },
-    semantics: "airlock/review-demo/v1" })
+    rules: surface.rules ?? [], semantics: "airlock/review-demo/v1" })
   const body = { schemaVersion: "airlock/review-demo/v1" as const, nodes, maximumCalls: review.maximumCalls,
-    iterations: review.iterations, contextDigest }
+    iterations: review.iterations, contextDigest, rules: [...surface.rules ?? []] }
   const id = yield* sha256Canonical(body)
   const plan = Schema.decodeUnknownSync(PrototypePlan)({ ...body, id })
   if (!Number.isSafeInteger(surface.maxPlanBytes) || surface.maxPlanBytes < 1 || new TextEncoder().encode(canonicalJson(plan)).length > surface.maxPlanBytes) {
     refusals.push({ nodeId: "$", field: "$", reason: "plan-size" })
   }
-  const report = freeze({ plan: freeze(plan), refusals: freeze(refusals) }) satisfies DemonstrationReview
+  const report = freeze({ plan: freeze(plan), refusals: freeze(refusals), explanations: freeze(explanations) }) satisfies DemonstrationReview
   contexts.set(report, { review, surface: canonicalJson(surface), environment: environmentDescription(review), program: canonicalJson(review.program),
     definitions: Object.entries(review.environment.tools).map(([name, { contract }]) => ({ name, contract, input: contract.input, outcome: contract.outcome, summarize: contract.summarize, target: contract.target })),
     decoders: Object.entries(review.environment.decoders).map(([name, decoder]) => ({ name, decoder })) })
@@ -179,9 +191,32 @@ export const prototypeInstances = (report: DemonstrationReview, review: Review, 
       const actual = combine(value.label, control.label)
       if (actual.provenance.some((origin) => !arg.label!.provenance.includes(origin))) return yield* fail("label")
       const envelope = new SinkPolicy({ id: "plan-envelope", confidentialityCeiling: arg.label.confidentiality, minimumIntegrity: arg.label.integrity })
-      for (const policy of [envelope, sink]) {
-        if (Result.isFailure(yield* checkSink(actual, policy).pipe(Effect.result))) return yield* fail("label")
+      if (Result.isFailure(yield* checkSink(actual, envelope).pipe(Effect.result))) return yield* fail("label")
+      let effective = actual
+      if (arg.flows.some((flow) => flow.rules.length > 0)) {
+        const released: InformationLabel[] = []
+        for (const [mode, tracked] of [["data", value], ["control", control]] as const) {
+          const edges = arg.flows.filter((flow) => flow.mode === mode && tracked.label.provenance.includes(flow.origin))
+          if (tracked.label.confidentiality !== "public" && edges.length === 0) return yield* fail("label")
+          const allOrigins = report.plan.nodes.flatMap((node) => node.arguments.flatMap((arg) => arg.flows.map((flow) => flow.origin)))
+          if (tracked.label.provenance.some((origin) => allOrigins.includes(origin) && !edges.some((edge) => edge.origin === origin))) return yield* fail("label")
+          if (edges.length === 0) { released.push(tracked.label); continue }
+          if (edges.some((edge) => edge.label === undefined)) return yield* fail("label")
+          const raw = combine(literal, ...edges.map((edge) => edge.label!))
+          const rawBoundary = new SinkPolicy({ id: "origin-envelope", confidentialityCeiling: raw.confidentiality, minimumIntegrity: raw.integrity })
+          if (Result.isFailure(yield* checkSink(tracked.label, rawBoundary).pipe(Effect.result))) return yield* fail("label")
+          for (const edge of edges) {
+            const applied = dischargeFlow(edge, node.tool, arg.field, report.plan.rules, (rule) => rule.when.every((condition) => {
+              const decoder = review.environment.decoders[condition.decoder.name], sibling = input[condition.field]
+              return decoder !== undefined && decoder.version === condition.decoder.version && sibling !== undefined && hasRefinement(sibling, decoder)
+            }))
+            if (applied.effective === undefined) return yield* fail("label")
+            released.push(applied.effective)
+          }
+        }
+        effective = combine(literal, ...released)
       }
+      if (Result.isFailure(yield* checkSink(effective, sink).pipe(Effect.result))) return yield* fail("label")
     }
     const described = contract.summarize(decoded.success)
     if (Result.isFailure(described) || fittingToolGrants(surface.grants, described.success).length === 0) return yield* fail("grant")

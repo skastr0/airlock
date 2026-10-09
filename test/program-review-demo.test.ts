@@ -3,16 +3,18 @@ import { Effect, Result, Schema } from "effect"
 import { sha256Canonical } from "../src/core/Canonical.ts"
 import { ToolGrantPolicy, toolGrant } from "../src/core/admission/ToolGrant.ts"
 import { decodeValue, deriveValue, labeledValue } from "../src/core/contract/Decoder.ts"
+import { composeFlowRules, releaseRule } from "../src/core/contract/FlowRules.ts"
 import { defineToolContract } from "../src/core/contract/ToolContract.ts"
 import { InformationLabel, SinkPolicy } from "../src/core/labels/Labels.ts"
 import { run } from "./support/CoreTest.ts"
 import { decoderIdentity, reviewPrototype, type Review } from "./support/air-review.ts"
-import { CompanyRecipient, dataFlowPrograms, environment } from "./support/air-review-fixtures.ts"
+import { CompanyRecipient, dataFlowPrograms, environment, Read } from "./support/air-review-fixtures.ts"
 import { lowerReviewPrototype, prototypeInstances, type ReviewSurface } from "./support/air-plan-review.ts"
 
 const Send = defineToolContract({ name: "mail.send", version: "1", effect: "request",
   input: Schema.Struct({ to: Schema.String, subject: Schema.String, body: Schema.String }),
-  output: Schema.Struct({ messageId: Schema.String }), public: ["to", "subject"] })
+  output: Schema.Struct({ messageId: Schema.String }), public: ["to", "subject"],
+  flow: { requires: { to: [{ name: CompanyRecipient.name, version: CompanyRecipient.version }] } } })
 const env = { ...environment, tools: { ...environment.tools, "mail.send": { ...environment.tools["mail.send"]!, contract: Send } } }
 const mailbox = new InformationLabel({ confidentiality: "private", integrity: "untrusted", provenance: ["mailbox"] })
 const pc = labeledValue(false, mailbox)
@@ -38,6 +40,17 @@ const prepare = (source: string, allowPrivateMail = false) => Effect.gen(functio
   return { review, policy, report: yield* lowerReviewPrototype(source, review, policy) }
 })
 const reason = <A>(effect: Effect.Effect<A, { readonly reason: string }>) => Effect.map(Effect.result(effect), (result) => Result.isFailure(result) ? result.failure.reason : "accepted")
+const companyCondition = [{ field: "to" as const, decoder: CompanyRecipient }]
+const bodyRelease = releaseRule(Read, Send, { id: "company-forward.body", source: { part: "result", field: "body" },
+  sink: "body", mode: "data", from: "private", to: "public", when: companyCondition })
+const companyForward = composeFlowRules([bodyRelease, releaseRule(Read, Send, { id: "company-forward.recipient", source: { part: "result", field: "from" },
+  sink: "to", mode: "data", from: "private", to: "public", when: companyCondition })],
+  (["to", "subject", "body"] as const).flatMap((field) => [
+    releaseRule(Read, Send, { id: `company-forward.receipt-control.${field}`, source: { part: "receipt", field: "state" },
+      sink: field, mode: "control", from: "private", to: "public", when: companyCondition }),
+    releaseRule(Read, Send, { id: `company-forward.recipient-control.${field}`, source: { part: "result", field: "from" },
+      sink: field, mode: "control", from: "private", to: "public", when: companyCondition })
+  ]))
 
 describe("test-only: whole-program Plan review demonstration", () => {
   it("reports forwarding dependencies and bounds; validation does not release mailbox data", async () => {
@@ -174,5 +187,50 @@ describe("test-only: whole-program Plan review demonstration", () => {
     mutable.tools["mail.send"] = { ...env.tools["mail.send"] }
     mutable.granted.delete("mail.send")
     expect(await run(reason(prototypeInstances(report, review, policy)(instance, input, pc)))).toBe("plan-mismatch")
+  })
+
+  it("explains the exact refused edge and the smallest conditional author rule that releases it", async () => {
+    const { report } = await run(prepare(dataFlowPrograms.forward))
+    const flow = report.explanations.find((flow) => flow.field === "body" && flow.mode === "data")!
+    expect(flow).toMatchObject({ field: "body", mode: "data", reason: "confidentiality", policyId: "mail.send.body",
+      allowWith: { operation: "release", source: { tool: "mail.read", part: "result", field: "body" }, sink: { tool: "mail.send", field: "body" },
+        mode: "data", from: "private", to: "public", when: [{ field: "to", decoder: { name: CompanyRecipient.name, version: "1" } }] } })
+    const { review, policy } = await run(prepare(dataFlowPrograms.forward))
+    const partial = await run(lowerReviewPrototype(dataFlowPrograms.forward, review, { ...policy, rules: [bodyRelease] }))
+    expect(partial.explanations.some((flow) => flow.field === "body" && flow.mode === "data")).toBe(false)
+    expect(partial.explanations.some((flow) => flow.field === "body" && flow.mode === "control")).toBe(true)
+    expect(partial.refusals.map((flow) => flow.field)).toEqual(["to", "subject", "body"])
+  })
+
+  it("opens forwarding through an explicit reusable rule set, preserving dynamic batch approval", async () => {
+    const { review, policy, report: denied } = await run(prepare(dataFlowPrograms.forward))
+    const authored = { ...policy, rules: companyForward }
+    const accepted = await run(lowerReviewPrototype(dataFlowPrograms.forward, review, authored))
+    expect(accepted.refusals).toEqual([])
+    expect(accepted.explanations).toEqual([])
+    expect(accepted.plan.id).not.toBe(denied.plan.id)
+    const send = accepted.plan.nodes[1]!
+    expect(send.approval).toBe("exact-batch")
+    expect(send.when).toBe("staged")
+    expect(send.arguments.every((arg) => arg.label?.confidentiality === "private" && arg.effectiveLabel?.confidentiality === "public")).toBe(true)
+    const prefix = `mail.read@${accepted.plan.nodes[0]!.sourceOffset}`
+    const tagged = (field: string) => new InformationLabel({ ...mailbox, provenance: ["mailbox", `${prefix}.result.${field}`] })
+    const input = { to: Result.getOrThrow(decodeValue(CompanyRecipient, labeledValue("alice@example.com", tagged("from")))),
+      subject: labeledValue("Forward", literal), body: labeledValue("private body", tagged("body")) }
+    const control = labeledValue(false, new InformationLabel({ ...mailbox, provenance: ["mailbox", `${prefix}.state`, `${prefix}.result.from`] }))
+    const instance = { planId: accepted.plan.id, nodeId: send.id, occurrence: 1, tool: send.tool }
+    expect((await run(prototypeInstances(accepted, review, authored)(instance, input, control))).approval).toBe("exact-batch")
+    expect(await run(reason(prototypeInstances(accepted, review, authored)(instance, { ...input, body: labeledValue("wrong field", tagged("from")) }, control)))).toBe("label")
+    expect(await run(reason(prototypeInstances(accepted, review, authored)(instance, { ...input, body: labeledValue("unscoped", mailbox) }, control)))).toBe("label")
+    expect(await run(reason(prototypeInstances(accepted, review, authored)(instance, { ...input, to: deriveValue(input.to.value, input.to) }, control)))).toBe("proof")
+  })
+
+  it("a forwarding rule set does not release HTTP or body-dependent fixed branch selection", async () => {
+    for (const source of [dataFlowPrograms.captureLeak, dataFlowPrograms.controlLeak]) {
+      const { review, policy } = await run(prepare(source))
+      const report = await run(lowerReviewPrototype(source, review, { ...policy, rules: companyForward }))
+      expect(report.refusals.length).toBeGreaterThan(0)
+      expect(report.explanations.some((flow) => flow.origin.endsWith("result.body"))).toBe(true)
+    }
   })
 })
