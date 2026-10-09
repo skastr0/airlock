@@ -13,7 +13,7 @@ export const MailList = defineToolContract({
   version: "1",
   input: Schema.Struct({ mailbox: Schema.String }),
   output: Schema.Struct({ messages: Schema.Array(Summary) }),
-  emissionEffect: "read",
+  effect: "capture",
   public: ["mailbox"]
 })
 
@@ -23,13 +23,14 @@ export const MailRead = defineToolContract({
   version: "1",
   input: Schema.Struct({ id: Schema.String }),
   output: Schema.Struct({ id: Schema.String, from: Schema.String, subject: Schema.String, body: Schema.String }),
-  emissionEffect: "read",
+  effect: "capture",
   public: []
 })
 
-/** Sending mail cannot be undone, so it declares no effect and no compensation. */
+/** Sending mail is a request with no declared compensation. */
 export const MailSend = defineToolContract({
   name: "mail.send",
+  effect: "request",
   version: "1",
   input: Schema.Struct({ to: Schema.String, subject: Schema.String, body: Schema.String }),
   output: Schema.Struct({ messageId: Schema.String }),
@@ -41,7 +42,7 @@ export const LabelRemove = defineToolContract({
   version: "1",
   input: Schema.Struct({ messageId: Schema.String, label: Schema.String }),
   output: Schema.Struct({ removed: Schema.Boolean }),
-  emissionEffect: "mutate",
+  effect: "request",
   public: ["label"]
 })
 
@@ -51,7 +52,7 @@ export const LabelAdd = defineToolContract({
   version: "1",
   input: Schema.Struct({ messageId: Schema.String, label: Schema.String }),
   output: Schema.Struct({ added: Schema.Boolean }),
-  emissionEffect: "mutate",
+  effect: "request",
   public: ["label"],
   compensate: {
     with: LabelRemove,

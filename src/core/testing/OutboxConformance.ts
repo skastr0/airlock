@@ -762,6 +762,7 @@ export const outboxConformance = (
           tool: "mail.send",
           version: "1",
           target: "tool:mail.send",
+          effect: "request",
           fields: ["body", "subject", "to"],
           inputBytes: 82,
           public: { to: "ada@example.com" }

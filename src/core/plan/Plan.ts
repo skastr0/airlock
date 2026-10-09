@@ -206,12 +206,18 @@ export class RequestExternalNode extends Schema.TaggedClass<RequestExternalNode>
   holdMillis: Schema.Number
 }) {}
 
-export const PlanNode = Schema.Union([
-  CaptureNode,
-  InvokeNode,
-  ApplyNode,
-  RequestExternalNode
-])
+/** One entry per effect, shared by Plans and tool contracts on every host. */
+export const PlanNodeKinds = {
+  capture: CaptureNode,
+  invoke: InvokeNode,
+  apply: ApplyNode,
+  request: RequestExternalNode
+} as const
+
+export const PlanEffect = Schema.Literals(Object.keys(PlanNodeKinds) as ReadonlyArray<keyof typeof PlanNodeKinds>)
+export type PlanEffect = typeof PlanEffect.Type
+
+export const PlanNode = Schema.Union(Object.values(PlanNodeKinds))
 export type PlanNode = typeof PlanNode.Type
 
 export class PlanDraft extends Schema.Class<PlanDraft>("PlanDraft")({

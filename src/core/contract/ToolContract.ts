@@ -2,6 +2,7 @@ import { Result, Schema } from "effect"
 import { canonicalJson } from "../Canonical.ts"
 import type { Compensation, IntentKind } from "../outbox/Intent.ts"
 import { InvalidIntent } from "../outbox/Records.ts"
+import { PlanEffect } from "../plan/Plan.ts"
 
 /**
  * What a tool call looks like to everything except its handler: which tool,
@@ -14,8 +15,8 @@ export const ToolSummary = Schema.Struct({
   version: Schema.String,
   /** What a supervisor grant is matched against. */
   target: Schema.String,
-  /** The author's claim about the far side; absent means it may be irreversible. */
-  emissionEffect: Schema.optionalKey(Schema.Literals(["read", "mutate"])),
+  /** What the contract claims the call does; the grant decides when it runs. */
+  effect: PlanEffect,
   /** Names of the input fields supplied, sorted. */
   fields: Schema.Array(Schema.String),
   /** Size of the canonical encoded input in UTF-8 bytes. */
@@ -37,8 +38,7 @@ export interface ToolShape {
   readonly output: unknown
   /** Names of the public input fields. */
   readonly public: string
-  /** What the author says the tool does; `undefined` claims nothing. */
-  readonly effect: "read" | "mutate" | undefined
+  readonly effect: PlanEffect
   /** Name of the contract that answers a committed call; `never` when irreversible. */
   readonly answer: string
 }
@@ -52,7 +52,7 @@ export interface ToolContract<Shape extends ToolShape>
 {
   readonly version: string
   readonly input: Schema.Codec<Shape["input"], Shape["wire"]>
-  readonly emissionEffect: Shape["effect"]
+  readonly effect: Shape["effect"]
   /** The only input fields whose values a summary, grant or receipt may see. */
   readonly publicFields: ReadonlyArray<Shape["public"]>
 }
@@ -72,9 +72,8 @@ const encoder = new TextEncoder()
  * Declares a tool contract. Redaction is the default, not an option: a field's
  * value is visible outside the handler only if `public` names it.
  *
- * `emissionEffect` is the author's description and can only narrow what a
- * supervisor grants; omitting it claims nothing, so the tool is treated as an
- * irreversible send. A contract with no `compensate` has no answer either.
+ * `effect` is the author's description, not an authorization to execute.
+ * A contract with no `compensate` has no declared answering act.
  *
  * Field names are those of the encoded input, which must be a JSON object.
  */
@@ -83,15 +82,15 @@ export const defineToolContract = <
   Input,
   Wire extends JsonRecord,
   Output,
+  const Declared extends PlanEffect,
   const Public extends keyof Input & string = never,
-  Answer extends IntentKind.Any = never,
-  const Declared extends "read" | "mutate" | undefined = undefined
+  Answer extends IntentKind.Any = never
 >(spec: {
   readonly name: Name
   readonly version: string
   readonly input: Schema.Codec<Input, Wire>
   readonly output: Schema.Codec<Output, Schema.Json>
-  readonly emissionEffect?: Declared
+  readonly effect: Declared
   readonly public?: ReadonlyArray<Public>
   /** Defaults to `tool:<name>`. Must not reveal a field that is not public. */
   readonly target?: (input: Input) => string
@@ -125,8 +124,7 @@ export const defineToolContract = <
     tag: spec.name,
     version: spec.version,
     input: spec.input,
-    // An omitted effect is `undefined`, which is what `Declared` defaults to.
-    emissionEffect: spec.emissionEffect as Declared,
+    effect: spec.effect,
     publicFields,
     dispatch: spec.input,
     summary: ToolSummary,
@@ -148,7 +146,7 @@ export const defineToolContract = <
         tool: spec.name,
         version: spec.version,
         target: spec.target === undefined ? `tool:${spec.name}` : spec.target(input),
-        ...(spec.emissionEffect === undefined ? {} : { emissionEffect: spec.emissionEffect }),
+        effect: spec.effect,
         fields: Object.keys(supplied).sort(),
         inputBytes: encoder.encode(canonicalJson(supplied)).byteLength,
         public: visible

@@ -21,7 +21,7 @@ const JsonRead = defineToolContract({
   input: Schema.Struct({ resource: Schema.Json }),
   output: Schema.Struct({ ok: Schema.Boolean }),
   public: ["resource"],
-  emissionEffect: "read"
+  effect: "capture"
 })
 
 const PrivateRead = defineToolContract({
@@ -29,7 +29,7 @@ const PrivateRead = defineToolContract({
   version: "1",
   input: Schema.Struct({ privateCount: Schema.Number }),
   output: Schema.Struct({ ok: Schema.Boolean }),
-  emissionEffect: "read"
+  effect: "capture"
 })
 
 const tools = defineOutbox({ "security.read": JsonRead, "security.private": PrivateRead })

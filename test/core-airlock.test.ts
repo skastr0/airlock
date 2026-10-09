@@ -174,7 +174,7 @@ describe("core: defineAirlock", () => {
           input: "{ messageId: string, label: string }",
           result: "{ added: boolean }",
           returns: "staged",
-          effect: "mutate",
+          effect: "request",
           answeredBy: "label.remove"
         },
         {
@@ -182,22 +182,22 @@ describe("core: defineAirlock", () => {
           input: "{ mailbox: string, query: string }",
           result: "{ ids: [string] }",
           returns: "result",
-          effect: "read"
+          effect: "capture"
         },
         {
           name: "mail.send",
           input: "{ to: string, subject: string, body: string }",
           result: "{ messageId: string }",
           returns: "staged",
-          effect: "send"
+          effect: "request"
         }
       ])
       const lines = guest.description.split("\n")
       expect(lines[0]).toBe("An Airlock program (.air) is a list of statements, one per line.")
       expect(lines.slice(-3)).toEqual([
-        "- label.add({ messageId: string, label: string }) -> { staged: true, id: string, state: string }. Changes something; is recorded for approval and returns a staged receipt, never a result; nothing happens until a supervisor commits it. Can be answered by label.remove.",
-        "- mail.list({ mailbox: string, query: string }) -> { ids: [string] }. Reads; runs at once and returns its result.",
-        "- mail.send({ to: string, subject: string, body: string }) -> { staged: true, id: string, state: string }. Sends something that cannot be undone; is recorded for approval and returns a staged receipt, never a result; nothing happens until a supervisor commits it."
+        "- label.add({ messageId: string, label: string }) -> { staged: true, id: string, state: string }. Makes an external request; is recorded for approval and returns a staged receipt, never a result; nothing happens until a supervisor commits it. Can be answered by label.remove.",
+        "- mail.list({ mailbox: string, query: string }) -> { ids: [string] }. Captures a value; runs at once and returns its result.",
+        "- mail.send({ to: string, subject: string, body: string }) -> { staged: true, id: string, state: string }. Makes an external request; is recorded for approval and returns a staged receipt, never a result; nothing happens until a supervisor commits it."
       ])
       expect(JSON.stringify(guest.actions)).not.toContain("\"label.remove\",\"input\"")
     }))

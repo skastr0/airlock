@@ -121,6 +121,7 @@ describe("core: what the types rule out", () => {
     const Wrong = () =>
       defineToolContract({
         name: "label.add.wrong",
+        effect: "request",
         version: "1",
         input: Schema.Struct({ messageId: Schema.String, label: Schema.String }),
         output: Schema.Struct({ added: Schema.Boolean }),

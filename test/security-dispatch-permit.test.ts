@@ -56,7 +56,7 @@ const Read = defineToolContract({
   input: Schema.Struct({ resource: Schema.String }),
   output: Schema.Struct({ ok: Schema.Boolean }),
   public: ["resource"],
-  emissionEffect: "read"
+  effect: "capture"
 })
 const toolBox = defineOutbox({ "security.read": Read })
 
@@ -66,7 +66,7 @@ const Other = defineToolContract({
   input: Schema.Struct({ resource: Schema.String }),
   output: Schema.Struct({ ok: Schema.Boolean }),
   public: ["resource"],
-  emissionEffect: "read"
+  effect: "capture"
 })
 
 describe("security: a dispatch permit authorizes one exact request", () => {

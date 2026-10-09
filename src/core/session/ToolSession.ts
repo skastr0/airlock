@@ -43,10 +43,10 @@ export interface Staged {
 }
 
 /**
- * Only a tool whose contract says `read` can ever return an outcome through a
+ * Only a capture currently returns an outcome through a
  * session. For every other tool the result type is `Staged` alone.
  */
-export type CallResult<Contract> = ToolContract.EffectOf<Contract> extends "read"
+export type CallResult<Contract> = ToolContract.EffectOf<Contract> extends "capture"
   ? Performed<ToolContract.OutputOf<Contract>> | Staged
   : Staged
 

@@ -13,13 +13,14 @@ export const MailList = defineToolContract({
   version: "1",
   input: Schema.Struct({ mailbox: Schema.String, query: Schema.String }),
   output: Schema.Struct({ ids: Schema.Array(Schema.String) }),
-  emissionEffect: "read",
+  effect: "capture",
   public: ["mailbox"]
 })
 
-/** Declares nothing about its effect and has no answer: an irreversible send. */
+/** An external request with no declared compensation. */
 export const MailSend = defineToolContract({
   name: "mail.send",
+  effect: "request",
   version: "1",
   input: Schema.Struct({ to: Schema.String, subject: Schema.String, body: Schema.String }),
   output: Schema.Struct({ messageId: Schema.String }),
@@ -31,7 +32,7 @@ export const LabelRemove = defineToolContract({
   version: "1",
   input: Schema.Struct({ messageId: Schema.String, label: Schema.String }),
   output: Schema.Struct({ removed: Schema.Boolean }),
-  emissionEffect: "mutate",
+  effect: "request",
   public: ["label"]
 })
 
@@ -41,7 +42,7 @@ export const LabelAdd = defineToolContract({
   version: "1",
   input: Schema.Struct({ messageId: Schema.String, label: Schema.String }),
   output: Schema.Struct({ added: Schema.Boolean }),
-  emissionEffect: "mutate",
+  effect: "request",
   public: ["label"],
   compensate: {
     with: LabelRemove,

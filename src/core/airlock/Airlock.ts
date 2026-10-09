@@ -215,7 +215,7 @@ export const defineAirlock = <const List extends ReadonlyArray<ToolContract.Any>
         if (contract === undefined) return []
         const immediate = decided.toolGrants
           .filter((grant) => grant.tool === name)
-          .map((grant) => contract.emissionEffect === "read" && grant.class === "read" && grant.commit === "auto")
+          .map((grant) => contract.effect === "capture" && grant.class === "read" && grant.commit === "auto")
         return [guestAction(contract, immediate.every(Boolean) ? "all" : immediate.some(Boolean) ? "some" : "none")]
       })
       return {

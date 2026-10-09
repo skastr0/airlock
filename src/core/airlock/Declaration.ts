@@ -1,5 +1,6 @@
 import { Schema } from "effect"
 import type { ToolContract } from "../contract/ToolContract.ts"
+import type { PlanEffect } from "../plan/Plan.ts"
 
 /**
  * What an agent needs to write an Airlock program (.air) for one session: the
@@ -83,7 +84,7 @@ export interface GuestAction {
    * depending on which grant the call fits.
    */
   readonly returns: "result" | "staged" | "result-or-staged"
-  readonly effect: "read" | "mutate" | "send"
+  readonly effect: PlanEffect
   /** The action that answers this one, if its contract declares a compensation. */
   readonly answeredBy?: string
 }
@@ -97,14 +98,15 @@ export const guestAction = (contract: ToolContract.Any, immediate: "all" | "none
   input: typeText(contract.input),
   result: typeText(contract.outcome),
   returns: immediate === "all" ? "result" : immediate === "none" ? "staged" : "result-or-staged",
-  effect: contract.emissionEffect === "read" ? "read" : contract.emissionEffect === "mutate" ? "mutate" : "send",
+  effect: contract.effect,
   ...(contract.compensate === undefined ? {} : { answeredBy: contract.compensate.kind })
 })
 
 const effectWords: { readonly [Effect in GuestAction["effect"]]: string } = {
-  read: "Reads",
-  mutate: "Changes something",
-  send: "Sends something that cannot be undone"
+  capture: "Captures a value",
+  invoke: "Runs a computation",
+  apply: "Changes something the host can put back",
+  request: "Makes an external request"
 }
 
 const returnWords: { readonly [Returns in GuestAction["returns"]]: string } = {

@@ -4,8 +4,7 @@ import type { ToolContract, ToolSummary } from "../contract/ToolContract.ts"
 import {
   CommitMode,
   DispatchClass,
-  type DispatchDecision,
-  stricterDispatchClass
+  type DispatchDecision
 } from "./DispatchPolicy.ts"
 
 /** A condition on one public field of a tool's input. */
@@ -144,8 +143,7 @@ const awaitSupervisor = (reason: string): DispatchDecision => ({ _tag: "AwaitSup
 /**
  * Whether a staged tool call may be committed without a supervisor. It never
  * dispatches. Auto-commit needs every fitting grant to pre-authorize a read,
- * and the contract itself to describe the tool as a read: a contract that
- * claims nothing is an irreversible send and always waits.
+ * and the contract itself to describe the tool as capture.
  */
 export const toolDispatchDecision = (
   grants: ReadonlyArray<ToolGrantPolicy>,
@@ -160,11 +158,6 @@ export const toolDispatchDecision = (
   if (!fitting.every((grant) => grant.commit === "auto" && grant.class === "read")) {
     return awaitSupervisor("a fitting grant does not pre-authorize commit")
   }
-  const effectiveClass = stricterDispatchClass("read", call.emissionEffect ?? "irreversible-send")
-  if (effectiveClass !== "read") {
-    return awaitSupervisor(
-      `effective class ${effectiveClass} is narrower than read; this call awaits a supervisor commit`
-    )
-  }
-  return { _tag: "AutoCommit", selector: call.tool, effectiveClass }
+  if (call.effect !== "capture") return awaitSupervisor("only a capture contract fits a read auto-commit grant")
+  return { _tag: "AutoCommit", selector: call.tool, effectiveClass: "read" }
 }

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "@effect/vitest"
 import { Result, Schema } from "effect"
-import { Admission, defineIntentKind, defineOutbox, defineToolContract } from "../src/core/index.ts"
+import { Admission, defineIntentKind, defineOutbox, defineToolContract, Plan, ToolSummary } from "../src/core/index.ts"
 import {
   exampleContracts,
   LabelAdd,
@@ -17,25 +17,53 @@ const list = (mailbox: string) =>
   Result.getOrThrow(MailList.summarize({ mailbox, query: "secret query" }))
 
 describe("core: tool contracts", () => {
+  it("requires exactly the Plan's four effect classes", () => {
+    expect(Plan.PlanEffect.literals).toEqual(Object.keys(Plan.PlanNodeKinds))
+    const input = Schema.Struct({ value: Schema.String })
+    const output = Schema.Struct({ ok: Schema.Boolean })
+    for (const effect of Plan.PlanEffect.literals) {
+      const contract = defineToolContract({ name: `tool.${effect}`, version: "1", input, output, effect })
+      const summary = Result.getOrThrow(contract.summarize({ value: "private" }))
+      expect(Schema.decodeUnknownSync(ToolSummary)(summary).effect).toBe(effect)
+      expect(contract.effect).toBe(effect)
+      expect(summary.public).toEqual({})
+      expect(summary).not.toHaveProperty("emissionEffect")
+      const { effect: _effect, ...omitted } = summary
+      expect(() => Schema.decodeUnknownSync(ToolSummary)(omitted)).toThrow()
+      expect(() => Schema.decodeUnknownSync(ToolSummary)({ ...summary, effect: "read" })).toThrow()
+    }
+    const missing = () => {
+      // @ts-expect-error a contract must declare its effect
+      return defineToolContract({ name: "missing", version: "1", input, output })
+    }
+    const obsolete = () => defineToolContract({
+      name: "obsolete", version: "1", input, output,
+      // @ts-expect-error read is no longer a contract effect
+      effect: "read"
+    })
+    expect([missing, obsolete].every((declaration) => typeof declaration === "function")).toBe(true)
+  })
+
   it("redacts by default and exposes only declared public fields", () => {
     expect(list("inbox")).toEqual({
       tool: "mail.list",
       version: "1",
       target: "tool:mail.list",
-      emissionEffect: "read",
+      effect: "capture",
       fields: ["mailbox", "query"],
       inputBytes: 42,
       public: { mailbox: "inbox" }
     })
     const NoPublic = defineToolContract({
       name: "vault.read",
+      effect: "capture",
       version: "1",
       input: Schema.Struct({ path: Schema.String }),
       output: Schema.Struct({ ok: Schema.Boolean })
     })
     expect(Result.getOrThrow(NoPublic.summarize({ path: "/secret/key" })).public).toEqual({})
     expect(NoPublic.publicFields).toEqual([])
-    expect(NoPublic.emissionEffect).toBeUndefined()
+    expect(NoPublic.effect).toBe("capture")
     expect(NoPublic.compensate).toBeUndefined()
   })
 
@@ -70,8 +98,8 @@ describe("core: tool contracts", () => {
     })
   })
 
-  it("never auto-commits a tool that does not describe itself as a read", () => {
-    // mail.send claims nothing, so it is an irreversible send whatever the grant says.
+  it("never auto-commits a non-capture tool under a read grant", () => {
+    // A request does not become a capture because a grant describes it as a read.
     const eager = new ToolGrantPolicy({ id: "eager", tool: "mail.send", class: "read", commit: "auto" })
     expect(toolDispatchDecision([eager], exampleContracts, send("ada@example.com"))).toMatchObject({
       _tag: "AwaitSupervisor"
