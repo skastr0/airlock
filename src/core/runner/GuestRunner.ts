@@ -72,7 +72,8 @@ export const GuestFault = Schema.Literals([
   "invalid-call",
   "missing-field",
   "invalid-index",
-  "duplicate-field"
+  "duplicate-field",
+  "duplicate-binding"
 ])
 export type GuestFault = typeof GuestFault.Type
 

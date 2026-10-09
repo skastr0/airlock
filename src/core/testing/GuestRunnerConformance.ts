@@ -298,6 +298,7 @@ export const guestRunnerConformance = (
           [`return "secret detail" + 1`, { ok: false, reason: "execution_failed", toolCalls: 0, at: { line: 1, column: 8 }, fault: "invalid-operation" }],
           [`return { a: 1, a: 2 }`, { ok: false, reason: "execution_failed", toolCalls: 0, at: { line: 1, column: 16 }, fault: "duplicate-field" }],
           [`let call = [1]\nreturn call[0]({})`, { ok: false, reason: "execution_failed", toolCalls: 0, at: { line: 2, column: 8 }, fault: "invalid-call" }],
+          [`let secret_detail = 1\nlet secret_detail = 2`, { ok: false, reason: "execution_failed", toolCalls: 0, at: { line: 2, column: 1 }, fault: "duplicate-binding" }],
           [`return (secret_detail;`, { ok: false, reason: "invalid_code", toolCalls: 0, at: { line: 1, column: 22 } }],
           ["", { ok: false, reason: "invalid_code", toolCalls: 0 }]
         ]

@@ -50,7 +50,8 @@ const faults: { readonly [Tag in EvaluationError["_tag"]]?: GuestFault } = {
   InvalidCallTarget: "invalid-call",
   MissingRecordField: "missing-field",
   InvalidIndex: "invalid-index",
-  DuplicateRecordField: "duplicate-field"
+  DuplicateRecordField: "duplicate-field",
+  DuplicateBinding: "duplicate-binding"
 }
 
 const reasons: { readonly [Tag in EvaluationError["_tag"]]?: GuestFailureReason } = {
