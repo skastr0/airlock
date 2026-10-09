@@ -4,6 +4,7 @@ import type { ToolContract, ToolSummary } from "../contract/ToolContract.ts"
 import type { ResourceField } from "../contract/Resource.ts"
 import { GrantWhen, HostParameters, type ToolHost } from "../contract/ToolHost.ts"
 import { portableToolHost } from "../contract/PortableToolHost.ts"
+import { CaptureRetention } from "../outbox/Capture.ts"
 
 /** Conditions inspect public inputs; physical scope checks require a host binding. */
 export const FieldMatch = Schema.Union([
@@ -33,21 +34,27 @@ export class ToolGrantPolicy extends Schema.Class<ToolGrantPolicy>("ToolGrantPol
   ),
   host: Schema.optionalKey(HostParameters),
   validUntil: Schema.optionalKey(Schema.DateTimeUtcFromString),
+  /** Omitted capture-now retention means digest; other grants must omit it. */
+  retention: Schema.optionalKey(CaptureRetention),
   where: Schema.Record(Schema.String, FieldMatch).pipe(
     Schema.withDecodingDefault(Effect.succeed({})), Schema.withConstructorDefault(Effect.succeed({}))
   )
 }) {}
 
+type GrantTiming<Contract> = ToolContract.EffectOf<Contract> extends "capture"
+  ? { readonly when: "now"; readonly retention?: CaptureRetention }
+    | { readonly when?: "approved"; readonly retention?: never }
+  : { readonly when?: ToolContract.EffectOf<Contract> extends "request" ? "approved" : GrantWhen; readonly retention?: never }
+
 export const toolGrant = <Contract extends ToolContract.Any>(contract: Contract, grant: {
   readonly id: string
-  readonly when?: ToolContract.EffectOf<Contract> extends "request" ? "approved" : GrantWhen
   readonly host?: HostParameters
   readonly validUntil?: DateTime.Utc
   readonly where?: { readonly [Field in ToolContract.PublicOf<Contract>]?: MatchFor<
     ToolContract.WireOf<Contract>[Field & keyof ToolContract.WireOf<Contract>],
     Field extends keyof ToolContract.ResourcesOf<Contract> ? ToolContract.ResourcesOf<Contract>[Field] : never
   > }
-}): ToolGrantPolicy & { readonly tool: Contract["tag"] } => new ToolGrantPolicy({
+} & GrantTiming<Contract>): ToolGrantPolicy & { readonly tool: Contract["tag"] } => new ToolGrantPolicy({
   ...grant, tool: contract.tag, where: grant.where as Record<string, FieldMatch> | undefined
 })
 
@@ -77,6 +84,9 @@ export const validateToolGrants = (grants: ReadonlyArray<ToolGrantPolicy>,
     seen.add(grant.id)
     const contract = Object.hasOwn(contracts, grant.tool) ? contracts[grant.tool] : undefined
     if (contract === undefined) return { field: `${at}.tool`, reason: `no contract is registered for tool ${grant.tool}` }
+    if (grant.retention !== undefined && (contract.effect !== "capture" || grant.when !== "now")) {
+      return { field: `${at}.retention`, reason: "retention is meaningful only for a capture granted now" }
+    }
     if (Object.values<ResourceField>(contract.resources).some((resource) => !host.resources.kinds.includes(resource.kind))) {
       return { field: `${at}.tool`, reason: "host cannot bind a declared resource kind" }
     }
@@ -139,7 +149,7 @@ export const unmetToolGrants = (grants: ReadonlyArray<ToolGrantPolicy>, call: To
   })
 
 export type ToolDispatchDecision =
-  | { readonly _tag: "Now" | "Approved"; readonly host?: HostParameters; readonly validUntil?: DateTime.Utc }
+  | { readonly _tag: "Now" | "Approved"; readonly host?: HostParameters; readonly validUntil?: DateTime.Utc; readonly retention?: CaptureRetention }
   | { readonly _tag: "Expired"; readonly validUntil: DateTime.Utc }
   | { readonly _tag: "Refused"; readonly reason: string }
 
@@ -162,5 +172,7 @@ export const toolDispatchDecision = (grants: ReadonlyArray<ToolGrantPolicy>, con
     return { _tag: "Expired", validUntil }
   }
   return { _tag: fitting.every((grant) => grant.when === "now") ? "Now" : "Approved",
+    ...(fitting.every((grant) => grant.when === "now") && contracts[call.tool]?.effect === "capture"
+      ? { retention: fitting.every((grant) => grant.retention === "keep") ? "keep" as const : "digest" as const } : {}),
     ...(first.host === undefined ? {} : { host: first.host }), ...(validUntil === undefined ? {} : { validUntil }) }
 }
