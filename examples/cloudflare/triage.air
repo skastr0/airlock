@@ -1,15 +1,18 @@
-# Triage the inbox: read it, label the first unread message, and propose a
-# reply. Reading runs at once. The label and the mail are only recorded; a
-# supervisor decides whether they happen.
-let inbox = mail.list({ mailbox: "inbox", query: "is:unread" })
-assert inbox.ids != [], "nothing to triage"
+# Triage the inbox: for every unread message from billing, read it, label it,
+# and propose forwarding it to finance. Listing and reading run at once. The
+# labels and the mail are only recorded; a supervisor decides whether they happen.
+let inbox = mail.list({ mailbox: "inbox" })
 
-let first = inbox.ids[0]
-let labelled = label.add({ messageId: first, label: "triaged" })
-let draft = mail.send({
-  to: "ada@example.com",
-  subject: "Unread mail",
-  body: "The first unread message is " + first + "."
-})
+for message in inbox.messages {
+  if message.unread && message.from == "billing@example.com" {
+    let full = mail.read({ id: message.id })
+    label.add({ messageId: message.id, label: "billing" })
+    mail.send({
+      to: "finance@example.com",
+      subject: "Fwd: " + full.subject,
+      body: full.body
+    })
+  }
+}
 
-return { first: first, label: labelled.id, mail: draft.id }
+return { triaged: "inbox", seen: inbox.messages }

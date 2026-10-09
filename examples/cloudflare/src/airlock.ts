@@ -1,5 +1,5 @@
 import { defineAirlock, refused, toolGrant, toolPolicy } from "@skastr0/airlock/cloudflare"
-import { LabelAdd, LabelRemove, MailList, MailSend } from "./contracts.ts"
+import { LabelAdd, LabelRemove, MailList, MailRead, MailSend } from "./contracts.ts"
 
 /** The Worker's bindings. `MAIL_TOKEN` is a secret; an Airlock program has no way to name it. */
 export interface Env {
@@ -21,13 +21,25 @@ export interface Env {
  */
 export const mailbox: Array<{ readonly did: string; readonly detail: string }> = []
 
+const inbox = [
+  { id: "m1", from: "billing@example.com", subject: "Invoice 1042 is overdue", unread: true, body: "Invoice 1042 for 310.00 was due on the 1st." },
+  { id: "m2", from: "news@example.com", subject: "This week", unread: true, body: "Nothing that needs you." },
+  { id: "m3", from: "billing@example.com", subject: "Receipt 1041", unread: false, body: "Paid, thank you." }
+]
+
 export const airlock = defineAirlock({
-  contracts: [MailList, MailSend, LabelAdd, LabelRemove],
+  contracts: [MailList, MailRead, MailSend, LabelAdd, LabelRemove],
 
   implement: {
     "mail.list": ({ mailbox: name }) => {
       mailbox.push({ did: "listed", detail: name })
-      return { ids: [`${name}-1`, `${name}-2`] }
+      return { messages: inbox.map(({ id, from, subject, unread }) => ({ id, from, subject, unread })) }
+    },
+    "mail.read": ({ id }) => {
+      const message = inbox.find((candidate) => candidate.id === id)
+      if (message === undefined) return refused(`there is no message ${id}`)
+      mailbox.push({ did: "read", detail: id })
+      return { id, from: message.from, subject: message.subject, body: message.body }
     },
     "mail.send": ({ to, subject }, { env, idempotencyKey }: { env: Env; idempotencyKey: string }) => {
       if (env.MAIL_TOKEN === "") return refused("the mail connection is not configured")
@@ -44,12 +56,14 @@ export const airlock = defineAirlock({
     }
   },
 
-  // What a program may do: read the inbox without asking, propose mail to the
-  // company's own addresses, propose labels. Nothing else exists for it.
+  // What a program may do: list the inbox and read its mail without asking,
+  // propose mail to the company's own addresses, propose labels. Nothing else
+  // exists for it.
   policy: toolPolicy({
     budget: { maxCalls: 8, maxInputBytes: 16_384 },
     toolGrants: [
       toolGrant(MailList, { id: "read-inbox", class: "read", commit: "auto", where: { mailbox: { equals: "inbox" } } }),
+      toolGrant(MailRead, { id: "read-mail", class: "read", commit: "auto" }),
       toolGrant(MailSend, { id: "company-mail", where: { to: { endsWith: "@example.com" } } }),
       toolGrant(LabelAdd, { id: "labels", class: "mutate" })
     ]

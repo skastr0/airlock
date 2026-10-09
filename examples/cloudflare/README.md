@@ -14,8 +14,8 @@ You write four files:
 
 | File | What it is | Lines |
 | --- | --- | --- |
-| `src/contracts.ts` | What each tool takes and returns | 43 |
-| `src/airlock.ts` | What each tool does, and what a program may do | 57 |
+| `src/contracts.ts` | What each tool takes and returns | 60 |
+| `src/airlock.ts` | What each tool does, and what a program may do | 71 |
 | `src/worker.ts` | The Durable Object export and your trusted routes | 44 |
 | `alchemy.run.ts` | The Worker and its binding on Cloudflare | 24 |
 
@@ -29,25 +29,28 @@ write it. `triage.air` is a program an agent might write.
 `triage.air`:
 
 ```
-let inbox = mail.list({ mailbox: "inbox", query: "is:unread" })
-assert inbox.ids != [], "nothing to triage"
+let inbox = mail.list({ mailbox: "inbox" })
 
-let first = inbox.ids[0]
-let labelled = label.add({ messageId: first, label: "triaged" })
-let draft = mail.send({
-  to: "ada@example.com",
-  subject: "Unread mail",
-  body: "The first unread message is " + first + "."
-})
+for message in inbox.messages {
+  if message.unread && message.from == "billing@example.com" {
+    let full = mail.read({ id: message.id })
+    label.add({ messageId: message.id, label: "billing" })
+    mail.send({
+      to: "finance@example.com",
+      subject: "Fwd: " + full.subject,
+      body: full.body
+    })
+  }
+}
 
-return { first: first, label: labelled.id, mail: draft.id }
+return { triaged: "inbox", seen: inbox.messages }
 ```
 
-`mail.list` returns the mail. `label.add` and `mail.send` return a receipt
-(`{ staged: true, id, state }`): nothing has been labelled or sent. `GET
-/tools` returns the granted actions, their input and result shapes, which of
-them are staged, and a short description of the language, ready to put in a
-prompt.
+`mail.list` and `mail.read` return the mail. `label.add` and `mail.send`
+return a receipt (`{ staged: true, id, state }`): nothing has been labelled or
+sent, and both wait in `GET /pending`. `GET /tools` returns the granted
+actions, their input and result shapes, which of them are staged, and a short
+description of the language, ready to put in a prompt.
 
 ## Run it locally
 

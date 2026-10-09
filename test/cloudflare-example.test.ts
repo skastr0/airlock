@@ -68,26 +68,39 @@ describe("examples/cloudflare in workerd", () => {
     expect(tools.actions.map((action) => [action.name, action.returns])).toEqual([
       ["label.add", "staged"],
       ["mail.list", "result"],
+      ["mail.read", "result"],
       ["mail.send", "staged"]
     ])
-    expect(tools.actions[2]?.input).toBe("{ to: string, subject: string, body: string }")
+    expect(tools.actions[1]).toMatchObject({
+      input: "{ mailbox: string }",
+      result: "{ messages: [{ id: string, from: string, subject: string, unread: boolean }] }"
+    })
+    expect(tools.actions[3]?.input).toBe("{ to: string, subject: string, body: string }")
     expect(tools.description).toContain("An Airlock program (.air)")
   })
 
-  it("runs triage.air: the read happens, the writes wait, a supervisor decides, and a replay sends nothing twice", async () => {
+  it("runs triage.air: the reads happen, the writes wait, a supervisor decides, and a replay sends nothing twice", async () => {
     const first = await run("demo", "run-1", triage)
-    expect(first).toMatchObject({ ok: true, result: { first: "inbox-1" }, toolCalls: 3 })
-    const ids = first.result as { readonly label: string; readonly mail: string }
-    expect(await did()).toEqual(["listed"])
+    expect(first).toMatchObject({ ok: true, result: { triaged: "inbox" }, toolCalls: 4 })
+    expect((first.result as { seen: ReadonlyArray<{ id: string }> }).seen.map((message) => message.id)).toEqual(["m1", "m2", "m3"])
+    // Only the unread message from billing was read. Nothing was labelled or sent.
+    expect(await request("GET", "/mailbox")).toEqual([
+      { did: "listed", detail: "inbox" },
+      { did: "read", detail: "m1" }
+    ])
 
-    const pending = await request<ReadonlyArray<View>>("GET", "/pending")
+    const pending = await request<ReadonlyArray<View & { summary?: unknown }>>("GET", "/pending")
     expect(pending.map((emission) => [emission.kind, emission.state]).sort()).toEqual([
       ["label.add", "staged"],
       ["mail.send", "staged"]
     ])
+    const ids = {
+      label: pending.find((emission) => emission.kind === "label.add")!.id,
+      mail: pending.find((emission) => emission.kind === "mail.send")!.id
+    }
 
     const sent = await request<View>("POST", "/commit", { id: ids.mail })
-    expect(sent).toMatchObject({ state: "committed", outcome: { messageId: "message-2" } })
+    expect(sent).toMatchObject({ state: "committed", outcome: { messageId: "message-3" } })
     expect(await request("POST", "/commit", { id: ids.mail })).toMatchObject({ error: "not-pending" })
 
     const labelled = await request<View>("POST", "/commit", { id: ids.label })
@@ -99,7 +112,12 @@ describe("examples/cloudflare in workerd", () => {
 
     const replay = await run("demo", "run-1", triage)
     expect(replay).toEqual(first)
-    expect(await did()).toEqual(["listed", "sent", "labelled"])
+    expect(await request("GET", "/mailbox")).toEqual([
+      { did: "listed", detail: "inbox" },
+      { did: "read", detail: "m1" },
+      { did: "sent", detail: `Fwd: Invoice 1042 is overdue to finance@example.com (${ids.mail})` },
+      { did: "labelled", detail: "m1 billing" }
+    ])
     expect(await request("GET", "/pending")).toEqual([])
   })
 
@@ -107,7 +125,7 @@ describe("examples/cloudflare in workerd", () => {
     const before = await did()
     const outcome = await run("other", "run-2", `
       mail.send({ to: "eve@elsewhere.test", subject: "s", body: "b" })
-      return mail.list({ mailbox: "inbox", query: "q" })`)
+      return mail.list({ mailbox: "inbox" })`)
     expect(outcome).toEqual({
       ok: false,
       reason: "tool_refused",
@@ -124,13 +142,13 @@ describe("examples/cloudflare in workerd", () => {
   it("stops a program at the policy's call budget and at the loop budget", async () => {
     const before = (await did()).length
     const calls = await run("budget", "run-3", `
-      for index in 0..9 { mail.list({ mailbox: "inbox", query: "q" }) }
+      for index in 0..9 { mail.list({ mailbox: "inbox" }) }
       return "finished"`)
     expect(calls).toEqual({ ok: false, reason: "tool_call_limit", toolCalls: 9 })
     expect((await did()).length).toBe(before + 8)
     const loop = await run("budget", "run-4", `
       for index in 0..5000 { let twice = index * 2 }
-      return mail.list({ mailbox: "inbox", query: "q" })`)
+      return mail.list({ mailbox: "inbox" })`)
     expect(loop).toMatchObject({ ok: false, reason: "loop_limit", toolCalls: 0 })
     expect((await did()).length).toBe(before + 8)
   })

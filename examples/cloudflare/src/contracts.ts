@@ -1,13 +1,30 @@
 import { defineToolContract, Schema } from "@skastr0/airlock/cloudflare"
 
-/** Reading the inbox. Which mailbox is public; the search query is not. */
+const Summary = Schema.Struct({
+  id: Schema.String,
+  from: Schema.String,
+  subject: Schema.String,
+  unread: Schema.Boolean
+})
+
+/** Listing a mailbox: who wrote and about what, not the bodies. Which mailbox is public. */
 export const MailList = defineToolContract({
   name: "mail.list",
   version: "1",
-  input: Schema.Struct({ mailbox: Schema.String, query: Schema.String }),
-  output: Schema.Struct({ ids: Schema.Array(Schema.String) }),
+  input: Schema.Struct({ mailbox: Schema.String }),
+  output: Schema.Struct({ messages: Schema.Array(Summary) }),
   emissionEffect: "read",
   public: ["mailbox"]
+})
+
+/** Reading one message in full. */
+export const MailRead = defineToolContract({
+  name: "mail.read",
+  version: "1",
+  input: Schema.Struct({ id: Schema.String }),
+  output: Schema.Struct({ id: Schema.String, from: Schema.String, subject: Schema.String, body: Schema.String }),
+  emissionEffect: "read",
+  public: []
 })
 
 /** Sending mail cannot be undone, so it declares no effect and no compensation. */
