@@ -26,8 +26,7 @@ describe("Airlock language evaluator", () => {
   it.effect("evaluates pure values, lexical lets, branches, bounded loops, and resolver calls", () =>
     Effect.gen(function* () {
       const program = parseSync(`
-let total = 0
-for index in 0..3 { let total = index + 1 }
+for index in 0..3 { let next = index + 1; assert next > 0 }
 let result = make_record(echo("ready"))
 if result.enabled && result.value == "ready" { return { count: 3, delay: 2s } }
 return null

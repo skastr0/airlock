@@ -1,6 +1,7 @@
 import { Effect, Schema } from "effect"
 import type { Duration, Expression, Program, Span, Statement } from "./ast.ts"
 import { DurationSchema, SpanSchema } from "./ast.ts"
+import { DuplicateBinding, validateBindings } from "./bindings.ts"
 
 /**
  * The evaluator is a candidate language component, not a capability source.
@@ -80,6 +81,7 @@ export class ValueLimitExceeded extends Schema.TaggedError<ValueLimitExceeded>()
 ) {}
 
 export type EvaluationError =
+  | DuplicateBinding
   | UnboundIdentifier
   | InvalidLanguageOperation
   | InvalidCallTarget
@@ -450,6 +452,7 @@ export const evaluate = <R = never, E = never>(
   resolver: ActionResolver<R, E>,
   options: EvaluateOptions = {}
 ): Effect.Effect<EvaluationResult, EvaluationError | E, R> => Effect.gen(function* () {
+  yield* validateBindings(program, Object.keys(options.bindings ?? {}))
   const loopLimit = options.maxLoopIterations ?? defaultLoopLimit
   if (!Number.isSafeInteger(loopLimit) || loopLimit < 0) {
     return yield* Effect.fail(invalid("maxLoopIterations", "must be a non-negative safe integer", program.span))
