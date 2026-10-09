@@ -20,7 +20,8 @@ export const transitions = {
   committed: [],
   uncertain: [],
   refused: [],
-  cancelled: []
+  cancelled: [],
+  captured: []
 } as const
 
 export type EmissionState = keyof typeof transitions
@@ -30,7 +31,8 @@ export const EmissionState: Schema.Codec<EmissionState> = Schema.Literals([
   "committed",
   "uncertain",
   "refused",
-  "cancelled"
+  "cancelled",
+  "captured"
 ])
 
 /** The states a given state may move to. `never` for a terminal state. */

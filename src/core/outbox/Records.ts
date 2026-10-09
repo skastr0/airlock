@@ -7,23 +7,9 @@ import type { ActiveState, EmissionState, Next } from "./Lifecycle.ts"
 
 // ── identifiers ─────────────────────────────────────────────────────────────
 
-/**
- * Derived, never random: `emi_` plus the first 32 hex digits of the SHA-256 of
- * the caller's idempotency key. Staging the same key always names the same
- * emission, on any host.
- */
-export const EmissionId = Schema.String.pipe(
-  Schema.check(Schema.isPattern(/^emi_[0-9a-f]{32}$/)),
-  Schema.brand("EmissionId")
-)
-export type EmissionId = typeof EmissionId.Type
-
-/** Chosen by the caller; names one logical external act across replays. */
-export const IdempotencyKey = Schema.String.pipe(
-  Schema.check(Schema.isMinLength(1), Schema.isMaxLength(512)),
-  Schema.brand("IdempotencyKey")
-)
-export type IdempotencyKey = typeof IdempotencyKey.Type
+import { EmissionId, IdempotencyKey } from "./Identifiers.ts"
+export { EmissionId, IdempotencyKey } from "./Identifiers.ts"
+import { CapturedEmission, CaptureRetention } from "./Capture.ts"
 
 // ── authority evidence ──────────────────────────────────────────────────────
 
@@ -70,6 +56,7 @@ export class EmissionAdmission extends Schema.Class<EmissionAdmission>("Emission
     version: Schema.String,
     effect: PlanEffect,
     when: GrantWhen,
+    retention: Schema.optionalKey(CaptureRetention),
     host: Schema.optionalKey(HostParameters),
     resources: Schema.Array(ResourceBinding),
     wire: Schema.optionalKey(WireAuthority),
@@ -89,7 +76,7 @@ export class ResponseCapture extends Schema.Class<ResponseCapture>("ResponseCapt
  * is stored; `commit`, `cancel` or `refuse` once it settles that way. An
  * uncertain emission owes no further receipt: there is no outcome to attest.
  */
-export const LedgerPhase = Schema.Literals(["stage", "commit", "cancel", "refuse"])
+export const LedgerPhase = Schema.Literals(["stage", "commit", "cancel", "refuse", "capture"])
 export type LedgerPhase = typeof LedgerPhase.Type
 
 export const UncertainReason = Schema.Literals([
@@ -186,7 +173,8 @@ export const EmissionRecord = Schema.Union([
   CommittedEmission,
   UncertainEmission,
   RefusedEmission,
-  CancelledEmission
+  CancelledEmission,
+  CapturedEmission
 ])
 export type EmissionRecord = typeof EmissionRecord.Type
 
@@ -216,7 +204,7 @@ export class SealedDispatch extends Schema.Class<SealedDispatch>("SealedDispatch
 
 // ── the one way a record moves ──────────────────────────────────────────────
 
-const identityOf = (record: EmissionRecord) => ({
+const identityOf = (record: Exclude<EmissionRecord, CapturedEmission>) => ({
   id: record.id,
   key: record.key,
   kind: record.kind,
@@ -305,7 +293,9 @@ export const advance = <From extends ActiveState, const To extends Arrival<Next<
 
 /** The phases a record's state owes the Ledger, in the order they happened. */
 export const owedPhases = (record: EmissionRecord): ReadonlyArray<LedgerPhase> =>
-  record.state === "committed"
+  record.state === "captured"
+    ? ["capture"]
+    : record.state === "committed"
     ? ["stage", "commit"]
     : record.state === "cancelled"
       ? ["stage", "cancel"]
@@ -315,7 +305,7 @@ export const owedPhases = (record: EmissionRecord): ReadonlyArray<LedgerPhase> =
 
 /** Whether the record's state owes the Ledger a receipt that is not yet marked durable. */
 export const owesReceipt = (record: EmissionRecord): boolean =>
-  owedPhases(record).some((phase) => !record.ledgered.includes(phase))
+  owedPhases(record).some((phase) => !(record.ledgered as ReadonlyArray<LedgerPhase>).includes(phase))
 
 /**
  * A record class instance from anything shaped like one. The kernel's typed
@@ -323,6 +313,7 @@ export const owesReceipt = (record: EmissionRecord): boolean =>
  * encodable record again, and it validates every field on the way.
  */
 export const rebuild = <Record extends EmissionRecord>(record: Record): Record => {
+  if (record.state === "captured") return new CapturedEmission(record) as Record
   const identity = identityOf(record)
   switch (record.state) {
     case "staged": return new StagedEmission(identity) as Record
@@ -368,7 +359,7 @@ export const rebuild = <Record extends EmissionRecord>(record: Record): Record =
  * exactly this; marking a phase twice changes nothing.
  */
 export const acknowledge = <Record extends EmissionRecord>(record: Record, phase: LedgerPhase): Record =>
-  record.ledgered.includes(phase)
+  (record.ledgered as ReadonlyArray<LedgerPhase>).includes(phase)
     ? record
     : rebuild({ ...record, ledgered: [...record.ledgered, phase] })
 
@@ -405,7 +396,7 @@ export class TransitionConflict extends Schema.TaggedError<TransitionConflict>()
   {
     id: EmissionId,
     expected: Schema.Literals(["staged", "committing"]),
-    actual: Schema.Literals(["staged", "committing", "committed", "uncertain", "refused", "cancelled"])
+    actual: Schema.Literals(["staged", "committing", "committed", "uncertain", "refused", "cancelled", "captured"])
   }
 ) {}
 

@@ -166,9 +166,9 @@ const hasDaemonOp = (
 const isAuthorizedReadEvidence = (
   emission: OutboxEmission
 ): boolean => {
+  if (emission.state !== "staged") return false
   const authorization = emission.authorization
-  return emission.state === "staged" &&
-    authorization !== undefined &&
+  return authorization !== undefined &&
     authorization.dispatchClass === "read" &&
     authorization.sealDigest.length > 0 &&
     authorization.target === emission.summary.target

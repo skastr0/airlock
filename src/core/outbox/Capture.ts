@@ -3,7 +3,7 @@ import { Sha256Digest } from "../Canonical.ts"
 import { HostParameters, ResourceBinding } from "../contract/ToolHost.ts"
 import { WireAuthority } from "../contract/Wire.ts"
 import { LedgerEntry } from "../ledger/Ledger.ts"
-import { EmissionId, IdempotencyKey } from "./Records.ts"
+import { EmissionId, IdempotencyKey } from "./Identifiers.ts"
 
 export const CaptureRetention = Schema.Literals(["digest", "keep"])
 export type CaptureRetention = typeof CaptureRetention.Type

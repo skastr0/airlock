@@ -128,7 +128,7 @@ export const runWorkedExample = (adapters: WorkedExampleAdapters) =>
         return {
           sent: sent.state,
           labelled: labelled.state,
-          answer: { kind: answer.kind, compensates: answer.compensates === labelled.id },
+          answer: { kind: answer.kind, compensates: answer.state !== "captured" && answer.compensates === labelled.id },
           sameAnswer: answeredTwice.id === answer.id,
           removed: removed.state
         }

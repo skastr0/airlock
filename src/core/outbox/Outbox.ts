@@ -171,7 +171,8 @@ export const takeWireRequest = (token: WireToken): WireRequest | undefined => {
 type Typed<Record, Tag, Summary, Outcome> =
   & Omit<Record, "kind" | "summary" | "outcome">
   & { readonly kind: Tag; readonly summary: Summary }
-  & (Record extends { readonly outcome: unknown } ? { readonly outcome: Outcome } : unknown)
+  & (Record extends { readonly state: "captured" } ? Pick<Record, "outcome" & keyof Record>
+    : Record extends { readonly outcome: unknown } ? { readonly outcome: Outcome } : unknown)
 
 /**
  * An emission as callers see it: the stored record with its kind's summary and
@@ -257,7 +258,7 @@ export class OutboxRecoveryRequired extends Schema.TaggedError<OutboxRecoveryReq
   "OutboxRecoveryRequired",
   {
     id: EmissionId,
-    status: Schema.Literals(["staged", "committing", "committed", "uncertain", "refused", "cancelled"]),
+    status: Schema.Literals(["staged", "committing", "committed", "uncertain", "refused", "cancelled", "captured"]),
     reason: Schema.String
   }
 ) {}
@@ -530,7 +531,7 @@ export const defineOutbox = <const Kinds extends IntentKinds>(
     const receiptFor = (record: EmissionRecord, phase: LedgerPhase) =>
       Effect.gen(function* () {
         const base = { effect: "emission", ref: record.id, key: `${record.id}:${phase}` } as const
-        if (phase === "stage") {
+        if (phase === "stage" && record.state !== "captured") {
           const kind = yield* kindOf(record)
           const summary = yield* Schema.decodeUnknownEffect(kind.summary)(record.summary).pipe(
             Effect.mapError((error) => corrupt(record.id, "record", `summary: ${error.message}`))
@@ -576,7 +577,7 @@ export const defineOutbox = <const Kinds extends IntentKinds>(
       Effect.gen(function* () {
         let settled = record
         for (const phase of owedPhases(record)) {
-          if (settled.ledgered.includes(phase)) continue
+          if ((settled.ledgered as ReadonlyArray<LedgerPhase>).includes(phase)) continue
           yield* ledger.record(yield* receiptFor(settled, phase)).pipe(Effect.mapError(recovery(settled)))
           yield* store.acknowledge(record.id, phase).pipe(
             Effect.catchTag("UnknownEmission", () =>

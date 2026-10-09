@@ -248,6 +248,8 @@ export const outboxConformance = (
         const first = yield* session(current, wire, (outbox) => outbox.stage(request("a")))
         const replay = yield* session(current, wire, (outbox) => outbox.stage(request("a")))
         same(replay.id, first.id)
+        holds(replay.state !== "captured" && first.state !== "captured", "staging creates lifecycle evidence")
+        if (replay.state === "captured" || first.state === "captured") return
         same(replay.stagedAt.toString(), first.stagedAt.toString())
 
         const committed = yield* session(current, wire, (outbox) => outbox.commit(first.id, bySupervisor))
@@ -863,7 +865,7 @@ export const outboxConformance = (
 
         const answer = yield* toolSession(current, handlers, (outbox) =>
           outbox.compensate(added.emission, { holdMillis: 5_000 }))
-        same([answer.kind, answer.state, answer.compensates], ["label.remove", "staged", added.emission.id])
+        same([answer.kind, answer.state, answer.state === "captured" ? undefined : answer.compensates], ["label.remove", "staged", added.emission.id])
         same(answer.kind === "label.remove" ? answer.summary.public : null, { label: "urgent" })
         same(calls.map((call) => call.tool), ["label.add"], "staging a compensation sends nothing")
 

@@ -370,7 +370,8 @@ export const make = Effect.gen(function* () {
           ))
 
   const byStagedAt = (left: EmissionRecord, right: EmissionRecord) =>
-    left.stagedAt.epochMilliseconds - right.stagedAt.epochMilliseconds ||
+    (left.state === "captured" ? left.completedAt : left.stagedAt).epochMilliseconds -
+      (right.state === "captured" ? right.completedAt : right.stagedAt).epochMilliseconds ||
     (left.id < right.id ? -1 : left.id > right.id ? 1 : 0)
 
   /**

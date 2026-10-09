@@ -3,7 +3,7 @@ import { DateTime, Result, Schema } from "effect"
 import { Sha256Digest } from "../src/core/Canonical.ts"
 import { LedgerEntry } from "../src/core/ledger/Ledger.ts"
 import { CapturedEmission, type CaptureEntry, validateCaptureEntry } from "../src/core/outbox/Capture.ts"
-import { EmissionId, IdempotencyKey } from "../src/core/outbox/Records.ts"
+import { EmissionRecord, EmissionId, IdempotencyKey, owesReceipt } from "../src/core/outbox/Records.ts"
 
 const digest = Sha256Digest.make(`sha256:${"a".repeat(64)}`)
 const id = EmissionId.make(`emi_${"a".repeat(32)}`)
@@ -18,24 +18,28 @@ const entry: CaptureEntry = { record, result: { digest }, receipt: new LedgerEnt
 describe("core: capture journal entry contract", () => {
   it("has no staged, hold or committing history, and accepts exactly one observation receipt", () => {
     expect(Result.isSuccess(validateCaptureEntry(entry))).toBe(true)
-    const decode = Schema.decodeUnknownResult(Schema.toType(CapturedEmission), { onExcessProperty: "error" })
+    const decode = Schema.decodeUnknownResult(CapturedEmission, { onExcessProperty: "error" })
+    const raw = Schema.encodeSync(CapturedEmission)(record)
+    expect(Result.isSuccess(Schema.decodeUnknownResult(EmissionRecord)(raw))).toBe(true)
+    expect(owesReceipt(record)).toBe(false)
     for (const field of ["stagedAt", "holdUntil", "committingAt", "provenance"]) {
-      expect(Result.isFailure(decode({ ...record, [field]: now }))).toBe(true)
+      expect(Result.isFailure(decode({ ...raw, [field]: "2026-10-09T00:00:00Z" }))).toBe(true)
     }
     for (const receipt of [{ ...entry.receipt, act: "commit" }, { ...entry.receipt, effect: "mutation" },
       { ...entry.receipt, ref: "another-call" }, { ...entry.receipt, key: "another-receipt" }]) {
-      expect(Result.isFailure(validateCaptureEntry({ ...entry, receipt }))).toBe(true)
+      expect(Result.isFailure(validateCaptureEntry({ ...entry, receipt: new LedgerEntry(receipt as LedgerEntry) }))).toBe(true)
     }
   })
 
   it("cannot represent apply, invoke, request or approved authority", () => {
+    const raw = Schema.encodeSync(CapturedEmission)(record)
+    const decode = Schema.decodeUnknownResult(CapturedEmission, { onExcessProperty: "error" })
     for (const effect of ["apply", "invoke", "request"]) {
-      const forged = { ...entry, record: { ...record, admission: { ...record.admission,
-        execution: { ...record.admission.execution, effect } } } }
-      expect(Result.isFailure(validateCaptureEntry(forged))).toBe(true)
+      expect(Result.isFailure(decode({ ...raw, admission: { ...raw.admission,
+        execution: { ...raw.admission.execution, effect } } }))).toBe(true)
     }
-    expect(Result.isFailure(validateCaptureEntry({ ...entry, record: { ...record, admission: { ...record.admission,
-      execution: { ...record.admission.execution, when: "approved" } } } }))).toBe(true)
+    expect(Result.isFailure(decode({ ...raw, admission: { ...raw.admission,
+      execution: { ...raw.admission.execution, when: "approved" } } }))).toBe(true)
     if (false) {
       // @ts-expect-error only capture may use this durable record
       const effect: CapturedEmission["admission"]["execution"]["effect"] = "apply"
