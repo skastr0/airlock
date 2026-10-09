@@ -155,6 +155,15 @@ export const openToolSession = <Contracts extends ToolContracts, Granted extends
     const grants: ReadonlyArray<ToolGrantPolicy> = Object.freeze([...policy.toolGrants])
     const rejection = validateToolGrants(grants, contracts)
     if (rejection !== undefined) return yield* new InvalidToolSession(rejection)
+    for (const [name, fields] of Object.entries(policy.flow)) {
+      const contract = Object.hasOwn(contracts, name) ? contracts[name] : undefined
+      if (contract === undefined) return yield* new InvalidToolSession({ field: `policy.flow.${name}`, reason: "must name a registered tool" })
+      for (const field of Object.keys(fields)) {
+        if (!contract.flow.sinks.includes(field)) {
+          return yield* new InvalidToolSession({ field: `policy.flow.${name}.${field}`, reason: "must name a declared disclosure sink" })
+        }
+      }
+    }
     const { maxCalls, maxInputBytes } = policy.budget
     const policyDigest = yield* toolPolicyDigest(policy)
 

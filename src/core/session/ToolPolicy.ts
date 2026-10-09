@@ -1,6 +1,7 @@
-import { type Crypto, type Effect, Schema } from "effect"
+import { type Crypto, Effect, Schema } from "effect"
 import { type ToolGrantPolicy as Grant, ToolGrantPolicy } from "../admission/ToolGrant.ts"
 import { type DigestUnavailable, type Sha256Digest, sha256Canonical } from "../Canonical.ts"
+import { SinkPolicy } from "../labels/Labels.ts"
 
 const Count = Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))
 
@@ -12,6 +13,11 @@ const Count = Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))
 export class ToolPolicy extends Schema.Class<ToolPolicy>("ToolPolicy")({
   schemaVersion: Schema.tag("airlock/tool-policy/v1"),
   toolGrants: Schema.Array(ToolGrantPolicy),
+  /** Supervisor ceilings by tool and encoded input field; contracts confer no release authority. */
+  flow: Schema.Record(Schema.String, Schema.Record(Schema.String, SinkPolicy)).pipe(
+    Schema.withDecodingDefault(Effect.succeed({})),
+    Schema.withConstructorDefault(Effect.succeed({}))
+  ),
   budget: Schema.Struct({
     maxCalls: Count,
     /** Total canonical input bytes across all calls of a session. */
@@ -27,6 +33,7 @@ export type ToolPolicyFor<Granted extends string> = ToolPolicy & {
 export const toolPolicy = <Granted extends string>(policy: {
   readonly toolGrants: ReadonlyArray<Grant & { readonly tool: Granted }>
   readonly budget: ToolPolicy["budget"]
+  readonly flow?: ToolPolicy["flow"]
 }): ToolPolicyFor<Granted> =>
   // The class instance holds the same grants it was given; the type keeps their tool names.
   new ToolPolicy(policy) as ToolPolicyFor<Granted>

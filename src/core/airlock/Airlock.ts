@@ -1,5 +1,7 @@
 import { type Crypto, Effect, Layer, Option, Schema } from "effect"
-import type { ToolContract } from "../contract/ToolContract.ts"
+import { InvalidToolContract, type ToolContract } from "../contract/ToolContract.ts"
+import { defineDecoderCatalog, type TrustedDecoder } from "../contract/Decoder.ts"
+import { validateFlowDecoders } from "../contract/Flow.ts"
 import type { Ledger } from "../ledger/Ledger.ts"
 import type { ClosedUnderCompensation } from "../outbox/Intent.ts"
 import { defineOutbox, type OutboxDefinition, type OutboxOf } from "../outbox/Outbox.ts"
@@ -80,6 +82,7 @@ export interface Supervisor {
 
 export interface Airlock<Contracts extends ToolContracts, Env> {
   readonly contracts: Contracts
+  readonly decoders: Readonly<Record<string, TrustedDecoder.Any>>
   /** The kernel underneath, for adapter authors. Users do not need it. */
   readonly outbox: OutboxDefinition<Contracts>
   readonly policy: (env: Env) => ToolPolicy
@@ -169,15 +172,19 @@ const encodeRecord = Schema.encodeSync(EmissionRecord)
  */
 export const defineAirlock = <const List extends ReadonlyArray<ToolContract.Any>, Env = unknown>(definition: {
   readonly contracts: List
+  readonly decoders?: ReadonlyArray<TrustedDecoder.Any>
   readonly implement: Implementations<ByName<List>, Env>
   readonly policy: ToolPolicy | ((env: Env) => ToolPolicy)
 } & (ByName<List> extends infer Kinds extends ToolContracts ? { readonly __closed?: ClosedUnderCompensation<Kinds> } : never)): Airlock<ByName<List> & ToolContracts, Env> => {
   type Contracts = ByName<List> & ToolContracts
+  const decoders = defineDecoderCatalog(definition.decoders ?? [])
   const byName: { [name: string]: ToolContract.Any } = {}
   for (const contract of definition.contracts) {
     if (Object.hasOwn(byName, contract.tag)) {
       throw new TypeError(`two contracts are named ${contract.tag}`)
     }
+    const invalidFlow = validateFlowDecoders(contract.flow, decoders)
+    if (invalidFlow !== undefined) throw new InvalidToolContract({ tool: contract.tag, ...invalidFlow })
     byName[contract.tag] = contract
   }
   // Keyed by each contract's own name; the mapped type says the same thing.
@@ -297,5 +304,5 @@ export const defineAirlock = <const List extends ReadonlyArray<ToolContract.Any>
 
   const supervisor = forThisDefinition(supervisorOf) as Airlock<Contracts, Env>["supervisor"]
 
-  return { contracts, outbox, policy, layer, guest, supervisor }
+  return { contracts, decoders, outbox, policy, layer, guest, supervisor }
 }

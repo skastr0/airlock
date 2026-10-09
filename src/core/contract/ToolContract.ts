@@ -4,6 +4,8 @@ import type { Compensation, IntentKind } from "../outbox/Intent.ts"
 import { InvalidIntent } from "../outbox/Records.ts"
 import { PlanEffect } from "../plan/Plan.ts"
 import { ResourceField, type ResourceFields, resourceFieldFits } from "./Resource.ts"
+import { ownToolFlow, requestSinkFields, type ToolFlow, type ToolFlowFor, validateToolFlow } from "./Flow.ts"
+import { modelSchema, type SchemaModel } from "./SchemaModel.ts"
 
 /**
  * What a tool call looks like to everything except its handler: which tool,
@@ -41,6 +43,7 @@ export interface ToolShape {
   readonly public: string
   readonly effect: PlanEffect
   readonly resources: Readonly<Record<string, ResourceField>>
+  readonly flow: ToolFlow
   /** Name of the contract that answers a committed call; `never` when irreversible. */
   readonly answer: string
 }
@@ -58,6 +61,9 @@ export interface ToolContract<Shape extends ToolShape>
   /** The only input fields whose values a summary, grant or receipt may see. */
   readonly publicFields: ReadonlyArray<Shape["public"]>
   readonly resources: Shape["resources"]
+  readonly flow: Shape["flow"]
+  /** The closed language view: unsupported schemas remain opaque nominal values. */
+  readonly model: { readonly input: SchemaModel; readonly output: SchemaModel }
 }
 
 export declare namespace ToolContract {
@@ -68,6 +74,7 @@ export declare namespace ToolContract {
   export type OutputOf<Contract> = ShapeOf<Contract>["output"]
   export type EffectOf<Contract> = ShapeOf<Contract>["effect"]
   export type ResourcesOf<Contract> = ShapeOf<Contract>["resources"]
+  export type FlowOf<Contract> = ShapeOf<Contract>["flow"]
 }
 
 export class InvalidToolContract extends Schema.TaggedError<InvalidToolContract>()("InvalidToolContract", {
@@ -104,6 +111,7 @@ export const defineToolContract = <
   readonly effect: Declared
   readonly public?: ReadonlyArray<Public>
   readonly resources?: Resources & ResourceFields<Wire, Public> & { readonly [Field in Exclude<keyof Resources, Public>]: never }
+  readonly flow?: ToolFlowFor<Wire, Output>
   /** Defaults to `tool:<name>`. Must not reveal a field that is not public. */
   readonly target?: (input: Input) => string
   /**
@@ -126,6 +134,7 @@ export const defineToolContract = <
   readonly public: Public
   readonly effect: Declared
   readonly resources: Resources
+  readonly flow: ToolFlow
   readonly answer: Answer["tag"]
 }> => {
   const answer: Compensation<Input, Output, Answer["tag"]> | undefined = spec.compensate === undefined
@@ -135,6 +144,13 @@ export const defineToolContract = <
   const declared = spec.resources ?? {}
   const decoded = Schema.decodeUnknownResult(Schema.Record(Schema.String, ResourceField), { onExcessProperty: "error" })(declared)
   const invalid = (field: string, reason: string) => new InvalidToolContract({ tool: spec.name, field, reason })
+  const decodedFlow = ownToolFlow(spec.flow)
+  if (Result.isFailure(decodedFlow)) throw invalid(decodedFlow.failure.field, decodedFlow.failure.reason)
+  const flow = spec.effect === "request"
+    ? Object.freeze({ ...decodedFlow.success, sinks: Object.freeze([...new Set([...requestSinkFields(spec.input), ...decodedFlow.success.sinks])]) })
+    : decodedFlow.success
+  const invalidFlow = validateToolFlow(flow, spec.input, spec.output)
+  if (invalidFlow !== undefined) throw invalid(invalidFlow.field, invalidFlow.reason)
   if (Result.isFailure(decoded)) throw invalid("resources", "must contain valid resource descriptors")
   const resources: Record<string, ResourceField> = Object.create(null)
   for (const [field, descriptor] of Object.entries(decoded.success)) {
@@ -159,6 +175,11 @@ export const defineToolContract = <
     effect: spec.effect,
     publicFields,
     resources: Object.freeze(resources) as Resources,
+    flow,
+    model: Object.freeze({
+      input: modelSchema(spec.input, { identity: JSON.stringify([spec.name, spec.version, "input"]), side: "encoded" }),
+      output: modelSchema(spec.output, { identity: JSON.stringify([spec.name, spec.version, "output"]), side: "decoded" })
+    }),
     dispatch: spec.input,
     summary: ToolSummary,
     outcome: spec.output,
