@@ -12,7 +12,8 @@ import type { HeldActReport, HeldCallReference, HeldCalls } from "./HeldCalls.ts
  * port's. Where an answer is folded, the reason says what was folded.
  */
 
-const local = (reference: HeldReference): HeldCallReference => ({
+/** The kernel's reference, as `HeldCalls` names it. */
+export const heldCallReference = (reference: HeldReference): HeldCallReference => ({
   callId: reference.callId,
   recoveryId: reference.recoveryId,
   heldUntil: DateTime.formatIso(reference.heldUntil)
@@ -42,7 +43,7 @@ export const localRecovery = (calls: HeldCalls["Service"]): HostRecovery => {
         Effect.mapError(failed(call.callId))
       ),
     inspect: (reference) =>
-      calls.inspect(local(reference)).pipe(
+      calls.inspect(heldCallReference(reference)).pipe(
         Effect.map((state) => {
           switch (state.state) {
             case "prepared":
@@ -61,7 +62,7 @@ export const localRecovery = (calls: HeldCalls["Service"]): HostRecovery => {
         Effect.mapError(failed(reference.callId))
       ),
     restore: (reference) =>
-      calls.restore(local(reference)).pipe(
+      calls.restore(heldCallReference(reference)).pipe(
         Effect.map((restored) => {
           switch (restored.state) {
             case "restored":
