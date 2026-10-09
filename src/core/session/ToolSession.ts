@@ -10,6 +10,9 @@ import { canonicalJson, type DigestUnavailable, sha256Text } from "../Canonical.
 import type { ToolContract, ToolSummary } from "../contract/ToolContract.ts"
 import type { TrustedDecoder } from "../contract/Decoder.ts"
 import { validateFlowRules } from "../contract/FlowRules.ts"
+import { portableToolHost } from "../contract/PortableToolHost.ts"
+import { type ToolHost, ResourceRefused } from "../contract/ToolHost.ts"
+import { loadResourcePolicy } from "../admission/ResourcePolicy.ts"
 import type { EmissionState } from "../outbox/Lifecycle.ts"
 import type { OutboxDefinition, OutboxOf, PerformError, StageError } from "../outbox/Outbox.ts"
 import {
@@ -48,9 +51,8 @@ export interface Staged {
  * Only a capture currently returns an outcome through a
  * session. For every other tool the result type is `Staged` alone.
  */
-export type CallResult<Contract> = ToolContract.EffectOf<Contract> extends "capture"
-  ? Performed<ToolContract.OutputOf<Contract>> | Staged
-  : Staged
+export type CallResult<Contract> = ToolContract.EffectOf<Contract> extends "request"
+  ? Staged : Performed<ToolContract.OutputOf<Contract>> | Staged
 
 // ── errors ──────────────────────────────────────────────────────────────────
 
@@ -88,6 +90,7 @@ export type ToolCallError =
   | SessionBudgetExceeded
   | InvalidToolInput
   | ToolCallNotGranted
+  | ResourceRefused
   | DigestUnavailable
   | StageError
   | PerformError
@@ -120,6 +123,7 @@ export interface ToolSessionOptions<Granted extends string> {
    */
   readonly policy: ToolPolicyFor<Granted>
   readonly decoders?: Readonly<Record<string, TrustedDecoder.Any>>
+  readonly host?: ToolHost
   /** Hold applied to every call this session stages. */
   readonly holdMillis?: number
 }
@@ -142,6 +146,7 @@ export const openToolSession = <Contracts extends ToolContracts, Granted extends
 > =>
   Effect.gen(function* () {
     const contracts = outbox.kinds
+    const host = options.host ?? portableToolHost
     const runId = options.runId
     const holdMillis = options.holdMillis ?? 0
     // The policy is decoded again here, so the session holds its own validated
@@ -156,10 +161,13 @@ export const openToolSession = <Contracts extends ToolContracts, Granted extends
       Effect.mapError((error) => new InvalidToolSession({ field: "policy", reason: error.message }))
     )
     const grants: ReadonlyArray<ToolGrantPolicy> = Object.freeze([...policy.toolGrants])
-    const rejection = validateToolGrants(grants, contracts)
+    const rejection = validateToolGrants(grants, contracts, host)
     if (rejection !== undefined) return yield* new InvalidToolSession(rejection)
     const flowRejection = validateFlowRules(policy.flowRules, contracts, options.decoders ?? {})
     if (flowRejection !== undefined) return yield* new InvalidToolSession(flowRejection)
+    const resourcePolicy = yield* loadResourcePolicy(policy.resources, grants, contracts, host).pipe(
+      Effect.mapError((error) => new InvalidToolSession({ field: error.field, reason: error.reason }))
+    )
     for (const [name, fields] of Object.entries(policy.flow)) {
       const contract = Object.hasOwn(contracts, name) ? contracts[name] : undefined
       if (contract === undefined) return yield* new InvalidToolSession({ field: `policy.flow.${name}`, reason: "must name a registered tool" })
@@ -201,20 +209,23 @@ export const openToolSession = <Contracts extends ToolContracts, Granted extends
         if (summarized._tag === "Failure") {
           return yield* new InvalidToolInput({ tool: contract.tag, reason: summarized.failure.reason })
         }
-        const summary = summarized.success
-        inputBytes += summary.inputBytes
+        inputBytes += summarized.success.inputBytes
         if (inputBytes > maxInputBytes) {
           return yield* new SessionBudgetExceeded({ budget: "inputBytes", limit: maxInputBytes })
         }
+        const bounded = yield* resourcePolicy.bind(contract, input, summarized.success)
+        const summary = bounded.summary
 
-        const fitting = fittingToolGrants(grants, summary)
+        const fitting = fittingToolGrants(grants, summary, bounded.match)
         if (fitting.length === 0) {
           return yield* new ToolCallNotGranted({
             tool: contract.tag,
-            unmet: unmetToolGrants(grants, summary)
+            unmet: unmetToolGrants(grants, summary, bounded.match)
           })
         }
         const grantIds = fitting.map((grant) => grant.id)
+        const decision = toolDispatchDecision(grants, contracts, summary, { host, resource: bounded.match, now: yield* DateTime.now })
+        if (decision._tag === "Refused") return yield* new ToolCallNotGranted({ tool: contract.tag, unmet: [{ grantId: grantIds.join(","), field: decision.reason }] })
 
         // The key names this call of this run: same run, same position, same
         // input. A guest that diverges on re-execution gets a different key
@@ -230,11 +241,14 @@ export const openToolSession = <Contracts extends ToolContracts, Granted extends
           key,
           intent: { kind: contract.tag, dispatch: input },
           holdMillis,
-          admission: new EmissionAdmission({ policyDigest, grantIds })
+          admission: new EmissionAdmission({ policyDigest, grantIds, execution: {
+            runId, tool: contract.tag, version: contract.version, effect: contract.effect,
+            when: decision._tag === "Now" ? "now" : "approved", resources: bounded.resources.map((resource) => resource.binding),
+            ...(decision.host === undefined ? {} : { host: decision.host }),
+            ...(decision.validUntil === undefined ? {} : { validUntil: decision.validUntil })
+          } })
         }
 
-        const decision = toolDispatchDecision(grants, contracts, summary, { now: yield* DateTime.now })
-        if (decision._tag === "Refused") return yield* new ToolCallNotGranted({ tool: contract.tag, unmet: [{ grantId: grantIds.join(","), field: decision.reason }] })
         if (decision._tag === "Now") {
           const performed = yield* service.perform(
             request,

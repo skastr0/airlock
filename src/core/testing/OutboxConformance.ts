@@ -785,7 +785,7 @@ export const outboxConformance = (
           intent: { kind: "mail.list", dispatch: { mailbox: "inbox", query: "from:ada" } },
           holdMillis: 0
         } as const
-        const provenance = new DispatchProvenance({ committedBy: "policy-auto", dispatchClass: "read" })
+        const provenance = new DispatchProvenance({ committedBy: "supervisor" })
         const first = yield* toolSession(current, handlers, (outbox) => outbox.perform(read, provenance))
         same(first.emission.outcome, { ids: ["m-1", "inbox"] })
         same(new TextDecoder().decode(first.response), "listing 1")
@@ -965,7 +965,9 @@ export const outboxConformance = (
           Effect.all([store.read(first.sent.id), store.read(first.listed.id)]))
         same(
           Option.map(sentRecord, (record) => record.admission),
-          Option.some({ policyDigest: digest, grantIds: ["grant/mailsend/2"] })
+          Option.some({ policyDigest: digest, grantIds: ["grant/mailsend/2"], execution: {
+            runId: "run-1", tool: "mail.send", version: "1", effect: "request", when: "approved", resources: []
+          } })
         )
         same(
           Option.map(listedRecord, (record) => [

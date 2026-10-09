@@ -3,6 +3,7 @@ import { type ToolGrantPolicy as Grant, ToolGrantPolicy } from "../admission/Too
 import { type DigestUnavailable, type Sha256Digest, sha256Canonical } from "../Canonical.ts"
 import { SinkPolicy } from "../labels/Labels.ts"
 import { composeFlowRules, FlowRule } from "../contract/FlowRules.ts"
+import { ResourcePolicy } from "../admission/ResourcePolicy.ts"
 
 const Count = Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))
 
@@ -14,6 +15,10 @@ const Count = Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))
 export class ToolPolicy extends Schema.Class<ToolPolicy>("ToolPolicy")({
   schemaVersion: Schema.tag("airlock/tool-policy/v1"),
   toolGrants: Schema.Array(ToolGrantPolicy),
+  resources: ResourcePolicy.pipe(
+    Schema.withDecodingDefault(Effect.succeed({})),
+    Schema.withConstructorDefault(Effect.succeed({}))
+  ),
   /** Named author decisions; review checks every origin and every exact-value condition. */
   flowRules: Schema.Array(FlowRule).pipe(
     Schema.withDecodingDefault(Effect.succeed([])),
@@ -41,6 +46,7 @@ export const toolPolicy = <Granted extends string>(policy: {
   readonly budget: ToolPolicy["budget"]
   readonly flow?: ToolPolicy["flow"]
   readonly flowRules?: ToolPolicy["flowRules"]
+  readonly resources?: ToolPolicy["resources"]
 }): ToolPolicyFor<Granted> =>
   // The class instance holds the same grants it was given; the type keeps their tool names.
   new ToolPolicy({ ...policy, flowRules: composeFlowRules(policy.flowRules ?? []) }) as ToolPolicyFor<Granted>

@@ -1,5 +1,7 @@
 import { Result, Schema } from "effect"
 import { Sha256Digest } from "../Canonical.ts"
+import { GrantWhen, HostParameters, ResourceBinding } from "../contract/ToolHost.ts"
+import { PlanEffect } from "../plan/Plan.ts"
 import type { ActiveState, EmissionState, Next } from "./Lifecycle.ts"
 
 // ── identifiers ─────────────────────────────────────────────────────────────
@@ -60,7 +62,17 @@ export class DispatchProvenance extends Schema.Class<DispatchProvenance>(
  */
 export class EmissionAdmission extends Schema.Class<EmissionAdmission>("EmissionAdmission")({
   policyDigest: Sha256Digest,
-  grantIds: Schema.Array(Schema.String)
+  grantIds: Schema.Array(Schema.String),
+  execution: Schema.optionalKey(Schema.Struct({
+    runId: Schema.String,
+    tool: Schema.String,
+    version: Schema.String,
+    effect: PlanEffect,
+    when: GrantWhen,
+    host: Schema.optionalKey(HostParameters),
+    resources: Schema.Array(ResourceBinding),
+    validUntil: Schema.optionalKey(Schema.DateTimeUtcFromString)
+  }))
 }) {}
 
 /** Shape of the bounded response capture; the bytes live in the store's blob. */

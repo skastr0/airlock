@@ -33,6 +33,8 @@ describe("core: tool grant timing and typed matchers", () => {
       toolGrant(inspect, { id: "bad", where: { names: { subsetOf: [1] } } })
       // @ts-expect-error within is only for declared resource operands
       toolGrant(inspect, { id: "bad", where: { names: { within: ["a"] } } })
+      // @ts-expect-error resources match through a host-resolved scope
+      toolGrant(inspect, { id: "bad", where: { path: { startsWith: "https://example.test" } } })
     }
   })
   it("never evaluates physical within as a textual match", () => {

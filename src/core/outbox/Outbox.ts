@@ -64,6 +64,7 @@ export interface DispatchPermit<Tag extends string = string> {
 
 const livePermits = new WeakSet<object>()
 const permitDispatches = new WeakMap<object, string>()
+const permitAdmissions = new WeakMap<object, EmissionAdmission>()
 const WireTypeId: unique symbol = Symbol("airlock/core/WireToken")
 
 /** One host network operation inside an admitted implementation's live call. */
@@ -78,7 +79,8 @@ const mintPermit = <Tag extends string>(
   kind: Tag,
   emissionId: EmissionId,
   dispatchDigest: Sha256Digest,
-  canonical: string
+  canonical: string,
+  admission?: EmissionAdmission
 ): DispatchPermit<Tag> => {
   const permit: DispatchPermit<Tag> = Object.freeze({
     [PermitTypeId]: kind,
@@ -88,6 +90,16 @@ const mintPermit = <Tag extends string>(
   })
   livePermits.add(permit)
   permitDispatches.set(permit, canonical)
+  if (admission !== undefined) {
+    const snapshot = Schema.decodeUnknownSync(Schema.fromJsonString(EmissionAdmission))(
+      Schema.encodeSync(Schema.fromJsonString(EmissionAdmission))(admission)
+    )
+    const freeze = (value: unknown): void => {
+      if (value !== null && typeof value === "object") { Object.values(value).forEach(freeze); Object.freeze(value) }
+    }
+    freeze(snapshot)
+    permitAdmissions.set(permit, snapshot)
+  }
   return permit
 }
 
@@ -97,6 +109,14 @@ const mintPermit = <Tag extends string>(
  */
 export const isLivePermit = (permit: DispatchPermit): boolean => livePermits.has(permit)
 
+/** Inert checks before host preparation; consuming the exact call is still required to act. */
+export const permitAuthorizes = (permit: DispatchPermit, kind: string, canonical: string): boolean =>
+  isLivePermit(permit) && permit.kind === kind && permitDispatches.get(permit) === canonical
+
+/** Execution authority comes from the minted permit, never substituted handler arguments. */
+export const permitAdmission = (permit: DispatchPermit): EmissionAdmission | undefined =>
+  isLivePermit(permit) ? permitAdmissions.get(permit) : undefined
+
 /**
  * For wire handlers, at execution time: consume one live permit for exactly
  * its staged kind and canonical encoded dispatch. Checking and consuming are
@@ -104,9 +124,7 @@ export const isLivePermit = (permit: DispatchPermit): boolean => livePermits.has
  * nothing; a consumed or revoked permit never authorizes another request.
  */
 export const consumePermit = (permit: DispatchPermit, kind: string, canonical: string): boolean => {
-  if (!isLivePermit(permit) || permit.kind !== kind) return false
-  const bound = permitDispatches.get(permit)
-  if (bound === undefined || bound !== canonical) return false
+  if (!permitAuthorizes(permit, kind, canonical)) return false
   permitDispatches.delete(permit)
   return true
 }
@@ -244,6 +262,7 @@ export type StageError =
   | Unreadable
 export type ReadError = UnknownEmission | Unreadable
 export type CommitError =
+  | InvalidDispatchAuthorization
   | UnknownEmission
   | EmissionNotPending
   | EmissionDispatchUncertain
@@ -376,14 +395,16 @@ const requestDigestOf = (
   dispatchDigest: Sha256Digest,
   holdMillis: number,
   authorization: DispatchAuthorization | undefined,
-  compensates: EmissionId | undefined
+  compensates: EmissionId | undefined,
+  admission: EmissionAdmission | undefined
 ) =>
   sha256Canonical({
     kind,
     dispatchDigest,
     holdMillis,
     authorization: authorization === undefined ? null : { ...authorization },
-    compensates: compensates ?? null
+    compensates: compensates ?? null,
+    admission: admission === undefined ? null : Schema.encodeSync(EmissionAdmission)(admission)
   })
 
 /** Compensations are named in their own id space, so no caller-chosen key can claim one. */
@@ -597,7 +618,8 @@ export const defineOutbox = <const Kinds extends IntentKinds>(
           record.dispatchDigest,
           DateTime.toEpochMillis(record.holdUntil) - DateTime.toEpochMillis(record.stagedAt),
           record.authorization,
-          record.compensates
+          record.compensates,
+          record.admission
         ).pipe(withCrypto)
         if (expected !== record.requestDigest) {
           return yield* corrupt(record.id, "record", "staged record does not match its request digest")
@@ -687,10 +709,15 @@ export const defineOutbox = <const Kinds extends IntentKinds>(
         }))
       }
       const admitted = request.admission
-      const admission = admitted === undefined ? undefined : new EmissionAdmission({
-        policyDigest: admitted.policyDigest,
-        grantIds: [...admitted.grantIds]
-      })
+      const decodedAdmission = admitted === undefined ? undefined : Schema.decodeUnknownResult(
+        Schema.toType(EmissionAdmission), { onExcessProperty: "error" }
+      )(admitted)
+      if (decodedAdmission !== undefined && Result.isFailure(decodedAdmission)) {
+        return Result.fail(new InvalidDispatchAuthorization({ field: "admission", reason: "must contain valid execution authority" }))
+      }
+      const admission = decodedAdmission === undefined ? undefined : Schema.decodeUnknownSync(
+        Schema.fromJsonString(EmissionAdmission), { onExcessProperty: "error" }
+      )(Schema.encodeSync(Schema.fromJsonString(EmissionAdmission))(decodedAdmission.success))
       return Result.succeed({
         tag,
         canonical,
@@ -725,7 +752,8 @@ export const defineOutbox = <const Kinds extends IntentKinds>(
         dispatchDigest,
         holdMillis,
         authorization,
-        compensates
+        compensates,
+        admission
       ).pipe(withCrypto)
       const id = yield* (
         compensates === undefined ? emissionIdFor(key) : compensationIdFor(compensates)
@@ -798,6 +826,14 @@ export const defineOutbox = <const Kinds extends IntentKinds>(
           yield* intact(staged)
           const kind = yield* kindOf(staged)
           const tag = kind.tag as Tag
+          const execution = staged.admission?.execution
+          if (execution?.validUntil !== undefined && DateTime.toEpochMillis(execution.validUntil) <= DateTime.toEpochMillis(yield* DateTime.now)) {
+            return yield* new InvalidDispatchAuthorization({ field: "admission.execution.validUntil", reason: "grant has expired" })
+          }
+          if (provenance.committedBy === "policy-auto" && "effect" in kind &&
+            (execution === undefined || execution.when !== "now" || execution.effect === "request" || kind.effect !== execution.effect)) {
+            return yield* new InvalidDispatchAuthorization({ field: "admission.execution.when", reason: "tool policy-auto requires admitted non-request now authority" })
+          }
           // Verify the sealed material before anything becomes irreversible.
           const sealed = yield* sealedDispatchOf(staged)
           const dispatch = sealed.dispatch
@@ -814,9 +850,10 @@ export const defineOutbox = <const Kinds extends IntentKinds>(
           // Dispatch is the interruptible portion. Once it has begun,
           // interruption is an honest uncertain outcome, not a bare fiber
           // interruption that erases the caller's receipt.
-          const permit = mintPermit(tag, id, committing.dispatchDigest, sealed.canonical)
+          const permit = mintPermit(tag, id, committing.dispatchDigest, sealed.canonical, committing.admission)
           const delivered = yield* restore(
-            Effect.suspend(() => handlers[tag]({ permit, dispatch, responseLimitBytes: RESPONSE_LIMIT_BYTES })).pipe(
+            Effect.suspend(() => handlers[tag]({ permit, dispatch, responseLimitBytes: RESPONSE_LIMIT_BYTES,
+              ...(committing.admission === undefined ? {} : { admission: committing.admission }), inputDigest: committing.dispatchDigest })).pipe(
               Effect.timeoutOption(DISPATCH_TIMEOUT_MILLIS),
               Effect.result
             )
@@ -824,6 +861,7 @@ export const defineOutbox = <const Kinds extends IntentKinds>(
             Effect.ensuring(Effect.sync(() => {
               livePermits.delete(permit)
               permitDispatches.delete(permit)
+              permitAdmissions.delete(permit)
             })),
             Effect.exit
           )

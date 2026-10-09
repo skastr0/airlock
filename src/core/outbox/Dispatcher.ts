@@ -1,6 +1,8 @@
 import { type Effect, Schema } from "effect"
 import type { IntentKind, IntentKinds } from "./Intent.ts"
 import type { DispatchPermit } from "./Outbox.ts"
+import type { Sha256Digest } from "../Canonical.ts"
+import type { EmissionAdmission } from "./Records.ts"
 
 /** What a handler returns for a dispatch that completed. */
 export interface Delivery<Outcome> {
@@ -38,6 +40,8 @@ export interface DispatchRequest<Tag extends string, Dispatch> {
   readonly dispatch: Dispatch
   /** The handler must retain no more than this many response bytes. */
   readonly responseLimitBytes: number
+  readonly admission?: EmissionAdmission
+  readonly inputDigest?: Sha256Digest
 }
 
 /**

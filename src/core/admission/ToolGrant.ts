@@ -17,11 +17,11 @@ export const FieldMatch = Schema.Union([
 ])
 export type FieldMatch = typeof FieldMatch.Type
 
-type MatchFor<Value, Resource> = { readonly equals: Value } | { readonly oneOf: ReadonlyArray<Value> }
+type MatchFor<Value, Resource> = [Resource] extends [never] ? { readonly equals: Value } | { readonly oneOf: ReadonlyArray<Value> }
   | (Value extends string ? { readonly startsWith: string } | { readonly endsWith: string } : never)
   | (Value extends number ? { readonly range: { readonly min?: number; readonly max?: number } } : never)
   | (Value extends ReadonlyArray<infer Item> ? { readonly subsetOf: ReadonlyArray<Item> } : never)
-  | ([Resource] extends [never] ? never : { readonly within: ReadonlyArray<string> })
+  : { readonly within: ReadonlyArray<string> }
 
 /** One explicit timing decision, validated by the host before a policy is loaded. */
 export class ToolGrantPolicy extends Schema.Class<ToolGrantPolicy>("ToolGrantPolicy")({
@@ -88,6 +88,9 @@ export const validateToolGrants = (grants: ReadonlyArray<ToolGrantPolicy>,
     if (Result.isFailure(hostCheck)) return { field: `${at}.host`, reason: hostCheck.failure.reason }
     for (const [field, match] of Object.entries(grant.where)) {
       if (!contract.publicFields.includes(field)) return { field: `${at}.where.${field}`, reason: "must name a public input field" }
+      if (Object.hasOwn(contract.resources, field) && !("within" in match)) {
+        return { field: `${at}.where.${field}`, reason: "resource operands require the host-resolved within matcher" }
+      }
       const ast = fieldAst(contract, field)
       if (("startsWith" in match || "endsWith" in match) && !stringField(ast)) return { field: `${at}.where.${field}`, reason: "string match requires a string input field" }
       if ("subsetOf" in match && (ast === undefined || !SchemaAST.isArrays(ast))) return { field: `${at}.where.${field}`, reason: "subsetOf requires a list input field" }

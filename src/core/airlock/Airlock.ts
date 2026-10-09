@@ -2,6 +2,8 @@ import { type Crypto, Effect, Layer, Option, Schema } from "effect"
 import { InvalidToolContract, type ToolContract } from "../contract/ToolContract.ts"
 import { defineDecoderCatalog, type TrustedDecoder } from "../contract/Decoder.ts"
 import { validateFlowDecoders } from "../contract/Flow.ts"
+import { portableToolHost } from "../contract/PortableToolHost.ts"
+import type { ToolHost } from "../contract/ToolHost.ts"
 import type { Ledger } from "../ledger/Ledger.ts"
 import type { ClosedUnderCompensation } from "../outbox/Intent.ts"
 import { defineOutbox, type OutboxDefinition, type OutboxOf } from "../outbox/Outbox.ts"
@@ -86,6 +88,7 @@ export interface Airlock<Contracts extends ToolContracts, Env> {
   /** The kernel underneath, for adapter authors. Users do not need it. */
   readonly outbox: OutboxDefinition<Contracts>
   readonly policy: (env: Env) => ToolPolicy
+  readonly host: (env: Env) => ToolHost
   /**
    * The Outbox with this definition's implementations as its handlers. A host
    * provides the store, the ledger and Crypto.
@@ -132,6 +135,8 @@ const explain = (subject: string) => (tagged: Tagged): AirlockFailure => {
             unmet.map((miss) => `\`${miss.field}\` is not allowed by grant "${miss.grantId}"`).join("; ")
       )
     }
+    case "ResourceRefused":
+      return failure("not-allowed", `${subject} is not allowed: ${text(error["field"], "resource")} ${text(error["reason"], "exceeds the resource scope")}`)
     case "SessionBudgetExceeded":
       return failure(
         "budget-exceeded",
@@ -175,6 +180,7 @@ export const defineAirlock = <const List extends ReadonlyArray<ToolContract.Any>
   readonly decoders?: ReadonlyArray<TrustedDecoder.Any>
   readonly implement: Implementations<ByName<List>, Env>
   readonly policy: ToolPolicy | ((env: Env) => ToolPolicy)
+  readonly host?: ToolHost | ((env: Env) => ToolHost)
 } & (ByName<List> extends infer Kinds extends ToolContracts ? { readonly __closed?: ClosedUnderCompensation<Kinds> } : never)): Airlock<ByName<List> & ToolContracts, Env> => {
   type Contracts = ByName<List> & ToolContracts
   const decoders = defineDecoderCatalog(definition.decoders ?? [])
@@ -195,11 +201,12 @@ export const defineAirlock = <const List extends ReadonlyArray<ToolContract.Any>
   const kernel = outbox as unknown as OutboxDefinition<ToolContracts>
   const policy = (env: Env): ToolPolicy =>
     typeof definition.policy === "function" ? definition.policy(env) : definition.policy
+  const host = (env: Env): ToolHost => typeof definition.host === "function" ? definition.host(env) : definition.host ?? portableToolHost
   const bySupervisor = new DispatchProvenance({ committedBy: "supervisor" })
 
   const layer: Airlock<Contracts, Env>["layer"] = (env) =>
     outbox.layer.pipe(
-      Layer.provide(Layer.succeed(outbox.Dispatcher, handlersFor(contracts, definition.implement, env)))
+      Layer.provide(Layer.succeed(outbox.Dispatcher, handlersFor(contracts, definition.implement, env, host(env))))
     )
 
   // `kernel` and `outbox` are one definition, so an effect that needs the
@@ -211,7 +218,7 @@ export const defineAirlock = <const List extends ReadonlyArray<ToolContract.Any>
   const guest: Airlock<Contracts, Env>["guest"] = ({ runId, env }) =>
     forThisDefinition(Effect.gen(function* () {
       const decided = policy(env)
-      const opened = yield* openToolSession(kernel, { runId, policy: decided, decoders }).pipe(
+      const opened = yield* openToolSession(kernel, { runId, policy: decided, decoders, host: host(env) }).pipe(
         Effect.mapError(explain("this session"))
       )
       const session: {
@@ -304,5 +311,5 @@ export const defineAirlock = <const List extends ReadonlyArray<ToolContract.Any>
 
   const supervisor = forThisDefinition(supervisorOf) as Airlock<Contracts, Env>["supervisor"]
 
-  return { contracts, decoders, outbox, policy, layer, guest, supervisor }
+  return { contracts, decoders, outbox, policy, host, layer, guest, supervisor }
 }
