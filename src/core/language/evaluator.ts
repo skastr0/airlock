@@ -74,10 +74,15 @@ export class LoopLimitExceeded extends Schema.TaggedError<LoopLimitExceeded>()(
   { limit: Schema.Number, span: SpanSchema }
 ) {}
 
+export class StepLimitExceeded extends Schema.TaggedError<StepLimitExceeded>()(
+  "StepLimitExceeded",
+  { limit: Schema.Number, span: SpanSchema }
+) {}
+
 /** A value the program built passed a limit its host set. */
 export class ValueLimitExceeded extends Schema.TaggedError<ValueLimitExceeded>()(
   "ValueLimitExceeded",
-  { limit: Schema.Number, measure: Schema.Literals(["string-length", "nodes"]), span: SpanSchema }
+  { limit: Schema.Number, measure: Schema.Literals(["string-length", "nodes", "total-nodes", "total-string-units"]), span: SpanSchema }
 ) {}
 
 export type EvaluationError =
@@ -90,6 +95,7 @@ export type EvaluationError =
   | AssertionFailed
   | DuplicateRecordField
   | LoopLimitExceeded
+  | StepLimitExceeded
   | ValueLimitExceeded
 
 /** The sole language-to-world seam; resolvers are supplied by the runtime. */
@@ -101,6 +107,8 @@ export interface ActionResolver<R = never, E = never> {
 }
 
 export interface EvaluateOptions {
+  /** Statements, expressions and loop iterations share this execution budget. */
+  readonly maxSteps?: number
   /** One shared safety budget consumed by every visited list or range item. */
   readonly maxLoopIterations?: number
   /**
@@ -115,6 +123,10 @@ export interface EvaluateOptions {
    * traversal is exponential. Unset means no limit.
    */
   readonly maxValueNodes?: number
+  /** Conservative node total across live binding roots, counting each alias. */
+  readonly maxTotalNodes?: number
+  /** UTF-16 string units (including record keys) across live binding roots. */
+  readonly maxTotalStringUnits?: number
   /** Explicit non-privileged values made available to the program. */
   readonly bindings?: Readonly<Record<string, LanguageValue>>
 }
@@ -128,10 +140,22 @@ interface LoopBudget {
   readonly maxValueNodes: number | undefined
   /** Node counts of values already measured, so a shared value is counted once per use, not walked. */
   readonly sizes: WeakMap<object, number>
+  readonly stringSizes: WeakMap<object, number>
+  readonly retained: WeakMap<Scope, { readonly nodes: number; readonly strings: number }>
+  readonly maxTotalNodes: number | undefined
+  readonly maxTotalStringUnits: number | undefined
+  readonly maxSteps: number
+  steps: number
 }
 const normal = (value: LanguageValue = null): Control => ({ returned: false, value })
 const returned = (value: LanguageValue): Control => ({ returned: true, value })
 const defaultLoopLimit = 10_000
+const defaultStepLimit = 100_000
+
+const consumeStep = (budget: LoopBudget, span: Span): Effect.Effect<void, StepLimitExceeded> =>
+  Effect.suspend(() => budget.steps >= budget.maxSteps
+    ? Effect.fail(new StepLimitExceeded({ limit: budget.maxSteps, span }))
+    : Effect.sync(() => { budget.steps++ }))
 
 const durationMillis = (value: Duration): number => {
   const factor: Record<Duration["unit"], number> = { ms: 1, s: 1_000, m: 60_000, h: 3_600_000, d: 86_400_000 }
@@ -171,15 +195,53 @@ const nodesOf = (value: LanguageValue, budget: LoopBudget, limit: number): numbe
   return nodes
 }
 
+const stringUnitsOf = (value: LanguageValue, budget: LoopBudget, limit: number): number => {
+  if (typeof value === "string") return value.length
+  if (typeof value !== "object" || value === null) return 0
+  const known = budget.stringSizes.get(value)
+  if (known !== undefined) return known
+  let units = 0
+  for (const [key, child] of Object.entries(value)) {
+    units += (Array.isArray(value) ? 0 : key.length) + stringUnitsOf(child, budget, limit)
+    if (units > limit) break
+  }
+  budget.stringSizes.set(value, units)
+  return units
+}
+
+const retainedWith = (scope: Scope, value: LanguageValue, budget: LoopBudget) => {
+  const current = budget.retained.get(scope) ?? { nodes: 0, strings: 0 }
+  return {
+    nodes: current.nodes + (budget.maxTotalNodes === undefined ? 0 : nodesOf(value, budget, budget.maxTotalNodes)),
+    strings: current.strings + (budget.maxTotalStringUnits === undefined ? 0 : stringUnitsOf(value, budget, budget.maxTotalStringUnits))
+  }
+}
+
+const withinTotal = <Value extends LanguageValue>(value: Value, scope: Scope, budget: LoopBudget, span: Span): Effect.Effect<Value, ValueLimitExceeded> => {
+  const next = retainedWith(scope, value, budget)
+  if (budget.maxTotalNodes !== undefined && next.nodes > budget.maxTotalNodes) return Effect.fail(new ValueLimitExceeded({ limit: budget.maxTotalNodes, measure: "total-nodes", span }))
+  if (budget.maxTotalStringUnits !== undefined && next.strings > budget.maxTotalStringUnits) return Effect.fail(new ValueLimitExceeded({ limit: budget.maxTotalStringUnits, measure: "total-string-units", span }))
+  return Effect.succeed(value)
+}
+
+const extendScope = (scope: Scope, name: string, value: LanguageValue, budget: LoopBudget, span: Span): Effect.Effect<Scope, ValueLimitExceeded> =>
+  Effect.map(withinTotal(value, scope, budget, span), () => {
+    const next = new Map(scope)
+    next.set(name, value)
+    budget.retained.set(next, retainedWith(scope, value, budget))
+    return next
+  })
+
 /** Fails if `value` holds more nodes than the host allows; otherwise returns it. */
 const withinNodes = <Value extends LanguageValue>(
   value: Value,
   budget: LoopBudget,
-  span: Span
+  span: Span,
+  scope?: Scope
 ): Effect.Effect<Value, ValueLimitExceeded> => {
   const limit = budget.maxValueNodes
   return limit === undefined || nodesOf(value, budget, limit) <= limit
-    ? Effect.succeed(value)
+    ? scope === undefined ? Effect.succeed(value) : withinTotal(value, scope, budget, span)
     : Effect.fail(new ValueLimitExceeded({ limit, measure: "nodes", span }))
 }
 
@@ -255,7 +317,9 @@ const snapshotList = (
         )
       }
     }
-    return Object.freeze(value.map(freezeValue))
+    // Every evaluator value is already deeply owned and frozen. Retain the
+    // immutable snapshot instead of allocating a second copy of every item.
+    return value
   })
 
 const actionName = (expression: Expression): string | undefined =>
@@ -284,10 +348,11 @@ const evaluateStatement = <R, E>(
   resolver: ActionResolver<R, E>,
   budget: LoopBudget
 ): Effect.Effect<{ readonly scope: Scope; readonly control: Control }, EvaluationError | E, R> => Effect.gen(function* () {
+  yield* consumeStep(budget, statement.span)
   switch (statement.kind) {
     case "LetStatement": {
       const value = yield* evaluateExpression(statement.value, scope, resolver, budget)
-      const next = new Map(scope); next.set(statement.name, value)
+      const next = yield* extendScope(scope, statement.name, value, budget, statement.span)
       return { scope: next, control: normal(value) }
     }
     case "ExpressionStatement":
@@ -322,9 +387,9 @@ const evaluateStatement = <R, E>(
         )
         let control = normal()
         for (const item of items) {
+          yield* consumeStep(budget, statement.span)
           yield* consumeLoopIteration(budget, statement.span)
-          const scoped = new Map(scope)
-          scoped.set(statement.variable, item)
+          const scoped = yield* extendScope(scope, statement.variable, item, budget, statement.span)
           control = yield* evaluateStatements(
             statement.body,
             scoped,
@@ -351,8 +416,9 @@ const evaluateStatement = <R, E>(
       yield* ensureLoopCapacity(iterations, budget, statement.span)
       let control = normal()
       for (let value = from; value < to; value++) {
+        yield* consumeStep(budget, statement.span)
         yield* consumeLoopIteration(budget, statement.span)
-        const scoped = new Map(scope); scoped.set(statement.variable, value)
+        const scoped = yield* extendScope(scope, statement.variable, value, budget, statement.span)
         control = yield* evaluateStatements(statement.body, scoped, resolver, budget)
         if (control.returned) break
       }
@@ -367,6 +433,8 @@ const evaluateExpression = <R, E>(
   resolver: ActionResolver<R, E>,
   budget: LoopBudget
 ): Effect.Effect<LanguageValue, EvaluationError | E, R> => Effect.gen(function* () {
+  // Call nodes are charged here before their argument list is evaluated.
+  yield* consumeStep(budget, expression.span)
   switch (expression.kind) {
     case "LiteralExpression":
       if (typeof expression.value === "number") return yield* finiteNumber(expression.value, "literal", expression.span)
@@ -381,7 +449,8 @@ const evaluateExpression = <R, E>(
       return yield* withinNodes(
         Object.freeze(yield* Effect.forEach(expression.items, (item) => evaluateExpression(item, scope, resolver, budget))),
         budget,
-        expression.span
+        expression.span,
+        scope
       )
     case "RecordExpression": {
       const record: Record<string, LanguageValue> = Object.create(null)
@@ -389,7 +458,7 @@ const evaluateExpression = <R, E>(
         if (Object.hasOwn(record, entry.key)) return yield* Effect.fail(new DuplicateRecordField({ field: entry.key, span: entry.span }))
         record[entry.key] = yield* evaluateExpression(entry.value, scope, resolver, budget)
       }
-      return yield* withinNodes(Object.freeze(record), budget, expression.span)
+      return yield* withinNodes(Object.freeze(record), budget, expression.span, scope)
     }
     case "UnaryExpression": {
       const value = yield* evaluateExpression(expression.operand, scope, resolver, budget)
@@ -441,7 +510,7 @@ const evaluateExpression = <R, E>(
       const action = actionName(expression.callee)
       if (action === undefined) return yield* Effect.fail(new InvalidCallTarget({ detail: "only identifier action calls are supported", span: expression.callee.span }))
       const args = yield* Effect.forEach(expression.arguments, (argument) => evaluateExpression(argument, scope, resolver, budget))
-      return yield* withinNodes(freezeValue(yield* resolver.resolve(action, Object.freeze(args))), budget, expression.span)
+      return yield* withinNodes(freezeValue(yield* resolver.resolve(action, Object.freeze(args))), budget, expression.span, scope)
     }
   }
 })
@@ -457,7 +526,7 @@ export const evaluate = <R = never, E = never>(
   if (!Number.isSafeInteger(loopLimit) || loopLimit < 0) {
     return yield* Effect.fail(invalid("maxLoopIterations", "must be a non-negative safe integer", program.span))
   }
-  for (const [name, limit] of [["maxStringLength", options.maxStringLength], ["maxValueNodes", options.maxValueNodes]] as const) {
+  for (const [name, limit] of [["maxStringLength", options.maxStringLength], ["maxValueNodes", options.maxValueNodes], ["maxSteps", options.maxSteps], ["maxTotalNodes", options.maxTotalNodes], ["maxTotalStringUnits", options.maxTotalStringUnits]] as const) {
     if (limit !== undefined && (!Number.isSafeInteger(limit) || limit < 0)) {
       return yield* Effect.fail(invalid(name, "must be a non-negative safe integer", program.span))
     }
@@ -467,11 +536,17 @@ export const evaluate = <R = never, E = never>(
     used: 0,
     maxStringLength: options.maxStringLength,
     maxValueNodes: options.maxValueNodes,
-    sizes: new WeakMap()
+    sizes: new WeakMap(),
+    stringSizes: new WeakMap(),
+    retained: new WeakMap(),
+    maxTotalNodes: options.maxTotalNodes,
+    maxTotalStringUnits: options.maxTotalStringUnits,
+    maxSteps: options.maxSteps ?? defaultStepLimit,
+    steps: 0
   }
-  const scope = new Map<string, LanguageValue>()
+  let scope: Scope = new Map<string, LanguageValue>()
   for (const [name, value] of Object.entries(options.bindings ?? {})) {
-    scope.set(name, yield* withinNodes(freezeValue(value), budget, program.span))
+    scope = yield* extendScope(scope, name, yield* withinNodes(freezeValue(value), budget, program.span), budget, program.span)
   }
   const result = yield* evaluateStatements(program.body, scope, resolver, budget)
   return new EvaluationResult({ returned: result.returned, value: result.value })

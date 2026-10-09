@@ -5,14 +5,27 @@ import { LanguageDiagnostic, tokenize, type Token } from "./lexer.ts"
 const precedence: Record<string, number> = { "||": 1, "&&": 2, "==": 3, "!=": 3, "<": 4, "<=": 4, ">": 4, ">=": 4, "+": 5, "-": 5, "*": 6, "/": 6 }
 const joined = (start: Span, end: Span): Span => ({ start: start.start, end: end.end, line: start.line, column: start.column })
 
+export interface ParseOptions { readonly maxNestingDepth?: number }
+/** Protects recursive parser/lowering stacks even if a host requests more. */
+export const maximumNestingDepth = 128
+
 export class Parser {
   private current = 0
-  constructor(private readonly source: string, private readonly tokens = tokenize(source)) {}
+  private nesting = 0
+  private readonly depths = new WeakMap<Expression, number>()
+  private readonly nestingLimit: number
+  constructor(private readonly source: string, private readonly tokens = tokenize(source), options: ParseOptions = {}) {
+    this.nestingLimit = options.maxNestingDepth ?? maximumNestingDepth
+    if (!Number.isSafeInteger(this.nestingLimit) || this.nestingLimit < 1 || this.nestingLimit > maximumNestingDepth) this.error(`maxNestingDepth must be between 1 and ${maximumNestingDepth}`)
+  }
   parse(): Program {
     const start = this.peek().span; const body = this.statements("eof"); const end = this.peek().span
     return { kind: "Program", body, span: joined(start, end) }
   }
   private statements(until: string): Statement[] {
+    return this.nested(() => this.statementBody(until))
+  }
+  private statementBody(until: string): Statement[] {
     const body: Statement[] = []; this.separators()
     while (this.peek().text !== until && this.peek().kind !== "eof") {
       body.push(this.statement())
@@ -50,8 +63,11 @@ export class Parser {
     const expression = this.expression(); return { kind: "ExpressionStatement", expression, span: expression.span }
   }
   private expression(min = 0): Expression {
+    return this.nested(() => this.expressionBody(min))
+  }
+  private expressionBody(min: number): Expression {
     let left = this.prefix()
-    while (true) { const operator = this.peek(); const power = precedence[operator.text] ?? -1; if (power < min) break; this.advance(); const right = this.expression(power + 1); left = { kind: "BinaryExpression", operator: operator.text as BinaryOperator, left, right, span: joined(left.span, right.span) } }
+    while (true) { const operator = this.peek(); const power = precedence[operator.text] ?? -1; if (power < min) break; this.advance(); const right = this.expression(power + 1); left = this.node({ kind: "BinaryExpression", operator: operator.text as BinaryOperator, left, right, span: joined(left.span, right.span) }) }
     return left
   }
   private prefix(): Expression {
@@ -95,7 +111,8 @@ export class Parser {
       }
     }
     else this.error(`expected an expression, found '${token.text || "end of input"}'`, token.span)
-    while (true) { if (this.match("(")) { const args = this.delimitedExpressions(")"); expression = { kind: "CallExpression", callee: expression, arguments: args, span: joined(expression.span, this.previous().span) } } else if (this.match(".")) { const field = this.expectIdentifier(); expression = { kind: "FieldExpression", object: expression, field: field.text, span: joined(expression.span, field.span) } } else if (this.match("[")) { this.newlines(); const index = this.expression(); this.newlines(); const closing = this.expect("]"); expression = { kind: "IndexExpression", object: expression, index, span: joined(expression.span, closing.span) } } else break }
+    expression = this.node(expression)
+    while (true) { if (this.match("(")) { const args = this.delimitedExpressions(")"); expression = this.node({ kind: "CallExpression", callee: expression, arguments: args, span: joined(expression.span, this.previous().span) }) } else if (this.match(".")) { const field = this.expectIdentifier(); expression = this.node({ kind: "FieldExpression", object: expression, field: field.text, span: joined(expression.span, field.span) }) } else if (this.match("[")) { this.newlines(); const index = this.expression(); this.newlines(); const closing = this.expect("]"); expression = this.node({ kind: "IndexExpression", object: expression, index, span: joined(expression.span, closing.span) }) } else break }
     return expression
   }
   private delimitedExpressions(close: string): Expression[] {
@@ -111,6 +128,29 @@ export class Parser {
     return result
   }
   private newlines() { while (this.peek().kind === "newline") this.advance() }
+  private nested<Value>(body: () => Value): Value {
+    if (this.nesting >= this.nestingLimit) this.error("syntax nesting limit exceeded")
+    this.nesting++
+    try { return body() } finally { this.nesting-- }
+  }
+  private node(expression: Expression): Expression {
+    let children: readonly Expression[] = []
+    switch (expression.kind) {
+      case "ListExpression": children = expression.items; break
+      case "RecordExpression": children = expression.entries.map((entry) => entry.value); break
+      case "UnaryExpression": children = [expression.operand]; break
+      case "BinaryExpression": children = [expression.left, expression.right]; break
+      case "CallExpression": children = [expression.callee, ...expression.arguments]; break
+      case "FieldExpression": children = [expression.object]; break
+      case "IndexExpression": children = [expression.object, expression.index]; break
+      default: break
+    }
+    let depth = 1
+    for (const child of children) depth = Math.max(depth, 1 + (this.depths.get(child) ?? 1))
+    if (depth > this.nestingLimit) this.error("syntax nesting limit exceeded", expression.span)
+    this.depths.set(expression, depth)
+    return expression
+  }
   private separators() { while (this.peek().kind === "newline" || this.peek().text === ";") this.advance() }
   private isSeparator() { return this.peek().kind === "newline" || this.peek().text === ";" }
   private match(text: string) { if (this.peek().text !== text) return false; this.advance(); return true }
@@ -123,11 +163,11 @@ export class Parser {
 }
 
 /** Parse source without granting the language component any runtime capability. */
-export const parseSync = (source: string): Program => new Parser(source).parse()
+export const parseSync = (source: string, options: ParseOptions = {}): Program => new Parser(source, tokenize(source), options).parse()
 /** Typed parse boundary for callers that already compose in Effect. */
-export const parse = (source: string): Effect.Effect<Program, LanguageDiagnostic> =>
+export const parse = (source: string, options: ParseOptions = {}): Effect.Effect<Program, LanguageDiagnostic> =>
   Effect.try({
-    try: () => parseSync(source),
+    try: () => parseSync(source, options),
     catch: (cause) => cause instanceof LanguageDiagnostic
       ? cause
       : new LanguageDiagnostic({ detail: String(cause), span: { start: 0, end: 0, line: 1, column: 1 }, source })
