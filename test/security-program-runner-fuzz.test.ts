@@ -28,8 +28,8 @@ describe("security: reproducible hostile programs through the production runner"
       let calls = 0
       const outcome = await run(example.source, (_tool, input) => Effect.sync(() => { calls++; return done(input) }))
       outcomeIsFixed(outcome, clue)
-      // The public result crosses JSON, whose numeric representation normalizes -0.
-      expect(outcome, clue).toEqual({ ok: true, result: JSON.parse(JSON.stringify(example.value)), toolCalls: example.calls })
+      // The public result crosses the boundary exactly: negative zero stays negative zero.
+      expect(outcome, clue).toEqual({ ok: true, result: example.value, toolCalls: example.calls })
       expect(calls, clue).toBe(example.calls)
     }
   }, 30_000)

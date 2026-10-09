@@ -115,6 +115,25 @@ describe("security: the program runner enforces the host boundary", () => {
     expect(held[0]).not.toBe(held[1])
   })
 
+  it("carries a number across the boundary exactly, in each direction", async () => {
+    const received: Array<unknown> = []
+    const outcome = await run(`
+      let first = security.read({})
+      let second = security.read({ scalar: first.result.scalar, list: first.result.list })
+      return first.result`, (_tool, input) => Effect.sync(() => {
+        received.push(input)
+        return done({ scalar: -0, list: [-0, 0], large: 9007199254740991, small: 5e-324 })
+      }))
+    // Tool to program to host: the run's result still holds negative zero.
+    const result = (outcome.ok ? outcome.result : {}) as { scalar: number; list: ReadonlyArray<number>; large: number; small: number }
+    expect([Object.is(result.scalar, -0), Object.is(result.list[0], -0), Object.is(result.list[1], 0)]).toEqual([true, true, true])
+    expect([result.large, result.small]).toEqual([9007199254740991, 5e-324])
+    // Tool to program to tool: the second call was handed what the first one answered.
+    const second = received[1] as { scalar: number; list: ReadonlyArray<number> }
+    expect([Object.is(second.scalar, -0), Object.is(second.list[0], -0), Object.is(second.list[1], 0)]).toEqual([true, true, true])
+    expect(boundedJson({ a: -0, b: [0, -0] }, 1_000, guestLimits())).toBe('{"a":-0,"b":[0,-0]}')
+  })
+
   it("interrupts an admitted call when the run is stopped before staging", async () => {
     let unblock!: () => void
     let entered!: () => void

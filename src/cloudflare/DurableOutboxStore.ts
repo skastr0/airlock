@@ -4,7 +4,6 @@ import {
   advance,
   type EmissionId,
   EmissionRecord,
-  LedgerEntry,
   OutboxStateCorrupt,
   OutboxStore,
   OutboxStoreFailed,
@@ -18,6 +17,7 @@ import {
 import type { EmissionState } from "../core/index.ts"
 import { StoredCaptureResult, validateCaptureEntry } from "../core/outbox/Capture.ts"
 import { type ExactJson, exactJsonText } from "../core/ExactJson.ts"
+import { encodeEntry as encodeReceipt } from "./DurableLedger.ts"
 import { type DurableStorage, ensureSchema, type SqlValue } from "./Storage.ts"
 
 /**
@@ -71,7 +71,6 @@ const parsed = <A>(decode: (value: unknown) => Result.Result<A, unknown>) => (te
 }
 const decodeRecord = parsed(fromRecord)
 const decodeCapture = parsed(fromCapture)
-const encodeReceipt = Schema.encodeSync(Schema.fromJsonString(LedgerEntry))
 
 /** A failure raised inside a transaction, carried out of it as a value. */
 class Abort {

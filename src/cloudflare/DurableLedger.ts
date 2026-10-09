@@ -1,9 +1,14 @@
 import { Effect, Layer, Schema } from "effect"
 import { Ledger, LedgerEntry, LedgerFailed } from "../core/index.ts"
+import { type ExactJson, exactJsonText } from "../core/ExactJson.ts"
 import { type DurableStorage, ensureSchema } from "./Storage.ts"
 
-const encodeEntry = Schema.encodeSync(Schema.fromJsonString(LedgerEntry))
-const decodeEntries = Schema.decodeUnknownEffect(Schema.Array(Schema.fromJsonString(LedgerEntry)))
+// Everything this host records is written by the core's one exact writer.
+const toEntry = Schema.encodeSync(LedgerEntry)
+export const encodeEntry = (entry: LedgerEntry): string => exactJsonText(toEntry(entry) as ExactJson)
+const decodeEntry = Schema.decodeUnknownEffect(LedgerEntry)
+const decodeEntries = (rows: ReadonlyArray<string>) =>
+  Effect.forEach(rows, (row) => Effect.flatMap(Effect.try(() => JSON.parse(row) as unknown), decodeEntry))
 
 const failed = (operation: "record" | "read") => (cause: unknown) =>
   new LedgerFailed({

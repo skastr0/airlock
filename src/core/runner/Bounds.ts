@@ -1,10 +1,13 @@
+import { exactJsonText } from "../ExactJson.ts"
 import { defaultGuestLimits, type GuestLimits } from "./GuestRunner.ts"
 
 /**
  * The bounds on every value that crosses between a program and its host: a
  * tool's input, a tool's result, the run's result. A value crosses only as
  * JSON text this module wrote, so what arrives on the other side is a copy
- * that shares nothing with the original.
+ * that shares nothing with the original. The copy is exact: every string and
+ * number token is written by the core's one exact writer, so negative zero
+ * arrives as negative zero.
  */
 
 const encoder = new TextEncoder()
@@ -32,7 +35,7 @@ export const boundedJson = (value: unknown, maxBytes: number, limits: GuestLimit
   }
   const string = (value: string) => {
     if (value.length > maxBytes) throw tooLarge
-    append(JSON.stringify(value))
+    append(exactJsonText(value))
   }
   const visit = (item: unknown, depth: number): void => {
     if (++nodes > limits.maxNodes || depth > limits.maxDepth) throw tooLarge
@@ -41,7 +44,8 @@ export const boundedJson = (value: unknown, maxBytes: number, limits: GuestLimit
     if (typeof item === "string") return string(item)
     if (typeof item === "number") {
       if (!Number.isFinite(item)) throw notJson
-      return append(JSON.stringify(item))
+      // A value that passed an exact refinement must arrive as the same number.
+      return append(exactJsonText(item))
     }
     if (typeof item !== "object") throw notJson
     if (Array.isArray(item)) {
