@@ -23,13 +23,16 @@ describe("terminal authority construction sites", () => {
     expect(handler).toBeGreaterThan(-1)
     expect(permitCheck).toBeGreaterThan(handler)
     expect(wire[0]!.index).toBeGreaterThan(permitCheck)
-    // A tool implementation's entry refuses a wire token that is not live
-    // and unused, also before the request.
+    // A tool implementation's entry takes the request the kernel bound to
+    // the call's wire token, once, and refuses without it, also before the
+    // request. It has no parameter through which a request could be given.
     const toolEntry = source.indexOf('Effect.fn("HttpDispatcher.send")')
-    const tokenCheck = source.indexOf("consumeWireToken(token)")
+    const tokenCheck = source.indexOf("takeWireRequest(token)")
     expect(toolEntry).toBeGreaterThan(-1)
     expect(tokenCheck).toBeGreaterThan(toolEntry)
     expect(wire[0]!.index).toBeGreaterThan(tokenCheck)
+    const signature = source.slice(toolEntry, tokenCheck)
+    expect(signature).not.toMatch(/\b(?:url|endpoint|method|headers|body|dispatch)\s*[:?]/)
     // The function that holds the request is private to the file and is
     // reached from those two entries only, each after its check.
     expect(source).not.toMatch(/export\s+(?:const|function)\s+onWire\b/)

@@ -2,6 +2,7 @@ import { Result, Schema } from "effect"
 import { Sha256Digest } from "../Canonical.ts"
 import { GrantWhen, HostParameters, ResourceBinding } from "../contract/ToolHost.ts"
 import { PlanEffect } from "../plan/Plan.ts"
+import { WireAuthority } from "../contract/Wire.ts"
 import type { ActiveState, EmissionState, Next } from "./Lifecycle.ts"
 
 // ── identifiers ─────────────────────────────────────────────────────────────
@@ -71,6 +72,7 @@ export class EmissionAdmission extends Schema.Class<EmissionAdmission>("Emission
     when: GrantWhen,
     host: Schema.optionalKey(HostParameters),
     resources: Schema.Array(ResourceBinding),
+    wire: Schema.optionalKey(WireAuthority),
     validUntil: Schema.optionalKey(Schema.DateTimeUtcFromString)
   }))
 }) {}

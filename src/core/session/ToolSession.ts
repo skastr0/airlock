@@ -13,6 +13,7 @@ import { validateFlowRules } from "../contract/FlowRules.ts"
 import { portableToolHost } from "../contract/PortableToolHost.ts"
 import { type ToolHost, ResourceRefused } from "../contract/ToolHost.ts"
 import { loadResourcePolicy } from "../admission/ResourcePolicy.ts"
+import { prepareWire } from "../contract/Wire.ts"
 import type { EmissionState } from "../outbox/Lifecycle.ts"
 import type { OutboxDefinition, OutboxOf, PerformError, StageError } from "../outbox/Outbox.ts"
 import {
@@ -226,6 +227,7 @@ export const openToolSession = <Contracts extends ToolContracts, Granted extends
         const grantIds = fitting.map((grant) => grant.id)
         const decision = toolDispatchDecision(grants, contracts, summary, { host, resource: bounded.match, now: yield* DateTime.now })
         if (decision._tag === "Refused") return yield* new ToolCallNotGranted({ tool: contract.tag, unmet: [{ grantId: grantIds.join(","), field: decision.reason }] })
+        const wireAuthority = yield* prepareWire(contract, input, bounded.resources.map((resource) => resource.binding), host).pipe(Effect.provide(crypto))
 
         // The key names this call of this run: same run, same position, same
         // input. A guest that diverges on re-execution gets a different key
@@ -245,7 +247,8 @@ export const openToolSession = <Contracts extends ToolContracts, Granted extends
             runId, tool: contract.tag, version: contract.version, effect: contract.effect,
             when: decision._tag === "Now" ? "now" : "approved", resources: bounded.resources.map((resource) => resource.binding),
             ...(decision.host === undefined ? {} : { host: decision.host }),
-            ...(decision.validUntil === undefined ? {} : { validUntil: decision.validUntil })
+            ...(decision.validUntil === undefined ? {} : { validUntil: decision.validUntil }),
+            ...(wireAuthority === undefined ? {} : { wire: wireAuthority })
           } })
         }
 

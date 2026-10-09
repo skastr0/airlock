@@ -52,7 +52,9 @@ export const HttpGet = defineToolContract({
     body: Schema.NullOr(Schema.String)
   }),
   public: ["endpoint", "accept"],
-  resources: { endpoint: { kind: "endpoint", rights: ["connect"] } }
+  resources: { endpoint: { kind: "endpoint", rights: ["connect"] } },
+  /** The whole request. An implementation cannot add to it. */
+  wire: (input) => ({ endpoint: "endpoint", method: "GET", headers: { accept: input.accept } })
 })
 
 export const HttpStage = defineToolContract({
@@ -93,5 +95,13 @@ export const HttpStage = defineToolContract({
     response_artifact: Schema.NullOr(ArtifactId)
   }),
   public: ["endpoint", "method", "bodyArtifact", "holdMillis"],
-  resources: { endpoint: { kind: "endpoint", rights: ["emit"] } }
+  resources: { endpoint: { kind: "endpoint", rights: ["emit"] } },
+  /** The whole request, as staged. An implementation cannot change it. */
+  wire: (input) => ({
+    endpoint: "endpoint",
+    method: input.method,
+    headers: input.headers,
+    ...(input.body === undefined ? {} : { body: input.body }),
+    ...(input.bodyArtifact === undefined ? {} : { bodyArtifact: input.bodyArtifact })
+  })
 })

@@ -1,4 +1,5 @@
 import { Effect, Schema } from "effect"
+import { createHash } from "node:crypto"
 import {
   Canonical,
   consumePermit,
@@ -10,8 +11,8 @@ import {
   type HttpOutcome,
   isLivePermit
 } from "../core/index.ts"
-import type { BoundResource } from "../core/contract/ToolHost.ts"
-import { consumeWireToken, type WireToken } from "../core/outbox/Outbox.ts"
+import { HttpMethod } from "../core/outbox/HttpIntent.ts"
+import { takeWireRequest, type WireToken } from "../core/outbox/Outbox.ts"
 
 /**
  * Reads at most `limit` bytes of a response and then cancels it. The body is
@@ -88,27 +89,53 @@ export const dispatchHttp = Effect.fn("HttpDispatcher.dispatch")(function* (
 })
 
 /**
- * The wire for a tool implementation. The kernel mints a wire token when it
- * hands an admitted call to its implementation; the token is good for one
- * request and only while that call is live. Without it nothing is sent.
+ * The wire for a tool implementation. It is handed nothing to send: the
+ * kernel evaluated the contract's own declaration on the admitted input,
+ * bound the result to the call's wire token, and this takes it out, once,
+ * while the call is live. The address is the endpoint admission bound.
  *
- * The address is not a string the implementation chooses: it is the endpoint
- * resource admission bound and matched against the grant for this call.
+ * A body that is an artifact is read here, from the host's store, and sent
+ * only if its bytes hash to the digest the request was approved with.
  */
 export const sendHttp = Effect.fn("HttpDispatcher.send")(function* (
   token: WireToken,
-  endpoint: BoundResource,
-  request: Omit<HttpDispatch, "url">,
-  responseLimitBytes: number
+  responseLimitBytes: number,
+  readArtifact: (id: string) => Effect.Effect<Uint8Array, unknown>
 ): Effect.fn.Return<Delivery<HttpOutcome>, DispatchFailed | DispatchRefused> {
-  if (endpoint.binding.kind !== "endpoint") {
-    return yield* new DispatchRefused({ reason: "the bound resource is not an endpoint" })
+  const request = takeWireRequest(token)
+  if (request === undefined) {
+    return yield* new DispatchRefused({ reason: "wire token is not live or carries no request" })
   }
-  if (!consumeWireToken(token)) {
-    return yield* new DispatchRefused({ reason: "wire token is not live" })
+  if (request.endpoint.binding.kind !== "endpoint" || !isHttpMethod(request.method)) {
+    return yield* new DispatchRefused({ reason: "the admitted request is not an HTTP request to an endpoint" })
   }
-  return yield* onWire({ ...request, url: endpoint.binding.selector }, responseLimitBytes)
+  let body = request.body
+  if (request.bodyArtifact !== undefined) {
+    const bytes = yield* readArtifact(request.bodyArtifact).pipe(
+      Effect.mapError(() => new DispatchRefused({ reason: "the body artifact could not be read" }))
+    )
+    const digest = `sha256:${createHash("sha256").update(bytes).digest("hex")}`
+    if (request.bodyArtifactDigest === undefined || digest !== request.bodyArtifactDigest) {
+      return yield* new DispatchRefused({ reason: "the body artifact is not the content that was approved" })
+    }
+    const text = yield* Effect.try({
+      try: () => new TextDecoder("utf-8", { fatal: true }).decode(bytes),
+      catch: () => new DispatchRefused({ reason: "the body artifact is not text" })
+    })
+    body = text
+  }
+  return yield* onWire(
+    {
+      url: request.endpoint.binding.selector,
+      method: request.method,
+      headers: { ...request.headers },
+      ...(body === undefined ? {} : { body })
+    },
+    responseLimitBytes
+  )
 })
+
+const isHttpMethod = Schema.is(HttpMethod)
 
 /**
  * Not exported, and reached only from the two functions above, each after

@@ -6,6 +6,7 @@ import { PlanEffect } from "../plan/Plan.ts"
 import { ResourceField, type ResourceFields, resourceFieldFits } from "./Resource.ts"
 import { ownToolFlow, requestSinkFields, type ToolFlow, type ToolFlowFor, validateToolFlow } from "./Flow.ts"
 import { modelSchema, type SchemaModel } from "./SchemaModel.ts"
+import type { WireSpec } from "./Wire.ts"
 
 /**
  * What a tool call looks like to everything except its handler: which tool,
@@ -64,6 +65,7 @@ export interface ToolContract<Shape extends ToolShape>
   readonly flow: Shape["flow"]
   /** The closed language view: unsupported schemas remain opaque nominal values. */
   readonly model: { readonly input: SchemaModel; readonly output: SchemaModel }
+  readonly wire?: (input: Shape["input"]) => WireSpec
 }
 
 export declare namespace ToolContract {
@@ -112,6 +114,9 @@ export const defineToolContract = <
   readonly public?: ReadonlyArray<Public>
   readonly resources?: Resources & ResourceFields<Wire, Public> & { readonly [Field in Exclude<keyof Resources, Public>]: never }
   readonly flow?: ToolFlowFor<Wire, Output>
+  readonly wire?: (input: Input) => Omit<WireSpec, "endpoint"> & {
+    readonly endpoint: { [Field in keyof Resources]: Resources[Field] extends { readonly kind: "endpoint"; readonly collection?: never } ? Field : never }[keyof Resources] & string
+  }
   /** Defaults to `tool:<name>`. Must not reveal a field that is not public. */
   readonly target?: (input: Input) => string
   /**
@@ -176,6 +181,7 @@ export const defineToolContract = <
     publicFields,
     resources: Object.freeze(resources) as Resources,
     flow,
+    ...(spec.wire === undefined ? {} : { wire: spec.wire }),
     model: Object.freeze({
       input: modelSchema(spec.input, { identity: JSON.stringify([spec.name, spec.version, "input"]), side: "encoded" }),
       output: modelSchema(spec.output, { identity: JSON.stringify([spec.name, spec.version, "output"]), side: "decoded" })

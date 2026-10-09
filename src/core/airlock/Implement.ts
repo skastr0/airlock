@@ -160,7 +160,7 @@ export const handlersFor = <Contracts extends ToolContracts, Env>(
           Promise.resolve().then(() => {
             if (signal.aborted || !isLivePermit(request.permit)) throw refused("dispatch permit is not live")
             if (expired()) throw refused("grant has expired")
-            const wireToken = enterImplementation(request.permit, name, canonical, signal)
+            const wireToken = enterImplementation(request.permit, name, canonical, signal, resources)
             if (wireToken === undefined) throw refused("dispatch permit does not authorize this request")
             const result = run(input, {
               env,

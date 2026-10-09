@@ -7,6 +7,9 @@ import {
   sha256Text
 } from "../Canonical.ts"
 import { Ledger, LedgerEntry, type LedgerFailed } from "../ledger/Ledger.ts"
+import { describeWire, type WireMaterial, type WireRequest } from "../contract/Wire.ts"
+import type { ToolContract } from "../contract/ToolContract.ts"
+import type { BoundResource } from "../contract/ToolHost.ts"
 import type { DispatchHandlers } from "./Dispatcher.ts"
 import type {
   ClosedUnderCompensation,
@@ -65,6 +68,7 @@ export interface DispatchPermit<Tag extends string = string> {
 const livePermits = new WeakSet<object>()
 const permitDispatches = new WeakMap<object, string>()
 const permitAdmissions = new WeakMap<object, EmissionAdmission>()
+const permitWires = new WeakMap<object, WireMaterial>()
 const WireTypeId: unique symbol = Symbol("airlock/core/WireToken")
 
 /** One host network operation inside an admitted implementation's live call. */
@@ -73,14 +77,15 @@ export interface WireToken {
   readonly callId: EmissionId
 }
 
-const wireTokens = new WeakMap<object, { readonly permit: DispatchPermit; readonly signal?: AbortSignal; available: boolean }>()
+const wireTokens = new WeakMap<object, { readonly permit: DispatchPermit; readonly signal?: AbortSignal; readonly request?: WireRequest; available: boolean }>()
 
 const mintPermit = <Tag extends string>(
   kind: Tag,
   emissionId: EmissionId,
   dispatchDigest: Sha256Digest,
   canonical: string,
-  admission?: EmissionAdmission
+  admission?: EmissionAdmission,
+  wire?: WireMaterial
 ): DispatchPermit<Tag> => {
   const permit: DispatchPermit<Tag> = Object.freeze({
     [PermitTypeId]: kind,
@@ -90,6 +95,7 @@ const mintPermit = <Tag extends string>(
   })
   livePermits.add(permit)
   permitDispatches.set(permit, canonical)
+  if (wire !== undefined) permitWires.set(permit, wire)
   if (admission !== undefined) {
     const snapshot = Schema.decodeUnknownSync(Schema.fromJsonString(EmissionAdmission))(
       Schema.encodeSync(Schema.fromJsonString(EmissionAdmission))(admission)
@@ -133,25 +139,31 @@ export const consumePermit = (permit: DispatchPermit, kind: string, canonical: s
  * Implementation entry: consumes the exact call permit before deriving its
  * one-use wire authority. A substituted call cannot get a token.
  */
-export const enterImplementation = (permit: DispatchPermit, kind: string, canonical: string, signal?: AbortSignal): WireToken | undefined => {
+export const enterImplementation = (permit: DispatchPermit, kind: string, canonical: string, signal?: AbortSignal,
+  resources: ReadonlyArray<BoundResource> = []
+): WireToken | undefined => {
+  const wire = permitWires.get(permit)
+  const endpoint = wire === undefined ? undefined : resources.find((resource) => canonicalJson(resource.binding) === canonicalJson(wire.endpoint))
+  if (wire !== undefined && endpoint === undefined) return undefined
   if (signal?.aborted === true || !consumePermit(permit, kind, canonical)) return undefined
   const token: WireToken = Object.freeze({ [WireTypeId]: true as const, callId: permit.emissionId })
-  wireTokens.set(token, { permit, ...(signal === undefined ? {} : { signal }), available: true })
+  const request: WireRequest | undefined = wire === undefined ? undefined : Object.freeze({ ...wire, endpoint: endpoint! })
+  wireTokens.set(token, { permit, ...(signal === undefined ? {} : { signal }), ...(request === undefined ? {} : { request }), available: true })
   return token
 }
 
 /** Checking does not consume; the host wire function must consume before I/O. */
 export const isLiveWireToken = (token: WireToken): boolean => {
   const entry = wireTokens.get(token)
-  return entry !== undefined && entry.available && entry.signal?.aborted !== true && isLivePermit(entry.permit)
+  return entry !== undefined && entry.request !== undefined && entry.available && entry.signal?.aborted !== true && isLivePermit(entry.permit)
 }
 
 /** Atomic, single use. Copies, forged tokens, aborted and settled calls refuse. */
-export const consumeWireToken = (token: WireToken): boolean => {
+export const takeWireRequest = (token: WireToken): WireRequest | undefined => {
   const entry = wireTokens.get(token)
-  if (entry === undefined || !entry.available || entry.signal?.aborted === true || !isLivePermit(entry.permit)) return false
+  if (entry === undefined || !isLiveWireToken(token)) return undefined
   entry.available = false
-  return true
+  return entry.request
 }
 
 // ── the typed view of an emission ───────────────────────────────────────────
@@ -837,6 +849,20 @@ export const defineOutbox = <const Kinds extends IntentKinds>(
           // Verify the sealed material before anything becomes irreversible.
           const sealed = yield* sealedDispatchOf(staged)
           const dispatch = sealed.dispatch
+          let wire: WireMaterial | undefined
+          if ("wire" in kind && typeof kind.wire === "function") {
+            if (execution?.wire === undefined) return yield* new InvalidDispatchAuthorization({ field: "admission.execution.wire", reason: "wire contract lacks exact staged request authority" })
+            const described = describeWire(kind as unknown as ToolContract.Any, dispatch, execution.resources, execution.wire.bodyArtifactDigest)
+            if (Result.isFailure(described) || described.success === undefined) {
+              return yield* new InvalidDispatchAuthorization({ field: "admission.execution.wire", reason: "wire declaration no longer matches the admitted request" })
+            }
+            wire = described.success
+            if ((yield* sha256Canonical(wire).pipe(withCrypto)) !== execution.wire.digest) {
+              return yield* new InvalidDispatchAuthorization({ field: "admission.execution.wire", reason: "wire request changed after staging" })
+            }
+          } else if (execution?.wire !== undefined) {
+            return yield* new InvalidDispatchAuthorization({ field: "admission.execution.wire", reason: "wire authority has no registered declaration" })
+          }
 
           const committing = yield* store.transition(id, "staged", {
             state: "committing",
@@ -850,7 +876,7 @@ export const defineOutbox = <const Kinds extends IntentKinds>(
           // Dispatch is the interruptible portion. Once it has begun,
           // interruption is an honest uncertain outcome, not a bare fiber
           // interruption that erases the caller's receipt.
-          const permit = mintPermit(tag, id, committing.dispatchDigest, sealed.canonical, committing.admission)
+          const permit = mintPermit(tag, id, committing.dispatchDigest, sealed.canonical, committing.admission, wire)
           const delivered = yield* restore(
             Effect.suspend(() => handlers[tag]({ permit, dispatch, responseLimitBytes: RESPONSE_LIMIT_BYTES,
               ...(committing.admission === undefined ? {} : { admission: committing.admission }), inputDigest: committing.dispatchDigest })).pipe(
@@ -862,6 +888,7 @@ export const defineOutbox = <const Kinds extends IntentKinds>(
               livePermits.delete(permit)
               permitDispatches.delete(permit)
               permitAdmissions.delete(permit)
+              permitWires.delete(permit)
             })),
             Effect.exit
           )

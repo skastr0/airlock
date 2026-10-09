@@ -141,4 +141,6 @@ export interface ToolHost {
     readonly grant: HostGrant
   }) => Result.Result<void, HostGrantRefused>
   readonly recovery?: HostRecovery
+  /** Opaque body ids are resolved to content digests before a request is staged. */
+  readonly wireBodyDigest?: (artifactId: string) => Effect.Effect<Sha256Digest, ResourceRefused>
 }

@@ -2,12 +2,16 @@ import { describe, expect, it } from "@effect/vitest"
 import { Effect, Layer, Schema } from "effect"
 import { handlersFor } from "../src/core/airlock/Implement.ts"
 import { defineToolContract } from "../src/core/contract/ToolContract.ts"
-import { consumeWireToken, defineOutbox, type DispatchPermit, enterImplementation, isLiveWireToken, type WireToken } from "../src/core/outbox/Outbox.ts"
-import { DispatchProvenance, IdempotencyKey } from "../src/core/outbox/Records.ts"
+import { takeWireRequest, defineOutbox, type DispatchPermit, enterImplementation, isLiveWireToken, type WireToken } from "../src/core/outbox/Outbox.ts"
+import { DispatchProvenance } from "../src/core/outbox/Records.ts"
+import { openToolSession } from "../src/core/session/ToolSession.ts"
+import { toolPolicy } from "../src/core/session/ToolPolicy.ts"
+import { toolGrant } from "../src/core/admission/ToolGrant.ts"
+import { endpointResources } from "../src/core/contract/PortableToolHost.ts"
 import * as WebCrypto from "../src/core/WebCrypto.ts"
 import { makeMemoryLedgerState, makeMemoryOutboxState, memoryLedger, memoryOutboxStore } from "../src/core/testing/index.ts"
 
-const Get = defineToolContract({ name: "http.get", version: "1", effect: "capture", input: Schema.Struct({ endpoint: Schema.String }), output: Schema.Boolean })
+const Get = defineToolContract({ name: "http.get", version: "1", effect: "capture", input: Schema.Struct({ endpoint: Schema.String }), output: Schema.Boolean, public: ["endpoint"], resources: { endpoint: { kind: "endpoint", rights: ["connect"] } }, wire: () => ({ endpoint: "endpoint", method: "GET", headers: {} }) })
 const box = defineOutbox({ "http.get": Get })
 const authority = new DispatchProvenance({ committedBy: "supervisor" })
 
@@ -21,7 +25,8 @@ const world = (implementation: Parameters<typeof handlersFor>[1], observe?: (per
 
 const call = Effect.gen(function* () {
   const outbox = yield* box.Outbox
-  const staged = yield* outbox.stage({ key: IdempotencyKey.make("wire-call"), intent: { kind: "http.get", dispatch: { endpoint: "https://example.com/" } }, holdMillis: 0 })
+  const session = yield* openToolSession(box, { runId: "wire-call", policy: toolPolicy({ resources: { endpoint: ["https://example.com/*"] }, toolGrants: [toolGrant(Get, { id: "get" })], budget: { maxCalls: 1, maxInputBytes: 4096 } }) })
+  const staged = yield* session["http.get"]({ endpoint: "https://example.com/" })
   return yield* outbox.commit(staged.id, authority)
 })
 
@@ -31,11 +36,11 @@ describe("core: implementation wire token", () => {
     return call.pipe(Effect.provide(world({ "http.get": (_: unknown, context: { wireToken: WireToken }) => {
       token = context.wireToken
       expect(isLiveWireToken(token)).toBe(true)
-      expect(consumeWireToken({ ...token })).toBe(false)
-      expect(consumeWireToken(JSON.parse(JSON.stringify(token)))).toBe(false)
-      expect(consumeWireToken(token)).toBe(true)
+      expect(takeWireRequest({ ...token })).toBeUndefined()
+      expect(takeWireRequest(JSON.parse(JSON.stringify(token)))).toBeUndefined()
+      expect(takeWireRequest(token)).toMatchObject({ method: "GET", endpoint: { binding: { selector: "https://example.com/" } } })
       expect(isLiveWireToken(token)).toBe(false)
-      expect(consumeWireToken(token)).toBe(false)
+      expect(takeWireRequest(token)).toBeUndefined()
       return true
     } })), Effect.tap(() => Effect.sync(() => { expect(token !== undefined && isLiveWireToken(token)).toBe(false) })))
   })
@@ -49,17 +54,18 @@ describe("core: implementation wire token", () => {
     } }, (permit) => { parent = permit })), Effect.tap(() => Effect.sync(() => {
       if (token === undefined) throw new Error("implementation must receive a token")
       expect(isLiveWireToken(token)).toBe(false)
-      expect(consumeWireToken(token)).toBe(false)
+      expect(takeWireRequest(token)).toBeUndefined()
     })))
   })
 
   it.effect("cannot derive a token for a substituted call while the parent permit is live", () => {
     const layer = box.layer.pipe(Layer.provideMerge(Layer.mergeAll(
       memoryOutboxStore(makeMemoryOutboxState()), memoryLedger(makeMemoryLedgerState()), WebCrypto.layer,
-      Layer.succeed(box.Dispatcher, { "http.get": (request) => Effect.sync(() => {
+      Layer.succeed(box.Dispatcher, { "http.get": (request) => Effect.gen(function* () {
         expect(enterImplementation(request.permit, "http.get", '{"endpoint":"https://outside.test/"}')).toBeUndefined()
-        const token = enterImplementation(request.permit, "http.get", '{"endpoint":"https://example.com/"}')
-        expect(token !== undefined && consumeWireToken(token)).toBe(true)
+        const resource = yield* endpointResources.rebind({ binding: request.admission!.execution!.resources[0]! }).pipe(Effect.orDie)
+        const token = enterImplementation(request.permit, "http.get", '{"endpoint":"https://example.com/"}', undefined, [resource])
+        expect(token === undefined ? undefined : takeWireRequest(token)).toMatchObject({ method: "GET" })
         return { outcome: true, response: new Uint8Array(), truncated: false }
       }) })
     )))
@@ -69,14 +75,15 @@ describe("core: implementation wire token", () => {
   it.effect("refuses an aborted token before the parent call has settled", () => {
     const layer = box.layer.pipe(Layer.provideMerge(Layer.mergeAll(
       memoryOutboxStore(makeMemoryOutboxState()), memoryLedger(makeMemoryLedgerState()), WebCrypto.layer,
-      Layer.succeed(box.Dispatcher, { "http.get": (request) => Effect.sync(() => {
+      Layer.succeed(box.Dispatcher, { "http.get": (request) => Effect.gen(function* () {
         const controller = new AbortController()
-        const token = enterImplementation(request.permit, "http.get", '{"endpoint":"https://example.com/"}', controller.signal)
+        const resource = yield* endpointResources.rebind({ binding: request.admission!.execution!.resources[0]! }).pipe(Effect.orDie)
+        const token = enterImplementation(request.permit, "http.get", '{"endpoint":"https://example.com/"}', controller.signal, [resource])
         if (token === undefined) throw new Error("live exact permit must derive a token")
         expect(isLiveWireToken(token)).toBe(true)
         controller.abort()
         expect(isLiveWireToken(token)).toBe(false)
-        expect(consumeWireToken(token)).toBe(false)
+        expect(takeWireRequest(token)).toBeUndefined()
         return { outcome: true, response: new Uint8Array(), truncated: false }
       }) })
     )))

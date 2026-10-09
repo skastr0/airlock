@@ -14,7 +14,6 @@ import { HttpGet, HttpStage } from "../src/native/index.ts"
 import { artifactIdOf } from "../src/native/Artifacts.ts"
 import { memoryArtifacts } from "./support/MemoryArtifacts.ts"
 import { type HttpToolContext, httpTools } from "../src/native/HttpTools.ts"
-import { endpointResources } from "../src/core/contract/PortableToolHost.ts"
 
 /**
  * The two HTTP tools against a real server, called the way the kernel calls
@@ -52,9 +51,6 @@ const artifacts = memoryArtifacts()
 const textArtifact = artifacts.put("artifact body")
 const binaryArtifact = artifacts.put(new Uint8Array([0xff, 0xfe]))
 const tools = httpTools({ responseLimitBytes: 1_024, artifacts: artifacts.store })
-
-const bound = (endpoint: string, right: "connect" | "emit") =>
-  endpointResources.bind({ kind: "endpoint", selector: endpoint, rights: [right], field: "endpoint" })
 
 /**
  * Makes one call as a guest of an Airlock over the two contracts, commits it
@@ -138,15 +134,14 @@ describe("local HTTP tools", () => {
   it.live("one call reaches the wire once, and never after it has settled", () =>
     Effect.scoped(Effect.gen(function* () {
       const { origin, seen } = yield* server
-      const request = { method: "GET" as const, headers: {} }
-      const extra = yield* bound(`${origin}/extra`, "connect")
+      const read = (id: string) => artifacts.store.read(id as never)
       let saved: WireToken | undefined
       let second: unknown
       yield* call(origin, "http.get", { endpoint: `${origin}/status`, accept: "*/*" }, (input, context) =>
         Effect.gen(function* () {
           saved = context.wireToken
           const answer = yield* tools["http.get"](input, context)
-          second = yield* sendHttp(context.wireToken, extra, request, 1_024).pipe(Effect.flip)
+          second = yield* sendHttp(context.wireToken, 1_024, read).pipe(Effect.flip)
           return answer
         }))
       expect(second).toMatchObject({ _tag: "DispatchRefused" })
@@ -159,36 +154,52 @@ describe("local HTTP tools", () => {
           unused = context.wireToken
           return { status: 0, content_type: null, bytes: 0, truncated: false, body: null }
         }))
-      expect((yield* sendHttp(unused!, extra, request, 1_024).pipe(Effect.flip))._tag).toBe("DispatchRefused")
-      expect((yield* sendHttp({ ...saved! }, extra, request, 1_024).pipe(Effect.flip))._tag).toBe("DispatchRefused")
+      expect((yield* sendHttp(unused!, 1_024, read).pipe(Effect.flip))._tag).toBe("DispatchRefused")
+      expect((yield* sendHttp({ ...saved! }, 1_024, read).pipe(Effect.flip))._tag).toBe("DispatchRefused")
       expect(seen.map((entry) => entry.url)).toEqual(["/status"])
     }))
   )
 
-  it.live("sends only to the endpoint admission bound, whatever the input says", () =>
+  it.live("sends the admitted request and nothing else, whatever the implementation is or is given", () =>
     Effect.scoped(Effect.gen(function* () {
       const { origin, seen } = yield* server
-      // An implementation handed a different input than the one admitted
-      // still reaches only the bound address.
-      const answer = yield* call(origin, "http.get", { endpoint: `${origin}/admitted`, accept: "*/*" }, (_input, context) =>
+      // Handed a different input than the one admitted: the admitted address is used.
+      yield* call(origin, "http.get", { endpoint: `${origin}/admitted`, accept: "text/plain" }, (_input, context) =>
         tools["http.get"]({ endpoint: `${origin}/somewhere-else`, accept: "*/*" }, context))
-      expect(answer).toMatchObject({ status: 200 })
-      expect(seen.map((entry) => entry.url)).toEqual(["/admitted"])
-      // Without an admitted endpoint, or with a resource that is not one, nothing is sent.
-      const none = yield* call(origin, "http.get", { endpoint: `${origin}/admitted`, accept: "*/*" }, (input, context) =>
-        tools["http.get"](input, { wireToken: context.wireToken, resources: [] }))
-      expect(none).toBeInstanceOf(Refused)
-      let wrongKind: unknown
-      yield* call(origin, "http.get", { endpoint: `${origin}/admitted`, accept: "*/*" }, (_input, context) =>
-        sendHttp(context.wireToken, {
-          binding: { field: "endpoint", kind: "path", rights: ["read"], selector: `${origin}/path`, identity: {} },
-          capability: undefined
-        }, { method: "GET", headers: {} }, 1_024).pipe(
-          Effect.flip,
-          Effect.tap((error) => Effect.sync(() => { wrongKind = error }))
+      // The sending tool's implementation, run for an admitted get, with a
+      // body to send: what leaves is still the admitted bodiless GET.
+      yield* call(origin, "http.get", { endpoint: `${origin}/admitted`, accept: "text/plain" }, (_input, context) =>
+        tools["http.stage"](
+          { endpoint: `${origin}/outside`, method: "POST", headers: { "x-added": "1" }, body: "unreviewed body", holdMillis: 0 },
+          context
         ))
-      expect(wrongKind).toMatchObject({ _tag: "DispatchRefused" })
-      expect(seen.map((entry) => entry.url)).toEqual(["/admitted"])
+      expect(seen.map((entry) => `${entry.method} ${entry.url} ${entry.body}`)).toEqual(["GET /admitted ", "GET /admitted "])
+      for (const entry of seen) {
+        expect(entry.headers.accept).toBe("text/plain")
+        expect(entry.headers["x-added"]).toBeUndefined()
+      }
+    }))
+  )
+
+  it.live("sends an artifact body only if it is still the content that was approved", () =>
+    Effect.scoped(Effect.gen(function* () {
+      const { origin, seen } = yield* server
+      const swapped = memoryArtifacts()
+      const id = swapped.put("approved body")
+      const tampering = httpTools({ responseLimitBytes: 1_024, artifacts: swapped.store })
+      // The store's bytes change between approval and sending.
+      const answer = yield* call(
+        origin,
+        "http.stage",
+        { endpoint: `${origin}/send`, method: "POST", headers: {}, bodyArtifact: id, holdMillis: 0 },
+        (input, context) => {
+          swapped.corrupt(id, "body swapped after approval")
+          return tampering["http.stage"](input, context)
+        }
+      )
+      expect(answer).toBeInstanceOf(Refused)
+      expect((answer as Refused).reason).toContain("not the content that was approved")
+      expect(seen).toEqual([])
     }))
   )
 })
