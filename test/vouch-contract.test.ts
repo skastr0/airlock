@@ -112,8 +112,6 @@ const canonicalActions = new Set([
   "http.stage"
 ])
 
-const aliasActions = new Set(["run", "capture", "apply", "request_external"])
-
 const responseValue = (request: ProgramActionRequest): LanguageValue => {
   const input = request.call.input as Record<string, unknown>
   const text = (value: unknown) => String(value ?? "")
@@ -304,7 +302,6 @@ describe("Vouch-derived generic shell replacement corpus", () => {
     const programs = await Promise.all(exampleSources.map(async (name) => parseSync(await readCorpus(name))))
     for (const program of programs) {
       for (const name of callNames(program)) {
-        expect(aliasActions.has(name)).toBe(false)
         expect(canonicalActions.has(name)).toBe(true)
       }
     }
@@ -422,7 +419,6 @@ describe("Vouch-derived generic shell replacement corpus", () => {
     })
     for (const request of hostWorkflow.requests) {
       expect(canonicalActions.has(request.call.action)).toBe(true)
-      expect(aliasActions.has(request.call.action)).toBe(false)
     }
     expect(
       hostWorkflow.requests.some(

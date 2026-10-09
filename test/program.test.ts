@@ -36,9 +36,9 @@ describe("ProgramRunner", () => {
         const runner = yield* ProgramRunner
         return yield* runner.run(new ProgramRequest({
           source: `
-            let source = capture("notes.txt")
+            let source = file.read({ path: "notes.txt" })
             if source != null {
-              return apply("write", { path: "out.txt", content: "done" })
+              return file.write({ path: "out.txt", content: "done" })
             }
             return null
           `
@@ -111,8 +111,8 @@ describe("ProgramRunner", () => {
     expect(calls).toHaveLength(2)
   })
 
-  it("decodes alias inputs into canonical process and HTTP actions", async () => {
-    const processCall = await Effect.runPromise(decodeProgramAction("run", [{
+  it("decodes durations and structured bodies into canonical process and HTTP actions", async () => {
+    const processCall = await Effect.runPromise(decodeProgramAction("process.run", [{
       executable: "/usr/bin/true",
       args: [],
       descendantExecutables: ["/bin/sh"],
@@ -121,7 +121,7 @@ describe("ProgramRunner", () => {
       timeout: { kind: "Duration", value: 2, unit: "m" },
       cellProfile: "native-contained"
     }]))
-    const call = await Effect.runPromise(canonicalizeProgramAction("run", processCall))
+    const call = await Effect.runPromise(canonicalizeProgramAction("process.run", processCall))
     expect(call).toMatchObject({
       action: "process.run",
       executable: "/usr/bin/true",
@@ -132,7 +132,7 @@ describe("ProgramRunner", () => {
       realm: "local"
     })
 
-    const staged = await Effect.runPromise(decodeProgramAction("request_external", [{
+    const staged = await Effect.runPromise(decodeProgramAction("http.stage", [{
       method: "POST",
       endpoint: "https://example.test/collect",
       hold: { kind: "Duration", value: 30, unit: "s" },
@@ -145,8 +145,8 @@ describe("ProgramRunner", () => {
     })
   })
 
-  it("rejects mutually exclusive alias timing fields", async () => {
-    const runConflict = await Effect.runPromise(Effect.result(decodeProgramAction("run", [{
+  it("rejects mutually exclusive timing fields", async () => {
+    const runConflict = await Effect.runPromise(Effect.result(decodeProgramAction("process.run", [{
       executable: "/usr/bin/true",
       args: [],
       cwd: "/tmp",
@@ -156,12 +156,12 @@ describe("ProgramRunner", () => {
     expect(runConflict._tag).toBe("Failure")
     if (runConflict._tag === "Failure") {
       expect(runConflict.failure).toMatchObject({
-        action: "run",
+        action: "process.run",
         reason: "timeout and timeoutMs are mutually exclusive"
       })
     }
 
-    const stagedConflict = await Effect.runPromise(Effect.result(decodeProgramAction("request_external", [{
+    const stagedConflict = await Effect.runPromise(Effect.result(decodeProgramAction("http.stage", [{
       method: "POST",
       endpoint: "https://example.test/collect",
       hold: { kind: "Duration", value: 1, unit: "s" },
@@ -170,7 +170,7 @@ describe("ProgramRunner", () => {
     expect(stagedConflict._tag).toBe("Failure")
     if (stagedConflict._tag === "Failure") {
       expect(stagedConflict.failure).toMatchObject({
-        action: "request_external",
+        action: "http.stage",
         reason: "hold and holdMillis are mutually exclusive"
       })
     }

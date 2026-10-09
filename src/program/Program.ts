@@ -356,11 +356,6 @@ const decodeStrictNativeActionCall = Schema.decodeUnknownEffect(NativeActionCall
 const isRecord = (value: LanguageValue | undefined): value is LanguageRecord =>
   typeof value === "object" && value !== null && !Array.isArray(value) && !("kind" in value && value.kind === "Duration")
 
-const string = (value: LanguageValue | undefined, field: string, action: string): Effect.Effect<string, ProgramActionDecodeFailed> =>
-  typeof value === "string"
-    ? Effect.succeed(value)
-    : Effect.fail(new ProgramActionDecodeFailed({ action, reason: `${field} must be a string` }))
-
 const record = (value: LanguageValue | undefined, action: string): Effect.Effect<LanguageRecord, ProgramActionDecodeFailed> =>
   isRecord(value)
     ? Effect.succeed(value)
@@ -368,12 +363,6 @@ const record = (value: LanguageValue | undefined, action: string): Effect.Effect
 
 const unknown = (action: string): Effect.Effect<never, UnknownProgramAction> =>
   Effect.fail(new UnknownProgramAction({ action }))
-
-const asStringList = (value: LanguageValue | undefined, field: string, action: string) => {
-  if (value === undefined) return Effect.succeed([] as string[])
-  if (Array.isArray(value) && value.every((item) => typeof item === "string")) return Effect.succeed([...value] as string[])
-  return Effect.fail(new ProgramActionDecodeFailed({ action, reason: `${field} must be a list of strings` }))
-}
 
 const object = (value: LanguageRecord): Record<string, unknown> => ({ ...value })
 
@@ -465,7 +454,7 @@ const normalizeRequestExternalInput = (
     return normalized
   })
 
-/** Decode compact language aliases into the canonical native action vocabulary. */
+/** Decodes one call of a native action. A call has one name and one record argument. */
 export const decodeProgramAction = (
   action: string,
   args: readonly LanguageValue[]
@@ -481,80 +470,7 @@ export const decodeProgramAction = (
           : object(input)
       return yield* strictNativeAction(action, { ...normalized, action })
     }
-    switch (action) {
-      case "run": {
-        if (args.length === 1) {
-          if (typeof args[0] === "string") {
-            return yield* strictNativeAction(action, {
-              action: "process.run",
-              executable: args[0],
-              args: []
-            })
-          }
-          const input = yield* record(args[0], action)
-          const normalized = yield* normalizeProcessRunInput(action, input)
-          return yield* strictNativeAction(action, { ...normalized, action: "process.run" })
-        }
-        if (args.length < 1 || args.length > 3) {
-          return yield* new ProgramActionDecodeFailed({ action, reason: "expects run(executable, args?, options?)" })
-        }
-        const executable = yield* string(args[0], "executable", action)
-        let runArgs: string[] = []
-        let options: LanguageRecord | undefined
-        if (args[1] !== undefined) {
-          if (Array.isArray(args[1])) {
-            runArgs = yield* asStringList(args[1], "args", action)
-            if (args[2] !== undefined) {
-              options = yield* record(args[2], action)
-            }
-          } else {
-            if (args[2] !== undefined) {
-              return yield* new ProgramActionDecodeFailed({ action, reason: "expects run(executable, args?, options?)" })
-            }
-            options = yield* record(args[1], action)
-          }
-        }
-        const normalized = options === undefined
-          ? {}
-          : yield* normalizeProcessRunInput(action, options)
-        return yield* strictNativeAction(action, {
-          ...normalized,
-          action: "process.run",
-          executable,
-          args: runArgs
-        })
-      }
-      case "capture": {
-        if (args.length !== 1) return yield* new ProgramActionDecodeFailed({ action, reason: "expects capture(path | { path, format? })" })
-        if (typeof args[0] === "string") {
-          return yield* strictNativeAction(action, { action: "file.read", path: args[0] })
-        }
-        const input = yield* record(args[0], action)
-        return yield* strictNativeAction(action, { ...object(input), action: "file.read" })
-      }
-      case "apply": {
-        if (args.length === 1) {
-          const input = yield* record(args[0], action)
-          const operation = yield* string(input.operation, "operation", action)
-          const { operation: _, ...rest } = object(input)
-          return yield* strictNativeAction(action, { ...rest, action: `file.${operation}` })
-        }
-        if (args.length !== 2) return yield* new ProgramActionDecodeFailed({ action, reason: "expects apply(operation, record)" })
-        const operation = yield* string(args[0], "operation", action)
-        return yield* strictNativeAction(action, {
-          ...object(yield* record(args[1], action)),
-          action: `file.${operation}`
-        })
-      }
-      case "request_external": {
-        if (args.length !== 1) return yield* new ProgramActionDecodeFailed({ action, reason: "expects one record argument" })
-        const input = yield* record(args[0], action)
-        const normalized = yield* normalizeRequestExternalInput(action, input)
-        return yield* strictNativeAction(action, { ...normalized, action: "http.stage" })
-      }
-      default:
-        return yield* unknown(action)
-    }
+    return yield* unknown(action)
   })
 
 /** Schema decoding applies native defaults before a draft enters admission. */

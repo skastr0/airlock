@@ -134,38 +134,29 @@ describe("Program native action surface", () => {
     expectPreEffectDenial(observed, "process.run")
   })
 
-  it("denies the compact run alias at the same pre-effect gate", async () => {
-    const observed = await runWith(
-      ProgramRunnerWithNativeActionsLive(new Set(["file.write"])),
-      `return run({ executable: "/usr/bin/true", args: [], cwd: "/tmp" })`
-    )
-    expectPreEffectDenial(observed, "process.run")
-    expect(observed.result.failure?.action).toBe("run")
-  })
-
   it.each([
-    ["capture", `return capture("/tmp/input")`, "file.read"],
-    ["apply", `return apply("write", { path: "/tmp/output", content: "ok" })`, "file.write"],
-    ["request_external", `return request_external({ endpoint: "https://example.test", method: "POST" })`, "http.stage"]
-  ])("denies the %s alias when its canonical action is omitted", async (_alias, source, nativeAction) => {
-    const observed = await runWith(
-      ProgramRunnerWithNativeActionsLive(new Set()),
-      source
-    )
-    expectPreEffectDenial(observed, nativeAction)
+    ["run", `return run({ executable: "/usr/bin/true", args: [], cwd: "/tmp" })`],
+    ["capture", `return capture("/tmp/input")`],
+    ["apply", `return apply("write", { path: "/tmp/output", content: "ok" })`],
+    ["request_external", `return request_external({ endpoint: "https://example.test", method: "POST" })`]
+  ])("has no second name for a native action: %s is unknown on the full surface", async (alias, source) => {
+    const observed = await runWith(ProgramRunnerWithNativeActionsLive(ALL_NATIVE_ACTIONS), source)
+    expect(observed.requests).toEqual([])
+    expect(observed.result.state).toBe("failed")
+    expect(observed.result.plans).toEqual([])
+    expect(observed.result.failure).toMatchObject({
+      action: alias,
+      phase: "contract",
+      causeTag: "UnknownProgramAction"
+    })
   })
 
-  it("denies both direct and aliased HTTP staging when http.stage is omitted", async () => {
-    for (const source of [
-      `return http.stage({ endpoint: "https://example.test", method: "POST" })`,
-      `return request_external({ endpoint: "https://example.test", method: "POST" })`
-    ]) {
-      const observed = await runWith(
-        ProgramRunnerWithNativeActionsLive(new Set(["process.run"])),
-        source
-      )
-      expectPreEffectDenial(observed, "http.stage")
-    }
+  it("denies HTTP staging when http.stage is omitted", async () => {
+    const observed = await runWith(
+      ProgramRunnerWithNativeActionsLive(new Set(["process.run"])),
+      `return http.stage({ endpoint: "https://example.test", method: "POST" })`
+    )
+    expectPreEffectDenial(observed, "http.stage")
   })
 
   it("allows file.write when it is explicitly included", async () => {
@@ -235,7 +226,7 @@ describe("Program native action surface", () => {
     expect([...ALL_NATIVE_ACTIONS]).toHaveLength(12)
     const observed = await runWith(
       ProgramRunnerLive,
-      `return run({ executable: "/usr/bin/true", args: [], cwd: "/tmp" })`
+      `return process.run({ executable: "/usr/bin/true", args: [], cwd: "/tmp" })`
     )
     expect(observed.result.state).toBe("succeeded")
     expect(observed.requests[0]?.draft.nodes[0]?._tag).toBe("Invoke")
