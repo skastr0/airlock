@@ -59,6 +59,12 @@ export class InvalidIndex extends Schema.TaggedError<InvalidIndex>()(
   { detail: Schema.String, span: SpanSchema }
 ) {}
 
+export class IndexOutOfRange extends Schema.TaggedError<IndexOutOfRange>()("IndexOutOfRange", { span: SpanSchema }) {}
+export class RangeBound extends Schema.TaggedError<RangeBound>()("RangeBound", { span: SpanSchema }) {}
+export class ArithmeticFailure extends Schema.TaggedError<ArithmeticFailure>()("ArithmeticFailure", {
+  fault: Schema.Literals(["zero", "overflow"]), span: SpanSchema
+}) {}
+
 export class AssertionFailed extends Schema.TaggedError<AssertionFailed>()(
   "AssertionFailed",
   { message: Schema.String, span: SpanSchema }
@@ -92,6 +98,9 @@ export type EvaluationError =
   | InvalidCallTarget
   | MissingRecordField
   | InvalidIndex
+  | IndexOutOfRange
+  | RangeBound
+  | ArithmeticFailure
   | AssertionFailed
   | DuplicateRecordField
   | LoopLimitExceeded
@@ -245,10 +254,10 @@ const withinNodes = <Value extends LanguageValue>(
     : Effect.fail(new ValueLimitExceeded({ limit, measure: "nodes", span }))
 }
 
-const finiteNumber = (value: number, operation: string, span: Span): Effect.Effect<number, InvalidLanguageOperation> =>
-  Number.isFinite(value)
+const finiteNumber = (value: number, span: Span): Effect.Effect<number, ArithmeticFailure> =>
+  Number.isFinite(value) && (!Number.isInteger(value) || Number.isSafeInteger(value))
     ? Effect.succeed(value)
-    : Effect.fail(invalid(operation, "result must be a finite number", span))
+    : Effect.fail(new ArithmeticFailure({ fault: "overflow", span }))
 
 const equal = (left: LanguageValue, right: LanguageValue): boolean => {
   if (isDuration(left) && isDuration(right)) return durationMillis(left) === durationMillis(right)
@@ -408,9 +417,7 @@ const evaluateStatement = <R, E>(
         !Number.isSafeInteger(from) ||
         !Number.isSafeInteger(to)
       ) {
-        return yield* Effect.fail(
-          invalid("for", "bounds must evaluate to safe integers", statement.span)
-        )
+        return yield* Effect.fail(new RangeBound({ span: statement.span }))
       }
       const iterations = Math.max(0, to - from)
       yield* ensureLoopCapacity(iterations, budget, statement.span)
@@ -437,7 +444,10 @@ const evaluateExpression = <R, E>(
   yield* consumeStep(budget, expression.span)
   switch (expression.kind) {
     case "LiteralExpression":
-      if (typeof expression.value === "number") return yield* finiteNumber(expression.value, "literal", expression.span)
+      if (typeof expression.value === "number") return Number.isFinite(expression.value)
+        ? expression.value
+        : yield* Effect.fail(new ArithmeticFailure({ fault: "overflow", span: expression.span }))
+      if (isDuration(expression.value)) yield* finiteNumber(durationMillis(expression.value), expression.span)
       return freezeValue(expression.value)
     case "IdentifierExpression": {
       const value = scope.get(expression.name)
@@ -464,7 +474,7 @@ const evaluateExpression = <R, E>(
       const value = yield* evaluateExpression(expression.operand, scope, resolver, budget)
       if (expression.operator === "!") return !(yield* truthy(value, expression.span))
       if (typeof value !== "number") return yield* Effect.fail(invalid("-", "requires a number", expression.span))
-      return yield* finiteNumber(-value, "-", expression.span)
+      return yield* finiteNumber(-value, expression.span)
     }
     case "BinaryExpression": {
       const left = yield* evaluateExpression(expression.left, scope, resolver, budget)
@@ -486,9 +496,9 @@ const evaluateExpression = <R, E>(
           : yield* Effect.fail(new ValueLimitExceeded({ limit, measure: "string-length", span: expression.span }))
       }
       if (typeof left !== "number" || typeof right !== "number") return yield* Effect.fail(invalid(expression.operator, "requires numbers (or strings for +)", expression.span))
-      if (expression.operator === "/" && right === 0) return yield* Effect.fail(invalid("/", "division by zero", expression.span))
+      if (expression.operator === "/" && right === 0) return yield* Effect.fail(new ArithmeticFailure({ fault: "zero", span: expression.span }))
       const value = expression.operator === "+" ? left + right : expression.operator === "-" ? left - right : expression.operator === "*" ? left * right : left / right
-      return yield* finiteNumber(value, expression.operator, expression.span)
+      return yield* finiteNumber(value, expression.span)
     }
     case "FieldExpression": {
       const object = yield* evaluateExpression(expression.object, scope, resolver, budget)
@@ -501,9 +511,8 @@ const evaluateExpression = <R, E>(
       const object = yield* evaluateExpression(expression.object, scope, resolver, budget)
       const index = yield* evaluateExpression(expression.index, scope, resolver, budget)
       if (!Array.isArray(object)) return yield* Effect.fail(invalid("[]", "requires a list", expression.span))
-      if (typeof index !== "number" || !Number.isInteger(index) || index < 0 || index >= object.length) {
-        return yield* Effect.fail(new InvalidIndex({ detail: "requires an in-range integer list index", span: expression.span }))
-      }
+      if (typeof index !== "number") return yield* Effect.fail(new InvalidIndex({ detail: "requires a number index", span: expression.span }))
+      if (!Number.isSafeInteger(index) || index < 0 || index >= object.length) return yield* Effect.fail(new IndexOutOfRange({ span: expression.span }))
       return object[index]!
     }
     case "CallExpression": {

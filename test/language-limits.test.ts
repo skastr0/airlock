@@ -1,7 +1,7 @@
 import { describe, expect, it } from "@effect/vitest"
 import { Effect } from "effect"
 import { parse, parseSync } from "../src/core/language/parser.ts"
-import { evaluate, StepLimitExceeded, ValueLimitExceeded, type ActionResolver } from "../src/core/language/evaluator.ts"
+import { ArithmeticFailure, IndexOutOfRange, RangeBound, evaluate, StepLimitExceeded, ValueLimitExceeded, type ActionResolver } from "../src/core/language/evaluator.ts"
 
 describe("language execution bounds", () => {
   for (const source of [
@@ -68,5 +68,17 @@ describe("language execution bounds", () => {
     const stopped = yield* evaluate(parseSync("echo(true)"), resolver, { bindings: { first: [1,2], second: [3,4] }, maxTotalNodes: 5 }).pipe(Effect.flip)
     expect(stopped._tag === "ValueLimitExceeded" && stopped.measure).toBe("total-nodes")
     expect(calls).toBe(0)
+  }))
+
+  it.effect("reports arithmetic, index bounds and range bounds as distinct fixed failures", () => Effect.gen(function* () {
+    const resolver: ActionResolver = { resolve: () => Effect.succeed(true) }
+    for (const source of ["return 1 / 0", "return 9007199254740991 + 1", "return -(9007199254740991 + 1)", "return 9999999999999999999999s"]) {
+      const stopped = yield* evaluate(parseSync(source), resolver).pipe(Effect.flip)
+      expect(stopped).toBeInstanceOf(ArithmeticFailure)
+      expect(stopped._tag === "ArithmeticFailure" && stopped.fault).toBe(source === "return 1 / 0" ? "zero" : "overflow")
+    }
+    for (const source of ["return [1][1]", "return [1][-1]", "return [1][0.5]"]) expect(yield* evaluate(parseSync(source), resolver).pipe(Effect.flip)).toBeInstanceOf(IndexOutOfRange)
+    expect(yield* evaluate(parseSync("for index in 0.5..1 {}"), resolver).pipe(Effect.flip)).toBeInstanceOf(RangeBound)
+    expect((yield* evaluate(parseSync("return 1 / 2"), resolver)).value).toBe(0.5)
   }))
 })

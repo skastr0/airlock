@@ -7,6 +7,7 @@ import {
   InvalidCallTarget,
   InvalidLanguageOperation,
   LoopLimitExceeded,
+  RangeBound,
   UnboundIdentifier,
   ValueLimitExceeded,
   evaluate,
@@ -255,11 +256,7 @@ return 0
         parseSync("for index in 0..9007199254740992 { visit(index) }"),
         dynamic
       ).pipe(Effect.flip)
-      expect(unsafe).toBeInstanceOf(InvalidLanguageOperation)
-      expect(unsafe).toMatchObject({
-        operation: "for",
-        detail: "bounds must evaluate to safe integers"
-      })
+      expect(unsafe).toBeInstanceOf(RangeBound)
     })
   )
 
