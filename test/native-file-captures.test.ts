@@ -18,7 +18,6 @@ import {
 import { fileCaptures } from "../src/native/FileCaptures.ts"
 import { ExclusiveRenameTestLive } from "./support/ExclusiveRenameTestLive.ts"
 
-const context = { env: undefined, signal: new AbortController().signal, idempotencyKey: "test" }
 
 const world = <A, E>(body: (args: {
   readonly fs: FileSystem.FileSystem
@@ -63,26 +62,26 @@ describe("local file captures", () => {
         yield* fs.writeFileString(path.join(workspace, "note.txt"), "hello")
         yield* fs.writeFileString(path.join(workspace, "data.json"), `{"n":1,"list":[true,null]}`)
 
-        const text = yield* run(captures["file.read"]({ path: "note.txt", format: "text" }, context))
+        const text = yield* run(captures["file.read"]({ path: "note.txt", format: "text" }))
         expect(text).toBe("hello")
-        const bytes = yield* run(captures["file.read"]({ path: "note.txt", format: "bytes" }, context))
+        const bytes = yield* run(captures["file.read"]({ path: "note.txt", format: "bytes" }))
         expect(bytes).toEqual([104, 101, 108, 108, 111])
-        const json = yield* run(captures["file.read"]({ path: "data.json", format: "json" }, context))
+        const json = yield* run(captures["file.read"]({ path: "data.json", format: "json" }))
         expect(json).toEqual({ n: 1, list: [true, null] })
         for (const value of [text, bytes, json]) expect(answers(FileRead.outcome, value)).toBe(true)
 
-        const stat = yield* run(captures["file.stat"]({ path: "note.txt" }, context))
+        const stat = yield* run(captures["file.stat"]({ path: "note.txt" }))
         expect(stat).toMatchObject({ kind: "file", bytes: 5 })
         expect(answers(FileStat.outcome, stat)).toBe(true)
-        const inspected = yield* run(captures["file.inspect"]({ path: "note.txt" }, context))
+        const inspected = yield* run(captures["file.inspect"]({ path: "note.txt" }))
         expect(answers(FileInspect.outcome, inspected)).toBe(true)
 
-        const listed = yield* run(captures["file.list"]({ path: "." }, context))
+        const listed = yield* run(captures["file.list"]({ path: "." }))
         expect(answers(FileList.outcome, listed)).toBe(true)
         expect((listed as ReadonlyArray<{ name: string }>).map((entry) => entry.name).sort())
           .toEqual(["data.json", "note.txt"])
 
-        const globbed = yield* run(captures["file.glob"]({ root: ".", pattern: "*.txt" }, context))
+        const globbed = yield* run(captures["file.glob"]({ root: ".", pattern: "*.txt" }))
         expect(answers(FileGlob.outcome, globbed)).toBe(true)
         expect(globbed).toHaveLength(1)
       })
@@ -97,13 +96,13 @@ describe("local file captures", () => {
         yield* fs.symlink(secret, path.join(workspace, "link.txt"))
 
         for (const target of ["../outside/secret.txt", secret, "link.txt", "missing.txt"]) {
-          const answer = yield* run(captures["file.read"]({ path: target, format: "text" }, context))
+          const answer = yield* run(captures["file.read"]({ path: target, format: "text" }))
           expect(answer, target).toBeInstanceOf(Refused)
           expect((answer as Refused).reason, target).not.toContain("the secret")
         }
-        expect(yield* run(captures["file.stat"]({ path: "link.txt" }, context))).toBeInstanceOf(Refused)
-        expect(yield* run(captures["file.list"]({ path: "../outside" }, context))).toBeInstanceOf(Refused)
-        expect(yield* run(captures["file.glob"]({ root: "../outside", pattern: "*" }, context))).toBeInstanceOf(Refused)
+        expect(yield* run(captures["file.stat"]({ path: "link.txt" }))).toBeInstanceOf(Refused)
+        expect(yield* run(captures["file.list"]({ path: "../outside" }))).toBeInstanceOf(Refused)
+        expect(yield* run(captures["file.glob"]({ root: "../outside", pattern: "*" }))).toBeInstanceOf(Refused)
       })
     )
   )

@@ -1,5 +1,6 @@
 import { Effect, type Schema } from "effect"
-import { type Implementations, type Refused, refused } from "../core/airlock/Implement.ts"
+import { type Refused, refused } from "../core/airlock/Implement.ts"
+import type { ToolContract } from "../core/contract/ToolContract.ts"
 import type { FileGlob, FileInspect, FileList, FileRead, FileStat } from "./FileContracts.ts"
 import { type NativeFileSystem, type NativeFilesystemErrorUnion, type NativeStat } from "./NativeFileSystem.ts"
 
@@ -30,7 +31,14 @@ const stat = (entry: NativeStat) => ({
   inode: entry.inode
 })
 
-export const fileCaptures = (fs: NativeFileSystem["Service"]): Implementations<Captures, unknown> => ({
+/** One function per capture contract. A read needs nothing but its input. */
+export type FileCaptures = {
+  readonly [Name in keyof Captures]: (
+    input: ToolContract.ShapeOf<Captures[Name]>["input"]
+  ) => Effect.Effect<ToolContract.OutputOf<Captures[Name]> | Refused, unknown>
+}
+
+export const fileCaptures = (fs: NativeFileSystem["Service"]): FileCaptures => ({
   "file.inspect": ({ path }) => nothingRead("file.inspect", Effect.map(fs.inspect(path), stat)),
   "file.stat": ({ path }) => nothingRead("file.stat", Effect.map(fs.stat(path), stat)),
   "file.read": ({ path, format }) =>
