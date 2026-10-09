@@ -1,12 +1,14 @@
 import { Effect, Result, Schema } from "effect"
 import type { ToolContract } from "../../src/core/contract/ToolContract.ts"
+import { HeldReference } from "../../src/core/contract/ToolHost.ts"
 import { decodeValue, labeledValue, type TrustedDecoder } from "../../src/core/contract/Decoder.ts"
 import { InformationLabel } from "../../src/core/labels/Labels.ts"
-import { acceptsLiteral, modelSchema, type SchemaModel } from "../../src/core/contract/SchemaModel.ts"
+import { acceptsLiteral, hasSameSchema, modelSchema, type SchemaModel } from "../../src/core/contract/SchemaModel.ts"
 import type { ToolFlow } from "../../src/core/contract/Flow.ts"
+import { validateFlowDecoders } from "../../src/core/contract/Flow.ts"
 import { validateBindings } from "../../src/core/language/bindings.ts"
 import type { Expression, Program, Span, Statement } from "../../src/core/language/ast.ts"
-import { SpanSchema } from "../../src/core/language/ast.ts"
+import { DurationSchema, SpanSchema } from "../../src/core/language/ast.ts"
 import { parse } from "../../src/core/language/parser.ts"
 
 /** Test-only checker over the current parser. No runner imports this prototype. */
@@ -21,6 +23,7 @@ export interface ReviewEnvironment {
   readonly maxListItems: number
   readonly maxCalls: number
   readonly maxIterations: number
+  readonly bindings?: Readonly<Record<string, { readonly schema: Schema.Codec<Schema.Json, Schema.Json>; readonly value: Schema.Json; readonly label: InformationLabel }>>
 }
 type Kind = "string" | "number" | "boolean" | "null" | "duration" | "never"
 export type Type =
@@ -37,6 +40,7 @@ export interface Fact {
   readonly origins: readonly string[]
   readonly refinements: readonly string[]
   readonly constant?: Schema.Json
+  readonly schemaProofs?: readonly SchemaModel[]
 }
 export interface CallFact {
   readonly tool: string
@@ -72,10 +76,12 @@ export const staticPath = (expr: Expression): string | undefined => expr.kind ==
 const add = (left: Counts, right: Counts): Counts => Object.fromEntries(unique(Object.keys(left), Object.keys(right)).map((key) => [key, (left[key] ?? 0) + (right[key] ?? 0)]))
 const maximum = (left: Counts, right: Counts): Counts => Object.fromEntries(unique(Object.keys(left), Object.keys(right)).map((key) => [key, Math.max(left[key] ?? 0, right[key] ?? 0)]))
 const scale = (counts: Counts, count: number): Counts => Object.fromEntries(Object.entries(counts).map(([key, value]) => [key, value * count]))
+const durationModel = modelSchema(DurationSchema, { identity: "language.Duration", side: "decoded" })
+const wayBackModel = modelSchema(HeldReference, { identity: "receipt.wayBack", side: "encoded" })
 
 export const reviewPrototype = (source: string, environment: ReviewEnvironment): Effect.Effect<Review, ReviewError | import("../../src/core/language/bindings.ts").DuplicateBinding | import("../../src/core/language/lexer.ts").LanguageDiagnostic> => Effect.gen(function* () {
   const parsed = yield* parse(source)
-  yield* validateBindings(parsed, ["schema"])
+  yield* validateBindings(parsed, ["schema", ...Object.keys(environment.bindings ?? {})])
   return yield* Effect.try({ try: () => check(parsed, environment), catch: (error) => error instanceof ReviewError ? error : new ReviewError({ detail: "unsupported contract or program", span: parsed.span }) })
 })
 
@@ -91,12 +97,13 @@ const check = (program: Program, environment: ReviewEnvironment): Review => {
   // eventual closed representation; this prototype never invents an any type.
   const fromModel = (model: SchemaModel, origin: string, input = false): Fact => {
     const origins = origin === "" ? [] : [origin]
+    if (hasSameSchema(model, durationModel)) return { ...fact({ kind: "duration" }, origins), schemaProofs: [model] }
     if (model.kind === "string" || model.kind === "number" || model.kind === "boolean" || model.kind === "never") return fact({ kind: model.kind }, origins)
     if (model.kind === "literal") return fact({ kind: model.value === null ? "null" : primitiveKind(model.value) }, origins, [], model.value)
     if (model.kind === "nominal") {
-      if (model.base === undefined) return fact({ kind: "opaque", identity: model.identity }, origins, [model.identity])
+      if (model.base === undefined) return { ...fact({ kind: "opaque", identity: model.identity }, origins, [model.identity]), schemaProofs: [model] }
       const base = fromModel(model.base, origin, input)
-      return { ...base, refinements: unique(base.refinements, [model.identity]) }
+      return { ...base, refinements: unique(base.refinements, [model.identity]), schemaProofs: [...(base.schemaProofs ?? []), model] }
     }
     if (model.kind === "record") {
       const fields = new Map<string, Fact>()
@@ -122,7 +129,11 @@ const check = (program: Program, environment: ReviewEnvironment): Review => {
   }
   const compatible = (value: Fact, expected: Fact, span: Span) => {
     if (value.type.kind === "never") return
-    if (expected.refinements.some((proof) => !value.refinements.includes(proof))) fail("missing schema refinement", span)
+    if (expected.refinements.some((proof) => {
+      if (value.refinements.includes(proof)) return false
+      const requirement = expected.schemaProofs?.find((model) => model.kind === "nominal" && model.identity === proof)
+      return requirement === undefined || !(value.schemaProofs ?? []).some((model) => hasSameSchema(model, requirement))
+    })) fail("missing schema refinement", span)
     if (value.type.kind === "choices") { for (const member of value.type.members) compatible(member, expected, span); return }
     if (expected.type.kind === "choices") {
       if (!expected.type.members.some((member) => { try { compatible(value, member, span); return true } catch (error) { if (error instanceof ReviewError) return false; throw error } })) fail("union type mismatch", span)
@@ -131,8 +142,12 @@ const check = (program: Program, environment: ReviewEnvironment): Review => {
     if (expected.type.kind === "nullable") { if (value.type.kind === "null") return; compatible(value.type.kind === "nullable" ? value.type.value : value, expected.type.value, span); return }
     if (value.type.kind !== expected.type.kind) fail(`expected ${expected.type.kind}, received ${value.type.kind}`, span)
     if (expected.constant !== undefined && value.constant !== expected.constant) fail("literal type mismatch", span)
-    if (expected.refinements.some((proof) => !value.refinements.includes(proof))) fail("missing schema refinement", span)
-    if (expected.type.kind === "opaque" && value.type.kind === "opaque" && expected.type.identity !== value.type.identity) fail("opaque schema identity mismatch", span)
+    if (expected.refinements.some((proof) => {
+      if (value.refinements.includes(proof)) return false
+      const requirement = expected.schemaProofs?.find((model) => model.kind === "nominal" && model.identity === proof)
+      return requirement === undefined || !(value.schemaProofs ?? []).some((model) => hasSameSchema(model, requirement))
+    })) fail("missing schema refinement", span)
+    if (expected.type.kind === "opaque" && value.type.kind === "opaque" && expected.type.identity !== value.type.identity && !(value.schemaProofs ?? []).some((actual) => (expected.schemaProofs ?? []).some((required) => hasSameSchema(actual, required)))) fail("opaque schema identity mismatch", span)
     if (expected.type.kind === "record" && value.type.kind === "record") {
       for (const key of value.type.fields.keys()) if (!expected.type.fields.has(key)) fail("record fields must match exactly", span)
       for (const [key, field] of expected.type.fields) {
@@ -148,6 +163,13 @@ const check = (program: Program, environment: ReviewEnvironment): Review => {
     if (expected.type.kind === "list" && value.type.kind === "list") compatible(value.type.item, expected.type.item, span)
   }
   const merge = (left: Fact, right: Fact, span: Span): Fact => {
+    if (left.type.kind === "never") return right
+    if (right.type.kind === "never") return left
+    const value = join(left, right, span)
+    const schemaProofs = (left.schemaProofs ?? []).filter((model) => (right.schemaProofs ?? []).some((other) => hasSameSchema(model, other)))
+    return { ...value, schemaProofs }
+  }
+  const join = (left: Fact, right: Fact, span: Span): Fact => {
     if (left.type.kind === "never") return right
     if (right.type.kind === "never") return left
     if (left.type.kind === "null") return { ...nullable(right), origins: unique(left.origins, right.origins) }
@@ -181,7 +203,8 @@ const check = (program: Program, environment: ReviewEnvironment): Review => {
     if (test.kind === "UnaryExpression" && test.operator === "!") return narrow(test.operand, scope, !truth)
     if (test.kind === "BinaryExpression" && ((test.operator === "&&" && truth) || (test.operator === "||" && !truth))) return narrow(test.right, narrow(test.left, scope, truth), truth)
     if (test.kind !== "BinaryExpression" || !["==", "!="].includes(test.operator)) return scope
-    const selector = test.left, tag = test.right
+    const reversed = test.left.kind === "LiteralExpression" && staticPath(test.right) !== undefined
+    const selector = reversed ? test.right : test.left, tag = reversed ? test.left : test.right
     const selectedPath = staticPath(selector)
     if (selectedPath !== undefined && tag.kind === "LiteralExpression" && tag.value === null) {
       const parts = selectedPath.split("."), root = scope.get(parts[0]!)
@@ -320,6 +343,7 @@ const check = (program: Program, environment: ReviewEnvironment): Review => {
         }
         const tool = environment.tools[name]
         if (tool === undefined || !environment.granted.has(name)) fail(`ungranted tool ${name}`, expression.span)
+        if (validateFlowDecoders(tool.contract.flow, environment.decoders) !== undefined) fail("unknown contract decoder", expression.span)
         tools.add(name)
         if (expression.arguments.length !== 1) fail("tool call takes one record", expression.span)
         const argument = expr(expression.arguments[0]!, scope, control)
@@ -329,18 +353,38 @@ const check = (program: Program, environment: ReviewEnvironment): Review => {
           if (Result.isFailure(Schema.decodeUnknownResult(tool.contract.input, { onExcessProperty: "error" })(materialized))) fail("static input violates schema", expression.span)
         } else compatible(argument.value, expected, expression.span)
         const requirements: ToolFlow["requires"] = tool.contract.flow.requires
-        if (argument.value.type.kind !== "record") fail("tool input requires record", expression.span)
-        const inputFields = argument.value.type.fields
+        if (Object.keys(requirements).length > 0 && argument.value.type.kind !== "record") fail("tool refinement requires modeled record", expression.span)
+        const inputFields = argument.value.type.kind === "record" ? argument.value.type.fields : new Map<string, Fact>()
         for (const [field, required] of Object.entries(requirements)) {
           if (required.some((identity) => !inputFields.get(field)?.refinements.includes(decoderIdentity(identity)))) fail(`missing required refinement on ${field}`, expression.span)
         }
         calls.push({ tool: name, span: expression.span, arguments: argument.value, control, maximumOccurrences: occurrences })
         const dependencies = unique(control, argument.value.origins)
         const influenced = (value: Fact): Fact => influencedFact(value, dependencies)
-        const result = influenced(fromModel(tool.contract.model.output, `${name}@${expression.span.start}.result`))
+        let result = influenced(fromModel(tool.contract.model.output, `${name}@${expression.span.start}.result`))
+        const provides: ToolFlow["provides"] = tool.contract.flow.provides
+        for (const [field, identities] of Object.entries(provides)) {
+          const attest = (value: Fact): Fact => value.type.kind === "nullable" ? { ...value, type: { ...value.type, value: attest(value.type.value) } } : ({ ...value,
+            refinements: unique(value.refinements, identities.map(decoderIdentity)),
+            schemaProofs: [...(value.schemaProofs ?? []), ...identities.map((identity) => modelSchema(environment.decoders[identity.name]!.schema, { identity: decoderIdentity(identity), side: "decoded" }))]
+          })
+          if (field === "$") result = attest(result)
+          else {
+            const decorate = (value: Fact): Fact => {
+              if (value.type.kind === "choices") return { ...value, type: { ...value.type, members: value.type.members.map(decorate) } }
+              if (value.type.kind !== "record") fail("provided field requires modeled record", expression.span)
+              const child = value.type.fields.get(field)
+              if (child === undefined) return value
+              const fields = new Map(value.type.fields); fields.set(field, attest(child))
+              return { ...value, type: { ...value.type, fields } }
+            }
+            result = decorate(result)
+          }
+        }
         const receiptOrigins = unique([`${name}@${expression.span.start}.state`], dependencies)
+        const receiptField = (field: string) => fact({ kind: "string" }, [`${name}@${expression.span.start}.${field}`])
         const state = (tag: string, fields: ReadonlyArray<readonly [string, Fact]>) => influenced(record(new Map([["state", fact({ kind: "string" }, receiptOrigins, [], tag)], ...fields]), receiptOrigins))
-        return { value: union(new Map([["done", state("done", [["id", fact({ kind: "string" }, receiptOrigins)], ["result", result]])], ["staged", state("staged", [["id", fact({ kind: "string" }, receiptOrigins)]])], ["refused", state("refused", [["refusal", record(new Map([["code", fact({ kind: "string" }, receiptOrigins)], ["message", fact({ kind: "string" }, receiptOrigins)]]), receiptOrigins)]])]]), receiptOrigins), counts: add(argument.counts, { [name]: 1 }) }
+        return { value: union(new Map([["done", state("done", [["id", receiptField("id")], ["result", result], ["wayBack", nullable(fromModel(wayBackModel, `${name}@${expression.span.start}.wayBack`))]])], ["staged", state("staged", [["id", receiptField("id")]])], ["refused", state("refused", [["refusal", record(new Map([["code", receiptField("refusal.code")], ["message", receiptField("refusal.message")]]), receiptOrigins)]])]]), receiptOrigins), counts: add(argument.counts, { [name]: 1 }) }
       }
     }
   }
@@ -409,7 +453,13 @@ const check = (program: Program, environment: ReviewEnvironment): Review => {
       control = next
     }
   }
-  const result = statements(program.body, new Map(), [])
+  const bindings = new Map<string, Fact>()
+  for (const [name, binding] of Object.entries(environment.bindings ?? {})) {
+    const decoded = Schema.decodeUnknownResult(binding.schema, { onExcessProperty: "error" })(binding.value)
+    if (Result.isFailure(decoded) || Result.isFailure(Schema.decodeUnknownResult(Schema.Json)(decoded.success))) fail(`invalid binding ${name}`)
+    bindings.set(name, fromModel(modelSchema(binding.schema, { identity: JSON.stringify(["binding", name]), side: "decoded" }), `binding.${name}`))
+  }
+  const result = statements(program.body, bindings, [])
   if (Object.values(result.counts).reduce((sum, count) => sum + count, 0) > environment.maxCalls || result.iterations > environment.maxIterations) fail("reviewed bound exceeds budget")
   return { program, environment, tools: [...tools].sort(), maximumCalls: result.counts, calls, iterations: result.iterations, expressionFacts }
 }

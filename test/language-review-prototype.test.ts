@@ -1,10 +1,12 @@
 import { describe, expect, it } from "@effect/vitest"
 import { Effect, Schema } from "effect"
+import { DurationSchema } from "../src/core/language/ast.ts"
+import { InformationLabel } from "../src/core/labels/Labels.ts"
 import { defineToolContract } from "../src/core/contract/ToolContract.ts"
 import { defineDecoder } from "../src/core/contract/Decoder.ts"
 import { decoderIdentity, reviewPrototype, ReviewError, type Review } from "./support/air-review.ts"
 import { runReviewedPrototype, type CallObservation, type PrototypeHost } from "./support/air-review-evaluator.ts"
-import { environment, triage } from "./support/air-review-fixtures.ts"
+import { CompanyRecipient, environment, triage } from "./support/air-review-fixtures.ts"
 import { runnerExamples } from "./support/hostile-air-corpus.ts"
 
 const done = (result: Schema.Json): Schema.Json => ({ state: "done", id: "receipt-1", result })
@@ -184,6 +186,71 @@ describe("current-syntax type checker prototype", () => {
       expect(error.reason).toBe("host-result")
       expect(JSON.stringify(error)).not.toContain("private host canary")
     }
+  }))
+
+  it.effect("retains exact checked schema identity across different tool model paths", () => Effect.gen(function* () {
+    const checked = Schema.String.check(Schema.makeFilter((text) => text.startsWith("ok:")))
+    const read = defineToolContract({ name: "checked.read", version: "1", effect: "capture", input: Schema.Struct({ id: Schema.String }), output: checked })
+    const use = defineToolContract({ name: "checked.use", version: "1", effect: "capture", input: Schema.Struct({ value: checked }), output: Schema.Boolean })
+    const env = { ...environment, tools: { "checked.read": { contract: read }, "checked.use": { contract: use } }, granted: new Set(["checked.read", "checked.use"]) }
+    const source = 'let r = checked.read({id:"one"}); if r.state == "done" { checked.use({value:r.result}) }; return true'
+    const review = yield* reviewPrototype(source, env)
+    expect(yield* runReviewedPrototype(review, { observe: assertObservedDependencies(review), resolve: (name) => Effect.succeed(name === "checked.read" ? done("ok:value") : done(true)) })).toBe(true)
+    expect(yield* reviewPrototype(source.replace('value:r.result', 'value:r.result + ""'), env).pipe(Effect.flip)).toBeInstanceOf(ReviewError)
+  }))
+
+  it.effect("attests contract-provided decoder proofs without applying a transform again", () => Effect.gen(function* () {
+    const provides = defineToolContract({ name: "trusted.read", version: "1", effect: "capture", input: Schema.Struct({ id: Schema.String }), output: Schema.Struct({ from: Schema.String }), flow: { provides: { from: [{ name: CompanyRecipient.name, version: CompanyRecipient.version }] } } })
+    const env = { ...environment, tools: { ...environment.tools, "trusted.read": { contract: provides } }, granted: new Set([...environment.granted, "trusted.read"]) }
+    const review = yield* reviewPrototype('let r = trusted.read({id:"one"}); if r.state == "done" { mail.send({to:r.result.from,subject:"Hi",body:"Hello"}) }; return true', env)
+    expect(yield* runReviewedPrototype(review, { observe: assertObservedDependencies(review), resolve: (name) => Effect.succeed(name === "trusted.read" ? done({ from: "a@example.com" }) : { state: "staged", id: "send" }) })).toBe(true)
+    const failed = yield* runReviewedPrototype(review, { resolve: () => Effect.succeed(done({ from: "a@outside.test" })) }).pipe(Effect.flip)
+    expect(failed.reason).toBe("host-result")
+  }))
+
+  it.effect("decodes and types trusted host bindings before any program call", () => Effect.gen(function* () {
+    const label = new InformationLabel({ confidentiality: "private", integrity: "untrusted", provenance: [] })
+    const env = { ...environment, bindings: { config: { schema: Schema.Struct({ url: Schema.String, count: Schema.NumberFromString }), value: { url: "https://example.com/bound", count: "2" }, label } } }
+    const review = yield* reviewPrototype('for n in 0..config.count { http.get({url:config.url}) }; return config.count', { ...env, maxCalls: 100 })
+    expect(yield* runReviewedPrototype(review, { observe: assertObservedDependencies(review), resolve: () => Effect.succeed(done({ text: "ok" })) })).toBe(2)
+    expect(yield* reviewPrototype('return config.count + "bad"', env).pipe(Effect.flip)).toBeInstanceOf(ReviewError)
+    expect(yield* reviewPrototype('let config = 1; return config', env).pipe(Effect.flip)).toHaveProperty("_tag", "DuplicateBinding")
+    expect(yield* reviewPrototype('return config.count', { ...env, bindings: { config: { ...env.bindings.config, value: { url: "ok", count: "bad" } } } }).pipe(Effect.flip)).toBeInstanceOf(ReviewError)
+  }))
+
+  it.effect("preserves nullable wire fields as null and narrows tagged schema unions", () => Effect.gen(function* () {
+    const nullableInput = defineToolContract({ name: "nullable.use", version: "1", effect: "capture", input: Schema.Struct({ preview: Schema.optionalKey(Schema.Union([Schema.String, Schema.Null])) }), output: Schema.Boolean })
+    const union = defineToolContract({ name: "union.read", version: "1", effect: "capture", input: Schema.Struct({ id: Schema.String }), output: Schema.Union([Schema.Struct({ kind: Schema.Literal("text"), text: Schema.String }), Schema.Struct({ kind: Schema.Literal("count"), count: Schema.Number })]) })
+    const env = { ...environment, tools: { "nullable.use": { contract: nullableInput }, "union.read": { contract: union } }, granted: new Set(["nullable.use", "union.read"]) }
+    let seen: Schema.Json = false
+    const nullable = yield* reviewPrototype('nullable.use({preview:null}); return true', env)
+    expect(yield* runReviewedPrototype(nullable, { resolve: (_, input) => Effect.sync(() => { seen = input; return done(true) }) })).toBe(true)
+    expect(seen).toEqual({ preview: null })
+    const source = 'let r = union.read({id:"one"}); if r.state == "done" { if "text" == r.result.kind { return r.result.text + "!" } else { return r.result.count + 1 } }; return null'
+    const review = yield* reviewPrototype(source, env)
+    expect(yield* runReviewedPrototype(review, { resolve: () => Effect.succeed(done({ kind: "text", text: "hello" })) })).toBe("hello!")
+    expect(yield* runReviewedPrototype(review, { resolve: () => Effect.succeed(done({ kind: "count", count: 1 })) })).toBe(2)
+  }))
+
+  it.effect("creates duration scalars only from literals or trusted duration schemas", () => Effect.gen(function* () {
+    expect(yield* runReviewedPrototype(yield* reviewPrototype('return {kind:"Duration",value:"bad",unit:"s"}.value', environment), unreachable)).toBe("bad")
+    expect(yield* runReviewedPrototype(yield* reviewPrototype('return 1s == {kind:"Duration",value:1,unit:"s"}', environment), unreachable)).toBe(false)
+    expect(yield* runReviewedPrototype(yield* reviewPrototype('return [1s] == [{kind:"Duration",value:1,unit:"s"}]', environment), unreachable)).toBe(false)
+    const duration = defineToolContract({ name: "duration.read", version: "1", effect: "capture", input: Schema.Struct({ id: Schema.String }), output: DurationSchema })
+    const env = { ...environment, tools: { "duration.read": { contract: duration } }, granted: new Set(["duration.read"]) }
+    const review = yield* reviewPrototype('let r = duration.read({id:"one"}); if r.state == "done" { return r.result == 1000ms }; return false', env)
+    expect(yield* runReviewedPrototype(review, { resolve: () => Effect.succeed(done({ kind: "Duration", value: 1, unit: "s" })) })).toBe(true)
+  }))
+
+  it.effect("keeps receipt metadata distinct and gives wayBack nullable typed fields", () => Effect.gen(function* () {
+    const source = 'let r = mail.read({id:"one"}); if r.state == "done" { if r.wayBack != null { http.get({url:r.wayBack.recoveryId}) } }; return true'
+    const review = yield* reviewPrototype(source, environment)
+    const wayBack = { callId: "call", recoveryId: "recovery", heldUntil: "2099-01-01T00:00:00.000Z" }
+    expect(yield* runReviewedPrototype(review, { observe: assertObservedDependencies(review), resolve: (name) => Effect.succeed(name === "mail.read" ? { state: "done", id: "id", result: { from: "a", subject: "b", body: "c" }, wayBack } : done({ text: "ok" })) })).toBe(true)
+    const ids = yield* reviewPrototype('let r = mail.read({id:"one"}); if r.state == "done" { http.get({url:r.id}) }; return true', environment)
+    const input = ids.calls.find((call) => call.tool === "http.get")!
+    expect(input.arguments.origins.some((origin) => origin.endsWith(".id"))).toBe(true)
+    expect(input.arguments.origins.some((origin) => origin.endsWith(".state"))).toBe(false)
   }))
 })
 
