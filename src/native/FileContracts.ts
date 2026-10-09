@@ -9,8 +9,9 @@ import { NativeEntryKind } from "./NativeFileSystem.ts"
  * file. The host supplies the implementations, and every apply goes through
  * Hold there.
  *
- * Every path a call names is a public field, so a grant can bound it and a
- * record can show it. File content never is.
+ * Every path a call names is a public field declared as a path resource with
+ * the rights the call needs on it, so a grant can bound it and a record can
+ * show it. File content never is.
  */
 
 const Stat = Schema.Struct({
@@ -31,7 +32,8 @@ export const FileInspect = defineToolContract({
   effect: "capture",
   input: Path,
   output: Stat,
-  public: ["path"]
+  public: ["path"],
+  resources: { path: { kind: "path", rights: ["read"] } }
 })
 
 /** Metadata of one entry. Symlinks are refused, not followed. */
@@ -41,7 +43,8 @@ export const FileStat = defineToolContract({
   effect: "capture",
   input: Path,
   output: Stat,
-  public: ["path"]
+  public: ["path"],
+  resources: { path: { kind: "path", rights: ["read"] } }
 })
 
 /**
@@ -59,7 +62,8 @@ export const FileRead = defineToolContract({
     )
   }),
   output: Schema.Json,
-  public: ["path", "format"]
+  public: ["path", "format"],
+  resources: { path: { kind: "path", rights: ["read"] } }
 })
 
 export const FileList = defineToolContract({
@@ -68,7 +72,8 @@ export const FileList = defineToolContract({
   effect: "capture",
   input: Path,
   output: Schema.Array(Schema.Struct({ name: Schema.String, stat: Stat })),
-  public: ["path"]
+  public: ["path"],
+  resources: { path: { kind: "path", rights: ["read"] } }
 })
 
 /** Paths under `root` matching a bounded pattern. Only `root` is a path. */
@@ -78,7 +83,8 @@ export const FileGlob = defineToolContract({
   effect: "capture",
   input: Schema.Struct({ root: Schema.String, pattern: Schema.String }),
   output: Schema.Array(Schema.String),
-  public: ["root", "pattern"]
+  public: ["root", "pattern"],
+  resources: { root: { kind: "path", rights: ["read"] } }
 })
 
 /**
@@ -106,7 +112,8 @@ export const FileWrite = defineToolContract({
     previous_held: Schema.Boolean,
     bytes: Schema.Finite
   }),
-  public: ["path"]
+  public: ["path"],
+  resources: { path: { kind: "path", rights: ["write"] } }
 })
 
 export const FileRemove = defineToolContract({
@@ -115,7 +122,8 @@ export const FileRemove = defineToolContract({
   effect: "apply",
   input: Path,
   output: Schema.Struct({ act_id: ActId, target: Schema.String, kind: NativeEntryKind }),
-  public: ["path"]
+  public: ["path"],
+  resources: { path: { kind: "path", rights: ["write"] } }
 })
 
 const Transfer = Schema.Struct({ source: Schema.String, destination: Schema.String })
@@ -132,7 +140,8 @@ export const FileCopy = defineToolContract({
     previous_held: Schema.Boolean,
     bytes: Schema.Finite
   }),
-  public: ["source", "destination"]
+  public: ["source", "destination"],
+  resources: { source: { kind: "path", rights: ["read"] }, destination: { kind: "path", rights: ["write"] } }
 })
 
 /** Two held acts: the install at the destination and the removal of the source. */
@@ -147,7 +156,8 @@ export const FileMove = defineToolContract({
     source: Schema.String,
     target: Schema.String
   }),
-  public: ["source", "destination"]
+  public: ["source", "destination"],
+  resources: { source: { kind: "path", rights: ["read", "write"] }, destination: { kind: "path", rights: ["write"] } }
 })
 
 /** One held act per directory created; none when the directory already existed. */
@@ -160,7 +170,8 @@ export const FileMkdir = defineToolContract({
     parents: Schema.Boolean.pipe(Schema.withDecodingDefaultKey(Effect.succeed(false)))
   }),
   output: Schema.Struct({ path: Schema.String, act_ids: Schema.Array(ActId) }),
-  public: ["path", "parents"]
+  public: ["path", "parents"],
+  resources: { path: { kind: "path", rights: ["write"] } }
 })
 
 export const FileContracts = [

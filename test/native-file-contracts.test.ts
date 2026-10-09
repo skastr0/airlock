@@ -1,4 +1,4 @@
-import { Result, Schema } from "effect"
+import { Result, Schema, SchemaAST } from "effect"
 import { describe, expect, it } from "vitest"
 import { FileContracts, FileMkdir, FileRead, FileWrite } from "../src/native/FileContracts.ts"
 
@@ -21,23 +21,39 @@ describe("native file contracts", () => {
     })
   })
 
-  it("make every path a call names public, so a grant can bound it", () => {
-    const paths: { readonly [tool: string]: ReadonlyArray<string> } = {
-      "file.inspect": ["path"],
-      "file.stat": ["path"],
-      "file.read": ["path"],
-      "file.list": ["path"],
-      "file.glob": ["root"],
-      "file.write": ["path"],
-      "file.remove": ["path"],
-      "file.copy": ["source", "destination"],
-      "file.move": ["source", "destination"],
-      "file.mkdir": ["path"]
+  it("declare every path a call names as a resource with the rights it needs", () => {
+    const read = { kind: "path", rights: ["read"] }
+    const write = { kind: "path", rights: ["write"] }
+    expect(Object.fromEntries(FileContracts.map((contract) => [contract.tag, contract.resources]))).toEqual({
+      "file.inspect": { path: read },
+      "file.stat": { path: read },
+      "file.read": { path: read },
+      "file.list": { path: read },
+      "file.glob": { root: read },
+      "file.write": { path: write },
+      "file.remove": { path: write },
+      "file.copy": { source: read, destination: write },
+      // A move removes its source, so it needs to write there too.
+      "file.move": { source: { kind: "path", rights: ["read", "write"] }, destination: write },
+      "file.mkdir": { path: write }
+    })
+  })
+
+  it("leave no string field that is neither a resource nor plainly not a path", () => {
+    const notPaths: { readonly [tool: string]: ReadonlyArray<string> } = {
+      "file.read": ["format"],
+      "file.glob": ["pattern"],
+      "file.write": ["content", "sourceArtifact"],
+      "file.mkdir": ["parents"]
     }
     for (const contract of FileContracts) {
-      for (const field of paths[contract.tag]!) {
-        expect(contract.publicFields, `${contract.tag}.${field}`).toContain(field)
-      }
+      const ast = Schema.toEncoded(contract.input).ast
+      const fields = SchemaAST.isObjects(ast) ? ast.propertySignatures.map((field) => String(field.name)) : []
+      expect(fields.length, contract.tag).toBeGreaterThan(0)
+      expect(
+        fields.filter((field) => !(field in contract.resources)).sort(),
+        contract.tag
+      ).toEqual([...(notPaths[contract.tag] ?? [])].sort())
     }
   })
 
