@@ -126,9 +126,10 @@ describe("cloud: a user's Airlock as a Durable Object", () => {
   type View = { readonly id: string; readonly kind: string; readonly state: string; readonly [field: string]: unknown }
   const guest = `
     let inbox = mail.list({ mailbox: "inbox", query: "is:unread" })
-    let sent = mail.send({ to: "ada@example.com", subject: "unread", body: "the first is " + inbox.ids[0] })
-    let labelled = label.add({ messageId: inbox.ids[0], label: "triaged" })
-    return { inbox: inbox, sent: sent.staged, labelled: labelled.staged, sendId: sent.id, labelId: labelled.id }`
+    assert inbox.state == "done", "the inbox was read"
+    let sent = mail.send({ to: "ada@example.com", subject: "unread", body: "the first is " + inbox.result.ids[0] })
+    let labelled = label.add({ messageId: inbox.result.ids[0], label: "triaged" })
+    return { inbox: inbox.result, sent: sent.state, labelled: labelled.state, sendId: sent.id, labelId: labelled.id }`
 
   it("describes exactly the granted actions, their shapes and which are staged", async () => {
     const described = await call<{
@@ -142,7 +143,9 @@ describe("cloud: a user's Airlock as a Durable Object", () => {
     ])
     expect(described.actions[1]).toMatchObject({ input: "{ mailbox: string, query: string }", result: "{ ids: [string] }" })
     expect(described.description).toContain("An Airlock program (.air)")
-    expect(described.description).toContain("- mail.send({ to: string, subject: string, body: string }) -> { staged: true, id: string, state: string }.")
+    expect(described.description).toContain("- mail.send({ to: string, subject: string, body: string }) -> { state: \"staged\", id: string }.")
+    expect(described.description).toContain("- mail.list({ mailbox: string, query: string }) -> { state: \"done\", id: string, result: { ids: [string] } }.")
+    expect(described.description).toContain("Check `receipt.state`")
     expect(JSON.stringify(described)).not.toContain("label.remove(")
   })
 
@@ -153,7 +156,7 @@ describe("cloud: a user's Airlock as a Durable Object", () => {
     const first = await call<Outcome>(workerd, `/airlock/run${object}`, { runId: "run-1", source: guest })
     expect(first).toMatchObject({
       ok: true,
-      result: { inbox: { ids: ["inbox-1", "inbox-2"] }, sent: true, labelled: true },
+      result: { inbox: { ids: ["inbox-1", "inbox-2"] }, sent: "staged", labelled: "staged" },
       toolCalls: 3
     })
     const ids = first.result as { readonly sendId: string; readonly labelId: string }
@@ -190,29 +193,33 @@ describe("cloud: a user's Airlock as a Durable Object", () => {
   })
 
   it("keeps a program inside its grants, its budgets and the language", async () => {
-    type Failed = Outcome & { readonly refusal?: { tool: string; code: string; message: string }; readonly fault?: string }
+    type Failed = Outcome & { readonly fault?: string }
     const run = (source: string) =>
       call<Failed>(workerd, "/airlock/run?object=limits", { runId: crypto.randomUUID(), source })
     const remote = () => call<ReadonlyArray<unknown>>(workerd, "/airlock/remote")
     const before = (await remote()).length
 
-    const outside = await run(`mail.send({ to: "eve@elsewhere.test", subject: "s", body: "b" })\nreturn "sent"`)
+    // A call outside the grants is refused to the program, which can read why. Nothing is staged or sent.
+    const outside = await run(`return mail.send({ to: "eve@elsewhere.test", subject: "s", body: "b" })`)
     expect(outside).toEqual({
-      ok: false,
-      reason: "tool_refused",
-      toolCalls: 1,
-      refusal: {
-        tool: "mail.send",
-        code: "not-allowed",
-        message: "mail.send is not allowed: `to` is not allowed by grant \"support-replies\""
-      }
+      ok: true,
+      result: {
+        state: "refused",
+        refusal: {
+          code: "not-allowed",
+          message: "mail.send is not allowed: `to` is not allowed by grant \"support-replies\""
+        }
+      },
+      toolCalls: 1
     })
+    expect(await call<ReadonlyArray<unknown>>(workerd, "/airlock/pending?object=limits")).toEqual([])
     // A tool the policy does not grant, and the things another language would offer, are not there.
-    expect(await run(`label.remove({ messageId: "m", label: "l" })`)).toMatchObject({
-      reason: "tool_refused",
-      refusal: { code: "unknown-tool" }
+    expect(await run(`return label.remove({ messageId: "m", label: "l" })`)).toMatchObject({
+      ok: true, result: { state: "refused", refusal: { code: "unknown-tool" } }
     })
-    expect(await run(`fetch("https://example.com/")`)).toMatchObject({ reason: "tool_refused", refusal: { code: "unknown-tool" } })
+    expect(await run(`return fetch("https://example.com/")`)).toMatchObject({
+      ok: true, result: { state: "refused", refusal: { code: "unknown-tool" } }
+    })
     expect(await run("return env.MAIL_TOKEN")).toMatchObject({ reason: "execution_failed", fault: "unbound-name" })
     expect(await run("return await fetch(1)")).toMatchObject({ reason: "invalid_code" })
     expect((await remote()).length).toBe(before)
@@ -344,7 +351,7 @@ describe("cloud: putting a held call back", () => {
     const tried = await call<{ ok: boolean; reason?: string }>(workerd, "/held/run?object=held", {
       runId: "held-2", source: `return restore({ id: "${callId}" })`
     })
-    expect(tried).toMatchObject({ ok: false, reason: "tool_refused" })
+    expect(tried).toMatchObject({ ok: true, result: { state: "refused", refusal: { code: "unknown-tool" } } })
     expect((await call<Held>(workerd, "/held/held")).map((entry) => entry.did)).toEqual(["prepared", "written"])
 
     const restored = await call<Answer>(workerd, "/held/restore?object=held", { id: callId })

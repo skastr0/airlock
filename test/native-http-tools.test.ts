@@ -81,9 +81,7 @@ const call = <Name extends "http.get" | "http.stage">(
     yield* Effect.gen(function* () {
       const guest = yield* airlock.guest({ runId: `run-${crypto.randomUUID()}`, env: undefined })
       const result = yield* guest.call(kind, input)
-      if (typeof result === "object" && result !== null && "staged" in result) {
-        yield* (yield* airlock.supervisor(undefined)).commit((result as { id: string }).id)
-      }
+      if (result.state === "staged") yield* (yield* airlock.supervisor(undefined)).commit(result.id)
     }).pipe(Effect.provide(airlock.layer(undefined).pipe(Layer.provideMerge(Layer.mergeAll(
       memoryOutboxStore(makeMemoryOutboxState()), memoryLedger(makeMemoryLedgerState()), WebCrypto.layer
     )))), Effect.result)

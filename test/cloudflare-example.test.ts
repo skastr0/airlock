@@ -54,7 +54,6 @@ describe("examples/cloudflare in workerd", () => {
     readonly result?: unknown
     readonly reason?: string
     readonly toolCalls: number
-    readonly refusal?: { readonly tool: string; readonly code: string; readonly message: string }
   }
   const did = async () => (await request<ReadonlyArray<Entry>>("GET", "/mailbox")).map((entry) => entry.did)
   const run = (session: string, runId: string, source: string) =>
@@ -121,22 +120,23 @@ describe("examples/cloudflare in workerd", () => {
     expect(await request("GET", "/pending")).toEqual([])
   })
 
-  it("ends a program at what the policy does not grant, in a sentence an agent can act on", async () => {
+  it("hands the program a refusal for what the policy does not grant, in a sentence an agent can act on", async () => {
     const before = await did()
     const outcome = await run("other", "run-2", `
-      mail.send({ to: "eve@elsewhere.test", subject: "s", body: "b" })
-      return mail.list({ mailbox: "inbox" })`)
+      let sent = mail.send({ to: "eve@elsewhere.test", subject: "s", body: "b" })
+      if sent.state == "refused" { return sent.refusal }
+      return "sent"`)
     expect(outcome).toEqual({
-      ok: false,
-      reason: "tool_refused",
-      toolCalls: 1,
-      refusal: {
-        tool: "mail.send",
+      ok: true,
+      result: {
         code: "not-allowed",
         message: "mail.send is not allowed: `to` is not allowed by grant \"company-mail\""
-      }
+      },
+      toolCalls: 1
     })
+    // Nothing was done and nothing waits for approval.
     expect(await did()).toEqual(before)
+    expect(await request("GET", "/pending?session=other")).toEqual([])
   })
 
   it("stops a program at the policy's call budget and at the loop budget", async () => {

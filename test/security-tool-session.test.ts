@@ -90,9 +90,8 @@ describe("security: tool-session admission owns its data", () => {
         { resource: "allowed", extra: "private-excess-canary" },
         JSON.parse('{"resource":"allowed","__proto__":{"extra":"private-excess-canary"}}')
       ]) {
-        const result = yield* session["security.read"](input).pipe(Effect.result)
-        expect(Result.isFailure(result)).toBe(true)
-        if (Result.isFailure(result)) expect(result.failure._tag).toBe("InvalidToolInput")
+        const result = yield* session["security.read"](input)
+        expect(result).toMatchObject({ state: "refused", refusal: { code: "invalid-input" } })
         expect(JSON.stringify(result)).not.toContain("private-excess-canary")
       }
       expect(seen).toEqual([])
@@ -121,9 +120,9 @@ describe("security: tool-session admission owns its data", () => {
       const result = yield* session["security.read"](wire)
       expect(wire.resource.bucket).toBe("denied")
       expect({
-        result: result._tag,
+        result: result.state,
         sealed: [...state.dispatches.values()].map((dispatch) => JSON.parse(dispatch.canonical))
-      }).toEqual({ result: "Performed", sealed: [{ resource: { bucket: "allowed" } }] })
+      }).toEqual({ result: "done", sealed: [{ resource: { bucket: "allowed" } }] })
       expect(seen).toEqual([{ bucket: "allowed" }])
     }).pipe(Effect.provide(world(seen, crypto, state)))
   })
@@ -135,9 +134,8 @@ describe("security: tool-session admission owns its data", () => {
     return Effect.gen(function* () {
       const session = yield* openToolSession(tools, { runId: "policy-snapshot", policy })
       allowed.bucket = "denied"
-      const result = yield* session["security.read"]({ resource: { bucket: "denied" } }).pipe(Effect.result)
-      expect(Result.isFailure(result)).toBe(true)
-      if (Result.isFailure(result)) expect(result.failure._tag).toBe("ToolCallNotGranted")
+      const result = yield* session["security.read"]({ resource: { bucket: "denied" } })
+      expect(result).toMatchObject({ state: "refused", refusal: { code: "not-allowed" } })
       expect(seen).toEqual([])
     }).pipe(Effect.provide(world(seen)))
   })
@@ -151,6 +149,7 @@ describe("security: tool-session admission owns its data", () => {
       const first = yield* session["security.read"]({ resource: { bucket: "allowed" } })
       const replay = yield* openToolSession(tools, { ...options, runId: "original-run" })
       const again = yield* replay["security.read"]({ resource: { bucket: "allowed" } })
+      if (first.state !== "done" || again.state !== "done") throw new Error("admitted capture must complete")
       expect(again.id).toBe(first.id)
       expect(seen).toEqual([{ bucket: "allowed" }])
     }).pipe(Effect.provide(world(seen)))
@@ -167,9 +166,8 @@ describe("security: tool-session admission owns its data", () => {
       })
       // A caller bypassing TypeScript still receives a redacted typed error.
       // @ts-expect-error deliberately invalid private input
-      const result = yield* session["security.private"]({ privateCount: "private-canary-123" }).pipe(Effect.result)
-      expect(Result.isFailure(result)).toBe(true)
-      if (Result.isFailure(result)) expect(result.failure._tag).toBe("InvalidToolInput")
+      const result = yield* session["security.private"]({ privateCount: "private-canary-123" })
+      expect(result).toMatchObject({ state: "refused", refusal: { code: "invalid-input" } })
       expect(JSON.stringify(result)).not.toContain("private-canary-123")
     }).pipe(Effect.provide(world(seen)))
   })

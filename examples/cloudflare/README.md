@@ -35,27 +35,35 @@ write it. `triage.air` is a program an agent might write.
 
 ```
 let inbox = mail.list({ mailbox: "inbox" })
+assert inbox.state == "done", "the inbox could not be read"
 
-for message in inbox.messages {
+for message in inbox.result.messages {
   if message.unread && message.from == "billing@example.com" {
     let full = mail.read({ id: message.id })
-    label.add({ messageId: message.id, label: "billing" })
-    mail.send({
-      to: "finance@example.com",
-      subject: "Fwd: " + full.subject,
-      body: full.body
-    })
+    if full.state == "done" {
+      label.add({ messageId: message.id, label: "billing" })
+      mail.send({
+        to: "finance@example.com",
+        subject: "Fwd: " + full.result.subject,
+        body: full.result.body
+      })
+    }
   }
 }
 
-return { triaged: "inbox", seen: inbox.messages }
+return { triaged: "inbox", seen: inbox.result.messages }
 ```
 
-`mail.list` and `mail.read` return the mail. `label.add` and `mail.send`
-return a receipt (`{ staged: true, id, state }`): nothing has been labelled or
-sent, and both wait in `GET /pending`. `GET /tools` returns the granted
-actions, their input and result shapes, which of them are staged, and a short
-description of the language, ready to put in a prompt.
+Every call returns a receipt, and the program checks its `state` before it
+reads anything else. `mail.list` and `mail.read` are granted `now`, so their
+receipts are `done` and carry a `result`. `label.add` and `mail.send` are
+granted `approved`: their receipts are `staged`, with an id and no result.
+Nothing has been labelled or sent, and both wait in `GET /pending`. A call
+outside the grants returns a `refused` receipt that says why.
+
+`GET /tools` returns the granted actions, their input and result shapes, which
+of them are staged, and a short description of the language, ready to put in
+a prompt.
 
 ## Run it locally
 
@@ -126,8 +134,8 @@ Each of these is checked in workerd by `test/cloudflare-durable.test.ts` and
 - reach the network, a cache, a binding or a secret: `fetch(...)` is just an
   action nobody granted, and `env.MAIL_TOKEN` is a name that is not bound;
 - call a tool the policy does not grant, or a granted tool outside its grant.
-  The program ends there and the caller gets a sentence such as
-  ``mail.send is not allowed: `to` is not allowed by grant "company-mail"``;
+  Nothing happens, and the program gets a `refused` receipt with a sentence
+  such as ``mail.send is not allowed: `to` is not allowed by grant "company-mail"``;
 - exceed the policy's call budget, loop past the iteration budget, build a
   value past the size limits, send an oversized input or return an oversized
   result: the run fails with a fixed reason code;
@@ -136,15 +144,18 @@ Each of these is checked in workerd by `test/cloudflare-durable.test.ts` and
 
 ## Limits you should know
 
-- **A refused action ends the program.** The language has no way to catch an
-  error. The agent reads the sentence, fixes the program and runs it again
-  under the same `runId`; calls that already ran return their recorded results.
+- **A refusal is a receipt; a fault ends the program.** A program can branch
+  on a `refused` receipt. A call that may have acted without Airlock knowing
+  the result, or a host that cannot answer, ends the run with the reason
+  `tool_failed`. The language has no way to catch that. Running the program
+  again under the same `runId` returns the recorded results of calls that
+  already ran.
 - **The language is small.** There is no reassignment and a `let` inside a
   loop ends with the loop, so a program cannot build up a list or a count. It
   can read, branch, act on each item of a list, and return what it found.
-- **A program runs in your Durable Object, not in an isolate.** It cannot run
-  forever (every loop iteration is charged to one budget) and cannot build a
-  value too large to hold, but it does use that object's CPU until the
-  wall-clock deadline stops it.
+- **A program runs in your Durable Object, not in an isolate.** What it
+  computes is bounded by a step budget and a loop budget, and what it holds
+  by size limits, so it cannot run forever or outgrow the object. One program
+  runs at a time per object; a few wait and the rest are told to try again.
 - **The mail service here is a stand-in.** `src/airlock.ts` shows where a real
   call goes, with `env.MAIL_TOKEN` and the idempotency key.

@@ -188,12 +188,12 @@ describe("core: what the types rule out", () => {
       session["mail.list"]({ mailbox: "inbox" })
 
       const listed = yield* session["mail.list"]({ mailbox: "inbox", query: "q" })
-      const ids = listed._tag === "Performed" ? listed.outcome.ids : []
+      const ids = listed.state === "done" ? listed.result.ids : []
       const labelled = yield* session["label.add"]({ messageId: "m", label: "l" })
       // A write's result is `Staged` and nothing else: there is no outcome to read.
-      const staged: "Staged" = labelled._tag
+      const staged: "staged" | "refused" = labelled.state
       // @ts-expect-error a staged write has no outcome, in the type or at run time
-      labelled.outcome
+      labelled.result
       // @ts-expect-error nor a response
       labelled.response
       return [ids, staged] as const

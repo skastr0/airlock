@@ -2,17 +2,20 @@
 # and propose forwarding it to finance. Listing and reading run at once. The
 # labels and the mail are only recorded; a supervisor decides whether they happen.
 let inbox = mail.list({ mailbox: "inbox" })
+assert inbox.state == "done", "the inbox could not be read"
 
-for message in inbox.messages {
+for message in inbox.result.messages {
   if message.unread && message.from == "billing@example.com" {
     let full = mail.read({ id: message.id })
-    label.add({ messageId: message.id, label: "billing" })
-    mail.send({
-      to: "finance@example.com",
-      subject: "Fwd: " + full.subject,
-      body: full.body
-    })
+    if full.state == "done" {
+      label.add({ messageId: message.id, label: "billing" })
+      mail.send({
+        to: "finance@example.com",
+        subject: "Fwd: " + full.result.subject,
+        body: full.result.body
+      })
+    }
   }
 }
 
-return { triaged: "inbox", seen: inbox.messages }
+return { triaged: "inbox", seen: inbox.result.messages }

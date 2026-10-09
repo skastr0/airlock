@@ -8,7 +8,7 @@ import {
   type GuestFault,
   type GuestLimits,
   type GuestOutcome,
-  type GuestRefusal,
+  type GuestToolFailure,
   type GuestRun,
   GuestRunner
 } from "./GuestRunner.ts"
@@ -16,13 +16,13 @@ import {
 /** Why the run stops at a tool call. It is the run's outcome, not something the program sees. */
 class Stopped extends Data.TaggedError("Stopped")<{
   readonly reason: GuestFailureReason
-  readonly refusal?: GuestRefusal
+  readonly failure?: GuestToolFailure
 }> {}
 
-const stop = (reason: GuestFailureReason, refusal?: GuestRefusal) =>
-  Effect.fail(new Stopped(refusal === undefined ? { reason } : { reason, refusal }))
+const stop = (reason: GuestFailureReason, failure?: GuestToolFailure) =>
+  Effect.fail(new Stopped(failure === undefined ? { reason } : { reason, failure }))
 
-/** A program names its tools; a name is cut so it cannot carry a payload into a refusal. */
+/** A program names its tools; a name is cut so it cannot carry a payload into an outcome. */
 const MAX_NAME = 128
 const MAX_MESSAGE = 512
 
@@ -89,7 +89,7 @@ const runProgram = ({ source, surface, bindings: bound, limits: overrides, signa
     let open = true
     const failed = (
       reason: GuestFailureReason,
-      detail: { readonly at?: { line: number; column: number }; readonly fault?: GuestFault; readonly refusal?: GuestRefusal } = {}
+      detail: { readonly at?: { line: number; column: number }; readonly fault?: GuestFault; readonly failure?: GuestToolFailure } = {}
     ): GuestOutcome => ({ ok: false, reason, toolCalls: calls, ...detail })
 
     if (invalidSource(source, limits)) return Effect.succeed(failed("invalid_code"))
@@ -113,13 +113,13 @@ const runProgram = ({ source, surface, bindings: bound, limits: overrides, signa
           if (calls >= limits.maxToolCalls) return yield* stop("tool_call_limit")
           // Counted before anything is validated: a rejected call is still a call.
           calls += 1
-          const tool = action.slice(0, MAX_NAME)
+          // A name the session does not grant never reaches the surface. The
+          // program gets the refusal the kernel itself gives for such a name.
           if (!granted.has(action)) {
-            return yield* stop("tool_refused", {
-              tool,
-              code: "unknown-tool",
-              message: `${tool} is not a tool this session grants`
-            })
+            return {
+              state: "refused",
+              refusal: { code: "unknown-tool", message: `${action.slice(0, MAX_NAME)} is not a tool this session grants` }
+            }
           }
           if (args.length !== 1) return yield* stop("tool_input_invalid")
           const input = yield* cross(args[0], limits.maxToolInputBytes, limits, {
@@ -128,16 +128,19 @@ const runProgram = ({ source, surface, bindings: bound, limits: overrides, signa
           })
           const ended = yield* Effect.result(Effect.suspend(() => surface.call(action, input)))
           if (!open || Date.now() >= deadline) return yield* stop("timeout")
+          // A refusal is a receipt the program reads. What fails here is a
+          // fault: the call may have acted, or the host could not answer.
           if (ended._tag === "Failure") {
-            const refusal: AirlockFailure = ended.failure
+            const fault: AirlockFailure = ended.failure
             // A spent session budget is the host's limit, not the tool's answer.
-            if (refusal.code === "budget-exceeded") return yield* stop("tool_call_limit")
-            return yield* stop("tool_refused", {
-              tool,
-              code: refusal.code,
-              message: refusal.message.slice(0, MAX_MESSAGE)
+            if (fault.code === "budget-exceeded") return yield* stop("tool_call_limit")
+            return yield* stop("tool_failed", {
+              tool: action.slice(0, MAX_NAME),
+              code: fault.code,
+              message: fault.message.slice(0, MAX_MESSAGE)
             })
           }
+          // The receipt crosses whole: its state, and its result when the call is done.
           return (yield* cross(ended.success, limits.maxToolResultBytes, limits, {
             tooLarge: "tool_result_limit",
             notJson: "execution_failed"
@@ -177,7 +180,7 @@ const runProgram = ({ source, surface, bindings: bound, limits: overrides, signa
       Effect.catch((error) =>
         Effect.succeed(
           error._tag === "Stopped"
-            ? failed(error.reason, error.refusal === undefined ? {} : { refusal: error.refusal })
+            ? failed(error.reason, error.failure === undefined ? {} : { failure: error.failure })
             : failed(reasons[error._tag] ?? "execution_failed", {
                 at: { line: error.span.line, column: error.span.column },
                 ...(faultOf(error) === undefined ? {} : { fault: faultOf(error)! })

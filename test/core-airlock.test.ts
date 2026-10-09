@@ -73,15 +73,15 @@ describe("core: defineAirlock", () => {
           tools: guest.tools,
           listed: yield* guest.call("mail.list", { mailbox: "inbox", query: "is:unread" }),
           sent: yield* guest.call("mail.send", { to: "ada@example.com", subject: "hi", body: "text" }),
-          ungranted: yield* Effect.flip(guest.call("label.remove", { messageId: "m", label: "l" }))
+          ungranted: yield* guest.call("label.remove", { messageId: "m", label: "l" })
         }
       }))
       expect(result.tools).toEqual(["label.add", "mail.list", "mail.send"])
-      expect(result.listed).toEqual({ ids: ["inbox-1", "inbox-2"] })
-      expect(result.sent).toMatchObject({ staged: true, state: "staged" })
+      expect(result.listed).toMatchObject({ state: "done", result: { ids: ["inbox-1", "inbox-2"] } })
+      expect(result.sent).toMatchObject({ state: "staged" })
       expect(result.ungranted).toMatchObject({
-        code: "unknown-tool",
-        message: "label.remove is not a tool this session grants"
+        state: "refused", refusal: { code: "unknown-tool",
+        message: "label.remove is not a tool this session grants" }
       })
       expect(env.sent).toEqual([])
     }))
@@ -95,7 +95,7 @@ describe("core: defineAirlock", () => {
         const staged = yield* guest.call("mail.send", { to: "ada@example.com", subject: "hi", body: "text" })
         const supervisor = yield* airlock.supervisor(env)
         const pending = yield* supervisor.pending
-        const id = "staged" in (staged as object) ? (staged as { id: string }).id : ""
+        const id = staged.state === "staged" ? staged.id : ""
         return {
           pending: pending.map((emission) => [emission.id, emission.kind, emission.state]),
           id,
@@ -125,12 +125,12 @@ describe("core: defineAirlock", () => {
       const failures = yield* run(env, Effect.gen(function* () {
         const guest = yield* airlock.guest({ runId: "run-1", env })
         return yield* Effect.all([
-          Effect.flip(guest.call("mail.send", { to: "eve@elsewhere.test", subject: "s", body: "b" })),
-          Effect.flip(guest.call("mail.send", { to: "ada@example.com" })),
-          Effect.flip(guest.call("mail.list", { mailbox: 7 }))
+          guest.call("mail.send", { to: "eve@elsewhere.test", subject: "s", body: "b" }),
+          guest.call("mail.send", { to: "ada@example.com" }),
+          guest.call("mail.list", { mailbox: 7 })
         ])
       }))
-      expect(failures.map((failure) => [failure.code, failure.message])).toEqual([
+      expect(failures.map((failure) => failure.state === "refused" ? [failure.refusal.code, failure.refusal.message] : failure.state)).toEqual([
         ["not-allowed", "mail.send is not allowed: `to` is not allowed by grant \"support-replies\""],
         ["invalid-input", expect.stringContaining("mail.send was given an invalid input")],
         ["invalid-input", expect.stringContaining("mail.list was given an invalid input")]
@@ -195,9 +195,9 @@ describe("core: defineAirlock", () => {
       const lines = guest.description.split("\n")
       expect(lines[0]).toBe("An Airlock program (.air) is a list of statements, one per line.")
       expect(lines.slice(-3)).toEqual([
-        "- label.add({ messageId: string, label: string }) -> { staged: true, id: string, state: string }. Makes an external request; is recorded for approval and returns a staged receipt, never a result; nothing happens until a supervisor commits it. Can be answered by label.remove.",
-        "- mail.list({ mailbox: string, query: string }) -> { ids: [string] }. Captures a value; runs at once and returns its result.",
-        "- mail.send({ to: string, subject: string, body: string }) -> { staged: true, id: string, state: string }. Makes an external request; is recorded for approval and returns a staged receipt, never a result; nothing happens until a supervisor commits it."
+        `- label.add({ messageId: string, label: string }) -> { state: "staged", id: string }. Makes an external request; is recorded for approval and returns a staged receipt, never a result; nothing happens until a supervisor commits it. Can be answered by label.remove.`,
+        `- mail.list({ mailbox: string, query: string }) -> { state: "done", id: string, result: { ids: [string] } }. Captures a value; runs at once and returns a done receipt with its result.`,
+        `- mail.send({ to: string, subject: string, body: string }) -> { state: "staged", id: string }. Makes an external request; is recorded for approval and returns a staged receipt, never a result; nothing happens until a supervisor commits it.`,
       ])
       expect(JSON.stringify(guest.actions)).not.toContain("\"label.remove\",\"input\"")
     }))

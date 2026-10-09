@@ -63,7 +63,7 @@ export const GuestFailureReason = Schema.Literals([
   "tool_input_limit",
   "tool_input_invalid",
   "tool_result_limit",
-  "tool_refused",
+  "tool_failed",
   "output_limit",
   "loop_limit",
   "step_limit",
@@ -97,16 +97,18 @@ export const GuestFault = Schema.Literals([
 export type GuestFault = typeof GuestFault.Type
 
 /**
- * A tool call Airlock refused. A refusal ends the run: the language has no way
- * to catch it. The message is Airlock's own sentence naming the tool, the
- * field and the grant.
+ * A tool call that ended the run. A call Airlock refuses does not: the program
+ * gets a receipt whose state is `refused` and decides what to do. What ends a
+ * run is a fault, where the call may have acted or the host could not answer:
+ * an uncertain result, an expired grant, an unavailable host. The message is
+ * Airlock's own sentence.
  */
-export const GuestRefusal = Schema.Struct({
+export const GuestToolFailure = Schema.Struct({
   tool: Schema.String,
   code: Schema.String,
   message: Schema.String
 })
-export type GuestRefusal = typeof GuestRefusal.Type
+export type GuestToolFailure = typeof GuestToolFailure.Type
 
 /** How a run ended. `toolCalls` counts every call attempted, refused ones included. */
 export const GuestOutcome = Schema.Union([
@@ -118,7 +120,7 @@ export const GuestOutcome = Schema.Union([
     /** Where in the source the program stopped, when the failure has a place. */
     at: Schema.optionalKey(Schema.Struct({ line: Schema.Int, column: Schema.Int })),
     fault: Schema.optionalKey(GuestFault),
-    refusal: Schema.optionalKey(GuestRefusal)
+    failure: Schema.optionalKey(GuestToolFailure)
   })
 ])
 export type GuestOutcome = typeof GuestOutcome.Type

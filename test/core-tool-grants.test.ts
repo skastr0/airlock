@@ -59,7 +59,7 @@ describe("core: tool grant timing and typed matchers", () => {
     const deadline = DateTime.makeUnsafe("2026-10-09T10:00:00Z")
     const expiring = toolGrant(inspect, { id: "expiring", when: "now", validUntil: deadline })
     const other = toolGrant(inspect, { id: "other", when: "now" })
-    expect(toolDispatchDecision([expiring, other], registry, call([]), { now: deadline })).toMatchObject({ _tag: "Refused", reason: "a fitting grant has expired" })
+    expect(toolDispatchDecision([expiring, other], registry, call([]), { now: deadline })).toMatchObject({ _tag: "Expired", validUntil: deadline })
     expect(toolDispatchDecision([other, expiring], registry, call([]), { now: DateTime.makeUnsafe("2026-10-09T09:59:59Z") })).toMatchObject({ _tag: "Now", validUntil: deadline })
   })
 })

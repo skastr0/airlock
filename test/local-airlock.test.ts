@@ -3,6 +3,7 @@ import { BunServices } from "@effect/platform-bun"
 import { describe, expect, it } from "@effect/vitest"
 import * as AirlockHome from "../src/AirlockHome.ts"
 import type { AirlockFailure } from "../src/core/airlock/Airlock.ts"
+import type { GuestReceipt } from "../src/core/contract/Receipt.ts"
 import { toolGrant } from "../src/core/admission/ToolGrant.ts"
 import type { ToolHost } from "../src/core/contract/ToolHost.ts"
 import { toolPolicy } from "../src/core/session/ToolPolicy.ts"
@@ -35,8 +36,9 @@ const world = <A, E>(body: (args: {
   readonly hold: typeof Hold.Service
   /** Opens a guest and a supervisor for a policy over this machine. */
   readonly open: (policy: (workspace: string) => Parameters<typeof localAirlock>[0]["policy"]) => Effect.Effect<{
-    readonly call: (tool: string, input: unknown) => Effect.Effect<unknown, AirlockFailure>
+    readonly call: (tool: string, input: unknown) => Effect.Effect<GuestReceipt, AirlockFailure>
     readonly commit: (id: string) => Effect.Effect<unknown, AirlockFailure>
+    readonly restore: (id: string) => Effect.Effect<unknown, AirlockFailure>
     readonly pending: Effect.Effect<ReadonlyArray<{ readonly id: string }>, AirlockFailure>
   }, unknown, Scope.Scope>
   readonly path: Path.Path
@@ -95,6 +97,7 @@ const world = <A, E>(body: (args: {
             return {
               call: (tool, input) => guest.call(tool, input).pipe(Effect.provide(context)),
               commit: (id) => supervisor.commit(id).pipe(Effect.provide(context)),
+              restore: (id) => supervisor.restore(id).pipe(Effect.provide(context)),
               pending: supervisor.pending.pipe(Effect.provide(context))
             }
           })
@@ -109,7 +112,7 @@ describe("the local machine as an Airlock", () => {
     world(({ fs, at, hold, open }) =>
       Effect.gen(function* () {
         yield* fs.writeFileString(at("note.txt"), "before")
-        const { call } = yield* open((workspace) => toolPolicy({
+        const { call, restore } = yield* open((workspace) => toolPolicy({
           toolGrants: [
             toolGrant(FileRead, { id: "read", when: "now" }),
             toolGrant(FileWrite, { id: "write", when: "now" })
@@ -117,15 +120,25 @@ describe("the local machine as an Airlock", () => {
           resources: { path: [workspace] },
           budget
         }))
-        expect(yield* call("file.read", { path: "note.txt", format: "text" })).toBe("before")
+        expect(yield* call("file.read", { path: "note.txt", format: "text" })).toMatchObject({ state: "done", result: "before" })
         const written = yield* call("file.write", { path: "note.txt", content: "after" })
-        expect(written).toMatchObject({ previous_held: true, bytes: 5 })
+        // A change made at once says, in its receipt, how it can be put back.
+        expect(written).toMatchObject({
+          state: "done",
+          result: { previous_held: true, bytes: 5 },
+          wayBack: { callId: expect.any(String), recoveryId: expect.any(String), heldUntil: expect.any(String) }
+        })
+        // A read has nothing to put back.
+        expect(yield* call("file.read", { path: "note.txt", format: "text" })).not.toHaveProperty("wayBack")
         expect(yield* fs.readFileString(at("note.txt"))).toBe("after")
 
-        // The change is in Hold under the call, and Hold can put it back.
-        const acts = (yield* hold.held).filter((act) => act.status === "held")
-        expect(acts).toHaveLength(1)
-        yield* hold.undoIfUnchanged(acts[0]!.id)
+        // The supervisor puts the call back through the same host, by the call's id.
+        expect((yield* hold.held).filter((act) => act.status === "held")).toHaveLength(1)
+        if (written.state !== "done") throw new Error("the write did not complete")
+        expect(yield* restore(written.id)).toMatchObject({ state: "restored" })
+        expect(yield* fs.readFileString(at("note.txt"))).toBe("before")
+        // Putting it back twice changes nothing more.
+        expect(yield* restore(written.id)).toMatchObject({ state: "restored" })
         expect(yield* fs.readFileString(at("note.txt"))).toBe("before")
       })
     )
@@ -135,22 +148,27 @@ describe("the local machine as an Airlock", () => {
     world(({ fs, at, hold, open }) =>
       Effect.gen(function* () {
         yield* fs.writeFileString(at("a.txt"), "source")
-        const { call, commit, pending } = yield* open((workspace) => toolPolicy({
+        const { call, commit, pending, restore } = yield* open((workspace) => toolPolicy({
           toolGrants: [toolGrant(FileMove, { id: "move" }), toolGrant(FileRemove, { id: "remove" })],
           resources: { path: [workspace] },
           budget
         }))
         const staged = yield* call("file.move", { source: "a.txt", destination: "b.txt" })
-        expect(staged).toMatchObject({ staged: true })
+        expect(staged).toEqual({ state: "staged", id: expect.any(String) })
         expect(yield* fs.exists(at("a.txt"))).toBe(true)
         expect(yield* fs.exists(at("b.txt"))).toBe(false)
         expect(yield* pending).toHaveLength(1)
 
-        yield* commit((staged as { id: string }).id)
+        if (staged.state !== "staged") throw new Error("the move did not wait")
+        yield* commit(staged.id)
         expect(yield* fs.exists(at("a.txt"))).toBe(false)
         expect(yield* fs.readFileString(at("b.txt"))).toBe("source")
         // Nothing was unlinked: the source is in Hold.
         expect((yield* hold.held).filter((act) => act.status === "held").length).toBeGreaterThanOrEqual(1)
+        // An approved change can be put back too, whole.
+        expect(yield* restore(staged.id)).toMatchObject({ state: "restored" })
+        expect(yield* fs.readFileString(at("a.txt"))).toBe("source")
+        expect(yield* fs.exists(at("b.txt"))).toBe(false)
       })
     )
   )
@@ -171,9 +189,10 @@ describe("the local machine as an Airlock", () => {
           resources: { path: [workspace] },
           budget
         }))
-        expect(yield* call("file.read", { path: "sub/in.txt", format: "text" })).toBe("in")
+        expect(yield* call("file.read", { path: "sub/in.txt", format: "text" })).toMatchObject({ state: "done", result: "in" })
+        // A refusal is an answer, not a fault: the run goes on and nothing happened.
         const refusedCode = (tool: string, input: unknown) =>
-          call(tool, input).pipe(Effect.flip, Effect.map((failure) => failure.code))
+          call(tool, input).pipe(Effect.map((receipt) => receipt.state === "refused" ? receipt.refusal.code : receipt.state))
         // Inside the ceiling but outside the grant's narrowing.
         expect(yield* refusedCode("file.read", { path: "top.txt", format: "text" })).toBe("not-allowed")
         // Outside the ceiling: by spelling, by `..`, and through a symlinked directory.

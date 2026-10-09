@@ -7,19 +7,18 @@ import {
   validateToolGrants
 } from "../admission/ToolGrant.ts"
 import { canonicalJson, type DigestUnavailable, sha256Text } from "../Canonical.ts"
-import type { ToolContract, ToolSummary } from "../contract/ToolContract.ts"
+import type { ToolContract } from "../contract/ToolContract.ts"
 import type { TrustedDecoder } from "../contract/Decoder.ts"
 import { validateFlowRules } from "../contract/FlowRules.ts"
 import { portableToolHost } from "../contract/PortableToolHost.ts"
 import { type ToolHost, ResourceRefused } from "../contract/ToolHost.ts"
 import { loadResourcePolicy } from "../admission/ResourcePolicy.ts"
 import { prepareWire } from "../contract/Wire.ts"
-import type { EmissionState } from "../outbox/Lifecycle.ts"
+import type { Done, Refused, Staged } from "../contract/Receipt.ts"
 import type { OutboxDefinition, OutboxOf, PerformError, StageError } from "../outbox/Outbox.ts"
 import {
   DispatchProvenance,
   EmissionAdmission,
-  type EmissionId,
   IdempotencyKey
 } from "../outbox/Records.ts"
 import { ToolPolicy, toolPolicyDigest, type ToolPolicyFor } from "./ToolPolicy.ts"
@@ -29,31 +28,13 @@ export type ToolContracts = { readonly [Name in string]: ToolContract<any> & { r
 
 // ── what a call returns ─────────────────────────────────────────────────────
 
-/** A read that was admitted, sent, and recorded. Replays return the same value. */
-export interface Performed<Output> {
-  readonly _tag: "Performed"
-  readonly id: EmissionId
-  readonly outcome: Output
-  readonly response: Uint8Array
-}
+export type { Done, Refused, Staged } from "../contract/Receipt.ts"
 
 /**
- * An act that was recorded and not sent: it waits for a supervisor. It carries
- * no outcome, now or on any replay, whatever the emission later becomes.
- */
-export interface Staged {
-  readonly _tag: "Staged"
-  readonly id: EmissionId
-  readonly state: EmissionState
-  readonly summary: ToolSummary
-}
-
-/**
- * Only a capture currently returns an outcome through a
- * session. For every other tool the result type is `Staged` alone.
+ * Requests never disclose a result to the program, including on replay.
  */
 export type CallResult<Contract> = ToolContract.EffectOf<Contract> extends "request"
-  ? Staged : Performed<ToolContract.OutputOf<Contract>> | Staged
+  ? Staged | Refused : Done<ToolContract.OutputOf<Contract>> | Staged | Refused
 
 // ── errors ──────────────────────────────────────────────────────────────────
 
@@ -87,14 +68,16 @@ export class SessionBudgetExceeded extends Schema.TaggedError<SessionBudgetExcee
   }
 ) {}
 
+export class ToolGrantExpired extends Schema.TaggedError<ToolGrantExpired>()("ToolGrantExpired", {
+  tool: Schema.String
+}) {}
+
 export type ToolCallError =
   | SessionBudgetExceeded
-  | InvalidToolInput
-  | ToolCallNotGranted
-  | ResourceRefused
+  | ToolGrantExpired
   | DigestUnavailable
   | StageError
-  | PerformError
+  | Exclude<PerformError, { readonly _tag: "EmissionRefused" }>
 
 // ── the session ─────────────────────────────────────────────────────────────
 
@@ -226,6 +209,7 @@ export const openToolSession = <Contracts extends ToolContracts, Granted extends
         }
         const grantIds = fitting.map((grant) => grant.id)
         const decision = toolDispatchDecision(grants, contracts, summary, { host, resource: bounded.match, now: yield* DateTime.now })
+        if (decision._tag === "Expired") return yield* new ToolGrantExpired({ tool: contract.tag })
         if (decision._tag === "Refused") return yield* new ToolCallNotGranted({ tool: contract.tag, unmet: [{ grantId: grantIds.join(","), field: decision.reason }] })
         const wireAuthority = yield* prepareWire(contract, input, bounded.resources.map((resource) => resource.binding), host).pipe(Effect.provide(crypto))
 
@@ -264,15 +248,22 @@ export const openToolSession = <Contracts extends ToolContracts, Granted extends
             })
           )
           return {
-            _tag: "Performed",
+            state: "done",
             id: performed.emission.id,
-            outcome: performed.emission.outcome,
-            response: performed.response
-          } satisfies Performed<unknown>
+            result: performed.emission.outcome,
+            ...(performed.emission.held === undefined ? {} : { wayBack: performed.emission.held })
+          } satisfies Done<unknown>
         }
         const staged = yield* service.stage(request)
-        return { _tag: "Staged", id: staged.id, state: staged.state, summary } satisfies Staged
-      })
+        return { state: "staged", id: staged.id } satisfies Staged
+      }).pipe(Effect.catchTags({
+        InvalidToolInput: (error) => Effect.succeed({ state: "refused" as const, refusal: { code: "invalid-input", message: `${error.tool} was given an invalid input` } }),
+        ToolCallNotGranted: (error) => Effect.succeed({ state: "refused" as const, refusal: { code: "not-allowed", message: error.unmet.length === 0
+          ? `${error.tool} is not allowed: no grant covers this call`
+          : `${error.tool} is not allowed: ` + error.unmet.map((miss) => `\`${miss.field}\` is not allowed by grant "${miss.grantId}"`).join("; ") } }),
+        ResourceRefused: (error) => Effect.succeed({ state: "refused" as const, refusal: { code: "not-allowed", message: `${contract.tag} is not allowed: ${error.field} ${error.reason}` } }),
+        EmissionRefused: (error) => Effect.succeed({ state: "refused" as const, refusal: { code: "refused", message: `nothing was sent: ${error.reason}` } })
+      }))
 
     const granted = new Set(grants.map((grant) => grant.tool))
     const session: { [name: string]: unknown } = {}

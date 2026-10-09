@@ -50,7 +50,8 @@ const send = (origin: string, artifacts: ReturnType<typeof memoryArtifacts>, bod
     return yield* Effect.gen(function* () {
       const guest = yield* airlock.guest({ runId: `run-${crypto.randomUUID()}`, env: undefined })
       const staged = yield* guest.call("http.stage", { endpoint: `${origin}/send`, method: "POST", headers: {}, holdMillis: 0, ...body })
-      return yield* (yield* airlock.supervisor(undefined)).commit((staged as { id: string }).id)
+      if (staged.state !== "staged") return yield* Effect.fail(staged)
+      return yield* (yield* airlock.supervisor(undefined)).commit(staged.id)
     }).pipe(Effect.provide(airlock.layer(undefined).pipe(Layer.provideMerge(Layer.mergeAll(
       memoryOutboxStore(makeMemoryOutboxState()), memoryLedger(makeMemoryLedgerState()), WebCrypto.layer
     )))), Effect.result)

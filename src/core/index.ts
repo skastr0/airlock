@@ -12,9 +12,9 @@ export {
   defineAirlock,
   type EmissionView,
   type GuestSurface,
-  type StagedReceipt,
   type Supervisor
 } from "./airlock/Airlock.ts"
+export { CallReceipt, CallRefusal, type Done, type GuestReceipt } from "./contract/Receipt.ts"
 export { type GuestAction, guestDescription, LANGUAGE_PRIMER, STAGED_RECEIPT_SHAPE } from "./airlock/Declaration.ts"
 export {
   handlersFor,
@@ -100,7 +100,7 @@ export {
   GuestFault,
   GuestLimits,
   GuestOutcome,
-  GuestRefusal,
+  GuestToolFailure,
   type GuestRun,
   GuestRunner
 } from "./runner/GuestRunner.ts"
@@ -114,6 +114,7 @@ export {
   type Staged,
   type ToolCallError,
   ToolCallNotGranted,
+  ToolGrantExpired,
   type ToolContracts,
   type ToolSession,
   type ToolSessionOptions

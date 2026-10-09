@@ -6,7 +6,7 @@ import { toolGrant } from "../src/core/admission/ToolGrant.ts"
 import { defineToolContract } from "../src/core/contract/ToolContract.ts"
 import { portableToolHost } from "../src/core/contract/PortableToolHost.ts"
 import { type HeldReference, type ToolHost } from "../src/core/contract/ToolHost.ts"
-import { DispatchProvenance, EmissionAdmission, IdempotencyKey, StagedEmission } from "../src/core/outbox/Records.ts"
+import { DispatchProvenance, EmissionAdmission, EmissionId, IdempotencyKey, StagedEmission } from "../src/core/outbox/Records.ts"
 import { toolPolicy } from "../src/core/session/ToolPolicy.ts"
 import { openToolSession } from "../src/core/session/ToolSession.ts"
 import { defineOutbox } from "../src/core/outbox/Outbox.ts"
@@ -41,8 +41,8 @@ describe("core: durable tool execution authority", () => {
       yield* session["http.get"]({ url: "https://example.test/original" })
       expect(seen).toEqual(["https://example.test/original"])
       substituteDispatch = true
-      const rejected = yield* session["http.get"]({ url: "https://example.test/second" }).pipe(Effect.result)
-      expect(rejected).toMatchObject({ _tag: "Failure", failure: { _tag: "EmissionRefused" } })
+      const rejected = yield* session["http.get"]({ url: "https://example.test/second" })
+      expect(rejected).toMatchObject({ state: "refused", refusal: { code: "refused" } })
       expect(seen).toEqual(["https://example.test/original"])
     }).pipe(Effect.provide(layer))
   })
@@ -62,8 +62,8 @@ describe("core: durable tool execution authority", () => {
       expect(seen[0]!.resources[0]!.capability).toEqual({ url: "https://example.test/private/a" })
       const record = [...state.records.values()][0]!
       expect(record.admission?.execution?.resources[0]).toEqual(seen[0]!.resources[0]!.binding)
-      const denied = yield* guest.call("http.get", { url: "https://example.test/public/b" }).pipe(Effect.result)
-      expect(Result.isFailure(denied)).toBe(true)
+      const denied = yield* guest.call("http.get", { url: "https://example.test/public/b" })
+      expect(denied).toMatchObject({ state: "refused", refusal: { code: "not-allowed" } })
       expect(seen).toHaveLength(1)
       const missing = defineAirlock({ contracts: [read], implement: { "http.get": () => true },
         policy: toolPolicy({ toolGrants: [toolGrant(read, { id: "read" })], budget: { maxCalls: 1, maxInputBytes: 4096 } }) })
@@ -82,7 +82,8 @@ describe("core: durable tool execution authority", () => {
     return Effect.gen(function* () {
       const guest = yield* airlock.guest({ runId: "request-authority", env: undefined })
       const receipt = yield* guest.call("send", { body: "private-content" })
-      const id = (receipt as { id: StagedEmission["id"] }).id
+      if (receipt.state !== "staged") throw new Error("request must stage")
+      const id = Schema.decodeUnknownSync(EmissionId)(receipt.id)
       const box = yield* airlock.outbox.Outbox
       const auto = yield* box.commit(id, new DispatchProvenance({ committedBy: "policy-auto" })).pipe(Effect.result)
       expect(auto).toMatchObject({ _tag: "Failure", failure: { _tag: "InvalidDispatchAuthorization" } })
@@ -117,7 +118,7 @@ describe("core: durable tool execution authority", () => {
     const layer = airlock.layer(undefined).pipe(Layer.provideMerge(Layer.mergeAll(memoryOutboxStore(makeMemoryOutboxState()), memoryLedger(makeMemoryLedgerState()), WebCrypto.layer)))
     return Effect.gen(function* () {
       const guest = yield* airlock.guest({ runId: "held", env: undefined })
-      expect(yield* guest.call("write", { body: "content" })).toBe(true)
+      expect(yield* guest.call("write", { body: "content" })).toMatchObject({ state: "done", result: true, wayBack: { recoveryId: "recovery" } })
       expect(events).toEqual(["prepared", "implemented"])
     }).pipe(Effect.provide(layer))
   })

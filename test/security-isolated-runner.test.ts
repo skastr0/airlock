@@ -21,7 +21,7 @@ const script = (await build({
         tools: ["security.throw", "security.echo"], actions: [], description: "",
         call: (tool, input) => {
           reached += 1;
-          return tool === "security.throw" ? Effect.die(new Error("host-canary-secret")) : Effect.succeed(input);
+          return tool === "security.throw" ? Effect.die(new Error("host-canary-secret")) : Effect.succeed({ state: "done", id: "call-1", result: input });
         }
       };
       export default {
@@ -120,9 +120,11 @@ describe("security: the program runner in real workerd", () => {
       `env.HOST_SECRET({})`
     ]
     for (const source of refused) {
-      const reply = await run(source)
-      expect([source, reply.outcome["reason"], (reply.outcome["refusal"] as { code?: string } | undefined)?.code, reply.reached])
-        .toEqual([source, "tool_refused", "unknown-tool", 0])
+      // The program is handed a refusal; the host's tools were never reached.
+      const reply = await run(`return ${source}`)
+      expect([source, reply.outcome.ok, (reply.outcome["result"] as { state?: string; refusal?: { code?: string } }).state,
+        (reply.outcome["result"] as { refusal?: { code?: string } }).refusal?.code, reply.reached])
+        .toEqual([source, true, "refused", "unknown-tool", 0])
     }
     const unbound = ["return HOST_SECRET", "return env.HOST_SECRET", "return globalThis", "return caches", "return security", "return constructor", "return __proto__"]
     for (const source of unbound) {
@@ -135,7 +137,7 @@ describe("security: the program runner in real workerd", () => {
       const reply = await run(source)
       expect([source, reply.outcome.ok, reply.reached]).toEqual([source, false, 0])
     }
-    const echoed = await run(`return security.echo({ __proto__: { polluted: true }, constructor: "c" })`)
+    const echoed = await run(`return security.echo({ __proto__: { polluted: true }, constructor: "c" }).result`)
     // The key travels as plain data, an own property on both sides, and changes no prototype.
     expect(JSON.stringify(echoed.outcome)).toBe(
       '{"ok":true,"result":{"__proto__":{"polluted":true},"constructor":"c"},"toolCalls":1}'
@@ -149,7 +151,7 @@ describe("security: the program runner in real workerd", () => {
     const sources = [
       `assert 1 == 2, "guest-log-canary-secret"`,
       `return guest_log_canary_secret`,
-      `guest_log_canary_secret({ text: "guest-log-canary-secret" })`,
+      `return guest_log_canary_secret({ text: "guest-log-canary-secret" }).result`,
       `return "guest-log-canary-secret" + 1`,
       `return ("guest-log-canary-secret"`
     ]
@@ -158,8 +160,9 @@ describe("security: the program runner in real workerd", () => {
       expect(reply.outcome.ok).toBe(false)
       expect(JSON.stringify(reply.outcome)).not.toMatch(/guest-log-canary-secret|binding-canary-secret/)
     }
-    const called = await run(`guest_log_canary_secret({})`)
-    expect(called.outcome["refusal"]).toMatchObject({ tool: "guest_log_canary_secret", code: "unknown-tool" })
+    // A refused call is the program's to read; unread, nothing of it is in the outcome.
+    const called = await run(`guest_log_canary_secret({ text: "guest-log-canary-secret" })\nreturn 1`)
+    expect(called.outcome).toEqual({ ok: true, result: 1, toolCalls: 1 })
     expect(logs.join("\n")).toContain("trusted-log-control")
     expect(logs.join("\n")).not.toContain("guest-log-canary-secret")
     expect(logs.join("\n")).not.toContain("binding-canary-secret")

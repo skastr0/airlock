@@ -105,7 +105,7 @@ export const guestRunnerConformance = (
         const workspace = { root: "/work", writable: ["a", "b"] }
         const outcome = yield* run(current, env, `
           let inbox = mail.list({ mailbox: workspace.root, query: "q" })
-          return { root: workspace.root, last: workspace.writable[1], enabled: enabled, inbox: inbox }`, {
+          return { root: workspace.root, last: workspace.writable[1], enabled: enabled, inbox: inbox.result }`, {
           bindings: { workspace, enabled: true }
         })
         same(outcome, {
@@ -114,7 +114,7 @@ export const guestRunnerConformance = (
           toolCalls: 1
         })
         // A bound name is a value, never a tool, and a name the host did not bind is still unbound.
-        same(reasonOf(yield* run(current, env, "return workspace({})", { bindings: { workspace } })), "tool_refused")
+        same(yield* run(current, env, "return workspace({}).state", { bindings: { workspace } }), { ok: true, result: "refused", toolCalls: 1 })
         same(reasonOf(yield* run(current, env, "return workspace.root")), "execution_failed")
         const getter = Object.defineProperty({}, "secret", { enumerable: true, get: () => "leaked" })
         same([
@@ -132,12 +132,17 @@ export const guestRunnerConformance = (
         const outcome = yield* run(current, env, `
           let listed = ${list}
           let sent = mail.send({ to: "ada@example.com", subject: "s", body: "b" })
-          return { listed: listed, staged: sent.staged, state: sent.state }`)
-        same(outcome, {
-          ok: true,
-          result: { listed: { ids: ["inbox-1"] }, staged: true, state: "staged" },
-          toolCalls: 2
-        })
+          return { read: listed.state, listed: listed.result, sent: sent }`)
+        holds(outcome.ok, "the program ran")
+        const result = (outcome.ok ? outcome.result : {}) as {
+          readonly read: string
+          readonly listed: unknown
+          readonly sent: { readonly state: string; readonly id: string; readonly result?: unknown }
+        }
+        same([result.read, result.listed, outcome.toolCalls], ["done", { ids: ["inbox-1"] }, 2])
+        // A staged receipt is its state and an id for the supervisor. It never carries a result.
+        same(Object.keys(result.sent).sort(), ["id", "state"])
+        same(result.sent.state, "staged")
         same(env.dispatched, ["mail.list"], "the send was recorded, not sent")
       }))
 
@@ -155,33 +160,45 @@ export const guestRunnerConformance = (
         same(env.dispatched.length, 4)
       }))
 
-    test("ends the run at a refused call, saying which tool and which grant", () =>
+    test("hands a refused call to the program as a receipt that says which tool and which grant", () =>
       Effect.gen(function* () {
         const current = yield* world
         const env = fresh()
         const outcome = yield* run(current, env, `
-          mail.send({ to: "eve@elsewhere.test", subject: "s", body: "b" })
-          return ${list}`)
-        holds(!outcome.ok && outcome.reason === "tool_refused" && outcome.toolCalls === 1, "the run ended at the refusal")
+          let sent = mail.send({ to: "eve@elsewhere.test", subject: "s", body: "b" })
+          if sent.state == "refused" {
+            return { refused: sent, then: ${list}.state }
+          }
+          return "sent"`)
+        holds(outcome.ok && outcome.toolCalls === 2, "the program went on after the refusal")
+        const result = (outcome.ok ? outcome.result : {}) as {
+          readonly refused: { readonly state: string; readonly refusal: { readonly code: string; readonly message: string } }
+          readonly then: string
+        }
+        // A refused receipt is its state and the refusal: no id, no result.
+        same(Object.keys(result.refused).sort(), ["refusal", "state"])
+        same([result.refused.refusal.code, result.then], ["not-allowed", "done"])
         holds(
-          !outcome.ok && outcome.refusal !== undefined && outcome.refusal.tool === "mail.send" &&
-            outcome.refusal.code === "not-allowed" &&
-            outcome.refusal.message.includes("mail.send is not allowed") && outcome.refusal.message.includes("company"),
-          "the caller is told which tool and which grant"
+          result.refused.refusal.message.includes("mail.send is not allowed") && result.refused.refusal.message.includes("company"),
+          "the program is told which tool and which grant"
         )
-        same(env.dispatched, [], "nothing after a refusal runs")
+        same(env.dispatched, ["mail.list"], "the refused send reached nothing")
+        // Reading the result of a call that was not done is the program's mistake, with a fixed word.
+        const careless = yield* run(current, env, `
+          let sent = mail.send({ to: "eve@elsewhere.test", subject: "s", body: "b" })
+          return sent.result`, { runId: "careless" })
+        same(careless, { ok: false, reason: "execution_failed", toolCalls: 1, at: { line: 3, column: 18 }, fault: "missing-field" })
       }))
 
     test("refuses a tool the session does not grant, and any name that is not a tool", () =>
       Effect.gen(function* () {
         const current = yield* world
         const env = fresh()
-        const ungranted = yield* run(current, env, `label.add({ messageId: "m", label: "l" })`)
+        const ungranted = yield* run(current, env, `return label.add({ messageId: "m", label: "l" })`)
         same(ungranted, {
-          ok: false,
-          reason: "tool_refused",
-          toolCalls: 1,
-          refusal: { tool: "label.add", code: "unknown-tool", message: "label.add is not a tool this session grants" }
+          ok: true,
+          result: { state: "refused", refusal: { code: "unknown-tool", message: "label.add is not a tool this session grants" } },
+          toolCalls: 1
         })
         // The words a program in another language would reach for are only names here.
         // Some are assembled, so that this file, which only quotes programs, names no host global or wire call itself.
@@ -195,8 +212,8 @@ export const guestRunnerConformance = (
           `mail.list.constructor({ mailbox: "inbox", query: "q" })`,
           `__proto__({})`
         ]) {
-          const outcome = yield* run(current, env, source)
-          same([reasonOf(outcome), outcome.toolCalls], ["tool_refused", 1], source)
+          const outcome = yield* run(current, env, `return ${source}.refusal.code`)
+          same(outcome, { ok: true, result: "unknown-tool", toolCalls: 1 }, source)
         }
         for (const source of [`return ${host}`, "return globalThis", "return env.MAIL_TOKEN", "return mail", "return this"]) {
           const outcome = yield* run(current, env, source)
@@ -238,15 +255,15 @@ export const guestRunnerConformance = (
         const deep = yield* run(current, env, `mail.list({ mailbox: "inbox", query: "q", extra: [[[1]]] })`, {
           limits: { maxDepth: 2 }
         })
-        const wrong = yield* run(current, env, `mail.list("inbox")`)
+        const wrong = yield* run(current, env, `return mail.list("inbox").refusal.code`)
         same([large, missing, surplus, deep, wrong].map(reasonOf), [
           "tool_input_limit",
           "tool_input_invalid",
           "tool_input_invalid",
           "tool_input_limit",
-          "tool_refused"
+          "ok"
         ])
-        holds(!wrong.ok && wrong.refusal?.code === "invalid-input", "an input of the wrong shape is refused by the contract")
+        holds(wrong.ok && wrong.result === "invalid-input", "an input of the wrong shape is refused by the contract")
         same(env.dispatched, [])
       }))
 

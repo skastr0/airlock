@@ -27,6 +27,7 @@ const call = Effect.gen(function* () {
   const outbox = yield* box.Outbox
   const session = yield* openToolSession(box, { runId: "wire-call", policy: toolPolicy({ resources: { endpoint: ["https://example.com/*"] }, toolGrants: [toolGrant(Get, { id: "get" })], budget: { maxCalls: 1, maxInputBytes: 4096 } }) })
   const staged = yield* session["http.get"]({ endpoint: "https://example.com/" })
+  if (staged.state !== "staged") throw new Error("approved capture must stage")
   return yield* outbox.commit(staged.id, authority)
 })
 

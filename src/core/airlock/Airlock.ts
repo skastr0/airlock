@@ -4,6 +4,7 @@ import { defineDecoderCatalog, type TrustedDecoder } from "../contract/Decoder.t
 import { validateFlowDecoders } from "../contract/Flow.ts"
 import { portableToolHost } from "../contract/PortableToolHost.ts"
 import { HeldReference, RecoveryRestoration, type ToolHost } from "../contract/ToolHost.ts"
+import { CallReceipt, type GuestReceipt } from "../contract/Receipt.ts"
 import type { Ledger } from "../ledger/Ledger.ts"
 import type { ClosedUnderCompensation } from "../outbox/Intent.ts"
 import { defineOutbox, type OutboxDefinition, type OutboxOf } from "../outbox/Outbox.ts"
@@ -34,6 +35,7 @@ export class AirlockFailure extends Schema.TaggedError<AirlockFailure>()("Airloc
     "invalid-input",
     "not-allowed",
     "budget-exceeded",
+    "expired",
     "refused",
     "uncertain",
     "conflict",
@@ -48,11 +50,6 @@ export class AirlockFailure extends Schema.TaggedError<AirlockFailure>()("Airloc
 }) {}
 
 /** The receipt for a call that was recorded and now waits for a supervisor. */
-export interface StagedReceipt {
-  readonly staged: true
-  readonly id: string
-  readonly state: string
-}
 
 /** An emission as plain data: the stored record's JSON form. */
 export type EmissionView = typeof EmissionRecord.Encoded
@@ -65,7 +62,7 @@ export interface GuestSurface {
    * Calls one granted tool with its JSON input. A read that is pre-authorized
    * returns its result; anything else returns a staged receipt.
    */
-  readonly call: (tool: string, input: unknown) => Effect.Effect<Schema.Json | StagedReceipt, AirlockFailure>
+  readonly call: (tool: string, input: unknown) => Effect.Effect<GuestReceipt, AirlockFailure>
   /** Each granted tool as an action: its name, its shapes, and whether a call runs at once or is staged. */
   readonly actions: ReadonlyArray<GuestAction>
   /** The language in a few lines and one plain line per action, for a prompt. */
@@ -146,6 +143,8 @@ const explain = (subject: string) => (tagged: Tagged): AirlockFailure => {
           ? `${subject} was not run: this session has used its ${String(error["limit"])} calls`
           : `${subject} was not run: this session has used its ${String(error["limit"])} bytes of input`
       )
+    case "ToolGrantExpired":
+      return failure("expired", `${subject} was not run: its grant has expired`)
     case "EmissionRefused":
       return failure("refused", `${subject} was refused and nothing was sent: ${text(error["reason"], "no reason given")}`)
     case "EmissionDispatchUncertain":
@@ -242,20 +241,19 @@ export const defineAirlock = <const List extends ReadonlyArray<ToolContract.Any>
         call: (tool, input) => {
           const method = Object.hasOwn(session, tool) ? session[tool] : undefined
           if (method === undefined) {
-            return Effect.fail(failure("unknown-tool", `${tool} is not a tool this session grants`))
+            return Effect.succeed({ state: "refused", refusal: { code: "unknown-tool", message: `${tool} is not a tool this session grants` } })
           }
           return method(input as never).pipe(
             Effect.mapError(explain(tool)),
-            Effect.map((result): Schema.Json | StagedReceipt => {
-              const settled = result as
-                | { readonly _tag: "Performed"; readonly outcome: unknown }
-                | { readonly _tag: "Staged"; readonly id: string; readonly state: string }
-              if (settled._tag === "Staged") return { staged: true, id: settled.id, state: settled.state }
+            Effect.map((result): GuestReceipt => {
+              const settled = result as import("../contract/Receipt.ts").Done<unknown> | import("../contract/Receipt.ts").Staged | import("../contract/Receipt.ts").Refused
+              if (settled.state !== "done") return settled
               const contract = byName[tool]
-              // A read's result leaves as the contract's encoded output: plain JSON.
-              return contract === undefined
-                ? null
-                : Schema.encodeUnknownSync(contract.outcome)(settled.outcome)
+              if (contract === undefined) throw new Error("completed call has no registered contract")
+              // The result is decoded. Encoding the tool's transport transform
+              // again here would silently change the value the program sees.
+              const value = Schema.encodeUnknownSync(Schema.toType(contract.outcome))(settled.result)
+              return Schema.encodeUnknownSync(CallReceipt)({ ...settled, result: value })
             })
           )
         }

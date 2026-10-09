@@ -5,6 +5,9 @@ import { GuestOutcome, GuestRunner, type GuestRun } from "../src/core/runner/Gue
 import { programRunner } from "../src/core/runner/ProgramRunner.ts"
 import { hostileSources, runnerExamples, seeded } from "./support/hostile-air-corpus.ts"
 
+// Malformed nested results deliberately exercise a defective host boundary.
+const done = (result: unknown) => ({ state: "done" as const, id: "security-result", result: result as Schema.Json })
+
 const run = (source: string, call: GuestSurface["call"], options: Pick<GuestRun, "limits" | "bindings"> = {}) =>
   Effect.runPromise(Effect.gen(function* () {
     const runner = yield* GuestRunner
@@ -23,7 +26,7 @@ describe("security: reproducible hostile programs through the production runner"
     for (const [index, example] of runnerExamples(seed, 1_000).entries()) {
       const clue = `seed=${seed} case=${index}\n${example.source}`
       let calls = 0
-      const outcome = await run(example.source, (_tool, input) => Effect.sync(() => { calls++; return input as never }))
+      const outcome = await run(example.source, (_tool, input) => Effect.sync(() => { calls++; return done(input) }))
       outcomeIsFixed(outcome, clue)
       // The public result crosses JSON, whose numeric representation normalizes -0.
       expect(outcome, clue).toEqual({ ok: true, result: JSON.parse(JSON.stringify(example.value)), toolCalls: example.calls })
@@ -36,7 +39,7 @@ describe("security: reproducible hostile programs through the production runner"
     for (const [index, source] of hostileSources(seed, 1_000).entries()) {
       const clue = `seed=${seed} case=${index}\n${JSON.stringify(source)}`
       let calls = 0
-      const outcome = await run(source, () => Effect.sync(() => { calls++; return { answer: 1 } }),
+      const outcome = await run(source, () => Effect.sync(() => { calls++; return done({ answer: 1 }) }),
         { limits: { maxSteps: 512, maxLoopIterations: 32, maxToolCalls: 4 } })
       outcomeIsFixed(outcome, clue)
       expect(calls, clue).toBeLessThanOrEqual(4)
@@ -56,7 +59,7 @@ describe("security: reproducible hostile programs through the production runner"
       const source = `security.echo({ value: ${JSON.stringify(example.value)} }); return "continued"`
       const outcome = await run(source, () => {
         if (mode === values.length) throw new Error("host-canary-throw")
-        return mode === values.length + 1 ? Effect.die(new Error("host-canary-defect")) : Effect.succeed(values[mode] as never)
+        return mode === values.length + 1 ? Effect.die(new Error("host-canary-defect")) : Effect.succeed(done(values[mode]))
       })
       outcomeIsFixed(outcome, clue)
       expect(outcome, clue).toEqual({ ok: false, reason: mode === 1 ? "tool_result_limit" : "execution_failed", toolCalls: 1 })
@@ -72,7 +75,7 @@ describe("security: reproducible hostile programs through the production runner"
     `return ${"[".repeat(300)}0${"]".repeat(300)}`
   ])("rejects recursive and iterative depth attacks before calling the host", async (source) => {
     let calls = 0
-    const outcome = await run(source, () => Effect.sync(() => { calls++; return null }))
+    const outcome = await run(source, () => Effect.sync(() => { calls++; return done(null) }))
     expect(outcome).toMatchObject({ ok: false, reason: "invalid_code", toolCalls: 0 })
     expect(calls).toBe(0)
     outcomeIsFixed(outcome, source.slice(0, 80))
@@ -81,7 +84,7 @@ describe("security: reproducible hostile programs through the production runner"
   it("charges empty iterations and straight-line work before the following call", async () => {
     for (const source of ["for n in 0..10000 {}; security.echo({})", `${"true;".repeat(200)}security.echo({})`]) {
       let calls = 0
-      const outcome = await run(source, () => Effect.sync(() => { calls++; return null }),
+      const outcome = await run(source, () => Effect.sync(() => { calls++; return done(null) }),
         { limits: { maxSteps: 64, maxLoopIterations: 20_000 } })
       expect(outcome).toMatchObject({ ok: false, reason: "step_limit", toolCalls: 0 })
       expect(calls).toBe(0)
@@ -95,12 +98,12 @@ describe("security: reproducible hostile programs through the production runner"
       `let a = "abc"; if true { let b = a; let c = a; security.echo({}) }`
     ]) {
       let calls = 0
-      const outcome = await run(source, () => Effect.sync(() => { calls++; return null }),
+      const outcome = await run(source, () => Effect.sync(() => { calls++; return done(null) }),
         { limits: { maxTotalNodes: 7, maxTotalStringUnits: 8 } })
       expect(outcome).toMatchObject({ ok: false, reason: "value_limit", toolCalls: 0 })
       expect(calls).toBe(0)
     }
-    const released = await run(`for n in 0..100 { let held = "12345" }; return true`, () => Effect.succeed(null),
+    const released = await run(`for n in 0..100 { let held = "12345" }; return true`, () => Effect.succeed(done(null)),
       { limits: { maxTotalStringUnits: 5 } })
     expect(released).toEqual({ ok: true, result: true, toolCalls: 0 })
   })

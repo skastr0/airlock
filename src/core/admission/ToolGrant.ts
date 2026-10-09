@@ -140,6 +140,7 @@ export const unmetToolGrants = (grants: ReadonlyArray<ToolGrantPolicy>, call: To
 
 export type ToolDispatchDecision =
   | { readonly _tag: "Now" | "Approved"; readonly host?: HostParameters; readonly validUntil?: DateTime.Utc }
+  | { readonly _tag: "Expired"; readonly validUntil: DateTime.Utc }
   | { readonly _tag: "Refused"; readonly reason: string }
 
 /** Every fitting grant participates: stricter timing wins; conflicting host authority refuses. */
@@ -158,7 +159,7 @@ export const toolDispatchDecision = (grants: ReadonlyArray<ToolGrantPolicy>, con
   const deadlines = fitting.flatMap((grant) => grant.validUntil === undefined ? [] : [grant.validUntil])
   const validUntil = deadlines.sort((a, b) => DateTime.toEpochMillis(a) - DateTime.toEpochMillis(b))[0]
   if (validUntil !== undefined && options.now !== undefined && DateTime.toEpochMillis(validUntil) <= DateTime.toEpochMillis(options.now)) {
-    return { _tag: "Refused", reason: "a fitting grant has expired" }
+    return { _tag: "Expired", validUntil }
   }
   return { _tag: fitting.every((grant) => grant.when === "now") ? "Now" : "Approved",
     ...(first.host === undefined ? {} : { host: first.host }), ...(validUntil === undefined ? {} : { validUntil }) }

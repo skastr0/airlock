@@ -68,7 +68,10 @@ const typeText = (schema: Schema.Top): string => {
 }
 
 /** The receipt a program gets for a call that was recorded and awaits a supervisor. */
-export const STAGED_RECEIPT_SHAPE = "{ staged: true, id: string, state: string }"
+export const STAGED_RECEIPT_SHAPE = "{ state: \"staged\", id: string }"
+/** The receipt for a call Airlock refused: nothing happened, and it says why. */
+export const REFUSED_RECEIPT_SHAPE = "{ state: \"refused\", refusal: { code: string, message: string } }"
+const doneShape = (result: string): string => `{ state: "done", id: string, result: ${result} }`
 
 /** One action a session grants, as an agent needs to know it. */
 export interface GuestAction {
@@ -79,9 +82,10 @@ export interface GuestAction {
   /** Shape of what the action itself answers, once it has run. */
   readonly result: string
   /**
-   * What a call hands back to the program: the action's result at once, a
-   * staged receipt because the call waits for a supervisor, or either,
-   * depending on which grant the call fits.
+   * What a granted call hands back to the program: a done receipt carrying
+   * the action's result at once, a staged receipt because the call waits for
+   * a supervisor, or either, depending on which grant the call fits. Any call
+   * may instead hand back a refused receipt.
    */
   readonly returns: "result" | "staged" | "result-or-staged"
   readonly effect: PlanEffect
@@ -110,9 +114,9 @@ const effectWords: { readonly [Effect in GuestAction["effect"]]: string } = {
 }
 
 const returnWords: { readonly [Returns in GuestAction["returns"]]: string } = {
-  result: "runs at once and returns its result",
+  result: "runs at once and returns a done receipt with its result",
   staged: "is recorded for approval and returns a staged receipt, never a result; nothing happens until a supervisor commits it",
-  "result-or-staged": "returns its result, or a staged receipt when the call needs approval"
+  "result-or-staged": "returns a done receipt with its result, or a staged receipt when the call needs approval"
 }
 
 /** The language in a few lines, for an agent that has not seen it. One text for every host. */
@@ -126,7 +130,10 @@ export const LANGUAGE_PRIMER = [
   "There are no functions, no reassignment and no way to catch an error: a name is bound once by `let`,",
   "and a `let` inside a block ends with the block.",
   "An action is called with exactly one record, e.g. `mail.list({ mailbox: \"inbox\" })`.",
-  "A refused action ends the program. The program's result is what it returns."
+  "Every call returns a receipt. Check `receipt.state` before reading anything else:",
+  "\"done\" has `receipt.result`; \"staged\" was recorded for a person to approve and has no result;",
+  `"refused" did nothing and says why: ${REFUSED_RECEIPT_SHAPE}.`,
+  "The program's result is what it returns."
 ].join("\n")
 
 /** The primer, then one line per granted action, in plain words, for a prompt. */
@@ -138,10 +145,10 @@ export const guestDescription = (actions: ReadonlyArray<GuestAction>): string =>
       ? "No actions are available."
       : actions.map((action) => {
           const shape = action.returns === "result"
-            ? action.result
+            ? doneShape(action.result)
             : action.returns === "staged"
               ? STAGED_RECEIPT_SHAPE
-              : `${action.result} or ${STAGED_RECEIPT_SHAPE}`
+              : `${doneShape(action.result)} or ${STAGED_RECEIPT_SHAPE}`
           const answer = action.answeredBy === undefined ? "" : ` Can be answered by ${action.answeredBy}.`
           return `- ${action.name}(${action.input}) -> ${shape}. ${effectWords[action.effect]}; ${returnWords[action.returns]}.${answer}`
         }).join("\n")

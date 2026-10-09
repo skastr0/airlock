@@ -70,10 +70,10 @@ describe("core: completed host recovery receipts", () => {
         policy: toolPolicy({ toolGrants: [toolGrant(write, { id: "write", when: "now" })], budget: { maxCalls: 1, maxInputBytes: 4096 } }) })
       const result = yield* Effect.gen(function* () {
         const guest = yield* airlock.guest({ runId: "invalid-reference", env: undefined })
-        return yield* guest.call("write", { body: "value" }).pipe(Effect.result)
+        return yield* guest.call("write", { body: "value" })
       }).pipe(Effect.provide(airlock.layer(undefined).pipe(Layer.provideMerge(Layer.mergeAll(
         memoryOutboxStore(makeMemoryOutboxState()), memoryLedger(makeMemoryLedgerState()), WebCrypto.layer)))))
-      expect(result).toMatchObject({ _tag: "Failure", failure: { code: "refused" } })
+      expect(result).toMatchObject({ state: "refused", refusal: { code: "refused" } })
       expect(implemented).toBe(0)
     }
   }))

@@ -9,6 +9,9 @@ const surface = (call: GuestSurface["call"]): GuestSurface => ({
   tools: ["security.read"], actions: [], description: "", call
 })
 
+/** What a host tool answers, as the kernel hands it over: a done receipt around the result. */
+const done = (result: unknown) => ({ state: "done" as const, id: "call-1", result: result as never })
+
 const run = (
   source: string,
   call: GuestSurface["call"],
@@ -37,24 +40,40 @@ describe("security: the program runner enforces the host boundary", () => {
     expect(outcome).toEqual({ ok: false, reason: "execution_failed", toolCalls: 1 })
   })
 
-  it("reports an ordinary tool refusal as Airlock's sentence, without exposing its cause", async () => {
+  it("ends the run at a tool fault with Airlock's sentence, without exposing its cause", async () => {
     const outcome = await run(`${read}\nreturn "continued"`, () => Effect.fail(Object.assign(new AirlockFailure({
-      code: "refused", message: "This call is refused."
+      code: "uncertain", message: "This call may have acted."
     }), { cause: new Error("host-canary-secret") })))
     expect(outcome).toEqual({
       ok: false,
-      reason: "tool_refused",
+      reason: "tool_failed",
       toolCalls: 1,
-      refusal: { tool: "security.read", code: "refused", message: "This call is refused." }
+      failure: { tool: "security.read", code: "uncertain", message: "This call may have acted." }
     })
   })
 
-  it("cuts a refusal's sentence and a called name to a fixed length", async () => {
-    const long = await run(read, () => Effect.fail(new AirlockFailure({ code: "refused", message: "m".repeat(5_000) })))
-    expect(!long.ok && long.refusal?.message.length).toBe(512)
-    const named = await run(`${"n".repeat(4_000)}({})`, () => Effect.succeed(null))
-    expect(!named.ok && named.refusal).toMatchObject({ tool: "n".repeat(128), code: "unknown-tool" })
-    expect(JSON.stringify(named).length).toBeLessThan(500)
+  it("hands a refusal to the program as a receipt, and lets no host object ride along on it", async () => {
+    const refused = { state: "refused" as const, refusal: { code: "not-allowed", message: "This call is refused." } }
+    const outcome = await run(`let receipt = security.read({})\nreturn [receipt.state, receipt.refusal.code, "continued"]`,
+      () => Effect.succeed(refused))
+    expect(outcome).toEqual({ ok: true, result: ["refused", "not-allowed", "continued"], toolCalls: 1 })
+    // A receipt carrying anything that is not plain data does not cross at all.
+    const carrying = await run(read, () => Effect.succeed(Object.assign({ ...refused }, { cause: new Error("host-canary-secret") })))
+    expect(carrying).toEqual({ ok: false, reason: "execution_failed", toolCalls: 1 })
+  })
+
+  it("cuts a fault's sentence and a called name to a fixed length", async () => {
+    const long = await run(read, () => Effect.fail(new AirlockFailure({ code: "uncertain", message: "m".repeat(5_000) })))
+    expect(!long.ok && long.failure?.message.length).toBe(512)
+    // A name the session does not grant is refused without reaching the host, and is cut in the refusal.
+    let reached = 0
+    const named = await run(`return ${"n".repeat(4_000)}({})`, () => Effect.sync(() => { reached += 1; return done(null) }))
+    expect(named).toEqual({
+      ok: true,
+      result: { state: "refused", refusal: { code: "unknown-tool", message: `${"n".repeat(128)} is not a tool this session grants` } },
+      toolCalls: 1
+    })
+    expect(reached).toBe(0)
   })
 
   it("never invokes a getter on a host result", async () => {
@@ -62,7 +81,7 @@ describe("security: the program runner enforces the host boundary", () => {
     const result = Object.defineProperty({}, "private", {
       enumerable: true, get: () => { reads += 1; throw new Error("host-canary-secret") }
     })
-    const outcome = await run(read, () => Effect.succeed(result as never))
+    const outcome = await run(read, () => Effect.succeed(done(result)))
     expect({ outcome, reads }).toEqual({ outcome: { ok: false, reason: "execution_failed", toolCalls: 1 }, reads: 0 })
   })
 
@@ -71,7 +90,7 @@ describe("security: the program runner enforces the host boundary", () => {
     const result = Object.defineProperty({ answer: 42 }, "toJSON", {
       value: () => { hooks += 1; throw new Error("host-canary-secret") }
     })
-    expect(await run(read, () => Effect.succeed(result))).toEqual({ ok: true, result: { answer: 42 }, toolCalls: 1 })
+    expect(await run(`${read}.result`, () => Effect.succeed(done(result)))).toEqual({ ok: true, result: { answer: 42 }, toolCalls: 1 })
     expect(hooks).toBe(0)
   })
 
@@ -82,11 +101,11 @@ describe("security: the program runner enforces the host boundary", () => {
       let input = { nested: { leaf: 1 } }
       let first = security.read(input)
       let second = security.read(input)
-      return [first, second, input]`, (_tool, input) => Effect.sync(() => {
+      return [first.result, second.result, input]`, (_tool, input) => Effect.sync(() => {
         held.push(input)
         ;(input as { nested: { leaf: number } }).nested.leaf = 99
         shared.list.push(3)
-        return shared
+        return done(shared)
       }))
     expect(outcome).toEqual({
       ok: true,
@@ -107,7 +126,7 @@ describe("security: the program runner enforces the host boundary", () => {
       entered()
       return Effect.promise(() => waiting).pipe(Effect.andThen(Effect.sync(() => {
         emissions += 1
-        return null
+        return done(null)
       })))
     }, { signal: controller.signal })
     await started
@@ -122,21 +141,21 @@ describe("security: the program runner enforces the host boundary", () => {
     let calls = 0
     const controller = new AbortController()
     controller.abort()
-    const outcome = await run(read, () => Effect.sync(() => { calls += 1; return null }), { signal: controller.signal })
+    const outcome = await run(read, () => Effect.sync(() => { calls += 1; return done(null) }), { signal: controller.signal })
     expect({ outcome, calls }).toEqual({ outcome: { ok: false, reason: "aborted", toolCalls: 0 }, calls: 0 })
   })
 
   it("does not call a tool if aborted before the program's first step", async () => {
     const controller = new AbortController()
     let calls = 0
-    const pending = run(read, () => Effect.sync(() => { calls += 1; return null }), { signal: controller.signal })
+    const pending = run(read, () => Effect.sync(() => { calls += 1; return done(null) }), { signal: controller.signal })
     controller.abort()
     expect(await pending).toEqual({ ok: false, reason: "aborted", toolCalls: 0 })
     expect(calls).toBe(0)
   })
 
   it("settles a program that exhausts the evaluator without host text", async () => {
-    const outcome = await run(`return ${"[".repeat(7_000)}1${"]".repeat(7_000)}`, () => Effect.succeed(null))
+    const outcome = await run(`return ${"[".repeat(7_000)}1${"]".repeat(7_000)}`, () => Effect.succeed(done(null)))
     expect(outcome.ok).toBe(false)
     expect(JSON.stringify(outcome)).not.toMatch(/RangeError|stack|Maximum/)
   })
@@ -144,14 +163,14 @@ describe("security: the program runner enforces the host boundary", () => {
   it("rejects excessive JSON depth in a tool input before the tool is reached", async () => {
     let calls = 0
     const outcome = await run(`return security.read({ nested: { deeper: { leaf: 1 } } })`,
-      () => Effect.sync(() => { calls += 1; return null }), { limits: { maxDepth: 1 } })
+      () => Effect.sync(() => { calls += 1; return done(null) }), { limits: { maxDepth: 1 } })
     expect({ outcome, calls }).toEqual({ outcome: { ok: false, reason: "tool_input_limit", toolCalls: 1 }, calls: 0 })
   })
 
   it("rejects excessive node counts before the tool is reached", async () => {
     let calls = 0
     const outcome = await run(`return security.read({ a: 1, b: 2 })`,
-      () => Effect.sync(() => { calls += 1; return null }), { limits: { maxNodes: 2 } })
+      () => Effect.sync(() => { calls += 1; return done(null) }), { limits: { maxNodes: 2 } })
     expect(outcome.ok).toBe(false)
     expect(calls).toBe(0)
     // The boundary check itself, apart from the evaluator's own limit on built values.
@@ -167,13 +186,13 @@ describe("security: the program runner enforces the host boundary", () => {
     [{ maxNodes: 2 }, { a: 1, b: 2 }],
     [{ maxToolResultBytes: 4 }, "éé"]
   ])("bounds host tool results independently (%j)", async (overrides, result) => {
-    const outcome = await run(`security.read({})\nreturn "continued"`, () => Effect.succeed(result), { limits: overrides })
+    const outcome = await run(`security.read({})\nreturn "continued"`, () => Effect.succeed(done(result)), { limits: overrides })
     expect(outcome).toEqual({ ok: false, reason: "tool_result_limit", toolCalls: 1 })
   })
 
   it("checks the program's final result against the node and byte limits", async () => {
-    expect((await run(`return { a: 1, b: 2 }`, () => Effect.succeed(null), { limits: { maxNodes: 2 } })).ok).toBe(false)
-    const text = await run(`return "éééé"`, () => Effect.succeed(null), { limits: { maxOutputBytes: 8 } })
+    expect((await run(`return { a: 1, b: 2 }`, () => Effect.succeed(done(null)), { limits: { maxNodes: 2 } })).ok).toBe(false)
+    const text = await run(`return "éééé"`, () => Effect.succeed(done(null)), { limits: { maxOutputBytes: 8 } })
     expect(text).toEqual({ ok: false, reason: "output_limit", toolCalls: 0 })
   })
 })

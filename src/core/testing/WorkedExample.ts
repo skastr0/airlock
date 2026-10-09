@@ -96,16 +96,17 @@ export const runWorkedExample = (adapters: WorkedExampleAdapters) =>
       const sent = yield* session["mail.send"]({
         to: "ada@example.com",
         subject: "unread count",
-        body: listed._tag === "Performed" ? `you have ${listed.outcome.ids.length}` : "unknown"
+        body: listed.state === "done" ? `you have ${listed.result.ids.length}` : "unknown"
       })
       const labelled = yield* session["label.add"]({ messageId: "m-1", label: "triaged" })
+      if (sent.state !== "staged" || labelled.state !== "staged") throw new Error("expected approved-only requests to stage")
       return {
         tools: Object.keys(session).sort(),
-        listed: listed._tag === "Performed"
-          ? { tag: listed._tag, ids: listed.outcome.ids, response: decoder.decode(listed.response) }
-          : { tag: listed._tag },
-        sent: { tag: sent._tag, state: sent.state, public: sent.summary.public },
-        labelled: { tag: labelled._tag, state: labelled.state },
+        listed: listed.state === "done"
+          ? { state: listed.state, result: listed.result }
+          : { state: listed.state },
+        sent: { state: sent.state },
+        labelled: { state: labelled.state },
         ids: { sent: sent.id, labelled: labelled.id }
       }
     })
@@ -173,9 +174,9 @@ export const runWorkedExample = (adapters: WorkedExampleAdapters) =>
 export const expectedTranscript = {
   tools: ["label.add", "mail.list", "mail.send"],
   first: {
-    listed: { tag: "Performed", ids: ["m-1", "m-2"], response: "2 messages in inbox" },
-    sent: { tag: "Staged", state: "staged", public: { to: "ada@example.com" } },
-    labelled: { tag: "Staged", state: "staged" }
+    listed: { state: "done", result: { ids: ["m-1", "m-2"] } },
+    sent: { state: "staged" },
+    labelled: { state: "staged" }
   },
   dispatchedByGuest: ["mail.list"],
   supervised: {
@@ -186,9 +187,9 @@ export const expectedTranscript = {
     removed: "committed"
   },
   replay: {
-    listed: { tag: "Performed", ids: ["m-1", "m-2"], response: "2 messages in inbox" },
-    sent: { tag: "Staged", state: "committed", public: { to: "ada@example.com" } },
-    labelled: { tag: "Staged", state: "committed" }
+    listed: { state: "done", result: { ids: ["m-1", "m-2"] } },
+    sent: { state: "staged" },
+    labelled: { state: "staged" }
   },
   sameEmissions: true,
   admitted: { underThisPolicy: true, sent: ["send-inside-company"], labelled: ["label-messages"] },
