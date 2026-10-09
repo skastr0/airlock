@@ -8,6 +8,8 @@ import {
 } from "../admission/ToolGrant.ts"
 import { canonicalJson, type DigestUnavailable, sha256Text } from "../Canonical.ts"
 import type { ToolContract, ToolSummary } from "../contract/ToolContract.ts"
+import type { TrustedDecoder } from "../contract/Decoder.ts"
+import { validateFlowRules } from "../contract/FlowRules.ts"
 import type { EmissionState } from "../outbox/Lifecycle.ts"
 import type { OutboxDefinition, OutboxOf, PerformError, StageError } from "../outbox/Outbox.ts"
 import {
@@ -117,6 +119,7 @@ export interface ToolSessionOptions<Granted extends string> {
    * fixed for the life of the session; nothing in the session can add to them.
    */
   readonly policy: ToolPolicyFor<Granted>
+  readonly decoders?: Readonly<Record<string, TrustedDecoder.Any>>
   /** Hold applied to every call this session stages. */
   readonly holdMillis?: number
 }
@@ -155,6 +158,8 @@ export const openToolSession = <Contracts extends ToolContracts, Granted extends
     const grants: ReadonlyArray<ToolGrantPolicy> = Object.freeze([...policy.toolGrants])
     const rejection = validateToolGrants(grants, contracts)
     if (rejection !== undefined) return yield* new InvalidToolSession(rejection)
+    const flowRejection = validateFlowRules(policy.flowRules, contracts, options.decoders ?? {})
+    if (flowRejection !== undefined) return yield* new InvalidToolSession(flowRejection)
     for (const [name, fields] of Object.entries(policy.flow)) {
       const contract = Object.hasOwn(contracts, name) ? contracts[name] : undefined
       if (contract === undefined) return yield* new InvalidToolSession({ field: `policy.flow.${name}`, reason: "must name a registered tool" })

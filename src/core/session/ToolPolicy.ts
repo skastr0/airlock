@@ -2,6 +2,7 @@ import { type Crypto, Effect, Schema } from "effect"
 import { type ToolGrantPolicy as Grant, ToolGrantPolicy } from "../admission/ToolGrant.ts"
 import { type DigestUnavailable, type Sha256Digest, sha256Canonical } from "../Canonical.ts"
 import { SinkPolicy } from "../labels/Labels.ts"
+import { composeFlowRules, FlowRule } from "../contract/FlowRules.ts"
 
 const Count = Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))
 
@@ -13,6 +14,11 @@ const Count = Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))
 export class ToolPolicy extends Schema.Class<ToolPolicy>("ToolPolicy")({
   schemaVersion: Schema.tag("airlock/tool-policy/v1"),
   toolGrants: Schema.Array(ToolGrantPolicy),
+  /** Named author decisions; review checks every origin and every exact-value condition. */
+  flowRules: Schema.Array(FlowRule).pipe(
+    Schema.withDecodingDefault(Effect.succeed([])),
+    Schema.withConstructorDefault(Effect.succeed([]))
+  ),
   /** Supervisor ceilings by tool and encoded input field; contracts confer no release authority. */
   flow: Schema.Record(Schema.String, Schema.Record(Schema.String, SinkPolicy)).pipe(
     Schema.withDecodingDefault(Effect.succeed({})),
@@ -34,9 +40,10 @@ export const toolPolicy = <Granted extends string>(policy: {
   readonly toolGrants: ReadonlyArray<Grant & { readonly tool: Granted }>
   readonly budget: ToolPolicy["budget"]
   readonly flow?: ToolPolicy["flow"]
+  readonly flowRules?: ToolPolicy["flowRules"]
 }): ToolPolicyFor<Granted> =>
   // The class instance holds the same grants it was given; the type keeps their tool names.
-  new ToolPolicy(policy) as ToolPolicyFor<Granted>
+  new ToolPolicy({ ...policy, flowRules: composeFlowRules(policy.flowRules ?? []) }) as ToolPolicyFor<Granted>
 
 const encodePolicy = Schema.encodeSync(ToolPolicy)
 

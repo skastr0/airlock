@@ -211,7 +211,7 @@ export const defineAirlock = <const List extends ReadonlyArray<ToolContract.Any>
   const guest: Airlock<Contracts, Env>["guest"] = ({ runId, env }) =>
     forThisDefinition(Effect.gen(function* () {
       const decided = policy(env)
-      const opened = yield* openToolSession(kernel, { runId, policy: decided }).pipe(
+      const opened = yield* openToolSession(kernel, { runId, policy: decided, decoders }).pipe(
         Effect.mapError(explain("this session"))
       )
       const session: {
