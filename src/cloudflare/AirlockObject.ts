@@ -33,6 +33,10 @@ export interface GuestDescription {
   readonly description: string
 }
 
+type Supervisor = Effect.Success<ReturnType<Airlock<ToolContracts, unknown>["supervisor"]>>
+/** What the host answered when asked to put a held call back. */
+export type Restoration = Effect.Success<ReturnType<Supervisor["restore"]>>
+
 /** The Durable Object's methods, as the trusted side calls them. */
 export interface AirlockObjectApi {
   /**
@@ -46,6 +50,12 @@ export interface AirlockObjectApi {
   commit(id: string): Promise<Reply<EmissionView>>
   cancel(id: string): Promise<Reply<EmissionView>>
   compensate(id: string, holdMillis?: number): Promise<Reply<EmissionView>>
+  /**
+   * Puts back what a completed call changed, where the host itself holds the
+   * way back. A supervisor's operation; it does not depend on the grant that
+   * allowed the call still being valid.
+   */
+  restore(id: string): Promise<Reply<Restoration>>
 }
 
 export interface AirlockObjectOptions {
@@ -235,6 +245,11 @@ export const airlockDurableObject = <Contracts extends ToolContracts, Env>(
           supervisor.compensate(String(id), typeof holdMillis === "number" ? holdMillis : 0))
       )
     }
+
+    restore(id: string): Promise<Reply<Restoration>> {
+      return this.#guarded(() =>
+        this.#reply(Effect.flatMap(airlock.supervisor(this.#env), (supervisor) => supervisor.restore(String(id)))))
+    }
   }
 }
 
@@ -271,6 +286,7 @@ export const airlockClient = (namespace: AirlockNamespace, name: string) => {
     inspect: (id: string) => unwrap(stub.inspect(id)),
     commit: (id: string) => unwrap(stub.commit(id)),
     cancel: (id: string) => unwrap(stub.cancel(id)),
-    compensate: (id: string, holdMillis?: number) => unwrap(stub.compensate(id, holdMillis))
+    compensate: (id: string, holdMillis?: number) => unwrap(stub.compensate(id, holdMillis)),
+    restore: (id: string) => unwrap(stub.restore(id))
   }
 }

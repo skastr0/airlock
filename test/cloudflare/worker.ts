@@ -6,7 +6,7 @@
  * its own object, so it has its own SQLite database, and reaches the adapters
  * only through `ctx.storage`.
  */
-import { Effect, Layer, type Scope } from "effect"
+import { DateTime, Effect, Layer, Result, Schema, type Scope } from "effect"
 import {
   airlockClient,
   airlockDurableObject,
@@ -19,6 +19,7 @@ import {
   Admission,
   defineAirlock,
   defineOutbox,
+  defineToolContract,
   DispatchProvenance,
   type EmissionId,
   IdempotencyKey,
@@ -27,6 +28,8 @@ import {
   toolPolicy,
   WebCrypto
 } from "../../src/core/index.ts"
+import { portableToolHost } from "../../src/core/contract/PortableToolHost.ts"
+import type { ToolHost } from "../../src/core/contract/ToolHost.ts"
 import {
   exampleContracts,
   guestRunnerConformance,
@@ -57,6 +60,7 @@ interface Env {
   readonly ALARMED: Namespace
   readonly QUEUED: Namespace
   readonly SOLO: Namespace
+  readonly HELD: Namespace
   readonly MAIL_TOKEN: string
 }
 
@@ -261,6 +265,57 @@ export const QueuedAirlock = airlockDurableObject(userAirlock, { maxWaitingProgr
 /** The same Airlock with no line at all: one program runs and nothing waits. */
 export const SoloAirlock = airlockDurableObject(userAirlock, { maxWaitingPrograms: 0 })
 
+// ── a host that holds the way back ─────────────────────────────────────────
+
+const NoteWrite = defineToolContract({
+  name: "note.write",
+  version: "1",
+  effect: "apply",
+  input: Schema.Struct({ body: Schema.String }),
+  output: Schema.Struct({ written: Schema.Boolean })
+})
+
+/** What the host was asked to do, in order, so a test can see who reached it. */
+const held: Array<{ readonly did: string; readonly callId: string }> = []
+const holdingHost: ToolHost = {
+  ...portableToolHost,
+  validateGrant: () => Result.succeed(undefined),
+  recovery: {
+    prepare: (call) =>
+      Effect.sync(() => {
+        held.push({ did: "prepared", callId: call.callId })
+        return { callId: call.callId, recoveryId: `held-${held.length}`, heldUntil: DateTime.makeUnsafe("2099-01-01T00:00:00Z") }
+      }),
+    inspect: (reference) => Effect.succeed({ state: "done", reference }),
+    restore: (reference) =>
+      Effect.sync(() => {
+        held.push({ did: "restored", callId: reference.callId })
+        return { state: "restored", reference }
+      })
+  }
+}
+
+/** Its `fetch` fires the platform's wake-up by hand, so a test can see what an alarm reaches. */
+export class HeldAirlock extends airlockDurableObject(defineAirlock({
+  contracts: [NoteWrite],
+  host: holdingHost,
+  implement: {
+    "note.write": (_input, context) => {
+      held.push({ did: "written", callId: context.held?.callId ?? "not held" })
+      return { written: true }
+    }
+  },
+  policy: toolPolicy({
+    budget: { maxCalls: 4, maxInputBytes: 4_096 },
+    toolGrants: [Admission.toolGrant(NoteWrite, { id: "notes", when: "now" })]
+  })
+})) {
+  async fetch(): Promise<Response> {
+    await this.alarm()
+    return json({ alarmed: true })
+  }
+}
+
 /**
  * The same Airlock with a short recovery alarm, plus a way to look at the
  * stored states without opening the Airlock: opening it is itself recovery,
@@ -295,6 +350,8 @@ const trusted = async (request: Request, env: Env): Promise<Response> => {
       case "/airlock/commit": return json(await airlock.commit(String(body["id"])))
       case "/airlock/cancel": return json(await airlock.cancel(String(body["id"])))
       case "/airlock/compensate": return json(await airlock.compensate(String(body["id"])))
+      case "/airlock/restore": return json(await airlock.restore(String(body["id"])))
+      case "/airlock/held": return json(held)
       case "/airlock/remote": return json(remote)
       default: return json({ error: "unknown route" }, 404)
     }
@@ -318,6 +375,14 @@ export default {
       const rewritten = new URL(request.url)
       rewritten.pathname = rewritten.pathname.replace("/solo/", "/airlock/")
       return trusted(new Request(rewritten.toString(), request), { ...env, AIRLOCK: env.SOLO })
+    }
+    if (url.pathname === "/held/alarm") {
+      return env.HELD.get(env.HELD.idFromName(url.searchParams.get("object") ?? "default")).fetch(request)
+    }
+    if (url.pathname.startsWith("/held/")) {
+      const rewritten = new URL(request.url)
+      rewritten.pathname = rewritten.pathname.replace("/held/", "/airlock/")
+      return trusted(new Request(rewritten.toString(), request), { ...env, AIRLOCK: env.HELD })
     }
     if (url.pathname.startsWith("/alarmed/")) {
       if (url.pathname === "/alarmed/states") return env.ALARMED.get(env.ALARMED.idFromName("alarmed")).fetch(request)

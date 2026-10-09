@@ -42,7 +42,8 @@ const start = (storage = persist) => {
       AIRLOCK: { className: "ExampleAirlock", useSQLite: true },
       ALARMED: { className: "AlarmedAirlock", useSQLite: true },
       QUEUED: { className: "QueuedAirlock", useSQLite: true },
-      SOLO: { className: "SoloAirlock", useSQLite: true }
+      SOLO: { className: "SoloAirlock", useSQLite: true },
+      HELD: { className: "HeldAirlock", useSQLite: true }
     },
     // No Worker Loader and no nodejs_compat: a program is evaluated in the object itself.
     bindings: { MAIL_TOKEN: "token-canary" },
@@ -318,6 +319,54 @@ describe("cloud: one program at a time", () => {
       "slow started", "slow", "slow started", "slow"
     ])
   }, 30_000)
+})
+
+describe("cloud: putting a held call back", () => {
+  type Held = ReadonlyArray<{ readonly did: string; readonly callId: string }>
+  type Answer = { readonly state?: string; readonly failed?: boolean; readonly code?: string; readonly reference?: { readonly callId: string } }
+
+  it("restores through the supervisor only, and neither a program nor the alarm reaches the host's way back", async () => {
+    const outcome = await call<{ ok: boolean }>(workerd, "/held/run?object=held", {
+      runId: "held-1", source: `return note.write({ body: "draft" })`
+    })
+    expect(outcome.ok).toBe(true)
+    const after = await call<Held>(workerd, "/held/held")
+    expect(after.map((entry) => entry.did)).toEqual(["prepared", "written"])
+    // The way back was claimed before the write, for the same call.
+    const callId = after[0]!.callId
+    expect(after[1]!.callId).toBe(callId)
+
+    // The alarm settles what was interrupted. It never restores.
+    expect(await call<{ alarmed: boolean }>(workerd, "/held/alarm?object=held")).toEqual({ alarmed: true })
+    expect((await call<Held>(workerd, "/held/held")).map((entry) => entry.did)).toEqual(["prepared", "written"])
+
+    // A program has no word for it.
+    const tried = await call<{ ok: boolean; reason?: string }>(workerd, "/held/run?object=held", {
+      runId: "held-2", source: `return restore({ id: "${callId}" })`
+    })
+    expect(tried).toMatchObject({ ok: false, reason: "tool_refused" })
+    expect((await call<Held>(workerd, "/held/held")).map((entry) => entry.did)).toEqual(["prepared", "written"])
+
+    const restored = await call<Answer>(workerd, "/held/restore?object=held", { id: callId })
+    expect(restored).toMatchObject({ state: "restored", reference: { callId } })
+    expect((await call<Held>(workerd, "/held/held")).at(-1)).toEqual({ did: "restored", callId })
+    expect(await call<Answer>(workerd, "/held/restore?object=held", { id: "no-such-call" }))
+      .toMatchObject({ failed: true })
+  }, 30_000)
+
+  it("refuses to restore where the host holds no way back", async () => {
+    const object = "?object=restore-none"
+    await call(workerd, `/airlock/run${object}`, {
+      runId: "run-1", source: `return mail.send({ to: "a@example.com", subject: "s", body: "b" })`
+    })
+    const [pending] = await call<ReadonlyArray<{ readonly id: string }>>(workerd, `/airlock/pending${object}`)
+    // Staged, then committed: either way the portable host holds nothing to put back.
+    expect(await call<Answer>(workerd, `/airlock/restore${object}`, { id: pending!.id }))
+      .toMatchObject({ failed: true, code: "not-compensable" })
+    await call(workerd, `/airlock/commit${object}`, { id: pending!.id })
+    expect(await call<Answer>(workerd, `/airlock/restore${object}`, { id: pending!.id }))
+      .toMatchObject({ failed: true, code: "not-compensable" })
+  })
 })
 
 describe("cloud: the recovery alarm", () => {
