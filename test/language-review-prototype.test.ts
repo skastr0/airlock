@@ -236,6 +236,18 @@ describe("generated type-safety evidence (not a proof)", () => {
     }
   }), { timeout: 60_000 })
 
+  it.effect("covers control retained after branches and from earlier loop iterations", () => Effect.gen(function* () {
+    const sources = [
+      'let r = mail.read({id:"one"}); if r.state == "done" { if r.result.subject == "go" { mail.read({id:r.result.body}) } }; http.get({url:"https://example.com/final"}); return true',
+      'for n in 0..3 { http.get({url:"https://example.com/first"}); mail.read({id:"one"}) }; http.get({url:"https://example.com/final"}); return true',
+      'for id in ["one","two"] { if true { mail.read({id:id}) }; http.get({url:"https://example.com/after"}) }; return true'
+    ]
+    for (const source of sources) {
+      const review = yield* reviewPrototype(source, environment)
+      expect(yield* runReviewedPrototype(review, { observe: assertObservedDependencies(review), resolve: (name) => Effect.succeed(name === "http.get" ? done({ text: "ok" }) : done({ from: "a@example.com", subject: "go", body: "second" })) })).toBe(true)
+    }
+  }))
+
   it.effect("rejects 1000 ill-typed mutations instead of reaching the host", () => Effect.gen(function* () {
     for (let sample = 0; sample < 1000; sample++) {
       const source = sample % 3 === 0 ? `let r = mail.read({id:${sample}}); return true` : sample % 3 === 1 ? `let r = mail.read({id:"m${sample}"}); return r.result.body` : `let r = mail.read({id:"m${sample}"}); if r.state == "done" { return r.result.missing${sample} }; return true`

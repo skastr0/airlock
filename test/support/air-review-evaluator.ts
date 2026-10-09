@@ -230,13 +230,13 @@ export const runReviewedPrototype = <E, R>(review: Review, host: PrototypeHost<E
       }
     }
   })
-  const statements = (body: readonly Statement[], outer: Scope, control: TrackedValue): Effect.Effect<{ returned: boolean; value: Box }, PrototypeStop, R> => Effect.gen(function* () {
+  const statements = (body: readonly Statement[], outer: Scope, control: TrackedValue): Effect.Effect<{ returned: boolean; value: Box; control: TrackedValue }, PrototypeStop, R> => Effect.gen(function* () {
     const scope = new Map(outer); let pc = control
     for (const statement of body) {
       switch (statement.kind) {
         case "LetStatement": scope.set(statement.name, yield* evaluate(statement.value, scope, pc)); break
         case "ExpressionStatement": { const value = yield* evaluate(statement.expression, scope, pc); pc = labeledValue(false, combine(pc.label, labelOf(value))); break }
-        case "ReturnStatement": return { returned: true, value: statement.value === undefined ? primitive(null) : yield* evaluate(statement.value, scope, pc) }
+        case "ReturnStatement": return { returned: true, control: pc, value: statement.value === undefined ? primitive(null) : yield* evaluate(statement.value, scope, pc) }
         case "AssertStatement": {
           const condition = yield* evaluate(statement.test, scope, pc)
           const passed = yield* effect(() => boolean(condition, statement.span), statement.span)
@@ -253,6 +253,7 @@ export const runReviewedPrototype = <E, R>(review: Review, host: PrototypeHost<E
           const condition = yield* effect(() => boolean(test, statement.span), statement.span)
           const branch = yield* statements(condition ? statement.consequent : statement.alternate ?? [], scope, pc)
           if (branch.returned) return branch
+          pc = branch.control
           break
         }
         case "ForStatement": {
@@ -267,7 +268,7 @@ export const runReviewedPrototype = <E, R>(review: Review, host: PrototypeHost<E
             for (let index = endpoints.from; index < endpoints.to; index++) {
               if (++iterations > review.environment.maxIterations) return yield* Effect.fail(new PrototypeStop({ reason: "budget", span: statement.span }))
               const inner = new Map(scope); inner.set(statement.variable, primitive(index, [from, to]))
-              const child = yield* statements(statement.body, inner, pc); if (child.returned) return child
+              const child = yield* statements(statement.body, inner, pc); if (child.returned) return child; pc = child.control
             }
             break
           }
@@ -279,12 +280,13 @@ export const runReviewedPrototype = <E, R>(review: Review, host: PrototypeHost<E
             const scopeForItem = new Map(scope); scopeForItem.set(statement.variable, source.children.get(index)!)
             const child = yield* statements(statement.body, scopeForItem, pc)
             if (child.returned) return child
+            pc = child.control
           }
           break
         }
       }
     }
-    return { returned: false, value: primitive(null) }
+    return { returned: false, value: primitive(null), control: pc }
   })
   return (yield* statements(review.program.body, new Map(), empty())).value.tracked.value
 })

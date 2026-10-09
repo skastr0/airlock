@@ -344,7 +344,7 @@ const check = (program: Program, environment: ReviewEnvironment): Review => {
       }
     }
   }
-  const statements = (body: readonly Statement[], outer: Scope, control: readonly string[]): { counts: Counts; iterations: number } => {
+  const statements = (body: readonly Statement[], outer: Scope, control: readonly string[]): { counts: Counts; iterations: number; control: readonly string[] } => {
     let scope = new Map(outer), pc = control, counts: Counts = {}, iterations = 0
     for (const statement of body) {
       switch (statement.kind) {
@@ -365,7 +365,7 @@ const check = (program: Program, environment: ReviewEnvironment): Review => {
           const no = statements(statement.alternate ?? [], narrow(statement.test, scope, false), branchPc)
           counts = add(counts, add(test.counts, maximum(yes.counts, no.counts))); iterations += Math.max(yes.iterations, no.iterations)
           // Includes whether later code is reached, even for an absent branch.
-          pc = branchPc
+          pc = unique(branchPc, yes.control, no.control)
           break
         }
         case "ForStatement": {
@@ -377,8 +377,8 @@ const check = (program: Program, environment: ReviewEnvironment): Review => {
             const loopPc = unique(pc, from.value.origins, to.value.origins), inner = new Map(scope)
             inner.set(statement.variable, fact({ kind: "number" }, loopPc))
             const previousOccurrences = occurrences; occurrences *= bound
-            const child = statements(statement.body, inner, loopPc); occurrences = previousOccurrences
-            counts = add(counts, add(add(from.counts, to.counts), scale(child.counts, bound))); iterations += bound * (1 + child.iterations); pc = loopPc
+            const child = loopBody(statement.body, inner, loopPc, bound); occurrences = previousOccurrences
+            counts = add(counts, add(add(from.counts, to.counts), scale(child.counts, bound))); iterations += bound * (1 + child.iterations); pc = unique(loopPc, child.control)
             break
           }
           const source = expr(statement.source, scope, pc)
@@ -387,14 +387,27 @@ const check = (program: Program, environment: ReviewEnvironment): Review => {
           const loopPc = unique(pc, source.value.origins, source.value.type.item.origins)
           const bound = source.value.type.bound, previousOccurrences = occurrences
           occurrences *= bound
-          const child = statements(statement.body, inner, loopPc)
+          const child = loopBody(statement.body, inner, loopPc, bound)
           occurrences = previousOccurrences
-          counts = add(counts, add(source.counts, scale(child.counts, bound))); iterations += bound * (1 + child.iterations); pc = loopPc
+          counts = add(counts, add(source.counts, scale(child.counts, bound))); iterations += bound * (1 + child.iterations); pc = unique(loopPc, child.control)
           break
         }
       }
     }
-    return { counts, iterations }
+    return { counts, iterations, control: pc }
+  }
+  // A later iteration can be reached through any earlier body outcome.
+  // Iterate monotonically over finite source identities before recording facts.
+  const loopBody = (body: readonly Statement[], scope: Scope, initial: readonly string[], bound: number): ReturnType<typeof statements> => {
+    const firstCall = calls.length
+    let control = initial
+    for (;;) {
+      calls.length = firstCall
+      const child = statements(body, scope, control)
+      const next = unique(control, child.control)
+      if (bound <= 1 || next.length === control.length) return child
+      control = next
+    }
   }
   const result = statements(program.body, new Map(), [])
   if (Object.values(result.counts).reduce((sum, count) => sum + count, 0) > environment.maxCalls || result.iterations > environment.maxIterations) fail("reviewed bound exceeds budget")
