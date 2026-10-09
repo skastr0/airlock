@@ -50,6 +50,19 @@ describe("core: trusted author flow rules", () => {
       mode: "data", from: "runtime", to: "untrusted" })).toThrow(InvalidFlowRule)
   })
 
+  it("rejects reused author records with hidden scope or condition fields", () => {
+    const spec = { id: "exact", source: { part: "result" as const, field: "body" as const }, sink: "body" as const,
+      mode: "data" as const, from: "private" as const, to: "public" as const }
+    for (const given of [{ ...spec, source: { ...spec.source, tool: "vault.read" } },
+      { ...spec, sink: { tool: "mail.send", field: "body" } },
+      { ...spec, operation: "endorse" },
+      { ...spec, when: [{ field: "to", decoder: address, tool: "other.send" }] }]) {
+      expect(() => releaseRule(read, send, given as typeof spec)).toThrow(InvalidFlowRule)
+    }
+    const reused = { ...spec.source, tool: "vault.read" }
+    expect(() => endorsementRule(read, send, { ...spec, source: reused, from: "untrusted", to: "operator" })).toThrow(InvalidFlowRule)
+  })
+
   it("refuses unknown result fields, sinks, sibling fields and changed decoder identities at registration", () => {
     expect(validateFlowRules([{ ...body, source: { tool: read.tag, part: "result", field: "missing" } }], registry, catalog)?.field).toContain("source")
     expect(validateFlowRules([{ ...body, sink: { ...body.sink, field: "missing" } }], registry, catalog)?.field).toContain("sink")

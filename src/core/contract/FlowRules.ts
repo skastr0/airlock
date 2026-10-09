@@ -45,10 +45,28 @@ type RuleScope<Source, Sink> = {
   readonly when?: ReadonlyArray<{ readonly field: keyof ToolContract.WireOf<Sink> & string; readonly decoder: TrustedDecoder.Any }>
 }
 
+const authorScope = {
+  id: Schema.String,
+  source: Schema.Union([
+    Schema.Struct({ part: Schema.Literal("result"), field: Schema.String }),
+    Schema.Struct({ part: Schema.Literal("receipt"), field: Schema.Literal("state") })
+  ]),
+  sink: Schema.String,
+  mode: Schema.Literals(["data", "control"]),
+  when: Schema.optionalKey(Schema.Array(Schema.Struct({ field: Schema.String, decoder: Schema.Unknown })))
+}
+const ReleaseSpec = Schema.Struct({ ...authorScope, from: Confidentiality, to: Confidentiality })
+const EndorsementSpec = Schema.Struct({ ...authorScope, from: Integrity, to: Integrity })
+const validateAuthorSpec = (schema: Schema.Top, spec: unknown): void => {
+  if (Result.isFailure(Schema.decodeUnknownResult(schema, { onExcessProperty: "error" })(spec))) {
+    throw new InvalidFlowRule({ field: "spec", reason: "must contain exact author rule fields" })
+  }
+}
+
 const ruleScope = <Source extends ToolContract.Any, Sink extends ToolContract.Any>(
   source: Source, sink: Sink, spec: RuleScope<Source, Sink>
 ) => ({
-  id: spec.id, source: { tool: source.tag, ...spec.source }, sink: { tool: sink.tag, field: spec.sink }, mode: spec.mode,
+  id: spec.id, source: { tool: source.tag, part: spec.source.part, field: spec.source.field }, sink: { tool: sink.tag, field: spec.sink }, mode: spec.mode,
   when: (spec.when ?? []).map(({ field, decoder }) => ({ field, decoder: { name: decoder.name, version: decoder.version } }))
 })
 
@@ -56,17 +74,23 @@ const ruleScope = <Source extends ToolContract.Any, Sink extends ToolContract.An
 export const releaseRule = <Source extends ToolContract.Any, Sink extends ToolContract.Any>(
   source: Source, sink: Sink,
   spec: RuleScope<Source, Sink> & { readonly from: Confidentiality; readonly to: Confidentiality }
-): Extract<FlowRule, { operation: "release" }> => composeFlowRules([{
+): Extract<FlowRule, { operation: "release" }> => {
+  validateAuthorSpec(ReleaseSpec, spec)
+  return composeFlowRules([{
   ...ruleScope(source, sink, spec), operation: "release", from: spec.from, to: spec.to
 }])[0]! as Extract<FlowRule, { operation: "release" }>
+}
 
 /** Endorsement is a separate, conspicuous author decision, never a decoder side effect. */
 export const endorsementRule = <Source extends ToolContract.Any, Sink extends ToolContract.Any>(
   source: Source, sink: Sink,
   spec: RuleScope<Source, Sink> & { readonly from: Integrity; readonly to: Integrity }
-): Extract<FlowRule, { operation: "endorse" }> => composeFlowRules([{
+): Extract<FlowRule, { operation: "endorse" }> => {
+  validateAuthorSpec(EndorsementSpec, spec)
+  return composeFlowRules([{
   ...ruleScope(source, sink, spec), operation: "endorse", from: spec.from, to: spec.to
 }])[0]! as Extract<FlowRule, { operation: "endorse" }>
+}
 
 const secrecy = ["public", "project", "private", "secret"] as const
 const trust = ["untrusted", "project", "operator", "runtime"] as const
