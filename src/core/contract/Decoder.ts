@@ -90,6 +90,26 @@ const track = <Value extends Schema.Json>(
 export const labeledValue = <Value extends Schema.Json>(value: Value, label: InformationLabel): TrackedValue<Value> =>
   track(value, label, new Set())
 
+export class InfluenceRejected extends Schema.TaggedError<InfluenceRejected>()("InfluenceRejected", {
+  reason: Schema.Literals(["untracked-value", "label"])
+}) {}
+
+/** Same owned JSON and exact proofs; adding influence can only strengthen secrecy. */
+export const addInfluence = <Value extends Schema.Json>(
+  source: TrackedValue<Value>, influence: InformationLabel
+): Result.Result<TrackedValue<Value>, InfluenceRejected> => {
+  const inherited = typeof source === "object" && source !== null ? proofs.get(source) : undefined
+  if (inherited === undefined) return Result.fail(new InfluenceRejected({ reason: "untracked-value" }))
+  try {
+    const label = ownLabel(combine(source.label, ownLabel(influence)))
+    const tracked: TrackedValue<Value> = Object.freeze({ [ValueTypeId]: true as const, value: source.value, label })
+    proofs.set(tracked, inherited)
+    return Result.succeed(tracked)
+  } catch {
+    return Result.fail(new InfluenceRejected({ reason: "label" }))
+  }
+}
+
 export const defineDecoder = <const Name extends string, Value extends Schema.Json>(spec: {
   readonly name: Name
   readonly version: string

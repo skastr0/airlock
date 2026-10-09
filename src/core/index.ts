@@ -159,3 +159,7 @@ export {
 
 export { CaptureAdmission, CaptureEntry, CaptureOutcome, CaptureRetention, CapturedEmission,
   CAPTURE_RESULT_LIMIT_BYTES, InvalidCapture, StoredCaptureResult, validateCaptureEntry } from "./outbox/Capture.ts"
+
+export { addInfluence, InfluenceRejected } from "./contract/Decoder.ts"
+export { createRoleWitnessIssuer, InvalidRoleWitness, isRoleWitnessIssuer, RoleLabels,
+  type RoleWitness, type RoleWitnessIssuer } from "./contract/RoleWitness.ts"
