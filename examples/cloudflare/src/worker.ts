@@ -1,4 +1,4 @@
-import { airlockClient, airlockDurableObject, AirlockError } from "@skastr0/airlock/cloud"
+import { airlockClient, airlockDurableObject, AirlockError } from "@skastr0/airlock/cloudflare"
 import { airlock, type Env, mailbox } from "./airlock.ts"
 
 /** The Durable Object: this one export is the whole server side of Airlock. */

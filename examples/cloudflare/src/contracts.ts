@@ -1,4 +1,4 @@
-import { defineToolContract, Schema } from "@skastr0/airlock/cloud"
+import { defineToolContract, Schema } from "@skastr0/airlock/cloudflare"
 
 /** Reading the inbox. Which mailbox is public; the search query is not. */
 export const MailList = defineToolContract({

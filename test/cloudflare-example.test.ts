@@ -20,7 +20,7 @@ const script = (await build({
   conditions: ["worker", "browser", "import"],
   target: "es2022",
   // The example imports the package by name; inside this repository that is this file.
-  alias: { "@skastr0/airlock/cloud": join(repository, "src", "cloud", "index.ts") },
+  alias: { "@skastr0/airlock/cloudflare": join(repository, "src", "cloudflare", "index.ts") },
   external: ["cloudflare:workers"],
   logLevel: "silent"
 })).outputFiles[0]!.text

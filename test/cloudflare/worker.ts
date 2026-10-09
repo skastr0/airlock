@@ -1,6 +1,6 @@
 /**
  * The test Worker. It is bundled and run inside real workerd by
- * `test/cloud-durable.test.ts`; nothing here runs in the test process.
+ * `test/cloudflare-durable.test.ts`; nothing here runs in the test process.
  *
  * One Durable Object class serves every route. Each conformance test runs in
  * its own object, so it has its own SQLite database, and reaches the adapters
@@ -16,7 +16,7 @@ import {
   type DurableStorage,
   type WorkerLoader,
   workerLoaderRunner
-} from "../../src/cloud/index.ts"
+} from "../../src/cloudflare/index.ts"
 import {
   Admission,
   defineAirlock,

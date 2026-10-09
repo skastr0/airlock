@@ -13,7 +13,7 @@ You write three things:
 | `src/airlock.ts` | What each tool does, and what the guest may do | 58 |
 | `src/worker.ts` | The Durable Object export and your trusted routes | 38 |
 
-All three import from `@skastr0/airlock/cloud` and nothing else.
+All three import from `@skastr0/airlock/cloudflare` and nothing else.
 
 ## What guest code looks like
 
@@ -40,7 +40,7 @@ in this repository:
 ```sh
 git clone https://github.com/skastr0/airlock && cd airlock
 bun install
-bunx vitest run test/cloud-example.test.ts
+bunx vitest run test/cloudflare-example.test.ts
 ```
 
 That test bundles `src/worker.ts` unchanged, starts workerd with a SQLite
@@ -65,7 +65,7 @@ in front of them.
 
 ## What the guest cannot do
 
-Each of these is checked in workerd by `test/cloud-durable.test.ts`:
+Each of these is checked in workerd by `test/cloudflare-durable.test.ts`:
 
 - reach the network (`fetch`, sockets), read a binding or a secret, import a
   Node module;

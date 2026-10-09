@@ -3,13 +3,13 @@ import { dirname, join, relative, resolve } from "node:path"
 import { describe, expect, it } from "vitest"
 
 /**
- * The cloud adapters' boundary, enforced by construction. `src/cloud` may
+ * The cloud adapters' boundary, enforced by construction. `src/cloudflare` may
  * depend on `effect`, on the kernel, on itself, and on `cloudflare:workers`. It names no host: no Node
  * or Bun module, no platform package, no host global, and nothing under
  * `src/host` or anywhere else in the repository.
  */
 const repository = resolve(import.meta.dirname, "..")
-const cloudRoot = join(repository, "src", "cloud")
+const cloudRoot = join(repository, "src", "cloudflare")
 const coreRoot = join(repository, "src", "core")
 
 const files = readdirSync(cloudRoot, { recursive: true, encoding: "utf8" })
@@ -42,7 +42,7 @@ describe("cloud adapter boundary", () => {
           const target = resolve(dirname(path), specifier)
           return inside(cloudRoot, target) || inside(coreRoot, target)
             ? []
-            : [{ file, specifier, reason: "leaves src/cloud and src/core" }]
+            : [{ file, specifier, reason: "leaves src/cloudflare and src/core" }]
         }
         // `cloudflare:workers` is the one module the Workers runtime itself
         // provides: the bases for RPC objects and Durable Objects.

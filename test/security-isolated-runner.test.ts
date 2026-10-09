@@ -10,7 +10,7 @@ const script = (await build({
     contents: `
       import { Effect } from "effect";
       import { GuestRunner } from "./src/core/index.ts";
-      import { workerLoaderRunner } from "./src/cloud/WorkerLoaderRunner.ts";
+      import { workerLoaderRunner } from "./src/cloudflare/WorkerLoaderRunner.ts";
       const surface = {
         tools: ["security.throw"], declaration: "", description: "",
         call: () => Effect.die(new Error("host-canary-secret"))

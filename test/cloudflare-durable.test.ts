@@ -9,7 +9,7 @@ import { expectedTranscript } from "../src/core/testing/index.ts"
 /**
  * The Durable Object adapters, judged inside real workerd.
  *
- * The test Worker (`test/cloud/worker.ts`) is bundled for a neutral platform
+ * The test Worker (`test/cloudflare/worker.ts`) is bundled for a neutral platform
  * and loaded with no `nodejs_compat`. Each conformance test runs in its own
  * SQLite-backed Durable Object, reached over HTTP; this file only starts
  * workerd, asks which tests exist, and reports each one.
@@ -17,7 +17,7 @@ import { expectedTranscript } from "../src/core/testing/index.ts"
 const repository = resolve(import.meta.dirname, "..")
 
 const script = (await build({
-  entryPoints: [join(repository, "test", "cloud", "worker.ts")],
+  entryPoints: [join(repository, "test", "cloudflare", "worker.ts")],
   bundle: true,
   write: false,
   format: "esm",

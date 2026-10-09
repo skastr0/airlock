@@ -1,4 +1,4 @@
-import { defineAirlock, refused, toolGrant, toolPolicy, type WorkerLoader } from "@skastr0/airlock/cloud"
+import { defineAirlock, refused, toolGrant, toolPolicy, type WorkerLoader } from "@skastr0/airlock/cloudflare"
 import { LabelAdd, LabelRemove, MailList, MailSend } from "./contracts.ts"
 
 /** The Worker's bindings. `MAIL_TOKEN` is a secret; a guest never sees it. */
