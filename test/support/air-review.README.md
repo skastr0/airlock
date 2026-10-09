@@ -37,8 +37,11 @@ not yet provide the final runtime per-field author-policy bridge.
 
 Typed host bindings decode before execution, contract flow.provides validates
 unchanged decoded values, and nominal checks follow exact trusted Schema identity
-across tool model paths. Non-JSON decoded fields still need encoded opaque
-transport before production cutover. Review,
+across tool model paths. Non-JSON decoded fields retain validated encoded JSON
+and the exact original trusted codec as opaque values. They support immutable
+aliases, same-codec transport and equality; programs cannot project, concatenate,
+calculate with or decode them. Trusted bindings and nullable/list fields preserve
+that identity; malformed wire results stop before exposure. Review,
 tracked execution and the existing runner must agree on the entire language
 before replacement. Map-based facts are an experiment, not a persisted Plan.
 

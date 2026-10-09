@@ -3,7 +3,7 @@ import type { ToolContract } from "../../src/core/contract/ToolContract.ts"
 import { HeldReference } from "../../src/core/contract/ToolHost.ts"
 import { decodeValue, labeledValue, type TrustedDecoder } from "../../src/core/contract/Decoder.ts"
 import { InformationLabel } from "../../src/core/labels/Labels.ts"
-import { acceptsLiteral, hasSameSchema, modelSchema, type SchemaModel } from "../../src/core/contract/SchemaModel.ts"
+import { acceptsLiteral, encodeModelValue, hasSameCodec, hasSameSchema, modelSchema, type SchemaModel } from "../../src/core/contract/SchemaModel.ts"
 import type { ToolFlow } from "../../src/core/contract/Flow.ts"
 import { validateFlowDecoders } from "../../src/core/contract/Flow.ts"
 import { validateBindings } from "../../src/core/language/bindings.ts"
@@ -23,7 +23,7 @@ export interface ReviewEnvironment {
   readonly maxListItems: number
   readonly maxCalls: number
   readonly maxIterations: number
-  readonly bindings?: Readonly<Record<string, { readonly schema: Schema.Codec<Schema.Json, Schema.Json>; readonly value: Schema.Json; readonly label: InformationLabel }>>
+  readonly bindings?: Readonly<Record<string, { readonly schema: Schema.Codec<unknown, Schema.Json>; readonly value: Schema.Json; readonly label: InformationLabel }>>
 }
 type Kind = "string" | "number" | "boolean" | "null" | "duration" | "never"
 export type Type =
@@ -129,6 +129,7 @@ const check = (program: Program, environment: ReviewEnvironment): Review => {
   }
   const compatible = (value: Fact, expected: Fact, span: Span) => {
     if (value.type.kind === "never") return
+    if (value.type.kind === "opaque" && (value.schemaProofs ?? []).some((actual) => (expected.schemaProofs ?? []).some((required) => hasSameCodec(actual, required)))) return
     if (expected.refinements.some((proof) => {
       if (value.refinements.includes(proof)) return false
       const requirement = expected.schemaProofs?.find((model) => model.kind === "nominal" && model.identity === proof)
@@ -199,6 +200,21 @@ const check = (program: Program, environment: ReviewEnvironment): Review => {
     return fact(left.type, unique(left.origins, right.origins), left.refinements.filter((proof) => right.refinements.includes(proof)), left.constant === right.constant ? left.constant : undefined)
   }
   const allKind = (value: Fact, kind: Kind): boolean => value.type.kind === "never" || value.type.kind === kind || (value.type.kind === "choices" && value.type.members.every((member) => allKind(member, kind)))
+  const hasOpaque = (value: Fact): boolean => value.type.kind === "opaque" || (value.type.kind === "record" && [...value.type.fields.values()].some(hasOpaque)) || (value.type.kind === "list" && hasOpaque(value.type.item)) || (value.type.kind === "nullable" && hasOpaque(value.type.value)) || (value.type.kind === "choices" && value.type.members.some(hasOpaque))
+  const equality = (left: Fact, right: Fact, span: Span): void => {
+    if (!hasOpaque(left) && !hasOpaque(right)) return
+    if (left.type.kind === "opaque" && right.type.kind === "opaque" && (left.schemaProofs ?? []).some((a) => (right.schemaProofs ?? []).some((b) => hasSameCodec(a, b)))) return
+    if (left.type.kind === "record" && right.type.kind === "record") {
+      const rightFields = right.type.fields
+      if (left.type.fields.size !== rightFields.size) fail("opaque equality requires matching shapes", span)
+      for (const [key, value] of left.type.fields) { const other = rightFields.get(key); if (other === undefined) fail("opaque equality requires matching shapes", span); equality(value, other, span) }
+      return
+    }
+    if (left.type.kind === "list" && right.type.kind === "list") { equality(left.type.item, right.type.item, span); return }
+    if (left.type.kind === "nullable" && right.type.kind === "null" || right.type.kind === "nullable" && left.type.kind === "null") return
+    if (left.type.kind === "nullable" || right.type.kind === "nullable") { equality(left.type.kind === "nullable" ? left.type.value : left, right.type.kind === "nullable" ? right.type.value : right, span); return }
+    fail("opaque equality requires the same codec identity", span)
+  }
   const narrow = (test: Expression, scope: Scope, truth: boolean): Scope => {
     if (test.kind === "UnaryExpression" && test.operator === "!") return narrow(test.operand, scope, !truth)
     if (test.kind === "BinaryExpression" && ((test.operator === "&&" && truth) || (test.operator === "||" && !truth))) return narrow(test.right, narrow(test.left, scope, truth), truth)
@@ -302,7 +318,7 @@ const check = (program: Program, environment: ReviewEnvironment): Review => {
         const origins = unique(left.value.origins, right.value.origins), counts = add(left.counts, right.counts)
         if (["&&", "||"].includes(expression.operator)) { compatible(left.value, scalar("boolean"), expression.span); compatible(right.value, scalar("boolean"), expression.span); return { value: fact({ kind: "boolean" }, origins), counts } }
         if (["==", "!=", "<", ">", "<=", ">="].includes(expression.operator)) {
-          if (["==", "!="].includes(expression.operator)) return { value: fact({ kind: "boolean" }, origins), counts }
+          if (["==", "!="].includes(expression.operator)) { equality(left.value, right.value, expression.span); return { value: fact({ kind: "boolean" }, origins), counts } }
           if (!(["string", "number", "duration"] as const).some((kind) => allKind(left.value, kind) && allKind(right.value, kind))) fail("comparison shape mismatch", expression.span)
           if (!["==", "!="].includes(expression.operator) && left.value.type.kind === "boolean") fail("ordered comparison requires string/number", expression.span)
           return { value: fact({ kind: "boolean" }, origins), counts }
@@ -335,6 +351,7 @@ const check = (program: Program, environment: ReviewEnvironment): Review => {
           const decoder = environment.decoders[handle.slice(7)]
           if (decoder === undefined) fail("unknown decoder", expression.span)
           const source = expr(expression.arguments[1]!, scope, control)
+          if (hasOpaque(source.value)) fail("opaque values cannot be decoded by a program", expression.span)
           const carryOrigins = (value: Fact): Fact => ({ ...value, origins: source.value.origins, type: value.type.kind === "record" ? { ...value.type, fields: new Map([...value.type.fields].map(([key, field]) => [key, carryOrigins(field)])) } : value.type.kind === "list" ? { ...value.type, item: carryOrigins(value.type.item) } : value.type.kind === "nullable" ? { ...value.type, value: carryOrigins(value.type.value) } : value.type.kind === "choices" ? { ...value.type, members: value.type.members.map(carryOrigins) } : value.type })
           const decoded = carryOrigins(fromModel(modelSchema(decoder.schema, { identity: decoderIdentity(decoder), side: "decoded" }), ""))
           const folded = source.value.constant === undefined ? undefined : decodeValue(decoder, labeledValue(source.value.constant, new InformationLabel({ confidentiality: "public", integrity: "runtime", provenance: [] })))
@@ -454,10 +471,19 @@ const check = (program: Program, environment: ReviewEnvironment): Review => {
     }
   }
   const bindings = new Map<string, Fact>()
+  const jsonLeaves = (model: SchemaModel, value: unknown): boolean => {
+    if (model.kind === "nominal") return model.base === undefined || jsonLeaves(model.base, value)
+    if (model.kind === "union") { const selected = model.members.find((member) => Result.isSuccess(encodeModelValue(member, value))); return selected !== undefined && jsonLeaves(selected, value) }
+    if (model.kind === "record") return value !== null && typeof value === "object" && !Array.isArray(value) && Object.entries(model.fields).every(([name, field]) => !Object.hasOwn(value, name) ? field.optional : jsonLeaves(field.type, Reflect.get(value, name)))
+    if (model.kind === "list") return Array.isArray(value) && value.every((item) => jsonLeaves(model.item, item))
+    return Result.isSuccess(Schema.decodeUnknownResult(Schema.Json)(value))
+  }
   for (const [name, binding] of Object.entries(environment.bindings ?? {})) {
+    if (Result.isFailure(Schema.decodeUnknownResult(Schema.Json)(binding.value))) fail(`invalid binding ${name}`)
     const decoded = Schema.decodeUnknownResult(binding.schema, { onExcessProperty: "error" })(binding.value)
-    if (Result.isFailure(decoded) || Result.isFailure(Schema.decodeUnknownResult(Schema.Json)(decoded.success))) fail(`invalid binding ${name}`)
-    bindings.set(name, fromModel(modelSchema(binding.schema, { identity: JSON.stringify(["binding", name]), side: "decoded" }), `binding.${name}`))
+    const model = modelSchema(binding.schema, { identity: JSON.stringify(["binding", name]), side: "decoded" })
+    if (Result.isFailure(decoded) || !jsonLeaves(model, decoded.success)) fail(`invalid binding ${name}`)
+    bindings.set(name, fromModel(model, `binding.${name}`))
   }
   const result = statements(program.body, bindings, [])
   if (Object.values(result.counts).reduce((sum, count) => sum + count, 0) > environment.maxCalls || result.iterations > environment.maxIterations) fail("reviewed bound exceeds budget")

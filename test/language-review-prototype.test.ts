@@ -252,6 +252,45 @@ describe("current-syntax type checker prototype", () => {
     expect(input.arguments.origins.some((origin) => origin.endsWith(".id"))).toBe(true)
     expect(input.arguments.origins.some((origin) => origin.endsWith(".state"))).toBe(false)
   }))
+
+  it.effect("transports non-JSON decoded dates opaquely by exact codec identity", () => Effect.gen(function* () {
+    const date = Schema.DateTimeUtcFromString
+    const read = defineToolContract({ name: "date.read", version: "1", effect: "capture", input: Schema.Struct({ id: Schema.String }), output: Schema.Struct({ date }) })
+    const use = defineToolContract({ name: "date.use", version: "1", effect: "capture", input: Schema.Struct({ date }), output: Schema.Boolean })
+    const env = { ...environment, tools: { "date.read": { contract: read }, "date.use": { contract: use } }, granted: new Set(["date.read", "date.use"]) }
+    const wire = "2026-10-09T12:00:00.000Z"
+    const source = 'let r = date.read({id:"one"}); if r.state == "done" { let alias = r.result.date; assert alias == r.result.date; date.use({date:alias}) }; return true'
+    const seen: Schema.Json[] = []
+    const review = yield* reviewPrototype(source, env)
+    expect(yield* runReviewedPrototype(review, { observe: assertObservedDependencies(review), resolve: (name, input) => Effect.sync(() => { if (name === "date.read") return done({ date: wire }); seen.push(input); return done(true) }) })).toBe(true)
+    expect(seen).toEqual([{ date: wire }])
+    for (const use of ['return r.result.date + ""', 'return r.result.date.value', 'return r.result.date == "2026-10-09T12:00:00.000Z"', 'let copied = decode(schema.companyRecipient,r.result.date)']) {
+      expect(yield* reviewPrototype(`let r = date.read({id:"one"}); if r.state == "done" { ${use} }; return true`, env).pipe(Effect.flip)).toBeInstanceOf(ReviewError)
+    }
+    const other = Schema.DateTimeUtcFromString.check(Schema.makeFilter(() => true))
+    const wrong = defineToolContract({ name: "date.other", version: "1", effect: "capture", input: Schema.Struct({ date: other }), output: Schema.Boolean })
+    const wrongEnv = { ...env, tools: { ...env.tools, "date.other": { contract: wrong } }, granted: new Set([...env.granted, "date.other"]) }
+    expect(yield* reviewPrototype(source.replace('date.use', 'date.other'), wrongEnv).pipe(Effect.flip)).toBeInstanceOf(ReviewError)
+  }))
+
+  it.effect("preserves opaque identity through nullable fields, lists and trusted bindings", () => Effect.gen(function* () {
+    const date = Schema.DateTimeUtcFromString
+    const payload = Schema.Struct({ date: Schema.NullOr(date), dates: Schema.Array(date) })
+    const read = defineToolContract({ name: "date.read", version: "1", effect: "capture", input: Schema.Struct({ id: Schema.String }), output: payload })
+    const use = defineToolContract({ name: "date.use", version: "1", effect: "capture", input: Schema.Struct({ date: Schema.NullOr(date) }), output: Schema.Boolean })
+    const wire = "2026-10-09T12:00:00.000Z"
+    const env = { ...environment, tools: { "date.read": { contract: read }, "date.use": { contract: use } }, granted: new Set(["date.read", "date.use"]), bindings: { fixed: { schema: payload, value: { date: wire, dates: [wire] }, label: new InformationLabel({ confidentiality: "private", integrity: "untrusted", provenance: [] }) } } }
+    const source = 'let r = date.read({id:"one"}); if r.state == "done" { assert r.result.date == r.result.date; if r.result.date != null { date.use({date:r.result.date}) }; for d in r.result.dates { date.use({date:d}) } }; date.use({date:fixed.date}); return true'
+    const review = yield* reviewPrototype(source, env)
+    for (let sample = 0; sample < 100; sample++) {
+      const inputs: Schema.Json[] = []
+      const result = yield* runReviewedPrototype(review, { observe: assertObservedDependencies(review), resolve: (name, input) => Effect.sync(() => { if (name === "date.read") return done({ date: sample % 2 === 0 ? wire : null, dates: sample % 3 === 0 ? [wire, wire] : [] }); inputs.push(input); return done(true) }) })
+      expect(result).toBe(true)
+      expect(inputs.every((input) => JSON.stringify(input) === JSON.stringify({ date: wire }))).toBe(true)
+    }
+    const malformed = yield* runReviewedPrototype(review, { resolve: () => Effect.succeed(done({ date: "bad date", dates: [] })) }).pipe(Effect.flip)
+    expect(malformed.reason).toBe("host-result")
+  }))
 })
 
 describe("generated type-safety evidence (not a proof)", () => {

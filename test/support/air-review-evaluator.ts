@@ -4,7 +4,7 @@ import { combine, InformationLabel } from "../../src/core/labels/Labels.ts"
 import type { Expression, Span, Statement } from "../../src/core/language/ast.ts"
 import { DurationSchema, SpanSchema } from "../../src/core/language/ast.ts"
 import { decoderIdentity, encodeConstructedInput, staticPath, type Review } from "./air-review.ts"
-import { acceptsLiteral, hasSameSchema, modelSchema, type SchemaModel } from "../../src/core/contract/SchemaModel.ts"
+import { acceptsLiteral, decodeModelValue, encodeModelValue, hasSameCodec, hasSameSchema, modelSchema, type SchemaModel } from "../../src/core/contract/SchemaModel.ts"
 import type { ToolFlow } from "../../src/core/contract/Flow.ts"
 import { HeldReference } from "../../src/core/contract/ToolHost.ts"
 
@@ -22,7 +22,7 @@ export interface PrototypeHost<E = never, R = never> {
   readonly observe?: (call: CallObservation) => void
   readonly resolve: (tool: string, input: Schema.Json, control: InformationLabel) => Effect.Effect<Schema.Json, E, R>
 }
-interface Box { readonly tracked: TrackedValue; readonly children: ReadonlyMap<string | number, Box>; readonly duration?: boolean; readonly influence?: InformationLabel; readonly constructed?: boolean; readonly selectionLabel?: InformationLabel }
+interface Box { readonly tracked: TrackedValue; readonly children: ReadonlyMap<string | number, Box>; readonly duration?: boolean; readonly influence?: InformationLabel; readonly constructed?: boolean; readonly selectionLabel?: InformationLabel; readonly opaque?: SchemaModel }
 type Scope = ReadonlyMap<string, Box>
 const literalLabel = new InformationLabel({ confidentiality: "public", integrity: "runtime", provenance: [] })
 const durationModel = modelSchema(DurationSchema, { identity: "language.Duration", side: "decoded" })
@@ -59,7 +59,7 @@ export const runReviewedPrototype = <E, R>(review: Review, host: PrototypeHost<E
     if (origin !== undefined) source = labeledValue(source.value, sourceLabel(origin))
     const value = source.value
     if (hasSameSchema(model, durationModel)) return { ...tracked(source), duration: true }
-    if (model.kind === "nominal") return model.base === undefined ? tracked(source) : boundary(source, model.base, span, origin)
+    if (model.kind === "nominal") return model.base === undefined ? { ...tracked(source), opaque: model } : boundary(source, model.base, span, origin)
     if (model.kind === "record") {
       if (value === null || typeof value !== "object" || Array.isArray(value)) stop("host-result", span)
       const children = new Map<string | number, Box>()
@@ -77,13 +77,58 @@ export const runReviewedPrototype = <E, R>(review: Review, host: PrototypeHost<E
       return { tracked: origin === undefined ? source : labeledValue(source.value, combine(source.label, ...[...children.values()].map(labelOf))), children, selectionLabel: source.label }
     }
     if (model.kind === "union") {
-      const matching = model.members.find((member) => acceptsLiteral(member, value))
+      const matching = model.members.find((member) => acceptsLiteral(member, value) || Result.isSuccess(decodeModelValue(member, value)))
       if (matching === undefined) stop("host-result", span)
       return boundary(source, matching, span, origin)
     }
     if (value === null && model.kind === "literal" && model.value === null) return tracked(source)
     if (value === null || typeof value === "object" || (typeof value === "number" && !Number.isFinite(value))) stop("host-result", span)
     return tracked(source)
+  }
+  const materialize = (model: SchemaModel, decoded: unknown, span: Span, encoded?: Schema.Json): Schema.Json => {
+    if (model.kind === "nominal") {
+      if (model.base !== undefined) return materialize(model.base, decoded, span, encoded)
+      if (encoded !== undefined && Result.isSuccess(decodeModelValue(model, encoded))) return labeledValue(encoded, literalLabel).value
+      const wire = encodeModelValue(model, decoded)
+      if (Result.isFailure(wire)) stop("host-result", span)
+      return wire.success
+    }
+    if (model.kind === "union") {
+      const selected = model.members.find((member) => Result.isSuccess(encodeModelValue(member, decoded)))
+      if (selected === undefined) stop("host-result", span)
+      return materialize(selected, decoded, span, encoded)
+    }
+    if (model.kind === "record") {
+      if (decoded === null || typeof decoded !== "object" || Array.isArray(decoded)) stop("host-result", span)
+      const record: Record<string, Schema.Json> = {}
+      for (const [name, field] of Object.entries(model.fields)) {
+        if (!Object.hasOwn(decoded, name)) { if (field.optional) continue; stop("host-result", span) }
+        const wire = encoded !== null && typeof encoded === "object" && !Array.isArray(encoded) && Object.hasOwn(encoded, name) ? Reflect.get(encoded, name) as Schema.Json : undefined
+        Object.defineProperty(record, name, { enumerable: true, value: materialize(field.type, Reflect.get(decoded, name), span, wire) })
+      }
+      return labeledValue(record, literalLabel).value
+    }
+    if (model.kind === "list") {
+      if (!Array.isArray(decoded) || decoded.length > review.environment.maxListItems) stop("value-limit", span)
+      return decoded.map((value, index) => materialize(model.item, value, span, Array.isArray(encoded) ? encoded[index] : undefined))
+    }
+    const json = Schema.decodeUnknownResult(Schema.Json)(decoded)
+    if (Result.isFailure(json)) stop("host-result", span)
+    const owned = labeledValue(json.success, literalLabel).value
+    if (!acceptsLiteral(model, owned)) stop("host-result", span)
+    return owned
+  }
+  const checkOpaqueInput = (value: Box, model: SchemaModel, span: Span): void => {
+    if (model.kind === "union") {
+      const selected = model.members.find((member) => value.opaque === undefined ? Result.isSuccess(decodeModelValue(member, value.tracked.value)) : hasSameCodec(value.opaque, member))
+      if (selected !== undefined) checkOpaqueInput(value, selected, span)
+      else stop("dynamic-type-error", span)
+      return
+    }
+    if (value.opaque !== undefined) { if (!hasSameCodec(value.opaque, model)) stop("dynamic-type-error", span); return }
+    if (model.kind === "nominal" && model.base !== undefined) return checkOpaqueInput(value, model.base, span)
+    if (model.kind === "record") for (const [field, expected] of Object.entries(model.fields)) { const child = value.children.get(field); if (child !== undefined) checkOpaqueInput(child, expected.type, span) }
+    if (model.kind === "list") for (const child of value.children.values()) checkOpaqueInput(child, model.item, span)
   }
   const boolean = (value: Box, span: Span): boolean => { if (typeof value.tracked.value !== "boolean") stop("dynamic-type-error", span); return value.tracked.value }
   const equal = (a: Schema.Json, b: Schema.Json): boolean => {
@@ -101,6 +146,11 @@ export const runReviewedPrototype = <E, R>(review: Review, host: PrototypeHost<E
     return result
   }
   const equalBoxes = (a: Box, b: Box, span: Span): boolean => {
+    if ((a.opaque === undefined && a.tracked.value === null) || (b.opaque === undefined && b.tracked.value === null)) return a.opaque === undefined && b.opaque === undefined && a.tracked.value === null && b.tracked.value === null
+    if (a.opaque !== undefined || b.opaque !== undefined) {
+      if (a.opaque === undefined || b.opaque === undefined || !hasSameCodec(a.opaque, b.opaque)) stop("dynamic-type-error", span)
+      return equal(a.tracked.value, b.tracked.value)
+    }
     if (a.duration === true || b.duration === true) return a.duration === true && b.duration === true && millis(a, span) === millis(b, span)
     const left = a.tracked.value, right = b.tracked.value
     if (left === null || right === null || typeof left !== "object" || typeof right !== "object") return Object.is(left, right)
@@ -211,6 +261,7 @@ export const runReviewedPrototype = <E, R>(review: Review, host: PrototypeHost<E
           callCounts.set(name, count)
           const input = argument.constructed ? encodeConstructedInput(argument.tracked.value, tool.contract.model.input) : argument.tracked.value
           if (Result.isFailure(Schema.decodeUnknownResult(tool.contract.input, { onExcessProperty: "error" })(input))) stop("dynamic-type-error", expression.span)
+          checkOpaqueInput(argument, tool.contract.model.input, expression.span)
           const requirements: ToolFlow["requires"] = tool.contract.flow.requires
           for (const [field, identities] of Object.entries(requirements)) {
             const input = argument.children.get(field)
@@ -237,10 +288,8 @@ export const runReviewedPrototype = <E, R>(review: Review, host: PrototypeHost<E
           if (received.state === "done") {
             const decoded = Schema.decodeUnknownResult(selected.tool.contract.outcome, { onExcessProperty: "error" })(received.result)
             if (Result.isFailure(decoded)) stop("host-result", expression.span)
-            const raw = Schema.decodeUnknownResult(Schema.Json)(decoded.success)
-            if (Result.isFailure(raw)) stop("host-result", expression.span)
-            const owned = labeledValue(raw.success, combine(label, pc.label, labelOf(argument)))
-            if (Result.isFailure(Schema.decodeUnknownResult(Schema.toType(selected.tool.contract.outcome))(owned.value))) stop("host-result", expression.span)
+            const raw = materialize(selected.tool.contract.model.output, decoded.success, expression.span, received.result)
+            const owned = labeledValue(raw, combine(label, pc.label, labelOf(argument)))
             let result = boundary(owned, selected.tool.contract.model.output, expression.span, { path: `${selected.name}@${expression.span.start}.result`, field: "$", flow: selected.tool.contract.flow, dependencies: combine(pc.label, labelOf(argument)) })
             const provides: ToolFlow["provides"] = selected.tool.contract.flow.provides
             for (const [field, identities] of Object.entries(provides)) {
@@ -331,11 +380,9 @@ export const runReviewedPrototype = <E, R>(review: Review, host: PrototypeHost<E
     for (const [name, binding] of Object.entries(review.environment.bindings ?? {})) {
       const decoded = Schema.decodeUnknownResult(binding.schema, { onExcessProperty: "error" })(binding.value)
       if (Result.isFailure(decoded)) stop("host-result", review.program.span)
-      const json = Schema.decodeUnknownResult(Schema.Json)(decoded.success)
-      if (Result.isFailure(json)) stop("host-result", review.program.span)
-      const owned = labeledValue(json.success, binding.label)
-      if (Result.isFailure(Schema.decodeUnknownResult(Schema.toType(binding.schema))(owned.value))) stop("host-result", review.program.span)
-      scope.set(name, boundary(owned, modelSchema(binding.schema, { identity: JSON.stringify(["binding", name]), side: "decoded" }), review.program.span, {
+      const model = modelSchema(binding.schema, { identity: JSON.stringify(["binding", name]), side: "decoded" })
+      const owned = labeledValue(materialize(model, decoded.success, review.program.span, binding.value), binding.label)
+      scope.set(name, boundary(owned, model, review.program.span, {
         path: `binding.${name}`, field: "$", flow: { sources: { "$": binding.label }, sinks: [], requires: {}, provides: {} }, dependencies: literalLabel
       }))
     }
