@@ -2,7 +2,8 @@ import { Effect, Result, Schema } from "effect"
 import type { ToolContract } from "../../src/core/contract/ToolContract.ts"
 import { decodeValue, labeledValue, type TrustedDecoder } from "../../src/core/contract/Decoder.ts"
 import { InformationLabel } from "../../src/core/labels/Labels.ts"
-import { modelSchema, type SchemaModel } from "../../src/core/contract/SchemaModel.ts"
+import { acceptsLiteral, modelSchema, type SchemaModel } from "../../src/core/contract/SchemaModel.ts"
+import type { ToolFlow } from "../../src/core/contract/Flow.ts"
 import { validateBindings } from "../../src/core/language/bindings.ts"
 import type { Expression, Program, Span, Statement } from "../../src/core/language/ast.ts"
 import { SpanSchema } from "../../src/core/language/ast.ts"
@@ -12,8 +13,6 @@ import { parse } from "../../src/core/language/parser.ts"
 export class ReviewError extends Schema.TaggedError<ReviewError>()("ReviewError", { detail: Schema.String, span: SpanSchema }) {}
 export interface PrototypeTool {
   readonly contract: ToolContract.Any
-  /** Provisional adapter for contract-owned metadata; not a policy authority. */
-  readonly requires?: Readonly<Record<string, string>>
 }
 export interface ReviewEnvironment {
   readonly tools: Readonly<Record<string, PrototypeTool>>
@@ -23,13 +22,16 @@ export interface ReviewEnvironment {
   readonly maxCalls: number
   readonly maxIterations: number
 }
-type Kind = "string" | "number" | "boolean" | "never"
+type Kind = "string" | "number" | "boolean" | "null" | "duration" | "never"
 export type Type =
   | { readonly kind: Kind }
-  | { readonly kind: "record"; readonly fields: ReadonlyMap<string, Fact> }
+  | { readonly kind: "record"; readonly fields: ReadonlyMap<string, Fact>; readonly optional?: ReadonlySet<string>; readonly rawFields?: ReadonlyMap<string, Fact>; readonly omitNull?: ReadonlySet<string> }
   | { readonly kind: "list"; readonly item: Fact; readonly bound: number }
   | { readonly kind: "union"; readonly cases: ReadonlyMap<string, Fact> }
   | { readonly kind: "schema"; readonly name: string }
+  | { readonly kind: "nullable"; readonly value: Fact }
+  | { readonly kind: "choices"; readonly members: readonly Fact[] }
+  | { readonly kind: "opaque"; readonly identity: string }
 export interface Fact {
   readonly type: Type
   readonly origins: readonly string[]
@@ -59,7 +61,7 @@ const fact = (type: Type, origins: readonly string[] = [], refinements: readonly
 const scalar = (kind: Kind) => fact({ kind })
 const record = (fields: ReadonlyMap<string, Fact>, origins: readonly string[] = []) => fact({ kind: "record", fields }, origins)
 const union = (cases: ReadonlyMap<string, Fact>, origins: readonly string[] = []) => fact({ kind: "union", cases }, origins)
-const option = (value: Fact) => union(new Map([["some", record(new Map([["value", value]]))], ["none", record(new Map())]]), value.origins)
+const nullable = (value: Fact): Fact => value.type.kind === "nullable" || value.type.kind === "null" ? value : fact({ kind: "nullable", value }, value.origins)
 export const staticPath = (expr: Expression): string | undefined => expr.kind === "IdentifierExpression" ? expr.name : expr.kind === "FieldExpression" ? (() => { const path = staticPath(expr.object); return path === undefined ? undefined : `${path}.${expr.field}` })() : undefined
 const add = (left: Counts, right: Counts): Counts => Object.fromEntries(unique(Object.keys(left), Object.keys(right)).map((key) => [key, (left[key] ?? 0) + (right[key] ?? 0)]))
 const maximum = (left: Counts, right: Counts): Counts => Object.fromEntries(unique(Object.keys(left), Object.keys(right)).map((key) => [key, Math.max(left[key] ?? 0, right[key] ?? 0)]))
@@ -83,45 +85,78 @@ const check = (program: Program, environment: ReviewEnvironment): Review => {
   // eventual closed representation; this prototype never invents an any type.
   const fromModel = (model: SchemaModel, origin: string, input = false): Fact => {
     const origins = origin === "" ? [] : [origin]
-    if (["string", "number", "boolean", "never"].includes(model.kind) && model.kind !== "literal" && model.kind !== "record" && model.kind !== "list" && model.kind !== "union" && model.kind !== "nominal") return fact({ kind: model.kind }, origins)
-    if (model.kind === "literal" && model.value !== null) return fact({ kind: primitiveKind(model.value) }, origins, [], model.value)
+    if (model.kind === "string" || model.kind === "number" || model.kind === "boolean" || model.kind === "never") return fact({ kind: model.kind }, origins)
+    if (model.kind === "literal") return fact({ kind: model.value === null ? "null" : primitiveKind(model.value) }, origins, [], model.value)
     if (model.kind === "nominal") {
-      if (model.base === undefined) fail(`opaque schema ${model.identity} not supported by prototype`)
+      if (model.base === undefined) return fact({ kind: "opaque", identity: model.identity }, origins, [model.identity])
       const base = fromModel(model.base, origin, input)
       return { ...base, refinements: unique(base.refinements, [model.identity]) }
     }
     if (model.kind === "record") {
       const fields = new Map<string, Fact>()
+      const optional = new Set<string>()
+      const rawFields = new Map<string, Fact>(), omitNull = new Set<string>()
       for (const [name, field] of Object.entries(model.fields)) {
-        if (input && field.optional) fail("optional input encoding pending")
-        const value = fromModel(field.type, `${origin}.${name}`, input)
-        fields.set(name, field.optional ? option(value) : value)
+        const value = fromModel(field.type, origin === "" ? "" : `${origin}.${name}`, input)
+        if (field.optional) optional.add(name)
+        rawFields.set(name, value)
+        if (field.optional && !acceptsLiteral(field.type, null)) omitNull.add(name)
+        fields.set(name, field.optional && !input ? nullable(value) : value)
       }
-      return fact({ kind: "record", fields }, origins)
+      return fact({ kind: "record", fields, optional, omitNull, ...(!input ? { rawFields } : {}) }, origins)
     }
     if (model.kind === "list") return fact({ kind: "list", item: fromModel(model.item, `${origin}[]`, input), bound: Math.min(model.maxLength ?? environment.maxListItems, environment.maxListItems) }, origins)
+    if (model.kind === "union") {
+      const members = model.members.map((member) => fromModel(member, origin, input))
+      const nonnull = members.filter((member) => member.type.kind !== "null")
+      if (nonnull.length !== members.length && nonnull.length > 0) return nullable(nonnull.length === 1 ? nonnull[0]! : fact({ kind: "choices", members: nonnull }, origins))
+      return members.length === 1 ? members[0]! : fact({ kind: "choices", members }, origins)
+    }
     return fail(`unsupported schema ${model.kind}`)
   }
   const compatible = (value: Fact, expected: Fact, span: Span) => {
     if (value.type.kind === "never") return
+    if (expected.refinements.some((proof) => !value.refinements.includes(proof))) fail("missing schema refinement", span)
+    if (value.type.kind === "choices") { for (const member of value.type.members) compatible(member, expected, span); return }
+    if (expected.type.kind === "choices") {
+      if (!expected.type.members.some((member) => { try { compatible(value, member, span); return true } catch (error) { if (error instanceof ReviewError) return false; throw error } })) fail("union type mismatch", span)
+      return
+    }
+    if (expected.type.kind === "nullable") { if (value.type.kind === "null") return; compatible(value.type.kind === "nullable" ? value.type.value : value, expected.type.value, span); return }
     if (value.type.kind !== expected.type.kind) fail(`expected ${expected.type.kind}, received ${value.type.kind}`, span)
     if (expected.constant !== undefined && value.constant !== expected.constant) fail("literal type mismatch", span)
     if (expected.refinements.some((proof) => !value.refinements.includes(proof))) fail("missing schema refinement", span)
+    if (expected.type.kind === "opaque" && value.type.kind === "opaque" && expected.type.identity !== value.type.identity) fail("opaque schema identity mismatch", span)
     if (expected.type.kind === "record" && value.type.kind === "record") {
-      if (expected.type.fields.size !== value.type.fields.size) fail("record fields must match exactly", span)
-      for (const [key, field] of expected.type.fields) { const actual = value.type.fields.get(key); if (actual === undefined) fail(`missing field ${key}`, span); compatible(actual, field, span) }
+      for (const key of value.type.fields.keys()) if (!expected.type.fields.has(key)) fail("record fields must match exactly", span)
+      for (const [key, field] of expected.type.fields) {
+        const actual = (value.type.rawFields ?? value.type.fields).get(key)
+        if (actual === undefined) { if (expected.type.optional?.has(key)) continue; fail(`missing field ${key}`, span) }
+        if (value.type.optional?.has(key) && !expected.type.optional?.has(key)) fail(`possibly omitted field ${key}`, span)
+        if (value.type.rawFields === undefined && expected.type.omitNull?.has(key)) {
+          if (actual.type.kind === "null") continue
+          compatible(actual.type.kind === "nullable" ? actual.type.value : actual, field, span)
+        } else compatible(actual, field, span)
+      }
     }
     if (expected.type.kind === "list" && value.type.kind === "list") compatible(value.type.item, expected.type.item, span)
   }
   const merge = (left: Fact, right: Fact, span: Span): Fact => {
     if (left.type.kind === "never") return right
     if (right.type.kind === "never") return left
-    if (left.type.kind !== right.type.kind) fail("list items must have one type", span)
+    if (left.type.kind === "null") return { ...nullable(right), origins: unique(left.origins, right.origins) }
+    if (right.type.kind === "null") return { ...nullable(left), origins: unique(left.origins, right.origins) }
+    if (left.type.kind === "nullable" || right.type.kind === "nullable") return nullable(merge(left.type.kind === "nullable" ? left.type.value : left, right.type.kind === "nullable" ? right.type.value : right, span))
+    if (left.type.kind !== right.type.kind) return fact({ kind: "choices", members: [...(left.type.kind === "choices" ? left.type.members : [left]), ...(right.type.kind === "choices" ? right.type.members : [right])] }, unique(left.origins, right.origins), left.refinements.filter((proof) => right.refinements.includes(proof)))
+    if (left.type.kind === "choices" && right.type.kind === "choices") return fact({ kind: "choices", members: [...left.type.members, ...right.type.members] }, unique(left.origins, right.origins), left.refinements.filter((proof) => right.refinements.includes(proof)))
     if (left.type.kind === "record" && right.type.kind === "record") {
-      if (left.type.fields.size !== right.type.fields.size) fail("list records must have exact fields", span)
+      const rightFields = right.type.fields
+      if (left.type.fields.size !== rightFields.size || [...left.type.fields.keys()].some((key) => !rightFields.has(key))) return fact({ kind: "choices", members: [left, right] }, unique(left.origins, right.origins))
       const fields = new Map<string, Fact>()
       for (const [key, value] of left.type.fields) { const other = right.type.fields.get(key); if (other === undefined) fail("list record field mismatch", span); fields.set(key, merge(value, other, span)) }
-      return record(fields, unique(left.origins, right.origins))
+      const rawFields = new Map<string, Fact>()
+      for (const [key, value] of left.type.rawFields ?? left.type.fields) rawFields.set(key, merge(value, (right.type.rawFields ?? rightFields).get(key)!, span))
+      return fact({ kind: "record", fields, optional: new Set(unique([...(left.type.optional ?? [])], [...(right.type.optional ?? [])])), ...((left.type.rawFields !== undefined || right.type.rawFields !== undefined) ? { rawFields } : {}) }, unique(left.origins, right.origins), left.refinements.filter((proof) => right.refinements.includes(proof)))
     }
     if (left.type.kind === "list" && right.type.kind === "list") return fact({ kind: "list", item: merge(left.type.item, right.type.item, span), bound: Math.max(left.type.bound, right.type.bound) }, unique(left.origins, right.origins))
     if (left.type.kind === "union" && right.type.kind === "union") {
@@ -132,11 +167,49 @@ const check = (program: Program, environment: ReviewEnvironment): Review => {
       }
       return union(cases, unique(left.origins, right.origins))
     }
+    if (left.constant !== undefined && right.constant !== undefined && !Object.is(left.constant, right.constant)) return fact({ kind: "choices", members: [left, right] }, unique(left.origins, right.origins), left.refinements.filter((proof) => right.refinements.includes(proof)))
     return fact(left.type, unique(left.origins, right.origins), left.refinements.filter((proof) => right.refinements.includes(proof)), left.constant === right.constant ? left.constant : undefined)
   }
+  const allKind = (value: Fact, kind: Kind): boolean => value.type.kind === "never" || value.type.kind === kind || (value.type.kind === "choices" && value.type.members.every((member) => allKind(member, kind)))
   const narrow = (test: Expression, scope: Scope, truth: boolean): Scope => {
+    if (test.kind === "UnaryExpression" && test.operator === "!") return narrow(test.operand, scope, !truth)
+    if (test.kind === "BinaryExpression" && ((test.operator === "&&" && truth) || (test.operator === "||" && !truth))) return narrow(test.right, narrow(test.left, scope, truth), truth)
     if (test.kind !== "BinaryExpression" || !["==", "!="].includes(test.operator)) return scope
     const selector = test.left, tag = test.right
+    const selectedPath = staticPath(selector)
+    if (selectedPath !== undefined && tag.kind === "LiteralExpression" && tag.value === null) {
+      const parts = selectedPath.split("."), root = scope.get(parts[0]!)
+      const equal = test.operator === "==" ? truth : !truth
+      const refine = (current: Fact, depth: number): Fact => {
+        if (depth === parts.length) return equal ? fact({ kind: "null" }, current.origins, [], null) : current.type.kind === "nullable" ? current.type.value : current
+        if (current.type.kind !== "record") return current
+        const child = current.type.fields.get(parts[depth]!)
+        if (child === undefined) return current
+        const fields = new Map(current.type.fields); fields.set(parts[depth]!, refine(child, depth + 1))
+        return { ...current, type: { kind: "record", fields } }
+      }
+      if (root === undefined) return scope
+      const next = new Map(scope); next.set(parts[0]!, refine(root, 1)); return next
+    }
+    if (selectedPath !== undefined && tag.kind === "LiteralExpression" && (typeof tag.value !== "object" || tag.value === null)) {
+      const parts = selectedPath.split("."), root = scope.get(parts[0]!)
+      const equal = test.operator === "==" ? truth : !truth
+      const refine = (current: Fact, depth: number): Fact => {
+        if (current.type.kind === "choices") {
+          const possible = current.type.members.map((member) => refine(member, depth)).filter((member) => member.type.kind !== "never")
+          return possible.length === 0 ? scalar("never") : possible.length === 1 ? possible[0]! : { ...current, type: { kind: "choices", members: possible } }
+        }
+        if (depth === parts.length) return current.constant === undefined || (Object.is(current.constant, tag.value) === equal) ? current : scalar("never")
+        if (current.type.kind !== "record") return current
+        const child = current.type.fields.get(parts[depth]!)
+        if (child === undefined) return current
+        const selected = refine(child, depth + 1)
+        if (selected.type.kind === "never") return scalar("never")
+        const fields = new Map(current.type.fields); fields.set(parts[depth]!, selected)
+        return { ...current, type: { ...current.type, fields } }
+      }
+      if (root !== undefined && root.type.kind !== "union") { const next = new Map(scope); next.set(parts[0]!, refine(root, 1)); return next }
+    }
     if (selector.kind !== "FieldExpression" || selector.field !== "state" || selector.object.kind !== "IdentifierExpression" || tag.kind !== "LiteralExpression" || typeof tag.value !== "string") return scope
     const current = scope.get(selector.object.name)
     if (current?.type.kind !== "union") return scope
@@ -156,7 +229,8 @@ const check = (program: Program, environment: ReviewEnvironment): Review => {
     const pure = (value: Fact) => ({ value, counts: {} })
     switch (expression.kind) {
       case "LiteralExpression":
-        if (typeof expression.value !== "string" && typeof expression.value !== "number" && typeof expression.value !== "boolean") fail("null/duration not in sound prototype", expression.span)
+        if (expression.value === null) return pure(fact({ kind: "null" }, [], [], null))
+        if (typeof expression.value === "object") return pure(fact({ kind: "duration" }, [], [], { kind: "Duration", value: expression.value.value, unit: expression.value.unit }))
         if (typeof expression.value === "number" && !Number.isFinite(expression.value)) fail("nonfinite literal", expression.span)
         return pure(fact({ kind: primitiveKind(expression.value) }, [], [], expression.value))
       case "IdentifierExpression": { const value = scope.get(expression.name); if (value === undefined) fail(`unbound ${expression.name}`, expression.span); return pure(value) }
@@ -173,38 +247,58 @@ const check = (program: Program, environment: ReviewEnvironment): Review => {
       }
       case "FieldExpression": {
         const object = expr(expression.object, scope, control)
-        if (object.value.type.kind === "union" && expression.field === "state") return { ...object, value: fact({ kind: "string" }, object.value.origins) }
-        if (object.value.type.kind !== "record") fail("field access requires a narrowed record", expression.span)
-        const value = object.value.type.fields.get(expression.field)
-        if (value === undefined) fail(`missing field ${expression.field}`, expression.span)
-        return { ...object, value }
+        const project = (value: Fact): Fact => {
+          if (value.type.kind === "never") return value
+          if (value.type.kind === "union" && expression.field === "state") return fact({ kind: "string" }, value.origins)
+          if (value.type.kind === "choices") return value.type.members.map(project).reduce((a, b) => merge(a, b, expression.span))
+          if (value.type.kind !== "record") fail("field access requires a narrowed record", expression.span)
+          const child = value.type.fields.get(expression.field)
+          if (child === undefined) fail(`missing field ${expression.field}`, expression.span)
+          return child
+        }
+        return { ...object, value: project(object.value) }
       }
       case "IndexExpression": {
         const object = expr(expression.object, scope, control), index = expr(expression.index, scope, control)
         if (object.value.type.kind !== "list" || index.value.type.kind !== "number") fail("safe index requires list and number", expression.span)
-        return { value: option(fact(object.value.type.item.type, unique(object.value.type.item.origins, index.value.origins), object.value.type.item.refinements)), counts: add(object.counts, index.counts) }
+        return { value: fact(object.value.type.item.type, unique(object.value.origins, object.value.type.item.origins, index.value.origins), object.value.type.item.refinements), counts: add(object.counts, index.counts) }
       }
       case "UnaryExpression": {
         const operand = expr(expression.operand, scope, control)
-        if (expression.operator !== "!" || operand.value.type.kind !== "boolean") fail("unsupported unary operation", expression.span)
-        return { ...operand, value: fact({ kind: "boolean" }, operand.value.origins) }
+        compatible(operand.value, scalar(expression.operator === "!" ? "boolean" : "number"), expression.span)
+        return { ...operand, value: fact({ kind: expression.operator === "!" ? "boolean" : "number" }, operand.value.origins) }
       }
       case "BinaryExpression": {
         const left = expr(expression.left, scope, control), right = expr(expression.right, ["&&", "||"].includes(expression.operator) ? narrow(expression.left, scope, expression.operator === "&&") : scope, unique(control, left.value.origins))
         const origins = unique(left.value.origins, right.value.origins), counts = add(left.counts, right.counts)
         if (["&&", "||"].includes(expression.operator)) { compatible(left.value, scalar("boolean"), expression.span); compatible(right.value, scalar("boolean"), expression.span); return { value: fact({ kind: "boolean" }, origins), counts } }
         if (["==", "!=", "<", ">", "<=", ">="].includes(expression.operator)) {
-          if (!["string", "number", "boolean"].includes(left.value.type.kind) || left.value.type.kind !== right.value.type.kind) fail("comparison shape mismatch", expression.span)
+          if (["==", "!="].includes(expression.operator)) return { value: fact({ kind: "boolean" }, origins), counts }
+          if (!(["string", "number", "duration"] as const).some((kind) => allKind(left.value, kind) && allKind(right.value, kind))) fail("comparison shape mismatch", expression.span)
           if (!["==", "!="].includes(expression.operator) && left.value.type.kind === "boolean") fail("ordered comparison requires string/number", expression.span)
           return { value: fact({ kind: "boolean" }, origins), counts }
         }
-        if (expression.operator === "+" && left.value.type.kind === "string" && right.value.type.kind === "string") return { value: fact({ kind: "string" }, origins, [], typeof left.value.constant === "string" && typeof right.value.constant === "string" ? left.value.constant + right.value.constant : undefined), counts }
-        // Numeric partiality awaits its total Result surface. Fail closed now.
-        fail("numeric arithmetic requires the pending total-number design", expression.span)
+        if (expression.operator === "+" && allKind(left.value, "string") && allKind(right.value, "string")) return { value: fact({ kind: "string" }, origins, [], typeof left.value.constant === "string" && typeof right.value.constant === "string" ? left.value.constant + right.value.constant : undefined), counts }
+        compatible(left.value, scalar("number"), expression.span); compatible(right.value, scalar("number"), expression.span)
+        if (typeof left.value.constant === "number" && typeof right.value.constant === "number") {
+          if (expression.operator === "/" && right.value.constant === 0) fail("certain arithmetic zero failure", expression.span)
+          const a = left.value.constant, b = right.value.constant
+          const constant = expression.operator === "+" ? a + b : expression.operator === "-" ? a - b : expression.operator === "*" ? a * b : a / b
+          if (!Number.isFinite(constant) || (Number.isInteger(constant) && !Number.isSafeInteger(constant))) fail("certain arithmetic overflow failure", expression.span)
+          return { value: fact({ kind: "number" }, origins, [], constant), counts }
+        }
+        return { value: fact({ kind: "number" }, origins), counts }
       }
       case "CallExpression": {
         const name = staticPath(expression.callee)
         if (name === undefined) fail("computed tool name", expression.span)
+        if (name === "at") {
+          if (expression.arguments.length !== 2) fail("at takes list and number", expression.span)
+          const list = expr(expression.arguments[0]!, scope, control), index = expr(expression.arguments[1]!, scope, control)
+          if (list.value.type.kind !== "list") fail("at requires list", expression.span)
+          compatible(index.value, scalar("number"), expression.span)
+          return { value: nullable({ ...list.value.type.item, origins: unique(list.value.origins, index.value.origins) }), counts: add(list.counts, index.counts) }
+        }
         if (name === "decode") {
           if (expression.arguments.length !== 2) fail("decode takes schema and value", expression.span)
           const handle = staticPath(expression.arguments[0]!)
@@ -212,7 +306,7 @@ const check = (program: Program, environment: ReviewEnvironment): Review => {
           const decoder = environment.decoders[handle.slice(7)]
           if (decoder === undefined) fail("unknown decoder", expression.span)
           const source = expr(expression.arguments[1]!, scope, control)
-          const carryOrigins = (value: Fact): Fact => ({ ...value, origins: source.value.origins, type: value.type.kind === "record" ? { ...value.type, fields: new Map([...value.type.fields].map(([key, field]) => [key, carryOrigins(field)])) } : value.type.kind === "list" ? { ...value.type, item: carryOrigins(value.type.item) } : value.type })
+          const carryOrigins = (value: Fact): Fact => ({ ...value, origins: source.value.origins, type: value.type.kind === "record" ? { ...value.type, fields: new Map([...value.type.fields].map(([key, field]) => [key, carryOrigins(field)])) } : value.type.kind === "list" ? { ...value.type, item: carryOrigins(value.type.item) } : value.type.kind === "nullable" ? { ...value.type, value: carryOrigins(value.type.value) } : value.type.kind === "choices" ? { ...value.type, members: value.type.members.map(carryOrigins) } : value.type })
           const decoded = carryOrigins(fromModel(modelSchema(decoder.schema, { identity: decoderIdentity(decoder), side: "decoded" }), ""))
           const folded = source.value.constant === undefined ? undefined : decodeValue(decoder, labeledValue(source.value.constant, new InformationLabel({ confidentiality: "public", integrity: "runtime", provenance: [] })))
           const value = { ...decoded, refinements: unique(decoded.refinements, [decoderIdentity(decoder)]), ...(folded !== undefined && Result.isSuccess(folded) ? { constant: folded.success.value } : {}) }
@@ -223,17 +317,24 @@ const check = (program: Program, environment: ReviewEnvironment): Review => {
         tools.add(name)
         if (expression.arguments.length !== 1) fail("tool call takes one record", expression.span)
         const argument = expr(expression.arguments[0]!, scope, control)
-        const expected = fromModel(modelSchema(tool.contract.input, { identity: `${name}@${tool.contract.version}/input`, side: "encoded" }), "", true)
+        const expected = fromModel(tool.contract.model.input, "", true)
         if (argument.value.constant !== undefined) {
-          if (Result.isFailure(Schema.decodeUnknownResult(tool.contract.input, { onExcessProperty: "error" })(argument.value.constant))) fail("static input violates schema", expression.span)
+          const materialized = encodeConstructedInput(argument.value.constant, tool.contract.model.input)
+          if (Result.isFailure(Schema.decodeUnknownResult(tool.contract.input, { onExcessProperty: "error" })(materialized))) fail("static input violates schema", expression.span)
         } else compatible(argument.value, expected, expression.span)
-        for (const [field, required] of Object.entries(tool.requires ?? {})) {
-          if (argument.value.type.kind !== "record" || !argument.value.type.fields.get(field)?.refinements.includes(required)) fail(`missing required refinement on ${field}`, expression.span)
+        const requirements: ToolFlow["requires"] = tool.contract.flow.requires
+        if (argument.value.type.kind !== "record") fail("tool input requires record", expression.span)
+        const inputFields = argument.value.type.fields
+        for (const [field, required] of Object.entries(requirements)) {
+          if (required.some((identity) => !inputFields.get(field)?.refinements.includes(decoderIdentity(identity)))) fail(`missing required refinement on ${field}`, expression.span)
         }
         calls.push({ tool: name, span: expression.span, arguments: argument.value, control, maximumOccurrences: occurrences })
-        const result = fromModel(modelSchema(tool.contract.outcome, { identity: `${name}@${tool.contract.version}/output`, side: "decoded" }), `${name}@${expression.span.start}.result`)
-        const state = (tag: string, fields: ReadonlyArray<readonly [string, Fact]>) => record(new Map([["state", fact({ kind: "string" }, [`${name}@${expression.span.start}.state`], [], tag)], ...fields]), [`${name}@${expression.span.start}.state`])
-        return { value: union(new Map([["done", state("done", [["id", scalar("string")], ["result", result]])], ["staged", state("staged", [["id", scalar("string")]])], ["refused", state("refused", [["refusal", record(new Map([["code", scalar("string")], ["message", scalar("string")]]))]])]]), [`${name}@${expression.span.start}.state`]), counts: add(argument.counts, { [name]: 1 }) }
+        const dependencies = unique(control, argument.value.origins)
+        const influenced = (value: Fact): Fact => ({ ...value, origins: unique(value.origins, dependencies), type: value.type.kind === "record" ? { ...value.type, fields: new Map([...value.type.fields].map(([key, child]) => [key, influenced(child)])) } : value.type.kind === "list" ? { ...value.type, item: influenced(value.type.item) } : value.type.kind === "nullable" ? { ...value.type, value: influenced(value.type.value) } : value.type.kind === "choices" ? { ...value.type, members: value.type.members.map(influenced) } : value.type })
+        const result = influenced(fromModel(tool.contract.model.output, `${name}@${expression.span.start}.result`))
+        const receiptOrigins = unique([`${name}@${expression.span.start}.state`], dependencies)
+        const state = (tag: string, fields: ReadonlyArray<readonly [string, Fact]>) => influenced(record(new Map([["state", fact({ kind: "string" }, receiptOrigins, [], tag)], ...fields]), receiptOrigins))
+        return { value: union(new Map([["done", state("done", [["id", fact({ kind: "string" }, receiptOrigins)], ["result", result]])], ["staged", state("staged", [["id", fact({ kind: "string" }, receiptOrigins)]])], ["refused", state("refused", [["refusal", record(new Map([["code", fact({ kind: "string" }, receiptOrigins)], ["message", fact({ kind: "string" }, receiptOrigins)]]), receiptOrigins)]])]]), receiptOrigins), counts: add(argument.counts, { [name]: 1 }) }
       }
     }
   }
@@ -244,7 +345,13 @@ const check = (program: Program, environment: ReviewEnvironment): Review => {
         case "LetStatement": { const result = expr(statement.value, scope, pc); scope.set(statement.name, result.value); counts = add(counts, result.counts); break }
         case "ExpressionStatement": { const result = expr(statement.expression, scope, pc); counts = add(counts, result.counts); pc = unique(pc, result.value.origins); break }
         case "ReturnStatement": if (statement.value !== undefined) { const result = expr(statement.value, scope, pc); counts = add(counts, result.counts) } break
-        case "AssertStatement": fail("assert is not in sound prototype termination set", statement.span)
+        case "AssertStatement": {
+          const condition = expr(statement.test, scope, pc); compatible(condition.value, scalar("boolean"), statement.span)
+          const message = statement.message === undefined ? { counts: {}, value: scalar("string") } : expr(statement.message, scope, unique(pc, condition.value.origins))
+          compatible(message.value, scalar("string"), statement.span)
+          counts = add(counts, add(condition.counts, message.counts)); pc = unique(pc, condition.value.origins)
+          break
+        }
         case "IfStatement": {
           const test = expr(statement.test, scope, pc); compatible(test.value, scalar("boolean"), statement.test.span)
           const branchPc = unique(pc, test.value.origins)
@@ -256,7 +363,18 @@ const check = (program: Program, environment: ReviewEnvironment): Review => {
           break
         }
         case "ForStatement": {
-          if (statement.iteration !== "list") fail("range requires pending total-number design", statement.span)
+          if (statement.iteration === "range") {
+            const from = expr(statement.from, scope, pc), to = expr(statement.to, scope, pc)
+            compatible(from.value, scalar("number"), statement.span); compatible(to.value, scalar("number"), statement.span)
+            for (const endpoint of [from.value.constant, to.value.constant]) if (endpoint !== undefined && (typeof endpoint !== "number" || !Number.isSafeInteger(endpoint))) fail("certain invalid range bound", statement.span)
+            const bound = typeof from.value.constant === "number" && typeof to.value.constant === "number" ? Math.max(0, to.value.constant - from.value.constant) : environment.maxIterations
+            const loopPc = unique(pc, from.value.origins, to.value.origins), inner = new Map(scope)
+            inner.set(statement.variable, fact({ kind: "number" }, loopPc))
+            const previousOccurrences = occurrences; occurrences *= bound
+            const child = statements(statement.body, inner, loopPc); occurrences = previousOccurrences
+            counts = add(counts, add(add(from.counts, to.counts), scale(child.counts, bound))); iterations += bound * (1 + child.iterations); pc = loopPc
+            break
+          }
           const source = expr(statement.source, scope, pc)
           if (source.value.type.kind !== "list") fail("for source must be finite list", statement.span)
           const inner = new Map(scope); inner.set(statement.variable, source.value.type.item)
@@ -278,4 +396,22 @@ const check = (program: Program, environment: ReviewEnvironment): Review => {
 }
 
 export const decoderIdentity = (decoder: { readonly name: string; readonly version: string }): string => JSON.stringify([decoder.name, decoder.version])
+/** Schema-directed encoding for newly constructed records; decoded aliases are unchanged. */
+export const encodeConstructedInput = (value: Schema.Json, model: SchemaModel): Schema.Json => {
+  if (model.kind === "nominal" && model.base !== undefined) return encodeConstructedInput(value, model.base)
+  if (model.kind === "union") {
+    for (const member of model.members) { const candidate = encodeConstructedInput(value, member); if (acceptsLiteral(member, candidate)) return candidate }
+    return value
+  }
+  if (model.kind === "record" && value !== null && typeof value === "object" && !Array.isArray(value)) {
+    return Object.fromEntries(Object.entries(value).flatMap(([name, child]) => {
+      const field = model.fields[name]
+      if (field === undefined) return [[name, child]]
+      if (child === null && field.optional && !acceptsLiteral(field.type, null)) return []
+      return [[name, encodeConstructedInput(child, field.type)]]
+    }))
+  }
+  if (model.kind === "list" && Array.isArray(value)) return value.map((item) => encodeConstructedInput(item, model.item))
+  return value
+}
 const primitiveKind = (value: string | number | boolean): Kind => typeof value === "string" ? "string" : typeof value === "number" ? "number" : "boolean"

@@ -1,56 +1,44 @@
-# Current-syntax checking experiment
+# Current-language checking experiment
 
-This test-only prototype reuses the current `.air` parser and AST. No production
-runner imports it. `air-review.ts` checks lexical bindings, tool inputs, closed
-receipt handling, trusted decoder refinements, call ceilings, and field/control
-origins. `air-review-evaluator.ts` interprets accepted trees with dynamic checks
-permanently enabled. Schema shapes and exact-value proofs come from the contract
-lane's `SchemaModel` and `Decoder`, rather than guest annotations.
+This test-only prototype reuses the production parser and AST. No production
+runner imports it. Contract-owned SchemaModel shapes and Decoder proofs drive
+checking; the evaluator retains dynamic checks permanently.
 
-The intended claim is preservation of modeled value shapes and required decoder
-proofs for accepted programs in this subset, provided registered schemas/decoders
-are trusted, immutable, synchronous and total, and every tool result is decoded
-at the boundary. An accepted program should not hit `dynamic-type-error` or
-`refinement`; those outcomes are checker bugs, not ordinary refusals. This is an
-empirical hypothesis, not a mechanized proof or a claim about the production
-runner, arbitrary schemas, all hosts, resource admission, or information-flow
-policy enforcement. The seeded generator exercises 10,000 accepted programs
-with randomized schema-conforming done/staged/refused results; 1,000 mutated
-programs must fail review. Keep every discovered counterexample as a regression.
+The intended property is preservation of modeled shapes and required exact-value
+decoder proofs for accepted, unchanged programs, assuming immutable synchronous
+total trusted schemas and decoding every host result at the boundary. Reaching
+dynamic-type-error or refinement is a checker regression. The tests are empirical
+evidence, not a mechanized proof, a production guarantee, or an IFC policy proof.
+The corpus includes 10,000 accepted programs with randomized conforming receipts,
+1,000 rejected mutations, and 1,000 independent expression/value/call-count oracles.
 
-Supported syntax is immutable `let`, boolean `if`/`else`, finite-list `for`,
-`return`, static `tool.name({record})` calls, safe indexing, scalar comparisons,
-string concatenation and boolean operators. `decode(schema.name, value)` is the
-only experiment-specific call, interpreted through the trusted catalog.
-`receipt.result` is accessible only after narrowing `state` to `done`;
-`decoded.value` only in `ok`; indexing and optional output fields return
-`some`/`none`. Records have exact types, so missing and extra input fields fail.
-No guest null, casts, mutation, recursive functions, schema declarations,
-proof constructors or inferred `any` are accepted.
+All existing statement forms are modeled: immutable bindings, conditionals,
+list and range loops, assertions, expression statements and returns. Expressions
+include arithmetic, durations, typed nullability, comparisons, boolean operations,
+records, lists, projections and indexing. Arithmetic, indexing, ranges and asserts
+may stop with their fixed production reasons. Statically certain arithmetic and
+range failures can be rejected before running. Test-only decode(schema.name,value)
+uses the trusted catalog; at(list,index) offers a nullable alternative to direct
+indexing. Receipt.result requires done narrowing; decoder.value requires ok.
 
-The prototype deliberately rejects generic schema unions, opaque schemas,
-optional encoded input fields, range loops, assertions, durations and numeric
-arithmetic. Checked schema nodes retain nominal requirements; unsupported
-dynamic nominal transport is rejected rather than structurally guessed.
-Finite-list lengths are guarded by the explicit host maximum and may terminate
-with `value-limit`. Numeric division and overflow need a total Result surface
-before arithmetic can enter this subset. This rejects some useful programs;
-it does not silently widen their types.
+An unchanged decoded record preserves omitted optional fields and exact-value
+proofs; reading an omitted field yields null. In a constructed input record, null
+encodes as omission only when the contract field is optional and non-nullable.
+Optional nullable fields send null. Literal unions retain their alternatives;
+opaque schemas permit whole-value transport without invented field operations.
 
-Runtime stops are closed: `host-result` for failed/malformed/non-JSON host
-responses (including invalid codec transforms); `budget` for consumed iteration,
-call or evaluator-work ceilings; `value-limit` for oversized boundary lists;
-`out-of-plan` for an unknown reviewed call; `dynamic-type-error` and `refinement`
-are retained defensive checks whose occurrence on an accepted unchanged tree is
-a regression. Grant refusal and staging are ordinary receipt values. Real host
-deadline, abort and uncertain outcomes still belong to the production kernel;
-this fixture host does not implement scheduling, admission or approvals.
+Call facts cover all branches and bound per-tool and per-site occurrences.
+Capture fields and receipt states retain argument and control dependencies
+transitively. These origins conservatively overlap data/control roles; they do
+not yet provide the final runtime per-field author-policy bridge.
 
-`Review.expressionFacts` and `calls` form the provisional bridge to the review
-seat. Source offsets identify call sites; origins retain field and control
-dependencies. Decoder constant folding uses actual `decodeValue`; decoder
-success retains its input origins. Joins intersect proofs recursively. The
-bridge uses Maps for the experiment, not a persisted Plan contract. Plan
-digests, exact-byte batch approval, physical-resource resolution, per-field
-policy checks and runtime call-envelope enforcement remain the review/kernel
-lanes' responsibilities.
+This remains short of production cutover: typed host bindings, flow.provides
+attestation and exact nominal schema transport are being integrated. Review,
+tracked execution and the existing runner must agree on the entire language
+before replacement. Map-based facts are an experiment, not a persisted Plan.
+
+Runtime stops are closed: host-result, budget, value-limit, out-of-plan,
+arithmetic_failure, index_out_of_range, range_bound, assert_failed, and the two
+defensive regression reasons dynamic-type-error/refinement. Malformed or defective
+hosts cannot expose their error text. Real admission, approval, scheduling,
+deadlines and uncertain outcomes remain kernel responsibilities.

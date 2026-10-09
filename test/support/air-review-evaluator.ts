@@ -1,17 +1,19 @@
-import { Effect, Result, Schema, SchemaAST } from "effect"
+import { Effect, Result, Schema } from "effect"
 import { decodeValue, deriveValue, hasRefinement, labeledValue, projectValue, type TrackedValue } from "../../src/core/contract/Decoder.ts"
 import { combine, InformationLabel } from "../../src/core/labels/Labels.ts"
 import type { Expression, Span, Statement } from "../../src/core/language/ast.ts"
-import { SpanSchema } from "../../src/core/language/ast.ts"
-import { decoderIdentity, staticPath, type Review } from "./air-review.ts"
+import { DurationSchema, SpanSchema } from "../../src/core/language/ast.ts"
+import { decoderIdentity, encodeConstructedInput, staticPath, type Review } from "./air-review.ts"
+import { acceptsLiteral, modelSchema, type SchemaModel } from "../../src/core/contract/SchemaModel.ts"
+import type { ToolFlow } from "../../src/core/contract/Flow.ts"
 
 export class PrototypeStop extends Schema.TaggedError<PrototypeStop>()("PrototypeStop", {
-  reason: Schema.Literals(["dynamic-type-error", "host-result", "budget", "out-of-plan", "refinement", "value-limit"]), span: SpanSchema
+  reason: Schema.Literals(["dynamic-type-error", "host-result", "budget", "out-of-plan", "refinement", "value-limit", "arithmetic_failure", "index_out_of_range", "range_bound", "assert_failed"]), span: SpanSchema
 }) {}
 export interface PrototypeHost<E = never, R = never> {
   readonly resolve: (tool: string, input: Schema.Json, control: InformationLabel) => Effect.Effect<Schema.Json, E, R>
 }
-interface Box { readonly tracked: TrackedValue; readonly children: ReadonlyMap<string | number, Box> }
+interface Box { readonly tracked: TrackedValue; readonly children: ReadonlyMap<string | number, Box>; readonly duration?: boolean; readonly influence?: InformationLabel; readonly constructed?: boolean }
 type Scope = ReadonlyMap<string, Box>
 const literalLabel = new InformationLabel({ confidentiality: "public", integrity: "runtime", provenance: [] })
 const empty = () => labeledValue(false, literalLabel)
@@ -22,41 +24,66 @@ export const runReviewedPrototype = <E, R>(review: Review, host: PrototypeHost<E
   const callCounts = new Map<string, number>()
   let iterations = 0, fuel = 20_000
   const effect = <A>(body: () => A, span: Span): Effect.Effect<A, PrototypeStop> => Effect.try({ try: body, catch: (error) => error instanceof PrototypeStop ? error : new PrototypeStop({ reason: "dynamic-type-error", span }) })
-  const primitive = (value: Schema.Json, parents: readonly Box[] = []): Box => ({ tracked: parents.length === 0 ? labeledValue(value, literalLabel) : deriveValue(value, parents[0]!.tracked, ...parents.slice(1).map((parent) => parent.tracked)), children: new Map() })
+  const labelOf = (box: Box): InformationLabel => combine(box.tracked.label, box.influence ?? literalLabel)
+  // Selection changes influence, not the selected JSON or its exact-value proof.
+  const influenced = (box: Box, ...parents: readonly Box[]): Box => {
+    const influence = combine(labelOf(box), ...parents.map(labelOf))
+    return { ...box, influence, children: new Map([...box.children].map(([key, child]) => [key, influenced(child, ...parents)])) }
+  }
+  const primitive = (value: Schema.Json, parents: readonly Box[] = []): Box => ({ tracked: parents.length === 0 ? labeledValue(value, literalLabel) : deriveValue(value, parents[0]!.tracked, ...parents.slice(1).map((parent) => parent.tracked), ...parents.map((parent) => labeledValue(false, labelOf(parent)))), children: new Map() })
   const record = (children: ReadonlyMap<string | number, Box>): Box => {
     const raw: Record<string, Schema.Json> = {}
     for (const [name, child] of children) Object.defineProperty(raw, name, { value: child.tracked.value, enumerable: true })
-    return { ...primitive(raw, [...children.values()]), children }
+    return { ...primitive(raw, [...children.values()]), children, constructed: true }
   }
   const list = (items: readonly Box[]): Box => ({ ...primitive(items.map((item) => item.tracked.value), items), children: new Map(items.map((item, index) => [index, item])) })
   const variant = (state: string, fields: ReadonlyArray<readonly [string, Box]> = [], parents: readonly Box[] = []): Box => record(new Map([["state", primitive(state, parents)], ...fields]))
   const tracked = (value: TrackedValue): Box => ({ tracked: value, children: new Map() })
-  const boundary = (source: TrackedValue, ast: SchemaAST.AST, span: Span): Box => {
+  const boundary = (source: TrackedValue, model: SchemaModel, span: Span): Box => {
     const value = source.value
-    if (SchemaAST.isObjects(ast)) {
+    if (model.kind === "nominal") return model.base === undefined ? tracked(source) : boundary(source, model.base, span)
+    if (model.kind === "record") {
       if (value === null || typeof value !== "object" || Array.isArray(value)) stop("host-result", span)
       const children = new Map<string | number, Box>()
-      for (const property of ast.propertySignatures) {
-        if (typeof property.name !== "string") stop("host-result", span)
-        const present = Object.hasOwn(value, property.name)
-        if (!present && !SchemaAST.isOptional(property.type)) stop("host-result", span)
-        if (SchemaAST.isOptional(property.type)) children.set(property.name, present ? variant("some", [["value", boundary(projectValue(source, property.name), property.type, span)]], [tracked(source)]) : variant("none", [], [tracked(source)]))
-        else children.set(property.name, boundary(projectValue(source, property.name), property.type, span))
+      for (const [name, field] of Object.entries(model.fields)) {
+        const present = Object.hasOwn(value, name)
+        if (!present && !field.optional) stop("host-result", span)
+        children.set(name, present ? boundary(projectValue(source, name), field.type, span) : primitive(null, [tracked(source)]))
       }
       return { tracked: source, children }
     }
-    if (SchemaAST.isArrays(ast)) {
+    if (model.kind === "list") {
       if (!Array.isArray(value) || value.length > review.environment.maxListItems) stop("value-limit", span)
-      return { tracked: source, children: new Map(value.map((_, index) => [index, boundary(projectValue(source, index), ast.rest[0]!, span)])) }
+      return { tracked: source, children: new Map(value.map((_, index) => [index, boundary(projectValue(source, index), model.item, span)])) }
     }
+    if (model.kind === "union") {
+      const matching = model.members.find((member) => acceptsLiteral(member, value))
+      if (matching === undefined) stop("host-result", span)
+      return boundary(source, matching, span)
+    }
+    if (value === null && model.kind === "literal" && model.value === null) return tracked(source)
     if (value === null || typeof value === "object" || (typeof value === "number" && !Number.isFinite(value))) stop("host-result", span)
     return tracked(source)
   }
   const boolean = (value: Box, span: Span): boolean => { if (typeof value.tracked.value !== "boolean") stop("dynamic-type-error", span); return value.tracked.value }
+  const equal = (a: Schema.Json, b: Schema.Json): boolean => {
+    if (typeof a !== "object" || a === null || typeof b !== "object" || b === null) return Object.is(a, b)
+    if (Array.isArray(a) && Array.isArray(b)) return a.length === b.length && a.every((value, index) => equal(value, b[index]!))
+    if (Array.isArray(a) || Array.isArray(b)) return false
+    const keys = Object.keys(a)
+    return keys.length === Object.keys(b).length && keys.every((key) => Object.hasOwn(b, key) && equal(Reflect.get(a, key), Reflect.get(b, key)))
+  }
+  const millis = (box: Box, span: Span) => {
+    const value = Schema.decodeUnknownSync(DurationSchema)(box.tracked.value)
+    const factors = { ms: 1, s: 1000, m: 60_000, h: 3_600_000, d: 86_400_000 }
+    const result = value.value * factors[value.unit]
+    if (!Number.isFinite(result) || (Number.isInteger(result) && !Number.isSafeInteger(result))) stop("arithmetic_failure", span)
+    return result
+  }
   const evaluate = (expression: Expression, scope: Scope, pc: TrackedValue): Effect.Effect<Box, PrototypeStop, R> => Effect.gen(function* () {
     if (--fuel < 0) return yield* Effect.fail(new PrototypeStop({ reason: "budget", span: expression.span }))
     switch (expression.kind) {
-      case "LiteralExpression": return yield* effect(() => { if (typeof expression.value !== "string" && typeof expression.value !== "number" && typeof expression.value !== "boolean") stop("dynamic-type-error", expression.span); return primitive(expression.value) }, expression.span)
+      case "LiteralExpression": return yield* effect(() => { if (typeof expression.value === "object" && expression.value !== null) return { ...primitive({ kind: "Duration", value: expression.value.value, unit: expression.value.unit }), duration: true }; return primitive(expression.value) }, expression.span)
       case "IdentifierExpression": return yield* effect(() => { const value = scope.get(expression.name); if (value === undefined) stop("dynamic-type-error", expression.span); return value }, expression.span)
       case "RecordExpression": {
         const children = new Map<string | number, Box>()
@@ -73,40 +100,72 @@ export const runReviewedPrototype = <E, R>(review: Review, host: PrototypeHost<E
         return yield* effect(() => {
           if (!Array.isArray(object.tracked.value) || typeof index.tracked.value !== "number") stop("dynamic-type-error", expression.span)
           const selected = Number.isSafeInteger(index.tracked.value) ? object.children.get(index.tracked.value) : undefined
-          return selected === undefined ? variant("none", [], [object, index]) : variant("some", [["value", selected]], [object, index])
+          if (selected === undefined) stop("index_out_of_range", expression.span)
+          return influenced(selected, object, index)
         }, expression.span)
       }
-      case "UnaryExpression": { const operand = yield* evaluate(expression.operand, scope, pc); return yield* effect(() => primitive(!boolean(operand, expression.span), [operand]), expression.span) }
+      case "UnaryExpression": {
+        const operand = yield* evaluate(expression.operand, scope, pc)
+        return yield* effect(() => {
+          if (expression.operator === "!") return primitive(!boolean(operand, expression.span), [operand])
+          if (typeof operand.tracked.value !== "number") stop("dynamic-type-error", expression.span)
+          const value = -operand.tracked.value
+          if (!Number.isFinite(value) || (Number.isInteger(value) && !Number.isSafeInteger(value))) stop("arithmetic_failure", expression.span)
+          return primitive(value, [operand])
+        }, expression.span)
+      }
       case "BinaryExpression": {
         const left = yield* evaluate(expression.left, scope, pc)
         if (expression.operator === "&&" && !boolean(left, expression.span)) return left
         if (expression.operator === "||" && boolean(left, expression.span)) return left
-        const right = yield* evaluate(expression.right, scope, deriveValue(false, pc, left.tracked))
+        const right = yield* evaluate(expression.right, scope, labeledValue(false, combine(pc.label, labelOf(left))))
         return yield* effect(() => {
           const a = left.tracked.value, b = right.tracked.value
+          if (left.duration === true && right.duration === true) {
+            const x = millis(left, expression.span), y = millis(right, expression.span)
+            const result = expression.operator === "==" ? x === y : expression.operator === "!=" ? x !== y : expression.operator === "<" ? x < y : expression.operator === "<=" ? x <= y : expression.operator === ">" ? x > y : expression.operator === ">=" ? x >= y : undefined
+            if (result === undefined) stop("dynamic-type-error", expression.span)
+            return primitive(result, [left, right])
+          }
+          if (expression.operator === "==" || expression.operator === "!=") {
+            const same = equal(a, b)
+            return primitive(expression.operator === "==" ? same : !same, [left, right])
+          }
           if (typeof a !== typeof b || a === null || typeof a === "object" || b === null || typeof b === "object") stop("dynamic-type-error", expression.span)
           switch (expression.operator) {
             case "&&": case "||": return primitive(boolean(right, expression.span), [left, right])
-            case "==": return primitive(a === b, [left, right])
-            case "!=": return primitive(a !== b, [left, right])
             case "<": return primitive(a < b, [left, right])
             case "<=": return primitive(a <= b, [left, right])
             case ">": return primitive(a > b, [left, right])
             case ">=": return primitive(a >= b, [left, right])
-            case "+": if (typeof a === "string" && typeof b === "string") return primitive(a + b, [left, right]); return stop("dynamic-type-error", expression.span)
+            case "+": if (typeof a === "string" && typeof b === "string") return primitive(a + b, [left, right]); break
+            case "-": case "*": case "/": break
             default: return stop("dynamic-type-error", expression.span)
           }
+          if (typeof a !== "number" || typeof b !== "number") stop("dynamic-type-error", expression.span)
+          if (expression.operator === "/" && b === 0) stop("arithmetic_failure", expression.span)
+          const value = expression.operator === "+" ? a + b : expression.operator === "-" ? a - b : expression.operator === "*" ? a * b : a / b
+          if (!Number.isFinite(value) || (Number.isInteger(value) && !Number.isSafeInteger(value))) stop("arithmetic_failure", expression.span)
+          return primitive(value, [left, right])
         }, expression.span)
       }
       case "CallExpression": {
         const name = staticPath(expression.callee)
+        if (name === "at") {
+          const object = yield* evaluate(expression.arguments[0]!, scope, pc), index = yield* evaluate(expression.arguments[1]!, scope, pc)
+          return yield* effect(() => {
+            if (!Array.isArray(object.tracked.value) || typeof index.tracked.value !== "number") stop("dynamic-type-error", expression.span)
+            const selected = Number.isSafeInteger(index.tracked.value) ? object.children.get(index.tracked.value) : undefined
+            return selected === undefined ? primitive(null, [object, index]) : influenced(selected, object, index)
+          }, expression.span)
+        }
         if (name === "decode") {
           const handle = staticPath(expression.arguments[0]!), decoder = handle === undefined ? undefined : review.environment.decoders[handle.slice(7)]
           const source = yield* evaluate(expression.arguments[1]!, scope, pc)
           return yield* effect(() => {
             if (decoder === undefined) stop("out-of-plan", expression.span)
             const result = decodeValue(decoder, source.tracked)
-            return Result.isFailure(result) ? variant("err", [["error", primitive(result.failure.reason, [source])]], [source]) : variant("ok", [["value", boundary(result.success, Schema.toType(decoder.schema).ast, expression.span)]], [source])
+            return Result.isFailure(result) ? variant("err", [["error", primitive(result.failure.reason, [source])]], [source]) : variant("ok", [["value", influenced(boundary(result.success, modelSchema(decoder.schema, { identity: decoderIdentity(decoder), side: "decoded" }), expression.span), source)]], [source])
           }, expression.span)
         }
         const argument = yield* evaluate(expression.arguments[0]!, scope, pc)
@@ -117,27 +176,32 @@ export const runReviewedPrototype = <E, R>(review: Review, host: PrototypeHost<E
           const count = (callCounts.get(name) ?? 0) + 1
           if (count > (review.maximumCalls[name] ?? 0)) stop("budget", expression.span)
           callCounts.set(name, count)
-          if (Result.isFailure(Schema.decodeUnknownResult(tool.contract.input, { onExcessProperty: "error" })(argument.tracked.value))) stop("dynamic-type-error", expression.span)
-          for (const [field, identity] of Object.entries(tool.requires ?? {})) {
-            const decoder = Object.values(review.environment.decoders).find((decoder) => decoderIdentity(decoder) === identity), input = argument.children.get(field)
-            if (decoder === undefined || input === undefined || !hasRefinement(input.tracked, decoder)) stop("refinement", expression.span)
+          const input = argument.constructed ? encodeConstructedInput(argument.tracked.value, tool.contract.model.input) : argument.tracked.value
+          if (Result.isFailure(Schema.decodeUnknownResult(tool.contract.input, { onExcessProperty: "error" })(input))) stop("dynamic-type-error", expression.span)
+          const requirements: ToolFlow["requires"] = tool.contract.flow.requires
+          for (const [field, identities] of Object.entries(requirements)) {
+            const input = argument.children.get(field)
+            for (const identity of identities) {
+              const decoder = review.environment.decoders[identity.name]
+              if (decoder === undefined || decoder.version !== identity.version || input === undefined || !hasRefinement(input.tracked, decoder)) stop("refinement", expression.span)
+            }
           }
-          return { name, tool }
+          return { name, tool, input }
         }, expression.span)
-        const response = yield* host.resolve(selected.name, argument.tracked.value, combine(pc.label, argument.tracked.label)).pipe(Effect.mapError(() => new PrototypeStop({ reason: "host-result", span: expression.span })))
+        const response = yield* host.resolve(selected.name, selected.input, combine(pc.label, labelOf(argument))).pipe(Effect.catchCause(() => Effect.fail(new PrototypeStop({ reason: "host-result", span: expression.span }))))
         return yield* effect(() => {
           const receipt = Schema.decodeUnknownResult(Receipt, { onExcessProperty: "error" })(response)
           if (Result.isFailure(receipt)) stop("host-result", expression.span)
-          const label = new InformationLabel({ confidentiality: "private", integrity: "untrusted", provenance: [`${selected.name}@${expression.span.start}`] })
+          const label = combine(new InformationLabel({ confidentiality: "private", integrity: "untrusted", provenance: [`${selected.name}@${expression.span.start}`] }), pc.label, labelOf(argument))
           const received = receipt.success
           if (received.state === "done") {
             const decoded = Schema.decodeUnknownResult(selected.tool.contract.outcome, { onExcessProperty: "error" })(received.result)
             if (Result.isFailure(decoded)) stop("host-result", expression.span)
             const raw = Schema.decodeUnknownResult(Schema.Json)(decoded.success)
             if (Result.isFailure(raw)) stop("host-result", expression.span)
-            const owned = labeledValue(raw.success, combine(label, pc.label, argument.tracked.label))
+            const owned = labeledValue(raw.success, combine(label, pc.label, labelOf(argument)))
             if (Result.isFailure(Schema.decodeUnknownResult(Schema.toType(selected.tool.contract.outcome))(owned.value))) stop("host-result", expression.span)
-            return variant("done", [["id", tracked(labeledValue(received.id, label))], ["result", boundary(owned, Schema.toType(selected.tool.contract.outcome).ast, expression.span)]], [tracked(labeledValue(false, label))])
+            return variant("done", [["id", tracked(labeledValue(received.id, label))], ["result", boundary(owned, selected.tool.contract.model.output, expression.span)]], [tracked(labeledValue(false, label))])
           }
           if (received.state === "staged") return variant("staged", [["id", tracked(labeledValue(received.id, label))]], [tracked(labeledValue(false, label))])
           return variant("refused", [["refusal", record(new Map([["code", tracked(labeledValue(received.refusal.code, label))], ["message", tracked(labeledValue(received.refusal.message, label))]]))]], [tracked(labeledValue(false, label))])
@@ -150,22 +214,45 @@ export const runReviewedPrototype = <E, R>(review: Review, host: PrototypeHost<E
     for (const statement of body) {
       switch (statement.kind) {
         case "LetStatement": scope.set(statement.name, yield* evaluate(statement.value, scope, pc)); break
-        case "ExpressionStatement": { const value = yield* evaluate(statement.expression, scope, pc); pc = deriveValue(false, pc, value.tracked); break }
-        case "ReturnStatement": return { returned: true, value: statement.value === undefined ? variant("none") : yield* evaluate(statement.value, scope, pc) }
-        case "AssertStatement": return yield* Effect.fail(new PrototypeStop({ reason: "dynamic-type-error", span: statement.span }))
+        case "ExpressionStatement": { const value = yield* evaluate(statement.expression, scope, pc); pc = labeledValue(false, combine(pc.label, labelOf(value))); break }
+        case "ReturnStatement": return { returned: true, value: statement.value === undefined ? primitive(null) : yield* evaluate(statement.value, scope, pc) }
+        case "AssertStatement": {
+          const condition = yield* evaluate(statement.test, scope, pc)
+          const passed = yield* effect(() => boolean(condition, statement.span), statement.span)
+          if (!passed) {
+            if (statement.message !== undefined) yield* evaluate(statement.message, scope, pc)
+            return yield* Effect.fail(new PrototypeStop({ reason: "assert_failed", span: statement.span }))
+          }
+          pc = labeledValue(false, combine(pc.label, labelOf(condition)))
+          break
+        }
         case "IfStatement": {
           const test = yield* evaluate(statement.test, scope, pc)
-          pc = deriveValue(false, pc, test.tracked)
+          pc = labeledValue(false, combine(pc.label, labelOf(test)))
           const condition = yield* effect(() => boolean(test, statement.span), statement.span)
           const branch = yield* statements(condition ? statement.consequent : statement.alternate ?? [], scope, pc)
           if (branch.returned) return branch
           break
         }
         case "ForStatement": {
-          if (statement.iteration !== "list") return yield* Effect.fail(new PrototypeStop({ reason: "dynamic-type-error", span: statement.span }))
+          if (statement.iteration === "range") {
+            const from = yield* evaluate(statement.from, scope, pc), to = yield* evaluate(statement.to, scope, pc)
+            const endpoints = yield* effect(() => {
+              if (typeof from.tracked.value !== "number" || typeof to.tracked.value !== "number") stop("dynamic-type-error", statement.span)
+              if (!Number.isSafeInteger(from.tracked.value) || !Number.isSafeInteger(to.tracked.value)) stop("range_bound", statement.span)
+              return { from: from.tracked.value, to: to.tracked.value }
+            }, statement.span)
+            pc = labeledValue(false, combine(pc.label, labelOf(from), labelOf(to)))
+            for (let index = endpoints.from; index < endpoints.to; index++) {
+              if (++iterations > review.environment.maxIterations) return yield* Effect.fail(new PrototypeStop({ reason: "budget", span: statement.span }))
+              const inner = new Map(scope); inner.set(statement.variable, primitive(index, [from, to]))
+              const child = yield* statements(statement.body, inner, pc); if (child.returned) return child
+            }
+            break
+          }
           const source = yield* evaluate(statement.source, scope, pc)
           if (!Array.isArray(source.tracked.value)) return yield* Effect.fail(new PrototypeStop({ reason: "dynamic-type-error", span: statement.span }))
-          pc = deriveValue(false, pc, source.tracked)
+          pc = labeledValue(false, combine(pc.label, labelOf(source)))
           for (let index = 0; index < source.tracked.value.length; index++) {
             if (++iterations > review.environment.maxIterations) return yield* Effect.fail(new PrototypeStop({ reason: "budget", span: statement.span }))
             const scopeForItem = new Map(scope); scopeForItem.set(statement.variable, source.children.get(index)!)
@@ -176,7 +263,7 @@ export const runReviewedPrototype = <E, R>(review: Review, host: PrototypeHost<E
         }
       }
     }
-    return { returned: false, value: variant("none") }
+    return { returned: false, value: primitive(null) }
   })
   return (yield* statements(review.program.body, new Map(), empty())).value.tracked.value
 })
