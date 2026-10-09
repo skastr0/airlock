@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process"
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs"
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
 import { describe, expect, it } from "vitest"
@@ -117,83 +117,39 @@ describe("agent-facing CLI", () => {
     })
   })
 
-  it("loads an immediate project tool definition as an inert namespaced action", () => {
+  it("gives a file in the workspace no way to name a new action", () => {
     const home = mkdtempSync(join(tmpdir(), "airlock-cli-tools-"))
     const tools = join(home, ".airlock", "tools")
     mkdirSync(join(home, ".airlock"))
     mkdirSync(tools)
-    writeFileSync(join(tools, "printf.airlock-tool.json"), JSON.stringify({
+    const marker = join(home, "ran")
+    writeFileSync(join(tools, "touch.airlock-tool.json"), JSON.stringify({
       schemaVersion: "airlock/tool-definition/v2",
-      id: "printf_json",
+      id: "touch_marker",
       version: "1.0.0",
-      executables: [{ realm: "local", selector: "/usr/bin/printf" }],
+      executables: [{ realm: "local", selector: "/usr/bin/touch" }],
       actions: [{
-        name: "decode",
-        inputSchema: {
-          type: "object",
-          properties: { cwd: { type: "string" }, json: { type: "string" } },
-          required: ["cwd", "json"], additionalProperties: false
-        },
-        outputSchema: {
-          type: "object", properties: { ok: { type: "boolean" } },
-          required: ["ok"], additionalProperties: false
-        },
-        args: [{ _tag: "Input", path: ["json"] }],
-        cwd: { _tag: "Input", path: ["cwd"] },
-        resources: [{ kind: "path", realm: "local", selector: { _tag: "Input", path: ["cwd"] }, rights: ["read"] }],
-        lowering: "invoke", effectFootprint: ["invoke"], resultDecoder: "json-stdout"
+        name: "go",
+        inputSchema: { type: "object", additionalProperties: false },
+        args: [{ _tag: "Literal", value: marker }],
+        cwd: { _tag: "Literal", value: home },
+        lowering: "invoke", effectFootprint: ["invoke"], resultDecoder: "exit-status"
       }]
     }))
     const program = join(home, "tool.air")
-    writeFileSync(program, `return printf_json.decode({ cwd: ${JSON.stringify(home)}, json: "{\\\"ok\\\":true}" })`)
+    writeFileSync(program, "return touch_marker.go({})")
 
     const executed = run(["run", program, "--workspace", home], home)
-    expect(executed.status).toBe(0)
-    expect(json(executed.stdout)).toMatchObject({
-      result: { result: { ok: true }, plans: [{ actionReference: expect.stringMatching(/^printf_json\.decode@sha256:/) }] }
+    expect(json(executed.stdout === "" ? executed.stderr : executed.stdout)).not.toMatchObject({
+      result: { state: "succeeded" }
     })
+    expect(existsSync(marker)).toBe(false)
+
     const listed = run(["actions"], home, {}, home)
     expect(listed.status).toBe(0)
-    expect(json(listed.stdout)).toMatchObject({ definitions: [expect.objectContaining({ name: "printf_json.decode" })] })
-  })
-
-  it("decodes a tool's actual nonzero process receipt as its exit status", () => {
-    const home = mkdtempSync(join(tmpdir(), "airlock-cli-tools-failure-"))
-    const tools = join(home, ".airlock", "tools")
-    mkdirSync(join(home, ".airlock"))
-    mkdirSync(tools)
-    writeFileSync(join(tools, "exit-check.airlock-tool.json"), JSON.stringify({
-      schemaVersion: "airlock/tool-definition/v2",
-      id: "exit_check",
-      version: "1.0.0",
-      executables: [{ realm: "local", selector: "/usr/bin/false" }],
-      actions: [{
-        name: "check",
-        inputSchema: {
-          type: "object",
-          properties: { cwd: { type: "string" } },
-          required: ["cwd"],
-          additionalProperties: false
-        },
-        args: [],
-        cwd: { _tag: "Input", path: ["cwd"] },
-        lowering: "invoke",
-        effectFootprint: ["invoke"],
-        resultDecoder: "exit-status"
-      }]
-    }))
-
-    const program = join(home, "exit-check.air")
-    writeFileSync(program, `return exit_check.check({ cwd: ${JSON.stringify(home)} })`)
-
-    const executed = run(["run", program, "--workspace", home], home)
-    expect(executed.status).toBe(0)
-    expect(json(executed.stdout)).toMatchObject({
-      result: {
-        state: "succeeded",
-        result: 1
-      }
-    })
+    const actions = json(listed.stdout) as unknown as { readonly actions: ReadonlyArray<{ readonly name: string }> }
+    expect(Object.keys(actions).sort()).toEqual(["actions", "schemaVersion"])
+    expect(actions.actions.map(({ name }) => name).some((name) => name.startsWith("touch_marker"))).toBe(false)
   })
 
   it("returns a typed partial report when a later program failure aborts after completed actions", () => {

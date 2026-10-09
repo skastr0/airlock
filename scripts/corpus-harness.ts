@@ -913,7 +913,7 @@ export const emitSidechannel = (
       environment["AIRLOCK_HOME"] = home
       environment["NO_COLOR"] = "1"
 
-      const actions = agentStdout(environment, ["actions", "--workspace", workspace])
+      const actions = agentStdout(environment, ["actions"])
       const schemas = sidechannelSchemas.map((name) => ({
         name,
         body: agentStdout(environment, ["schema", name])

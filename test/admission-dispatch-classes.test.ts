@@ -74,8 +74,7 @@ const externalDraft = (
     id: PlanId.make("plan/dispatch-class"),
     actionReference: "test.dispatch-class",
     nodes: [request],
-    requirements: [requirement],
-    definitionDigests: []
+    requirements: [requirement]
   })
 }
 

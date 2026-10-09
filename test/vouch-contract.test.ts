@@ -460,7 +460,7 @@ describe("Vouch-derived generic shell replacement corpus", () => {
         stdout: "capture", stderr: "capture", outputLimitBytes: 1_048_576,
         timeoutMs: 210_000, cellProfile: "native-contained"
       })
-      const draft = new PlanDraft({ schemaVersion: "airlock/plan-draft/v1", id: PlanId.make("plan/state-preserving-replacement"), actionReference: "corpus.state-preserving-replacement", nodes: [restore, retain, capture, replace, snapshot], requirements, definitionDigests: [] })
+      const draft = new PlanDraft({ schemaVersion: "airlock/plan-draft/v1", id: PlanId.make("plan/state-preserving-replacement"), actionReference: "corpus.state-preserving-replacement", nodes: [restore, retain, capture, replace, snapshot], requirements })
       expect((yield* orderPlan(draft)).map((item) => item._tag)).toEqual(["Capture", "Invoke", "Apply", "RequestExternal", "Invoke"])
     })
   )

@@ -16,7 +16,6 @@ import {
   BOX_GRANT_FILE,
   BOX_GRANT_SIGNATURE_FILE,
   OPERATOR_PUBLIC_KEY_FILE,
-  SEAL_CATALOG_DIRECTORY,
   boxGrantDigest,
   boxGrantSigningPayload
 } from "../src/seal/index.ts"
@@ -47,11 +46,10 @@ const digest = (bytes: Uint8Array) =>
 const makeSeal = (name: string, options: {
   readonly wrongBinary?: boolean
   readonly missingSignature?: boolean
-  readonly extraDefinition?: boolean
+  readonly catalogInGrant?: boolean
 } = {}) => {
   const directory = join(root, name)
-  const catalog = join(directory, SEAL_CATALOG_DIRECTORY)
-  mkdirSync(catalog, { recursive: true })
+  mkdirSync(directory, { recursive: true })
   const { privateKey, publicKey } = generateKeyPairSync("ed25519")
   const actualBinaryDigest = digest(readFileSync(binary))
   const grant = new BoxGrant({
@@ -74,13 +72,14 @@ const makeSeal = (name: string, options: {
       "serve"
     ],
     nativeActions: NativeActionCatalog.map(({ name }) => name),
-    catalog: [],
     daemonOps: [],
     binaryDigest: options.wrongBinary
       ? Sha256Digest.make(`sha256:${"0".repeat(64)}`)
       : actualBinaryDigest
   })
-  writeFileSync(join(directory, BOX_GRANT_FILE), `${JSON.stringify(grant, null, 2)}\n`)
+  // A grant in the removed shape, with a definition catalog, is not a grant.
+  const written = options.catalogInGrant ? { ...grant, catalog: [] } : grant
+  writeFileSync(join(directory, BOX_GRANT_FILE), `${JSON.stringify(written, null, 2)}\n`)
   writeFileSync(
     join(directory, OPERATOR_PUBLIC_KEY_FILE),
     publicKey.export({ format: "pem", type: "spki" })
@@ -89,12 +88,6 @@ const makeSeal = (name: string, options: {
     writeFileSync(
       join(directory, BOX_GRANT_SIGNATURE_FILE),
       sign(null, boxGrantSigningPayload(grant), privateKey)
-    )
-  }
-  if (options.extraDefinition) {
-    writeFileSync(
-      join(catalog, "extra.airlock-tool.json"),
-      JSON.stringify({ schemaVersion: "airlock/tool-definition/v2" })
     )
   }
   expect(boxGrantDigest(grant)).toMatch(/^sha256:[0-9a-f]{64}$/)
@@ -129,7 +122,7 @@ describe("sealed process startup", () => {
   it.each([
     ["missing signature", { missingSignature: true }],
     ["wrong binary digest", { wrongBinary: true }],
-    ["extra catalog definition", { extraDefinition: true }]
+    ["a grant with a definition catalog", { catalogInGrant: true }]
   ] as const)("fails before runtime state on %s", (_label, options) => {
     const name = `bad-${_label.replaceAll(" ", "-")}`
     const home = join(root, `${name}-home`)

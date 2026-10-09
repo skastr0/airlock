@@ -44,13 +44,6 @@ export const BoxGrantDaemonOp = Schema.Literals([
 ])
 export type BoxGrantDaemonOp = typeof BoxGrantDaemonOp.Type
 
-export class BoxGrantCatalogPin extends Schema.Class<BoxGrantCatalogPin>(
-  "BoxGrantCatalogPin"
-)({
-  id: Schema.String,
-  sha256: Sha256Digest
-}) {}
-
 const unique = <A>(
   values: ReadonlyArray<A>,
   identity: (value: A) => string,
@@ -67,10 +60,6 @@ const UniqueBoxGrantVerbs = Schema.Array(BoxGrantVerb).pipe(
 const UniqueNativeActions = Schema.Array(NativeActionName).pipe(
   Schema.check(Schema.makeFilter((actions) => unique(actions, (action) => action, "native actions")))
 )
-const UniqueCatalogPins = Schema.Array(BoxGrantCatalogPin).pipe(
-  Schema.check(Schema.makeFilter((pins) => unique(pins, (pin) => pin.id, "catalog ids"))),
-  Schema.check(Schema.makeFilter((pins) => unique(pins, (pin) => pin.sha256, "catalog hashes")))
-)
 const UniqueDaemonOps = Schema.Array(BoxGrantDaemonOp).pipe(
   Schema.check(Schema.makeFilter((operations) => unique(
     operations,
@@ -82,14 +71,13 @@ const UniqueDaemonOps = Schema.Array(BoxGrantDaemonOp).pipe(
 /**
  * Strict `airlock/box-grant/v1` supervisor document. All arrays have set
  * semantics and therefore reject repeated identities instead of silently
- * normalizing them. `catalog` is required even when the pinned set is empty.
+ * normalizing them.
  */
 export class BoxGrant extends Schema.Class<BoxGrant>("BoxGrant")({
   schemaVersion: Schema.Literal("airlock/box-grant/v1"),
   admission: AdmissionPolicy,
   verbs: UniqueBoxGrantVerbs,
   nativeActions: UniqueNativeActions,
-  catalog: UniqueCatalogPins,
   daemonOps: UniqueDaemonOps,
   binaryDigest: Sha256Digest
 }) {}
@@ -107,17 +95,14 @@ const canonicalBoxGrantContent = (grant: BoxGrant) => ({
   // change the identity of the authority document.
   verbs: [...grant.verbs].sort(lexical),
   nativeActions: [...grant.nativeActions].sort(lexical),
-  catalog: [...grant.catalog].sort((left, right) =>
-    lexical(left.id, right.id) || lexical(left.sha256, right.sha256)
-  ),
   daemonOps: [...grant.daemonOps].sort(lexical)
 })
 
 /**
  * Hash decoded semantic content, not input JSON spelling, object-key order, or
  * the order used to spell one of the grant's set-valued fields. The returned
- * digest uses the same `sha256:<64 lowercase hex>` wire format as catalog and
- * binary pins.
+ * digest uses the same `sha256:<64 lowercase hex>` wire format as the
+ * binary pin.
  */
 export const hashBoxGrant = (
   grant: BoxGrant

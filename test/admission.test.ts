@@ -50,8 +50,7 @@ const draft = (requirements: ReadonlyArray<ResourceRequirement>, node: PlanNode)
     id: PlanId.make("plan/admission"),
     actionReference: "test.admission",
     nodes: [node],
-    requirements,
-    definitionDigests: []
+    requirements
   })
 
 const executable = new ResourceRequirement({

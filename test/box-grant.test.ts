@@ -30,7 +30,6 @@ const document = (overrides: Record<string, unknown> = {}) => ({
   admission,
   verbs: ["run", "held", "pending"],
   nativeActions: ["file.read", "process.run"],
-  catalog: [{ id: "builtin/core@1", sha256: sha("b") }],
   daemonOps: ["commit", "reap"],
   binaryDigest: sha("a"),
   ...overrides
@@ -54,7 +53,6 @@ describe("box grant v1", () => {
     const second = await decoded(JSON.parse(JSON.stringify({
       binaryDigest: sha("a"),
       daemonOps: ["commit", "reap"],
-      catalog: [{ sha256: sha("b"), id: "builtin/core@1" }],
       nativeActions: ["file.read", "process.run"],
       verbs: ["run", "held", "pending"],
       admission: {
@@ -76,19 +74,11 @@ describe("box grant v1", () => {
     const reorderedSets = await decoded(document({
       verbs: ["pending", "held", "run"],
       nativeActions: ["process.run", "file.read"],
-      catalog: [
-        { id: "z/catalog", sha256: sha("c") },
-        { id: "a/catalog", sha256: sha("b") }
-      ],
       daemonOps: ["reap", "commit"]
     }))
     const orderedSets = await decoded(document({
       verbs: ["held", "pending", "run"],
       nativeActions: ["file.read", "process.run"],
-      catalog: [
-        { id: "a/catalog", sha256: sha("b") },
-        { id: "z/catalog", sha256: sha("c") }
-      ],
       daemonOps: ["commit", "reap"]
     }))
     expect(await run(hashBoxGrant(reorderedSets))).toBe(await run(hashBoxGrant(orderedSets)))
@@ -98,12 +88,12 @@ describe("box grant v1", () => {
     expect(combined.digest).toMatch(/^sha256:[0-9a-f]{64}$/)
   })
 
-  it("requires catalog while accepting an explicitly empty pinned set", async () => {
-    const empty = await decoded(document({ catalog: [] }))
-    expect(empty.catalog).toEqual([])
-
-    const { catalog: _catalog, ...missing } = document()
-    expect(await rejected(missing)).toBe(true)
+  it("has no definition catalog: a grant that carries one is refused", async () => {
+    expect(await rejected({ ...document(), catalog: [] })).toBe(true)
+    expect(await rejected({
+      ...document(),
+      catalog: [{ id: "builtin/core@1", sha256: sha("b") }]
+    })).toBe(true)
   })
 
   it("keeps verbs, native actions, and daemon operations closed", async () => {
@@ -126,30 +116,20 @@ describe("box grant v1", () => {
     expect(await rejected(document({ daemonOps: ["commit", "dispatch"] }))).toBe(true)
   })
 
-  it("rejects duplicate set members and duplicate catalog identities", async () => {
+  it("rejects duplicate set members", async () => {
     const cases = [
       document({ verbs: ["run", "run"] }),
       document({ nativeActions: ["file.read", "file.read"] }),
-      document({ daemonOps: ["commit", "commit"] }),
-      document({ catalog: [
-        { id: "same", sha256: sha("b") },
-        { id: "same", sha256: sha("c") }
-      ] }),
-      document({ catalog: [
-        { id: "one", sha256: sha("b") },
-        { id: "two", sha256: sha("b") }
-      ] })
+      document({ daemonOps: ["commit", "commit"] })
     ]
     for (const candidate of cases) expect(await rejected(candidate)).toBe(true)
   })
 
-  it("requires lowercase sha256 pins and a binary digest", async () => {
+  it("requires a lowercase sha256 binary digest", async () => {
     expect(await rejected(document({ binaryDigest: "a".repeat(64) }))).toBe(true)
     expect(await rejected(document({ binaryDigest: `sha256:${"A".repeat(64)}` }))).toBe(true)
     expect(await rejected(document({ binaryDigest: `sha256:${"a".repeat(63)}` }))).toBe(true)
-    expect(await rejected(document({
-      catalog: [{ id: "bad", sha256: `sha256:${"g".repeat(64)}` }]
-    }))).toBe(true)
+    expect(await rejected(document({ binaryDigest: `sha256:${"g".repeat(64)}` }))).toBe(true)
 
     const { binaryDigest: _binaryDigest, ...missing } = document()
     expect(await rejected(missing)).toBe(true)
@@ -161,20 +141,15 @@ describe("box grant v1", () => {
       admission: { ...admission, verbs: ["reap"] }
     }))).toBe(true)
     expect(await rejected(document({
-      catalog: [{ id: "builtin/core@1", sha256: sha("b"), path: "/tmp/plugin" }]
-    }))).toBe(true)
-    expect(await rejected(document({
       admission: { ...admission, endpointAllowlist: ["https://widen.example/*"] }
     }))).toBe(true)
   })
 
-  it("keeps grant minting separate from tool definitions and .air programs", async () => {
-    // Construction evidence: the two agent-origin source planes neither import
-    // the grant component nor carry its versioned document vocabulary. Their
+  it("keeps grant minting separate from .air programs", async () => {
+    // Construction evidence: the agent-origin source plane neither imports
+    // the grant component nor carries its versioned document vocabulary. Its
     // bytes can be inputs to admission, but cannot become this supervisor type.
     const agentPlane = [
-      "src/core/tools/Definitions.ts",
-      "src/core/tools/Lowering.ts",
       "src/program/Program.ts",
       "src/core/language/ast.ts",
       "src/core/language/parser.ts"
@@ -182,14 +157,13 @@ describe("box grant v1", () => {
     expect(agentPlane).not.toContain("BoxGrant")
     expect(agentPlane).not.toContain("airlock/box-grant/v1")
 
-    // A tool/.air-shaped wrapper cannot mint authority by carrying grant
+    // A wrapper of another shape cannot mint authority by carrying grant
     // arrays: strict decoding accepts only the dedicated supervisor envelope.
     expect(await rejected({
-      schemaVersion: "airlock/tool-definition/v2",
+      schemaVersion: "airlock/program/v1",
       id: "attempt",
       verbs: ["reap"],
       nativeActions: ["file.remove"],
-      catalog: [{ id: "attacker", sha256: sha("c") }],
       daemonOps: ["commit"],
       binaryDigest: sha("a"),
       admission: admission

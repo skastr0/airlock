@@ -43,28 +43,11 @@ const admission = (workspace: string, profile: "native-contained" | "compatibili
   endpointGrants: []
 })
 
-const definition = (id = "vendor.echo") => Buffer.from(`${JSON.stringify({
-  schemaVersion: "airlock/tool-definition/v2",
-  id,
-  version: "1.0.0",
-  executables: [{ realm: "local", selector: "/bin/echo" }],
-  actions: [{
-    name: "check",
-    inputSchema: { type: "object" },
-    args: [],
-    cwd: { _tag: "Literal", value: "/tmp" },
-    lowering: "invoke",
-    effectFootprint: ["invoke"],
-    resultDecoder: "exit-status"
-  }]
-})}\n`)
-
 type Fixture = {
   readonly root: string
   readonly workspace: string
   readonly binary: string
   readonly admission: string
-  readonly definition: string
   readonly privateKey: string
   readonly publicKey: string
 }
@@ -81,8 +64,6 @@ const fixture = (profile: "native-contained" | "compatibility" = "native-contain
   chmodSync(binary, 0o755)
   const policy = join(root, "admission.json")
   writeFileSync(policy, `${JSON.stringify(admission(workspace, profile), null, 2)}\n`)
-  const definitionPath = join(root, "echo.json")
-  writeFileSync(definitionPath, definition())
   const privateKey = join(keys, "operator-private.pem")
   const publicKey = join(keys, "operator-public.pem")
   const generated = run([
@@ -102,7 +83,6 @@ const fixture = (profile: "native-contained" | "compatibility" = "native-contain
     workspace,
     binary,
     admission: policy,
-    definition: definitionPath,
     privateKey,
     publicKey
   }
@@ -119,7 +99,6 @@ const createArgs = (
   ...(options.reversed
     ? ["--verb", "actions", "--verb", "run", "--native-action", "process.run", "--native-action", "file.read", "--daemon-op", "reap", "--daemon-op", "commit"]
     : ["--verb", "run", "--verb", "actions", "--native-action", "file.read", "--native-action", "process.run", "--daemon-op", "commit", "--daemon-op", "reap"]),
-  "--definition", item.definition,
   "--private-key", item.privateKey,
   "--public-key", item.publicKey,
   "--out", out,
@@ -139,12 +118,7 @@ const created = (
 
 const grant = (bundle: string) => JSON.parse(
   readFileSync(join(bundle, "seal", "box-grant.json"), "utf8")
-) as { readonly binaryDigest: string; readonly catalog: ReadonlyArray<{ readonly sha256: string }> }
-
-const catalogPath = (bundle: string) => {
-  const pin = grant(bundle).catalog[0]!
-  return join(bundle, "seal", "catalog", `sha256-${pin.sha256.slice(7)}.airlock-tool.json`)
-}
+) as { readonly binaryDigest: string; readonly nativeActions: ReadonlyArray<string> }
 
 describe("seal-box operator bundle tool", () => {
   it("generates Ed25519 PEM keys exclusively with private/public modes and no key output", () => {
@@ -167,20 +141,23 @@ describe("seal-box operator bundle tool", () => {
     expect(readFileSync(publicKey)).toEqual(publicBefore)
   })
 
-  it("creates and verifies a self-contained bundle with exact binary/catalog bytes and readonly modes", () => {
+  it("creates and verifies a self-contained bundle with exact binary bytes, the granted actions and readonly modes", () => {
     const item = created()
     const checked = run(["verify", "--bundle", item.bundle])
     expect(checked.status, checked.stderr).toBe(0)
     expect(readFileSync(join(item.bundle, "bin", "airlock"))).toEqual(readFileSync(item.binary))
     expect(readFileSync(join(item.bundle, "bin", "airlock-agent"))).toEqual(readFileSync(item.binary))
-    expect(readFileSync(catalogPath(item.bundle))).toEqual(readFileSync(item.definition))
+    expect(grant(item.bundle).nativeActions).toEqual(["file.read", "process.run"])
+    expect(grant(item.bundle)).not.toHaveProperty("catalog")
+    expect(readdirSync(join(item.bundle, "seal")).sort()).toEqual([
+      "box-grant.ed25519", "box-grant.json", "operator-ed25519.pub.pem"
+    ])
     expect(grant(item.bundle).binaryDigest).toBe(digest(readFileSync(item.binary)))
     expect(mode(join(item.bundle, "bin", "airlock"))).toBe(0o555)
     for (const path of [
       join(item.bundle, "seal", "box-grant.json"),
       join(item.bundle, "seal", "box-grant.ed25519"),
-      join(item.bundle, "seal", "operator-ed25519.pub.pem"),
-      catalogPath(item.bundle)
+      join(item.bundle, "seal", "operator-ed25519.pub.pem")
     ]) expect(mode(path)).toBe(0o444)
     expect(readFileSync(join(item.bundle, "seal", "box-grant.ed25519"))).toHaveLength(64)
     expect(existsSync(join(item.bundle, "seal", "operator-private.pem"))).toBe(false)
@@ -188,17 +165,20 @@ describe("seal-box operator bundle tool", () => {
     expect(files.every((name) => !/private|\.key$/i.test(name))).toBe(true)
   })
 
-  it("fails verification for a flipped binary, flipped definition, and missing signature", () => {
-    for (const corrupt of ["binary", "definition", "signature"] as const) {
+  it("fails verification for a flipped binary, a widened grant, and missing signature", () => {
+    for (const corrupt of ["binary", "grant", "signature"] as const) {
       const item = created()
       if (corrupt === "binary") {
         const path = join(item.bundle, "bin", "airlock")
         chmodSync(path, 0o755)
         writeFileSync(path, Buffer.from("flipped"))
-      } else if (corrupt === "definition") {
-        const path = catalogPath(item.bundle)
+      } else if (corrupt === "grant") {
+        // The grant is what the box pins: one more action under the old signature.
+        const path = join(item.bundle, "seal", "box-grant.json")
+        const widened = JSON.parse(readFileSync(path, "utf8")) as { nativeActions: Array<string> }
+        widened.nativeActions.push("file.remove")
         chmodSync(path, 0o644)
-        writeFileSync(path, definition("vendor.flipped"))
+        writeFileSync(path, JSON.stringify(widened))
       } else {
         renameSync(
           join(item.bundle, "seal", "box-grant.ed25519"),
@@ -217,7 +197,8 @@ describe("seal-box operator bundle tool", () => {
       [...createArgs(item, join(item.root, "bad-native")), "--native-action", "plugin.run"],
       [...createArgs(item, join(item.root, "bad-daemon")), "--daemon-op", "dispatch"],
       [...createArgs(item, join(item.root, "duplicate")), "--verb", "run"],
-      [...createArgs(item, join(item.root, "unknown")), "--surprise", "yes"]
+      [...createArgs(item, join(item.root, "unknown")), "--surprise", "yes"],
+      [...createArgs(item, join(item.root, "definition")), "--definition", item.admission]
     ]
     for (const args of cases) expect(run(args).status).not.toBe(0)
 

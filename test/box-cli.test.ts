@@ -17,7 +17,6 @@ import {
   BOX_GRANT_FILE,
   BOX_GRANT_SIGNATURE_FILE,
   OPERATOR_PUBLIC_KEY_FILE,
-  SEAL_CATALOG_DIRECTORY,
   boxGrantDigest,
   boxGrantSigningPayload
 } from "../src/seal/index.ts"
@@ -56,7 +55,7 @@ const digest = (bytes: Uint8Array) =>
   Sha256Digest.make(`sha256:${createHash("sha256").update(bytes).digest("hex")}`)
 
 const writeGoodSeal = () => {
-  mkdirSync(join(seal, SEAL_CATALOG_DIRECTORY), { recursive: true })
+  mkdirSync(seal, { recursive: true })
   const { privateKey, publicKey } = operator
   const grant = new BoxGrant({
     schemaVersion: "airlock/box-grant/v1",
@@ -73,7 +72,6 @@ const writeGoodSeal = () => {
     }),
     verbs: ["doctor"],
     nativeActions: [],
-    catalog: [],
     daemonOps: [],
     binaryDigest: digest(readFileSync(binary))
   })
@@ -181,7 +179,7 @@ describe("required-seal tenant entrypoint", () => {
     const cloneBinary = join(clone, "bin", "airlock")
     const cloneSeal = join(clone, "seal")
     mkdirSync(join(clone, "bin"), { recursive: true })
-    mkdirSync(join(cloneSeal, SEAL_CATALOG_DIRECTORY), { recursive: true })
+    mkdirSync(cloneSeal, { recursive: true })
     cpSync(binary, cloneBinary)
     const attacker = generateKeyPairSync("ed25519")
     const grant = new BoxGrant({
@@ -199,7 +197,6 @@ describe("required-seal tenant entrypoint", () => {
       }),
       verbs: ["exec", "serve"],
       nativeActions: ["process.run"],
-      catalog: [],
       daemonOps: ["commit"],
       binaryDigest: digest(readFileSync(cloneBinary))
     })

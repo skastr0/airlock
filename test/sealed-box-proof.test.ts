@@ -11,7 +11,6 @@ import * as AirlockHome from "../src/AirlockHome.ts"
 import {
   AdmissionPolicy,
   BoxGrant,
-  BoxGrantCatalogPin,
   EndpointGrantPolicy,
 } from "../src/core/admission/index.ts"
 import { daemonTick, runDaemonHealthServer } from "../src/daemon/index.ts"
@@ -23,10 +22,8 @@ import {
   BOX_GRANT_SIGNATURE_FILE,
   BinarySnapshot,
   OPERATOR_PUBLIC_KEY_FILE,
-  SEAL_CATALOG_DIRECTORY,
   boxGrantDigest,
   boxGrantSigningPayload,
-  catalogFileNameForPin,
   reverifySeal,
   verifySealAtPath
 } from "../src/seal/index.ts"
@@ -41,7 +38,6 @@ const workspace = join(root, "workspace")
 const home = join(generation, "home")
 const socketPath = join(generation, "ipc", "daemon.sock")
 const sealPath = join(generation, "seal")
-const fixtureBytes = readFileSync(join(repository, "examples", "tools", "fixture-status.airlock-tool.json"))
 const operator = generateKeyPairSync("ed25519")
 const publicKeyPath = join(root, "operator.pub.pem")
 let provider: Server
@@ -70,7 +66,7 @@ beforeAll(async () => {
   expect(built.status, built.stderr).toBe(0)
   cpSync(binary, agentBinary)
   provider = createServer((request, response) => {
-    if (request.url === "/v1/status" && request.method === "GET") hits += 1
+    hits += 1
     response.writeHead(200, { "content-type": "application/json" })
     response.end('{"ok":true}\n')
   })
@@ -79,8 +75,7 @@ beforeAll(async () => {
   if (address === null || typeof address === "string") throw new Error("provider unavailable")
   origin = `http://127.0.0.1:${address.port}`
 
-  mkdirSync(join(sealPath, SEAL_CATALOG_DIRECTORY), { recursive: true })
-  const pin = new BoxGrantCatalogPin({ id: "fixture_status", sha256: sha256(fixtureBytes) })
+  mkdirSync(sealPath, { recursive: true })
   grant = new BoxGrant({
     schemaVersion: "airlock/box-grant/v1",
     admission: new AdmissionPolicy({
@@ -92,22 +87,24 @@ beforeAll(async () => {
       pathAllowlist: [`${workspace}/**`],
       executableAllowlist: [],
       executableEdges: [],
-      endpointGrants: [new EndpointGrantPolicy({
-        selector: `${origin}/v1/*`, methods: ["GET"], class: "read", commit: "auto"
-      })]
+      endpointGrants: [
+        new EndpointGrantPolicy({
+          selector: `${origin}/v1/*`, methods: ["GET"], class: "read", commit: "auto"
+        }),
+        // Granted, but not pre-authorized: this one waits for a supervisor.
+        new EndpointGrantPolicy({ selector: `${origin}/v2/*`, methods: ["GET"] })
+      ]
     }),
     verbs: ["eval", "run", "held", "pending", "serve"],
     nativeActions: [
       "file.inspect", "file.read", "file.list", "file.glob", "file.stat", "http.stage"
     ],
-    catalog: [pin],
     daemonOps: ["commit"],
     binaryDigest: sha256(readFileSync(binary))
   })
   writeFileSync(join(sealPath, BOX_GRANT_FILE), `${JSON.stringify(grant, null, 2)}\n`)
   writeFileSync(join(sealPath, BOX_GRANT_SIGNATURE_FILE), sign(null, boxGrantSigningPayload(grant), operator.privateKey))
   writeFileSync(join(sealPath, OPERATOR_PUBLIC_KEY_FILE), operator.publicKey.export({ format: "pem", type: "spki" }))
-  writeFileSync(join(sealPath, SEAL_CATALOG_DIRECTORY, catalogFileNameForPin(pin)), fixtureBytes)
   writeFileSync(join(generation, "SEALED"), `${JSON.stringify({
     schemaVersion: "airlock/installed-generation/v1",
     grantDigest: boxGrantDigest(grant),
@@ -207,10 +204,10 @@ describe("portable sealed-box proof", () => {
     expect((await invoke(["held"])).stdout.trim()).toBe("[]")
   }, 30_000)
 
-  it("commits read evidence only through daemonTick and keeps declared mutation pending", async () => {
+  it("commits read evidence only through daemonTick and keeps a request without pre-authorization pending", async () => {
     const before = hits
     const readProgram = join(workspace, "read.air")
-    writeFileSync(readProgram, `return fixture_status.read({ endpoint: "${origin}/v1/status" })\n`)
+    writeFileSync(readProgram, `return http.stage({ endpoint: "${origin}/v1/status", method: "GET", holdMillis: 0 })\n`)
     const staged = await invoke(["run", readProgram, "--workspace", workspace])
     expect(staged.status, staged.stderr).toBe(0)
     expect(JSON.parse(staged.stdout)).toMatchObject({ result: { result: { state: "staged" } } })
@@ -231,7 +228,7 @@ describe("portable sealed-box proof", () => {
 
     const mutate = await invoke([
       "eval", "--workspace", workspace, "--source",
-      `return fixture_status.reconcile({ endpoint: "${origin}/v1/status" })`
+      `return http.stage({ endpoint: "${origin}/v2/status", method: "GET", holdMillis: 0 })`
     ])
     expect(mutate.status, mutate.stderr).toBe(0)
     const pendingMutate = JSON.parse((await invoke(["pending"])).stdout)

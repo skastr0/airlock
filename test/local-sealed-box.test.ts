@@ -187,7 +187,6 @@ describe.skipIf(!isNonRootDarwin)("same-user local sealed generation", () => {
         "file.glob", "file.inspect", "file.list", "file.read", "file.stat",
         "http.stage"
       ],
-      catalog: [],
       daemonOps: []
     })
 
@@ -332,7 +331,7 @@ describe.skipIf(!isNonRootDarwin)("same-user local sealed generation", () => {
       expect(help.stdout).not.toMatch(new RegExp(`\\b${hidden}\\b`))
   })
 
-  it("fails startup on signed-grant and exact-catalog tamper", () => {
+  it("fails startup on a tampered grant and on a grant in the removed catalog shape", () => {
     const signatureClone = startupClone("signature-tamper")
     const signatureGrantPath = join(signatureClone, "seal", "box-grant.json")
     const signatureGrant = JSON.parse(readFileSync(signatureGrantPath, "utf8"))
@@ -350,11 +349,12 @@ describe.skipIf(!isNonRootDarwin)("same-user local sealed generation", () => {
       reason: "signature-invalid"
     })
 
-    const catalogClone = startupClone("catalog-tamper")
-    writeFileSync(
-      join(catalogClone, "seal", "catalog", "evil.airlock-tool.json"),
-      '{}\n'
-    )
+    const catalogClone = startupClone("catalog-shape")
+    const catalogGrantPath = join(catalogClone, "seal", "box-grant.json")
+    const catalogGrant = JSON.parse(readFileSync(catalogGrantPath, "utf8"))
+    catalogGrant.catalog = []
+    chmodSync(catalogGrantPath, 0o644)
+    writeFileSync(catalogGrantPath, `${JSON.stringify(catalogGrant, null, 2)}\n`)
     const catalogRefused = invoke(
       join(catalogClone, "bin", "airlock"),
       ["doctor"],
@@ -363,7 +363,7 @@ describe.skipIf(!isNonRootDarwin)("same-user local sealed generation", () => {
     expect(catalogRefused.status).toBe(78)
     expect(JSON.parse(catalogRefused.stderr)).toMatchObject({
       _tag: "SealVerificationFailed",
-      reason: "catalog-file-extra"
+      reason: "invalid-grant"
     })
   }, 120_000)
 

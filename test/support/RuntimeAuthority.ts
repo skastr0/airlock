@@ -80,8 +80,7 @@ export const runtimeAuthority = (
     id: planId,
     actionReference: "test.runtime",
     nodes: admittedNodes,
-    requirements,
-    definitionDigests: []
+    requirements
   })
   const policy = new AdmissionPolicy({
     schemaVersion: "airlock/admission-policy/v2",
@@ -131,7 +130,6 @@ export const uncheckedRuntimeAuthority = (
       admittedAt: timestamp,
       policyDigest
     }),
-    definitionDigests: [],
     planDigest: digest("unchecked-runtime-plan")
   })
   return new ExecutionAuthority({

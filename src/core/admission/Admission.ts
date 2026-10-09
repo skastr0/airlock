@@ -493,8 +493,6 @@ const makeIdentity = (requirement: ResourceRequirement) =>
 
 /**
  * Admits a draft without touching the filesystem, process table, or network.
- * A tool definition is already represented only by `definitionDigests`; it is
- * never an authority source here.
  */
 export const admit = (
   draft: PlanDraft,

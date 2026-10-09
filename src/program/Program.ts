@@ -70,14 +70,6 @@ import {
   RuntimeRecoveryEvidence,
   RuntimeRun
 } from "../runtime/index.ts"
-import {
-  ExportedToolAction,
-  ToolActionLoweringRequest,
-  decodeToolResult,
-  exportedToolActionName,
-  isEnqueueAction,
-  lowerToolAction
-} from "../core/tools/index.ts"
 
 /**
  * Program is the candidate bridge from the pure Airlock language to plans.
@@ -89,21 +81,6 @@ import {
 export class ProgramActionCall extends Schema.Class<ProgramActionCall>("ProgramActionCall")({
   action: Schema.String,
   input: Schema.Unknown
-}) {}
-
-/** Immutable definition facts bound into the request digest and Plan draft. */
-export class ProgramToolBinding extends Schema.Class<ProgramToolBinding>("ProgramToolBinding")({
-  name: Schema.String,
-  definitionId: Schema.String,
-  definitionDigest: Canonical.Sha256Digest,
-  resultDecoder: Schema.Literals(["exit-status", "json-stdout", "json-stderr", "none"]),
-  /**
-   * The definition author's declared consequence, carried forward so the
-   * supervisor plane can take the stricter of it and the grant's class. A
-   * definition can only narrow with it; it never selects or widens anything.
-   */
-  emissionEffect: Schema.optional(Schema.Literals(["read", "mutate"])),
-  outputSchema: Schema.optional(Schema.Unknown)
 }) {}
 
 export class InlineArtifact extends Schema.Class<InlineArtifact>("InlineArtifact")({
@@ -131,8 +108,7 @@ export class ProgramActionRequest extends Schema.Class<ProgramActionRequest>("Pr
   /** Bound into draft.actionReference so admission covers call and input bytes. */
   callDigest: Canonical.Sha256Digest,
   draft: PlanDraft,
-  inlineArtifacts: Schema.Array(InlineArtifact),
-  tool: Schema.optional(ProgramToolBinding)
+  inlineArtifacts: Schema.Array(InlineArtifact)
 }) {}
 
 export class ProgramActionResult extends Schema.Class<ProgramActionResult>("ProgramActionResult")({
@@ -522,18 +498,10 @@ const bytesDigest = (bytes: Uint8Array) =>
 
 const digestAction = (
   call: NativeActionCallValue,
-  artifacts: ReadonlyArray<InlineArtifact>,
-  tool?: ProgramToolBinding
+  artifacts: ReadonlyArray<InlineArtifact>
 ): Canonical.Sha256Digest =>
   Canonical.Sha256Digest.make(`sha256:${createHash("sha256").update(Canonical.canonicalJson({
     call,
-    ...(tool === undefined ? {} : { tool: {
-      name: tool.name,
-      definitionId: tool.definitionId,
-      definitionDigest: tool.definitionDigest,
-      resultDecoder: tool.resultDecoder,
-      ...(tool.outputSchema === undefined ? {} : { outputSchema: tool.outputSchema })
-    } }),
     artifacts: artifacts
       .map((artifact) => ({
         id: artifact.id,
@@ -818,108 +786,13 @@ export const draftForAction = (
       id,
       actionReference: actionReference(call, callDigest),
       nodes,
-      requirements,
-      definitionDigests: [] as Canonical.Sha256Digest[]
+      requirements
     })
     return new ProgramActionRequest({
       call: new ProgramActionCall({ action: call.action, input: call }),
       callDigest,
       draft,
       inlineArtifacts
-    })
-  })
-
-const oneDeclaredExecutable = (
-  exported: ExportedToolAction
-): Effect.Effect<string, ProgramActionDecodeFailed> => {
-  const selectors = [
-    ...new Set(
-      exported.loaded.definition.executables
-        .filter((entry) => entry.role === "root")
-        .map((entry) => entry.selector)
-    )
-  ]
-  return selectors.length === 1 && selectors[0]!.startsWith("/")
-    ? Effect.succeed(selectors[0]!)
-    : Effect.fail(new ProgramActionDecodeFailed({
-      action: exportedToolActionName(exported.loaded.definition, exported.action),
-      reason: "definition action requires exactly one declared absolute executable"
-    }))
-}
-
-const nativeActionForTool = (exported: ExportedToolAction): NativeActionName =>
-  isEnqueueAction(exported.action) ? "http.stage" : "process.run"
-
-const draftForToolAction = (
-  exported: ExportedToolAction,
-  cellProfile: CellProfile,
-  args: readonly LanguageValue[],
-  sequence: number,
-  nowId: string,
-  availableArtifacts: ReadonlyArray<InlineArtifact>,
-  nativeActions: NativeActionSurface,
-  bindPath: ProgramPathSelectorBinder
-): Effect.Effect<ProgramActionRequest, ProgramActionDecodeFailed, Crypto.Crypto> =>
-  Effect.gen(function* () {
-    const name = exportedToolActionName(exported.loaded.definition, exported.action)
-    const requiredNativeAction = nativeActionForTool(exported)
-    // Check the definition kind before input decoding or lowering. Definitions
-    // describe a friendlier spelling; they never provide a capability bypass.
-    yield* requireNativeAction(nativeActions, requiredNativeAction, name)
-    if (args.length !== 1) {
-      return yield* new ProgramActionDecodeFailed({ action: name, reason: "expects exactly one record argument" })
-    }
-    const input = yield* record(args[0], name)
-    // An enqueue action binds no executable at all: it stages an intent. Only
-    // invoke lowering needs the caller-selected executable identity.
-    const executable = isEnqueueAction(exported.action)
-      ? ""
-      : yield* oneDeclaredExecutable(exported)
-    const lowered = yield* lowerToolAction(new ToolActionLoweringRequest({
-      loaded: exported.loaded,
-      action: exported.action.name,
-      input: object(input),
-      executable,
-      cellProfile
-    }), (selector) => bindPath(name, selector)).pipe(
-      Effect.mapError((error) => error instanceof ProgramActionDecodeFailed
-        ? error
-        : new ProgramActionDecodeFailed({
-            action: name,
-            reason: causeReason(error)
-          }))
-    )
-    if (lowered.call.action !== requiredNativeAction) {
-      return yield* new ProgramActionDecodeFailed({
-        action: name,
-        reason: `definition action lowered to ${lowered.call.action}; expected ${requiredNativeAction}`
-      })
-    }
-    // Defend the actual post-lowering call as well as the declared tool kind.
-    yield* requireNativeAction(nativeActions, lowered.call.action, name)
-    const base = yield* draftForAction(lowered.call, sequence, nowId, availableArtifacts)
-    const tool = new ProgramToolBinding({
-      name,
-      definitionId: lowered.definitionId,
-      definitionDigest: lowered.definitionDigest,
-      resultDecoder: lowered.resultDecoder,
-      ...(lowered.emissionEffect === undefined
-        ? {}
-        : { emissionEffect: lowered.emissionEffect }),
-      ...(exported.action.outputSchema === undefined ? {} : { outputSchema: exported.action.outputSchema })
-    })
-    const callDigest = digestAction(lowered.call, base.inlineArtifacts, tool)
-    const draft = new PlanDraft({
-      ...base.draft,
-      actionReference: `${name}@${callDigest}`,
-      definitionDigests: [lowered.definitionDigest]
-    })
-    return new ProgramActionRequest({
-      call: new ProgramActionCall({ action: name, input: lowered.call }),
-      callDigest,
-      draft,
-      inlineArtifacts: base.inlineArtifacts,
-      tool
     })
   })
 
@@ -1281,54 +1154,6 @@ const requireSuccessfulRuntime = (
   ))
 }
 
-const processEvidence = (
-  run: RuntimeRun,
-  plan: Plan,
-  action: string
-) => {
-  const invokes = plan.nodes.filter(
-    (node): node is InvokeNode => node._tag === "Invoke"
-  )
-  if (invokes.length !== 1) {
-    return Effect.fail(runtimeExecutionFailure(
-      action,
-      run,
-      "contract",
-      `expected exactly one Invoke node; found ${invokes.length}`,
-      "ProgramPlanShapeMismatch"
-    ))
-  }
-  const matches = run.processes.filter(
-    (candidate) => candidate.nodeId === invokes[0]!.id
-  )
-  return matches.length === 1
-    ? Effect.succeed({ invoke: invokes[0]!, evidence: matches[0]! })
-    : Effect.fail(runtimeExecutionFailure(
-        action,
-        run,
-        "runtime",
-        `expected exactly one process receipt for ${invokes[0]!.id}; found ${matches.length}`,
-        "ProgramProcessEvidenceUnavailable"
-      ))
-}
-
-const toolRuntimeIsDecodable = (
-  run: RuntimeRun,
-  invoke: InvokeNode
-) =>
-  run.receipts.every((receipt) =>
-    receipt.state === "succeeded" ||
-    (
-      receipt.nodeId === invoke.id &&
-      receipt.state === "failed" &&
-      receipt.errorTag === "RuntimeProcessFailure"
-    ) ||
-    (
-      receipt.state === "cancelled" &&
-      receipt.errorTag === "RuntimeDependencyFailed"
-    )
-  )
-
 const validateRuntimeRequest = (
   request: ProgramActionRequest,
   plan: Plan
@@ -1337,7 +1162,7 @@ const validateRuntimeRequest = (
     const call = yield* Schema.decodeUnknownEffect(NativeActionCall)(request.call.input).pipe(
       Effect.mapError(executionFailure(request.call.action, "contract"))
     )
-    if (request.tool === undefined && request.call.action !== call.action) {
+    if (request.call.action !== call.action) {
       return yield* new ProgramActionExecutionFailed({
         action: request.call.action,
         phase: "contract",
@@ -1345,22 +1170,13 @@ const validateRuntimeRequest = (
         reason: `call tag ${request.call.action} does not match input tag ${call.action}`
       })
     }
-    if (request.tool !== undefined && request.call.action !== request.tool.name) {
-      return yield* new ProgramActionExecutionFailed({
-        action: request.call.action,
-        phase: "contract",
-        causeTag: "ProgramToolBindingMismatch",
-        reason: "the tool action name does not match its bound definition facts"
-      })
-    }
-    const actualDigest = digestAction(call, request.inlineArtifacts, request.tool)
-    const expectedReference = `${request.tool?.name ?? call.action}@${actualDigest}`
+    const actualDigest = digestAction(call, request.inlineArtifacts)
+    const expectedReference = `${call.action}@${actualDigest}`
     if (
       request.callDigest !== actualDigest ||
       request.draft.id !== plan.id ||
       request.draft.actionReference !== expectedReference ||
-      plan.actionReference !== expectedReference ||
-      (request.tool !== undefined && !plan.definitionDigests.includes(request.tool.definitionDigest))
+      plan.actionReference !== expectedReference
     ) {
       return yield* new ProgramActionExecutionFailed({
         action: call.action,
@@ -1439,8 +1255,7 @@ const externalFor = (
  * for an explicit supervisor act.
  */
 export type ProgramDispatchAuthority = (
-  authority: ExecutionAuthority,
-  declaredEmissionEffect?: "read" | "mutate"
+  authority: ExecutionAuthority
 ) => ReadonlyArray<RuntimeDispatchAuthorization>
 
 /** A verified-seal identity selects daemon-owned, never inline, dispatch. */
@@ -1458,8 +1273,8 @@ export const supervisorDispatchAuthority = (
   policy: AdmissionPolicy,
   sealedDispatch?: ProgramSealedDispatch
 ): ProgramDispatchAuthority =>
-(authority, declaredEmissionEffect) =>
-  supervisorAutoCommits(policy, authority, declaredEmissionEffect).map(
+(authority) =>
+  supervisorAutoCommits(policy, authority).map(
     (authorized) =>
       new RuntimeDispatchAuthorization({
         nodeId: authorized.nodeId,
@@ -1503,7 +1318,7 @@ const makeProgramPlanRuntimeLive = (dispatch: ProgramDispatchAuthority) => Layer
             mediaType: input.mediaType,
             provenance: input.provenance
           }))
-          const authorizations = dispatch(authority, request.tool?.emissionEffect)
+          const authorizations = dispatch(authority)
           const run = yield* runtime.execute(authority, inputs, authorizations).pipe(
             Effect.mapError(executionFailure(call.action, "runtime"))
           )
@@ -1684,52 +1499,6 @@ const makeProgramPlanRuntimeLive = (dispatch: ProgramDispatchAuthority) => Layer
               })
             }
             case "process.run": {
-              if (request.tool !== undefined) {
-                const { invoke, evidence } = yield* processEvidence(
-                  run,
-                  plan,
-                  request.tool.name
-                )
-                if (!toolRuntimeIsDecodable(run, invoke)) {
-                  const failed = failedRuntimeReceipt(run)
-                  return yield* runtimeExecutionFailure(
-                    request.tool.name,
-                    run,
-                    "runtime",
-                    `tool runtime finished ${run.state} outside its process result`,
-                    failed?.errorTag ?? "ProgramToolRuntimeFailed"
-                  )
-                }
-                if (evidence.receipt.exitCode === null) {
-                  return yield* runtimeExecutionFailure(
-                    request.tool.name,
-                    run,
-                    "runtime",
-                    `tool process ended ${evidence.outcome}${
-                      evidence.receipt.signal === null
-                        ? ""
-                        : ` with ${evidence.receipt.signal}`
-                    } without an exit code`,
-                    "ProgramToolProcessIncomplete"
-                  )
-                }
-                const value = yield* decodeToolResult({
-                  definitionId: request.tool.definitionId,
-                  actionName: request.tool.name,
-                  resultDecoder: request.tool.resultDecoder,
-                  ...(request.tool.outputSchema === undefined ? {} : { outputSchema: request.tool.outputSchema })
-                }, {
-                  exitCode: evidence.receipt.exitCode,
-                  stdout: decodedText.decode(evidence.receipt.stdout),
-                  stderr: decodedText.decode(evidence.receipt.stderr)
-                }).pipe(
-                  Effect.mapError(executionFailure(request.tool.name, "contract", run)),
-                  Effect.flatMap((decoded) => Schema.decodeUnknownEffect(LanguageValueSchema)(decoded).pipe(
-                    Effect.mapError(executionFailure(request.tool!.name, "contract", run))
-                  ))
-                )
-                return actionResult(value, outputs)
-              }
               return nativeActionResult(call.action, runtimeRunValue(run, plan), outputs)
             }
             case "http.stage": {
@@ -1854,40 +1623,16 @@ export const ProgramExecutionLive = (
   )
 }
 
-export const ProgramExecutionWithToolsLive = (
-  policy: AdmissionPolicy,
-  actions: ReadonlyMap<string, ExportedToolAction>,
-  cellProfile: CellProfile,
-  nativeActions: NativeActionSurface = ALL_NATIVE_ACTIONS,
-  sealedDispatch?: ProgramSealedDispatch,
-  bindPath: ProgramPathSelectorBinder = unchangedProgramPathSelector
-) => {
-  const executor = ProgramPlanExecutorLive.pipe(
-    Layer.provideMerge(ProgramAdmissionLive(policy)),
-    Layer.provideMerge(ProgramPlanRuntimeWithPolicyLive(policy, sealedDispatch))
-  )
-  return ProgramRunnerWithToolsLive(
-    actions,
-    cellProfile,
-    nativeActions,
-    bindPath
-  ).pipe(Layer.provide(executor))
-}
-
 /** Supports dotted native verbs without giving the language a reflective call surface. */
-export const normalizeProgramActions = (program: Program, extraActions: ReadonlySet<string> = new Set()): Program => {
-  const actionNames = new Set<string>([...nativeNames, ...extraActions])
-  return resolveDottedActions(program, (name) => actionNames.has(name))
-}
+export const normalizeProgramActions = (program: Program): Program =>
+  resolveDottedActions(program, (name) => nativeNames.has(name as NativeActionName))
 
 const runProgram = (executor: {
   readonly execute: (request: ProgramActionRequest) => Effect.Effect<ProgramActionResult, ProgramActionExecutionFailed>
-}, tools: {
-  readonly actions: ReadonlyMap<string, ExportedToolAction>
-  readonly cellProfile: CellProfile
+}, surface: {
   readonly nativeActions: NativeActionSurface
   readonly bindPath: ProgramPathSelectorBinder
-}, digests: Crypto.Crypto) =>
+}) =>
   (request: ProgramRequest): Effect.Effect<ProgramRunResult, ProgramError> =>
     Effect.gen(function* () {
       const parsed = yield* parse(request.source)
@@ -1948,37 +1693,15 @@ const runProgram = (executor: {
       }
       const resolver: ActionResolver<never, UnknownProgramAction | ProgramActionDecodeFailed | ProgramActionExecutionFailed> = {
         resolve: (action, args) => Effect.gen(function* () {
-          const tool = tools.actions.get(action)
-          if (tool !== undefined) {
-            // The runner checks before even asking the definition lowerer; the
-            // helper repeats the check so this path stays safe when refactored.
-            yield* requireNativeAction(tools.nativeActions, nativeActionForTool(tool), action)
-            const next = yield* draftForToolAction(
-              tool,
-              tools.cellProfile,
-              args,
-              sequence++,
-              crypto.randomUUID(),
-              [...artifacts.values()],
-              tools.nativeActions,
-              tools.bindPath
-            ).pipe(Effect.provideService(Crypto.Crypto, digests))
-            plans.push(next.draft)
-            for (const input of next.inlineArtifacts) artifacts.set(input.id, input)
-            const executed = yield* executor.execute(next)
-            for (const output of executed.artifacts) artifacts.set(output.id, output)
-            actions.push(actionRecord(next, executed))
-            return executed.value
-          }
           const decoded = yield* decodeProgramAction(action, args)
           const canonical = yield* canonicalizeProgramActionForSurface(
             action,
             decoded,
-            tools.nativeActions
+            surface.nativeActions
           )
           const call = yield* mapNativeActionPathSelectors(
             canonical,
-            (selector) => tools.bindPath(action, selector)
+            (selector) => surface.bindPath(action, selector)
           )
           const next = yield* draftForAction(
             call,
@@ -1994,7 +1717,7 @@ const runProgram = (executor: {
           return executed.value
         })
       }
-      const evaluation = yield* evaluate(normalizeProgramActions(parsed, new Set(tools.actions.keys())), resolver, {
+      const evaluation = yield* evaluate(normalizeProgramActions(parsed), resolver, {
         ...(request.maxLoopIterations === undefined ? {} : { maxLoopIterations: request.maxLoopIterations }),
         bindings: request.bindings
       }).pipe(Effect.result)
@@ -2019,54 +1742,31 @@ const runProgram = (executor: {
     })
 
 const programRunnerLive = (configuration: {
-  readonly actions: ReadonlyMap<string, ExportedToolAction>
-  readonly cellProfile: CellProfile
   readonly nativeActions: NativeActionSurface
   readonly bindPath: ProgramPathSelectorBinder
 }) => {
   // Bind a snapshot to the Layer so later mutation of a caller-owned Set
   // cannot widen a runner that was already configured.
-  const tools = {
-    actions: configuration.actions,
-    cellProfile: configuration.cellProfile,
+  const surface = {
     nativeActions: new Set(configuration.nativeActions) as NativeActionSurface,
     bindPath: configuration.bindPath
   }
   return Layer.effect(
     ProgramRunner,
-    Effect.gen(function* () {
-      const executor = yield* ProgramActionExecutor
-      const digests = yield* Crypto.Crypto
-      return ProgramRunner.of({
-        run: runProgram(executor, tools, digests)
-      })
-    })
+    Effect.map(ProgramActionExecutor, (executor) => ProgramRunner.of({
+      run: runProgram(executor, surface)
+    }))
   )
 }
 
 /** The default language surface contains all native actions. */
 export const ProgramRunnerLive = programRunnerLive({
-  actions: new Map(),
-  cellProfile: "compatibility",
   nativeActions: ALL_NATIVE_ACTIONS,
   bindPath: unchangedProgramPathSelector
 })
 
-/** Build a native-only runner with an explicit opt-in action surface. */
+/** Build a runner with an explicit opt-in action surface. */
 export const ProgramRunnerWithNativeActionsLive = (
   nativeActions: NativeActionSurface,
   bindPath: ProgramPathSelectorBinder = unchangedProgramPathSelector
-) => programRunnerLive({
-  actions: new Map(),
-  cellProfile: "compatibility",
-  nativeActions,
-  bindPath
-})
-
-/** A caller that loaded definitions may explicitly extend one runner surface. */
-export const ProgramRunnerWithToolsLive = (
-  actions: ReadonlyMap<string, ExportedToolAction>,
-  cellProfile: CellProfile,
-  nativeActions: NativeActionSurface = ALL_NATIVE_ACTIONS,
-  bindPath: ProgramPathSelectorBinder = unchangedProgramPathSelector
-) => programRunnerLive({ actions, cellProfile, nativeActions, bindPath })
+) => programRunnerLive({ nativeActions, bindPath })

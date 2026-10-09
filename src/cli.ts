@@ -46,7 +46,7 @@ import {
 } from "./daemon/index.ts"
 import {
   ProgramActionDecodeFailed,
-  ProgramExecutionWithToolsLive,
+  ProgramExecutionLive,
   ProgramRequest,
   ProgramRunner,
   type ProgramPathSelectorBinder,
@@ -55,13 +55,6 @@ import {
   nativeActionResultSchema,
   unchangedProgramPathSelector
 } from "./program/index.ts"
-import {
-  ToolDefinitionDirectories,
-  type ExportedToolAction,
-  exportToolActions,
-  loadKnownToolDefinitions
-} from "./core/tools/index.ts"
-import { makeFileToolDefinitionReader } from "./tools/FileReader.ts"
 import {
   makeFileRuntimeRunJournal,
   RuntimeConfig,
@@ -73,7 +66,6 @@ import {
   type SealContext,
   SealVerificationFailed,
   loadStartupSeal,
-  sealedTools,
   verifyInstalledReadiness
 } from "./seal/index.ts"
 import { describeFailure, reasonOf } from "./FailureText.ts"
@@ -413,45 +405,6 @@ const compatibilityPolicy = (workspace: string) => new AdmissionPolicy({
   executableEdges: [],
   endpointGrants: []
 })
-
-/** Fixed, immediate, optional locations; definitions never recursively load code. */
-const definitionDirectories = (workspace: string) => new ToolDefinitionDirectories({
-  builtin: nodePath.join(import.meta.dir, "..", "tool-definitions"),
-  installed: nodePath.join(process.env["AIRLOCK_HOME"] ?? nodePath.join(nodeOs.homedir(), ".airlock"), "tools"),
-  user: nodePath.join(nodeOs.homedir(), ".config", "airlock", "tools"),
-  project: nodePath.join(workspace, ".airlock", "tools")
-})
-
-const toolDefinitionFailure = (error: { readonly _tag: string }): CliInputError =>
-  new CliInputError({
-    field: "tool-definitions",
-    reason: "message" in error && typeof error.message === "string" && error.message !== ""
-      ? error.message
-      : "reason" in error && typeof error.reason === "string"
-        ? error.reason
-        : error._tag
-  })
-
-const discoveredTools = (
-  seal: SealContext,
-  workspace: string
-): Effect.Effect<ReadonlyArray<ExportedToolAction>, CliInputError> => {
-  if (seal._tag === "VerifiedSeal") {
-    return sealedTools(seal, workspace).pipe(
-      Effect.mapError(toolDefinitionFailure)
-    )
-  }
-  return loadKnownToolDefinitions(
-    makeFileToolDefinitionReader(),
-    definitionDirectories(workspace)
-  ).pipe(
-    Effect.flatMap((registry) => exportToolActions(
-      registry,
-      new Set(NativeActionCatalog.map((action) => action.name))
-    )),
-    Effect.mapError(toolDefinitionFailure)
-  )
-}
 
 const bindPolicyPathScopes = (
   policy: AdmissionPolicy
@@ -992,36 +945,14 @@ const visibleNativeActions = (seal: SealContext) => {
   return NativeActionCatalog.filter((action) => allowed.has(action.name))
 }
 
-const definitionActionIsVisible = (
-  lowering: "invoke" | "enqueue",
-  nativeActions: ReadonlySet<NativeActionName>
-) => lowering === "invoke"
-  ? nativeActions.has("process.run")
-  : nativeActions.has("http.stage")
-
-const makeActions = (seal: SealContext) => Command.make("actions", {
-  workspace: Flag.String("workspace").pipe(Flag.withDefault(process.cwd()))
-}, ({ workspace }) => rendered(
+const makeActions = (seal: SealContext) => Command.make("actions", {}, () => rendered(
   requireVerb(seal, "actions").pipe(
-    Effect.andThen(discoveredTools(seal, nodePath.resolve(workspace))),
-    Effect.map((tools) => {
-      const nativeActions = allowedNativeActions(seal)
-      return {
-        schemaVersion: "airlock/actions/v1",
-        actions: visibleNativeActions(seal),
-        definitions: tools
-          .filter((tool) => definitionActionIsVisible(tool.action.lowering, nativeActions))
-          .map((tool) => ({
-            name: tool.name,
-            definitionId: tool.loaded.definition.id,
-            version: tool.loaded.definition.version,
-            executable: tool.loaded.definition.executables.map((item) => item.selector),
-            resultDecoder: tool.action.resultDecoder
-          }))
-      }
-    })
+    Effect.map(() => ({
+      schemaVersion: "airlock/actions/v1",
+      actions: visibleNativeActions(seal)
+    }))
   )
-)).pipe(Command.withDescription("List built-in actions plus inert discovered tool definitions"))
+)).pipe(Command.withDescription("List the actions a program can call"))
 
 /**
  * Draft 2020-12 JSON Schema for one discovery contract. Unmodeled properties
@@ -1316,7 +1247,6 @@ const executeProgram = (
             Effect.flatMap(bindPolicyPathScopes)
           )
     )
-    const tools = yield* discoveredTools(seal, workspace)
     const parsedBindings = yield* parseBindings(rawBindings)
     const bindingsValue = profile === "native-contained"
       ? { ...parsedBindings, workspace }
@@ -1332,7 +1262,6 @@ const executeProgram = (
         NativeFileSystemLive(new NativeFilesystemConfig({ workspace }))
       )
     )
-    const toolActions = new Map(tools.map((tool) => [tool.name, tool]))
     const bindPath: ProgramPathSelectorBinder = profile === "native-contained"
       ? (action, selector) => bindPhysicalPathSelector(workspace, selector).pipe(
           Effect.mapError((cause) => new ProgramActionDecodeFailed({
@@ -1343,22 +1272,13 @@ const executeProgram = (
         )
       : unchangedProgramPathSelector
     const programLayer = seal._tag === "VerifiedSeal"
-      ? ProgramExecutionWithToolsLive(
+      ? ProgramExecutionLive(
           policy,
-          toolActions,
-          profile,
           new Set(seal.grant.nativeActions),
           { sealDigest: seal.grantDigest },
           bindPath
         )
-      : ProgramExecutionWithToolsLive(
-          policy,
-          toolActions,
-          profile,
-          undefined,
-          undefined,
-          bindPath
-        )
+      : ProgramExecutionLive(policy, undefined, undefined, bindPath)
     const runner = yield* ProgramRunner.pipe(
       Effect.provide(programLayer.pipe(Layer.provideMerge(runtimeLayer)))
     )

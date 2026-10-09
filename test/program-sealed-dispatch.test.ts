@@ -56,8 +56,7 @@ const draft = new PlanDraft({
     realm: "remote/status.internal.example",
     selector: endpoint,
     rights: ["connect", "emit"]
-  })],
-  definitionDigests: []
+  })]
 })
 
 describe("sealed Program dispatch authority", () => {
@@ -80,10 +79,6 @@ describe("sealed Program dispatch authority", () => {
           target: endpoint
         }
       })
-      expect(supervisorDispatchAuthority(policy, { sealDigest })(
-        authority,
-        "mutate"
-      )).toEqual([])
       expect(supervisorDispatchAuthority(policy)(authority)[0]?.stagedAuthorization)
         .toBeUndefined()
     })

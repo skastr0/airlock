@@ -2,6 +2,7 @@ import { createHash, generateKeyPairSync, sign } from "node:crypto"
 import {
   mkdir,
   mkdtemp,
+  rename,
   symlink,
   writeFile
 } from "node:fs/promises"
@@ -10,19 +11,16 @@ import { join } from "node:path"
 import { describe, expect, it } from "@effect/vitest"
 import { Effect } from "effect"
 import { decodeBoxGrant } from "../src/core/admission/BoxGrant.ts"
-import { DEFAULT_TOOL_DEFINITION_MAX_BYTES } from "../src/tools/FileReader.ts"
 import {
   AIRLOCK_SEAL_ENV,
   BOX_GRANT_FILE,
   BOX_GRANT_SIGNATURE_FILE,
   BinarySnapshot,
   OPERATOR_PUBLIC_KEY_FILE,
-  SEAL_CATALOG_DIRECTORY,
   SealVerificationFailed,
   UnsealedSeal,
   VerifiedSeal,
   boxGrantSigningPayload,
-  catalogFileNameForPin,
   loadStartupSeal,
   reverifySeal
 } from "../src/seal/index.ts"
@@ -46,34 +44,10 @@ const admission = {
   endpointGrants: []
 }
 
-const definition = (id = "vendor.echo") => new TextEncoder().encode(JSON.stringify({
-  schemaVersion: "airlock/tool-definition/v2",
-  id,
-  version: "1.0.0",
-  executables: [{ realm: "machine", selector: "/usr/bin/true" }],
-  actions: [{
-    name: "check",
-    inputSchema: { type: "object" },
-    args: [],
-    cwd: { _tag: "Literal", value: "/tmp" },
-    lowering: "invoke",
-    effectFootprint: ["invoke"],
-    resultDecoder: "exit-status"
-  }]
-}))
-
-type Entry = {
-  readonly pinId: string
-  readonly rawBytes: Uint8Array
-  readonly write?: boolean
-}
-
 type FixtureOptions = {
   readonly admission?: typeof admission
-  readonly entries?: ReadonlyArray<Entry>
   readonly grantOverrides?: Readonly<Record<string, unknown>>
   readonly serializeGrant?: (grant: Record<string, unknown>) => string
-  readonly makeCatalog?: boolean
   readonly writeGrant?: boolean
   readonly writeSignature?: boolean
   readonly signatureBytes?: (signature: Uint8Array) => Uint8Array
@@ -81,23 +55,11 @@ type FixtureOptions = {
 
 const makeFixture = async (options: FixtureOptions = {}) => {
   const sealPath = await mkdtemp(join(tmpdir(), "airlock-seal-"))
-  const catalogPath = join(sealPath, SEAL_CATALOG_DIRECTORY)
-  if (options.makeCatalog !== false) await mkdir(catalogPath)
-
-  const entries = options.entries ?? [{
-    pinId: "vendor.echo",
-    rawBytes: definition()
-  }]
-  const pins = entries.map((entry) => ({
-    id: entry.pinId,
-    sha256: digest(entry.rawBytes)
-  }))
   const grantObject: Record<string, unknown> = {
     schemaVersion: "airlock/box-grant/v1",
     admission: options.admission ?? admission,
     verbs: ["run", "actions"],
     nativeActions: ["file.read", "process.run"],
-    catalog: pins,
     daemonOps: ["commit"],
     binaryDigest: digest(binary),
     ...options.grantOverrides
@@ -121,25 +83,12 @@ const makeFixture = async (options: FixtureOptions = {}) => {
     await writeFile(join(sealPath, BOX_GRANT_SIGNATURE_FILE), signature)
   }
 
-  if (options.makeCatalog !== false) {
-    for (let index = 0; index < entries.length; index++) {
-      const entry = entries[index]!
-      if (entry.write === false) continue
-      await writeFile(
-        join(catalogPath, catalogFileNameForPin(grant.catalog[index]!)),
-        entry.rawBytes
-      )
-    }
-  }
-
   return {
     sealPath,
-    catalogPath,
     grant,
     grantObject,
     privateKey: keys.privateKey,
-    publicKey: keys.publicKey,
-    pins
+    publicKey: keys.publicKey
   }
 }
 
@@ -217,38 +166,29 @@ describe("startup seal verification", () => {
   })
 
   it("verifies generated Ed25519 authority and retains exact inert snapshots", async () => {
-    const rawBytes = definition("vendor.echo")
-    const fixture = await makeFixture({
-      entries: [{ pinId: "vendor.echo", rawBytes }]
-    })
+    const fixture = await makeFixture()
     const context = await load(fixture.sealPath)
 
     expect(context).toBeInstanceOf(VerifiedSeal)
     expect(context._tag).toBe("VerifiedSeal")
     expect(context.grant.admission.schemaVersion).toBe("airlock/admission-policy/v2")
+    expect(context.grant.nativeActions).toEqual(["file.read", "process.run"])
     expect(context.grantDigest).toMatch(/^sha256:[0-9a-f]{64}$/)
     expect(context.binaryDigest).toBe(digest(binary))
     expect(context.binaryPath).toBe("/fixture/airlock")
-    expect(context.catalog).toHaveLength(1)
-    expect(context.catalog[0]).toMatchObject({
-      id: "vendor.echo",
-      digest: digest(rawBytes)
-    })
-    expect(context.catalog[0]!.path).toBe(join(
-      fixture.catalogPath,
-      catalogFileNameForPin(fixture.grant.catalog[0]!)
-    ))
-    expect([...context.catalog[0]!.rawBytes]).toEqual([...rawBytes])
-    expect(context.catalog[0]!.definition.schemaVersion).toBe(
-      "airlock/tool-definition/v2"
-    )
   })
 
-  it("uses a digest filename and never a grant id as a path fragment", () => {
-    const sha256 = Sha256Digest.make(`sha256:${"a".repeat(64)}`)
-    expect(catalogFileNameForPin({ sha256 })).toBe(
-      `sha256-${"a".repeat(64)}.airlock-tool.json`
+  it("refuses a grant that still pins a definition catalog", async () => {
+    const fixture = await makeFixture()
+    await writeFile(
+      join(fixture.sealPath, BOX_GRANT_FILE),
+      JSON.stringify({ ...fixture.grantObject, catalog: [] })
     )
+    const error = await failed(loadStartupSeal({
+      sealPath: fixture.sealPath,
+      binarySnapshotProvider: provider()
+    }))
+    expect(error).toMatchObject({ phase: "grant", reason: "invalid-grant" })
   })
 
   it("verifies whitespace and object-key reordered JSON against semantic grant identity", async () => {
@@ -387,135 +327,58 @@ describe("startup seal verification", () => {
     expect(error).toMatchObject({ phase: "identity", reason: "source-mode" })
   })
 
-  it("requires the catalog directory even for an empty pin set", async () => {
-    const fixture = await makeFixture({ entries: [], makeCatalog: false })
-    const error = await failed(loadStartupSeal({
-      sealPath: fixture.sealPath,
-      binarySnapshotProvider: provider()
-    }))
-    expect(error).toMatchObject({ phase: "catalog", reason: "missing" })
-  })
-
-  it("accepts an empty catalog only when it has no suffix-bearing children", async () => {
-    const fixture = await makeFixture({ entries: [] })
-    await writeFile(join(fixture.catalogPath, "README.txt"), "ignored")
-    const context = await load(fixture.sealPath)
-    expect(context.catalog).toEqual([])
-  })
-
-  it("rejects an extra immediate definition suffix file", async () => {
+  it("does not read a grant through a symlink, even to identical signed bytes", async () => {
     const fixture = await makeFixture()
-    await writeFile(
-      join(fixture.catalogPath, "extra.airlock-tool.json"),
-      definition("vendor.extra")
-    )
-    const error = await failed(loadStartupSeal({
-      sealPath: fixture.sealPath,
-      binarySnapshotProvider: provider()
-    }))
-    expect(error).toMatchObject({ phase: "catalog", reason: "catalog-file-extra" })
-  })
-
-  it("rejects a missing digest-named catalog file", async () => {
-    const fixture = await makeFixture({
-      entries: [{ pinId: "vendor.echo", rawBytes: definition(), write: false }]
-    })
-    const error = await failed(loadStartupSeal({
-      sealPath: fixture.sealPath,
-      binarySnapshotProvider: provider()
-    }))
-    expect(error).toMatchObject({ phase: "catalog", reason: "catalog-file-missing" })
-  })
-
-  it("does not follow a digest-named catalog symlink", async () => {
-    const rawBytes = definition()
-    const fixture = await makeFixture({
-      entries: [{ pinId: "vendor.echo", rawBytes, write: false }]
-    })
     const outside = join(
       await mkdtemp(join(tmpdir(), "airlock-seal-outside-")),
-      "definition.json"
+      "box-grant.json"
     )
-    await writeFile(outside, rawBytes)
-    await symlink(
-      outside,
-      join(fixture.catalogPath, catalogFileNameForPin(fixture.grant.catalog[0]!))
-    )
+    await rename(join(fixture.sealPath, BOX_GRANT_FILE), outside)
+    await symlink(outside, join(fixture.sealPath, BOX_GRANT_FILE))
 
     const error = await failed(loadStartupSeal({
       sealPath: fixture.sealPath,
       binarySnapshotProvider: provider()
     }))
-    expect(error).toMatchObject({ phase: "catalog", reason: "symlink" })
+    expect(error).toMatchObject({ phase: "grant", reason: "symlink" })
   })
 
-  it("rejects a nonregular digest-named catalog entry", async () => {
-    const rawBytes = definition()
-    const fixture = await makeFixture({
-      entries: [{ pinId: "vendor.echo", rawBytes, write: false }]
-    })
-    await mkdir(join(
-      fixture.catalogPath,
-      catalogFileNameForPin(fixture.grant.catalog[0]!)
-    ))
+  it("does not read a signature or an operator key through a symlink", async () => {
+    for (const [file, phase] of [
+      [BOX_GRANT_SIGNATURE_FILE, "signature"],
+      [OPERATOR_PUBLIC_KEY_FILE, "key"]
+    ] as const) {
+      const fixture = await makeFixture()
+      const outside = join(await mkdtemp(join(tmpdir(), "airlock-seal-outside-")), file)
+      await rename(join(fixture.sealPath, file), outside)
+      await symlink(outside, join(fixture.sealPath, file))
+
+      const error = await failed(loadStartupSeal({
+        sealPath: fixture.sealPath,
+        binarySnapshotProvider: provider()
+      }))
+      expect(error, file).toMatchObject({ phase, reason: "symlink" })
+    }
+  })
+
+  it("rejects a grant that is not a regular file", async () => {
+    const fixture = await makeFixture({ writeGrant: false })
+    await mkdir(join(fixture.sealPath, BOX_GRANT_FILE))
     const error = await failed(loadStartupSeal({
       sealPath: fixture.sealPath,
       binarySnapshotProvider: provider()
     }))
-    expect(error).toMatchObject({ phase: "catalog", reason: "not-regular" })
+    expect(error).toMatchObject({ phase: "grant", reason: "not-regular" })
   })
 
-  it("enforces the current tool-definition size limit", async () => {
-    const rawBytes = new Uint8Array(DEFAULT_TOOL_DEFINITION_MAX_BYTES + 1)
-    const fixture = await makeFixture({
-      entries: [{ pinId: "vendor.echo", rawBytes }]
-    })
-    const error = await failed(loadStartupSeal({
-      sealPath: fixture.sealPath,
-      binarySnapshotProvider: provider()
-    }))
-    expect(error).toMatchObject({ phase: "catalog", reason: "too-large" })
-  })
-
-  it("rejects a byte digest mismatch before decoding the definition", async () => {
+  it("enforces the grant size limit before decoding", async () => {
     const fixture = await makeFixture()
-    await writeFile(
-      join(fixture.catalogPath, catalogFileNameForPin(fixture.grant.catalog[0]!)),
-      definition("vendor.changed")
-    )
+    await writeFile(join(fixture.sealPath, BOX_GRANT_FILE), new Uint8Array(256 * 1024 + 1))
     const error = await failed(loadStartupSeal({
       sealPath: fixture.sealPath,
       binarySnapshotProvider: provider()
     }))
-    expect(error).toMatchObject({ phase: "catalog", reason: "digest-mismatch" })
-  })
-
-  it("rejects invalid definition bytes even when their pin matches", async () => {
-    const fixture = await makeFixture({
-      entries: [{
-        pinId: "vendor.echo",
-        rawBytes: new TextEncoder().encode("{not json")
-      }]
-    })
-    const error = await failed(loadStartupSeal({
-      sealPath: fixture.sealPath,
-      binarySnapshotProvider: provider()
-    }))
-    expect(error).toMatchObject({
-      phase: "catalog",
-      reason: "invalid-tool-definition"
-    })
-  })
-
-  it("requires the decoded definition id to equal the pin id", async () => {
-    const fixture = await makeFixture({
-      entries: [{ pinId: "vendor.expected", rawBytes: definition("vendor.actual") }]
-    })
-    const error = await failed(loadStartupSeal({
-      sealPath: fixture.sealPath,
-      binarySnapshotProvider: provider()
-    }))
-    expect(error).toMatchObject({ phase: "catalog", reason: "tool-id-mismatch" })
+    expect(error).toMatchObject({ phase: "grant", reason: "too-large" })
   })
 })
 
@@ -527,7 +390,7 @@ describe("seal reverification", () => {
       binarySnapshotProvider: provider()
     }))
     expect(fresh.grantDigest).toBe(expected.grantDigest)
-    expect([...fresh.catalog[0]!.rawBytes]).toEqual([...expected.catalog[0]!.rawBytes])
+    expect(fresh.binaryDigest).toBe(expected.binaryDigest)
   })
 
   it("detects a newly valid but different grant", async () => {
@@ -548,20 +411,6 @@ describe("seal reverification", () => {
       binarySnapshotProvider: provider()
     }))
     expect(error).toMatchObject({ phase: "reverify", reason: "snapshot-mismatch" })
-  })
-
-  it("detects catalog bytes changed after the original capture", async () => {
-    const fixture = await makeFixture()
-    const expected = await load(fixture.sealPath)
-    await writeFile(
-      expected.catalog[0]!.path,
-      definition("vendor.changed")
-    )
-
-    const error = await failed(reverifySeal(expected, {
-      binarySnapshotProvider: provider()
-    }))
-    expect(error).toMatchObject({ phase: "catalog", reason: "digest-mismatch" })
   })
 
   it("detects changed binary bytes on the fresh pass", async () => {

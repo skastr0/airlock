@@ -34,7 +34,6 @@ export * as Hold from "./domain.ts"
 export * as Labels from "./labels/index.ts"
 export * as Language from "./language/index.ts"
 export * as Plan from "./plan/index.ts"
-export * as Tools from "./tools/index.ts"
 export * as WebCrypto from "./WebCrypto.ts"
 export { EffectClass, Ledger, LedgerEntry, LedgerFailed } from "./ledger/Ledger.ts"
 export {

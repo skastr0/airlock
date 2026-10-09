@@ -4,7 +4,7 @@
  * bundles and fresh same-user local generations. A bundle contains:
  *
  *   BUNDLE/bin/airlock
- *   BUNDLE/seal/{box-grant.json,box-grant.ed25519,operator-ed25519.pub.pem,catalog/}
+ *   BUNDLE/seal/{box-grant.json,box-grant.ed25519,operator-ed25519.pub.pem}
  *
  * This tool never removes or replaces an artifact. Installation exclusively
  * owns a fresh generation directory, builds in place, and publishes readiness
@@ -54,28 +54,20 @@ import {
   BOX_GRANT_SIGNATURE_FILE,
   BinarySnapshot,
   OPERATOR_PUBLIC_KEY_FILE,
-  SEAL_CATALOG_DIRECTORY,
   boxGrantSigningPayload,
-  catalogFileNameForPin,
   verifySealAtPath
 } from "../src/seal/index.ts"
-import {
-  ToolDefinitionDocument,
-  ToolDefinitionLocation,
-  decodeToolDefinition
-} from "../src/core/tools/Definitions.ts"
-import { DEFAULT_TOOL_DEFINITION_MAX_BYTES } from "../src/tools/FileReader.ts"
 
 const usage = `usage: bun scripts/seal-box.ts <command> [options]
 
 Commands:
   keygen --private-key PATH --public-key PATH
   create --binary FILE --admission FILE [--verb V ...] [--native-action A ...]
-         [--definition FILE ...] [--daemon-op O ...] --private-key FILE
+         [--daemon-op O ...] --private-key FILE
          --public-key FILE --out FRESH_DIR [--allow-sealed-compatibility]
   verify --bundle DIR
   local --workspace DIR --out FRESH_DIR --private-key FILE --public-key FILE
-        [--admission FILE] [--definition FILE ...]
+        [--admission FILE]
         [--allow-sealed-compatibility] [--with-daemon-commit]
   install --bundle DIR --root DIR --box ID --workspace DIR
           [--daemon-user NAME --daemon-uid N --daemon-group NAME --daemon-gid N]
@@ -115,7 +107,7 @@ const optionSpecification = {
       "--binary", "--admission", "--private-key", "--public-key", "--out"
     ]),
     repeated: new Set([
-      "--verb", "--native-action", "--definition", "--daemon-op"
+      "--verb", "--native-action", "--daemon-op"
     ]),
     boolean: new Set(["--allow-sealed-compatibility"])
   },
@@ -128,7 +120,7 @@ const optionSpecification = {
     single: new Set([
       "--workspace", "--out", "--private-key", "--public-key", "--admission"
     ]),
-    repeated: new Set(["--definition"]),
+    repeated: new Set<string>(),
     boolean: new Set([
       "--allow-sealed-compatibility", "--with-daemon-commit"
     ])
@@ -564,15 +556,9 @@ const keygen = async (): Promise<void> => {
   console.log(JSON.stringify({ privateKey: privatePath, publicKey: publicPath }))
 }
 
-type DefinitionSnapshot = {
-  readonly id: string
-  readonly rawBytes: Uint8Array
-  readonly digest: `sha256:${string}`
-}
-
 const decodeAdmission = async (path: string): Promise<typeof AdmissionPolicy.Type> => {
   const bytes = await readRegularNoSymlink("--admission", path, {
-    maxBytes: DEFAULT_TOOL_DEFINITION_MAX_BYTES
+    maxBytes: 256 * 1024
   })
   const parsed = decodeJson("--admission", decodeUtf8("--admission", bytes))
   try {
@@ -581,25 +567,6 @@ const decodeAdmission = async (path: string): Promise<typeof AdmissionPolicy.Typ
     )
   } catch {
     return fail("--admission is not a strict AdmissionPolicy", 65)
-  }
-}
-
-const decodeDefinition = async (path: string): Promise<DefinitionSnapshot> => {
-  const rawBytes = await readRegularNoSymlink("--definition", path, {
-    maxBytes: DEFAULT_TOOL_DEFINITION_MAX_BYTES
-  })
-  const json = decodeUtf8("--definition", rawBytes)
-  const location = new ToolDefinitionLocation({
-    kind: "installed",
-    directory: dirname(path)
-  })
-  try {
-    const loaded = await Effect.runPromise(decodeToolDefinition(
-      new ToolDefinitionDocument({ location, file: path, json })
-    ))
-    return { id: loaded.definition.id, rawBytes, digest: sha256(rawBytes) }
-  } catch {
-    return fail(`invalid tool definition: ${path}`, 65)
   }
 }
 
@@ -668,10 +635,8 @@ const create = async (): Promise<void> => {
   const privatePath = requireAbsolute("--private-key", required(options, "--private-key"))
   const publicPath = requireAbsolute("--public-key", required(options, "--public-key"))
   const out = requireAbsolute("--out", required(options, "--out"))
-  const definitionPaths = (options.repeated.get("--definition") ?? [])
-    .map((path) => requireAbsolute("--definition", path))
 
-  const allInputs = [binaryPath, admissionPath, privatePath, publicPath, ...definitionPaths]
+  const allInputs = [binaryPath, admissionPath, privatePath, publicPath]
   if (allInputs.some((path) => pathInside(out, path) || pathInside(path, out))) {
     fail("--out must be disjoint from every input path")
   }
@@ -686,17 +651,6 @@ const create = async (): Promise<void> => {
   ) {
     fail("sealed compatibility policy requires --allow-sealed-compatibility", 65)
   }
-  const definitions: Array<DefinitionSnapshot> = []
-  for (const path of definitionPaths) definitions.push(await decodeDefinition(path))
-  const definitionIds = new Set<string>()
-  const definitionDigests = new Set<string>()
-  for (const definition of definitions) {
-    if (definitionIds.has(definition.id)) fail(`duplicate definition id: ${definition.id}`, 65)
-    if (definitionDigests.has(definition.digest)) fail(`duplicate definition digest: ${definition.digest}`, 65)
-    definitionIds.add(definition.id)
-    definitionDigests.add(definition.digest)
-  }
-
   const privateKey = await privateKeyFrom(privatePath)
   const suppliedPublic = await publicKeyFrom(publicPath)
   if (!samePublicKey(createPublicKey(privateKey), suppliedPublic.key)) {
@@ -712,9 +666,6 @@ const create = async (): Promise<void> => {
       "--native-action",
       options.repeated.get("--native-action") ?? []
     ),
-    catalog: definitions
-      .map((definition) => ({ id: definition.id, sha256: definition.digest }))
-      .sort((left, right) => left.id.localeCompare(right.id) || left.sha256.localeCompare(right.sha256)),
     daemonOps: sortedUnique("--daemon-op", options.repeated.get("--daemon-op") ?? []),
     binaryDigest: sha256(binary)
   }
@@ -730,10 +681,8 @@ const create = async (): Promise<void> => {
   await mkdirFresh(out)
   const binPath = join(out, "bin")
   const sealPath = join(out, "seal")
-  const catalogPath = join(sealPath, SEAL_CATALOG_DIRECTORY)
   await mkdirFresh(binPath)
   await mkdirFresh(sealPath)
-  await mkdirFresh(catalogPath)
   await writeExclusive(join(binPath, "airlock"), binary, 0o555)
   await writeExclusive(join(binPath, "airlock-agent"), binary, 0o555)
   await writeExclusive(
@@ -743,13 +692,6 @@ const create = async (): Promise<void> => {
   )
   await writeExclusive(join(sealPath, BOX_GRANT_SIGNATURE_FILE), signature, 0o444)
   await writeExclusive(join(sealPath, OPERATOR_PUBLIC_KEY_FILE), suppliedPublic.bytes, 0o444)
-  for (const definition of definitions) {
-    await writeExclusive(
-      join(catalogPath, catalogFileNameForPin({ sha256: definition.digest })),
-      definition.rawBytes,
-      0o444
-    )
-  }
   const verified = await verifyBundle(out)
   console.log(JSON.stringify({
     bundle: out,
@@ -766,8 +708,7 @@ const verify = async (): Promise<void> => {
   console.log(JSON.stringify({
     bundle,
     grantDigest: verified.grantDigest,
-    binaryDigest: verified.binaryDigest,
-    definitions: verified.catalog.map((entry) => entry.id)
+    binaryDigest: verified.binaryDigest
   }))
 }
 
@@ -838,7 +779,6 @@ const local = async (): Promise<void> => {
     required(options, "--public-key")
   )
   const requestedAdmission = options.single.get("--admission")
-  const requestedDefinitions = options.repeated.get("--definition") ?? []
 
   // Resolve every authority-bearing input before claiming the fresh output.
   // In particular, /tmp and /private/tmp must compare as one physical scope.
@@ -860,14 +800,6 @@ const local = async (): Promise<void> => {
         "--admission",
         requireAbsolute("--admission", requestedAdmission)
       )
-  const definitionPaths: Array<string> = []
-  for (const requested of requestedDefinitions) {
-    definitionPaths.push(await canonicalLocalFile(
-      "--definition",
-      requireAbsolute("--definition", requested)
-    ))
-  }
-
   if (pathsOverlap(out, workspace)) {
     fail("--out and --workspace must be physically disjoint")
   }
@@ -877,8 +809,7 @@ const local = async (): Promise<void> => {
   const allInputs = [
     privatePath,
     publicPath,
-    ...(admissionPath === undefined ? [] : [admissionPath]),
-    ...definitionPaths
+    ...(admissionPath === undefined ? [] : [admissionPath])
   ]
   if (allInputs.some((path) => pathsOverlap(out, path))) {
     fail("--out must be physically disjoint from every input path")
@@ -908,21 +839,6 @@ const local = async (): Promise<void> => {
     !options.boolean.has("--allow-sealed-compatibility")
   ) {
     fail("sealed compatibility policy requires --allow-sealed-compatibility", 65)
-  }
-
-  const definitions: Array<DefinitionSnapshot> = []
-  for (const path of definitionPaths) definitions.push(await decodeDefinition(path))
-  const definitionIds = new Set<string>()
-  const definitionDigests = new Set<string>()
-  for (const definition of definitions) {
-    if (definitionIds.has(definition.id)) {
-      fail(`duplicate definition id: ${definition.id}`, 65)
-    }
-    if (definitionDigests.has(definition.digest)) {
-      fail(`duplicate definition digest: ${definition.digest}`, 65)
-    }
-    definitionIds.add(definition.id)
-    definitionDigests.add(definition.digest)
   }
 
   // mkdir is the no-replace ownership boundary. Every failure before SEALED
@@ -969,11 +885,6 @@ const local = async (): Promise<void> => {
       "file.glob", "file.inspect", "file.list", "file.read", "file.stat",
       "http.stage"
     ],
-    catalog: definitions
-      .map((definition) => ({ id: definition.id, sha256: definition.digest }))
-      .sort((left, right) =>
-        left.id.localeCompare(right.id) || left.sha256.localeCompare(right.sha256)
-      ),
     daemonOps: withDaemonCommit ? ["commit"] : [],
     binaryDigest: sha256(binary)
   }
@@ -992,9 +903,7 @@ const local = async (): Promise<void> => {
 
   await writeExclusive(join(binPath, "airlock-agent"), binary, 0o555)
   const sealPath = join(out, "seal")
-  const catalogPath = join(sealPath, SEAL_CATALOG_DIRECTORY)
   await mkdirFresh(sealPath)
-  await mkdirFresh(catalogPath)
   await writeExclusive(
     join(sealPath, BOX_GRANT_FILE),
     `${JSON.stringify(grant, null, 2)}\n`,
@@ -1010,13 +919,6 @@ const local = async (): Promise<void> => {
     suppliedPublic.bytes,
     0o444
   )
-  for (const definition of definitions) {
-    await writeExclusive(
-      join(catalogPath, catalogFileNameForPin({ sha256: definition.digest })),
-      definition.rawBytes,
-      0o444
-    )
-  }
 
   const home = join(out, "home")
   await mkdirFresh(home, 0o700)
@@ -1191,36 +1093,15 @@ const copyBundleInto = async (bundle: string, generation: string): Promise<void>
   const grant = await readRegularNoSymlink("bundle grant", join(seal, BOX_GRANT_FILE))
   const signature = await readRegularNoSymlink("bundle signature", join(seal, BOX_GRANT_SIGNATURE_FILE))
   const publicKey = await readRegularNoSymlink("bundle public key", join(seal, OPERATOR_PUBLIC_KEY_FILE))
-  const catalogNames = (await readdir(join(seal, SEAL_CATALOG_DIRECTORY), { withFileTypes: true }))
-    .map((entry) => {
-      if (!entry.isFile() || entry.isSymbolicLink()) fail("bundle catalog must contain regular files only", 65)
-      return entry.name
-    })
-    .sort()
-  const catalog = [] as Array<{ readonly name: string; readonly bytes: Uint8Array }>
-  for (const name of catalogNames) {
-    catalog.push({
-      name,
-      bytes: await readRegularNoSymlink("bundle catalog", join(seal, SEAL_CATALOG_DIRECTORY, name), {
-        maxBytes: DEFAULT_TOOL_DEFINITION_MAX_BYTES
-      })
-    })
-  }
-
   const binOut = join(generation, "bin")
   const sealOut = join(generation, "seal")
-  const catalogOut = join(sealOut, SEAL_CATALOG_DIRECTORY)
   await mkdirFresh(binOut)
   await mkdirFresh(sealOut)
-  await mkdirFresh(catalogOut)
   await writeExclusive(join(binOut, "airlock"), binary, 0o555)
   await writeExclusive(join(binOut, "airlock-agent"), binary, 0o555)
   await writeExclusive(join(sealOut, BOX_GRANT_FILE), grant, 0o444)
   await writeExclusive(join(sealOut, BOX_GRANT_SIGNATURE_FILE), signature, 0o444)
   await writeExclusive(join(sealOut, OPERATOR_PUBLIC_KEY_FILE), publicKey, 0o444)
-  for (const entry of catalog) {
-    await writeExclusive(join(catalogOut, entry.name), entry.bytes, 0o444)
-  }
 }
 
 const install = async (): Promise<void> => {

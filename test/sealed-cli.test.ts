@@ -16,7 +16,6 @@ import { beforeAll, describe, expect, it } from "vitest"
 import {
   AdmissionPolicy,
   BoxGrant,
-  BoxGrantCatalogPin,
   type BoxGrantVerb,
   EndpointGrantPolicy
 } from "../src/core/admission/index.ts"
@@ -25,9 +24,7 @@ import {
   BOX_GRANT_FILE,
   BOX_GRANT_SIGNATURE_FILE,
   OPERATOR_PUBLIC_KEY_FILE,
-  SEAL_CATALOG_DIRECTORY,
-  boxGrantSigningPayload,
-  catalogFileNameForPin
+  boxGrantSigningPayload
 } from "../src/seal/index.ts"
 import { Sha256Digest } from "../src/core/Canonical.ts"
 
@@ -69,26 +66,15 @@ const makeSeal = (name: string, options: {
   readonly verbs: ReadonlyArray<BoxGrantVerb>
   readonly nativeActions: ReadonlyArray<NativeActionName>
   readonly admission?: AdmissionPolicy
-  readonly definitions?: ReadonlyArray<{
-    readonly id: string
-    readonly bytes: Uint8Array
-  }>
 }) => {
   const directory = join(root, `seal-${name}`)
-  const catalog = join(directory, SEAL_CATALOG_DIRECTORY)
-  mkdirSync(catalog, { recursive: true })
+  mkdirSync(directory, { recursive: true })
   const { privateKey, publicKey } = generateKeyPairSync("ed25519")
-  const definitions = options.definitions ?? []
-  const pins = definitions.map((definition) => new BoxGrantCatalogPin({
-    id: definition.id,
-    sha256: digest(definition.bytes)
-  }))
   const grant = new BoxGrant({
     schemaVersion: "airlock/box-grant/v1",
     admission: options.admission ?? defaultAdmission(),
     verbs: [...options.verbs],
     nativeActions: [...options.nativeActions],
-    catalog: pins,
     daemonOps: [],
     binaryDigest: digest(readFileSync(binary))
   })
@@ -101,12 +87,6 @@ const makeSeal = (name: string, options: {
     join(directory, BOX_GRANT_SIGNATURE_FILE),
     sign(null, boxGrantSigningPayload(grant), privateKey)
   )
-  for (const [index, definition] of definitions.entries()) {
-    writeFileSync(
-      join(catalog, catalogFileNameForPin(pins[index]!)),
-      definition.bytes
-    )
-  }
   return directory
 }
 
@@ -499,71 +479,21 @@ describe("sealed CLI grant graph", () => {
     expect(JSON.parse(pending.stdout)).toEqual([])
   })
 
-  it("loads only pinned definitions and filters discovery by the signed native surface", () => {
+  it("shows only the signed native surface, and nothing a workspace file adds", () => {
     const workspace = join(root, "discovery-workspace")
     mkdirSync(workspace, { recursive: true })
-    const invokeBytes = new TextEncoder().encode(JSON.stringify({
-      schemaVersion: "airlock/tool-definition/v2",
-      id: "invoke_tool",
-      version: "1.0.0",
-      executables: [{ realm: "local", selector: "/bin/echo" }],
-      actions: [{
-        name: "call",
-        inputSchema: {
-          type: "object",
-          properties: { cwd: { type: "string" } },
-          required: ["cwd"],
-          additionalProperties: false
-        },
-        args: [],
-        cwd: { _tag: "Input", path: ["cwd"] },
-        lowering: "invoke",
-        effectFootprint: ["invoke"],
-        resultDecoder: "exit-status"
-      }]
-    }))
-    const enqueueBytes = new TextEncoder().encode(JSON.stringify({
-      schemaVersion: "airlock/tool-definition/v2",
-      id: "enqueue_tool",
-      version: "1.0.0",
-      executables: [],
-      actions: [{
-        name: "stage",
-        inputSchema: {
-          type: "object",
-          properties: {},
-          required: [],
-          additionalProperties: false
-        },
-        lowering: "enqueue",
-        emissionEffect: "mutate",
-        request: {
-          method: "POST",
-          endpoint: { _tag: "Literal", value: "https://example.invalid/stage" }
-        },
-        effectFootprint: ["enqueue"],
-        resultDecoder: "none"
-      }]
-    }))
-    const definitions = [
-      { id: "invoke_tool", bytes: invokeBytes },
-      { id: "enqueue_tool", bytes: enqueueBytes }
-    ]
 
     const fileOnlySeal = makeSeal("discovery-file", {
       verbs: ["actions", "schema"],
-      nativeActions: ["file.write"],
-      definitions
+      nativeActions: ["file.write"]
     })
-    const fileOnly = invoke(["actions", "--workspace", workspace], {
-      seal: fileOnlySeal,
-      cwd: workspace
-    })
+    const fileOnly = invoke(["actions"], { seal: fileOnlySeal, cwd: workspace })
     expect(fileOnly.status, fileOnly.stderr).toBe(0)
-    expect(parseJson(fileOnly.stdout)).toMatchObject({
-      actions: [{ name: "file.write" }],
-      definitions: []
-    })
+    const listed = parseJson(fileOnly.stdout) as {
+      readonly actions: ReadonlyArray<{ readonly name: string }>
+    }
+    expect(Object.keys(listed).sort()).toEqual(["actions", "schemaVersion"])
+    expect(listed.actions.map(({ name }) => name)).toEqual(["file.write"])
 
     for (const subject of ["actions", "all"]) {
       const visibleSchema = invoke(["schema", subject], {
@@ -593,52 +523,40 @@ describe("sealed CLI grant graph", () => {
     })
     expect(disabledSchema.stderr).not.toContain("file.read")
 
-    const enqueueSeal = makeSeal("discovery-enqueue", {
-      verbs: ["actions", "schema"],
-      nativeActions: ["http.stage"],
-      definitions
-    })
-    const enqueueOnly = invoke(["actions", "--workspace", workspace], {
-      seal: enqueueSeal,
-      cwd: workspace
-    })
-    expect(enqueueOnly.status, enqueueOnly.stderr).toBe(0)
-    const enqueuePayload = parseJson(enqueueOnly.stdout) as {
-      readonly actions: ReadonlyArray<{ readonly name: string }>
-      readonly definitions: ReadonlyArray<{ readonly name: string }>
+    for (const nativeAction of ["http.stage", "process.run"] as const) {
+      const seal = makeSeal(`discovery-${nativeAction}`, {
+        verbs: ["actions"],
+        nativeActions: [nativeAction]
+      })
+      const only = invoke(["actions"], { seal, cwd: workspace })
+      expect(only.status, only.stderr).toBe(0)
+      expect((parseJson(only.stdout) as {
+        readonly actions: ReadonlyArray<{ readonly name: string }>
+      }).actions.map(({ name }) => name)).toEqual([nativeAction])
     }
-    expect(enqueuePayload.actions.map(({ name }) => name)).toEqual(["http.stage"])
-    expect(enqueuePayload.definitions.map(({ name }) => name)).toContain("enqueue_tool.stage")
-    expect(enqueuePayload.definitions.map(({ name }) => name)).not.toContain("invoke_tool.call")
 
-    const invokeSeal = makeSeal("discovery-invoke", {
-      verbs: ["actions"],
-      nativeActions: ["process.run"],
-      definitions
-    })
-    const invokeOnly = invoke(["actions", "--workspace", workspace], {
-      seal: invokeSeal,
-      cwd: workspace
-    })
-    expect(invokeOnly.status, invokeOnly.stderr).toBe(0)
-    const invokePayload = parseJson(invokeOnly.stdout) as {
-      readonly definitions: ReadonlyArray<{ readonly name: string }>
-    }
-    expect(invokePayload.definitions.map(({ name }) => name)).toContain("invoke_tool.call")
-    expect(invokePayload.definitions.map(({ name }) => name)).not.toContain("enqueue_tool.stage")
-
+    // Nothing a workspace can hold names a new action: a file where tool
+    // definitions used to be discovered changes neither the listing nor a run.
     const ambient = join(workspace, ".airlock", "tools")
     mkdirSync(ambient, { recursive: true })
-    writeFileSync(join(ambient, "extra.airlock-tool.json"), invokeBytes)
-    const refused = invoke(["actions", "--workspace", workspace], {
-      seal: enqueueSeal,
-      cwd: workspace
-    })
-    expect(refused.status).toBe(1)
-    expect(parseJson(refused.stderr)).toMatchObject({
-      _tag: "CliInputError",
-      field: "tool-definitions"
-    })
+    writeFileSync(join(ambient, "extra.airlock-tool.json"), JSON.stringify({
+      schemaVersion: "airlock/tool-definition/v2",
+      id: "invoke_tool",
+      version: "1.0.0",
+      executables: [{ realm: "local", selector: "/bin/echo" }],
+      actions: [{
+        name: "call",
+        inputSchema: { type: "object" },
+        args: [],
+        cwd: { _tag: "Literal", value: "/tmp" },
+        lowering: "invoke",
+        effectFootprint: ["invoke"],
+        resultDecoder: "exit-status"
+      }]
+    }))
+    const after = invoke(["actions"], { seal: fileOnlySeal, cwd: workspace })
+    expect(after.status, after.stderr).toBe(0)
+    expect(parseJson(after.stdout)).toEqual(listed)
   })
 
   it("constructs all current commands from one guarded descriptor table", () => {

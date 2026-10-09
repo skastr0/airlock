@@ -226,8 +226,7 @@ export class PlanDraft extends Schema.Class<PlanDraft>("PlanDraft")({
   actionReference: Schema.String,
   nodes: Schema.Array(PlanNode),
   requirements: Schema.Array(ResourceRequirement),
-  policyDigest: Schema.optional(Sha256Digest),
-  definitionDigests: Schema.Array(Sha256Digest)
+  policyDigest: Schema.optional(Sha256Digest)
 }) {}
 
 export class AuthorityAdmission extends Schema.Class<AuthorityAdmission>("AuthorityAdmission")({
@@ -250,7 +249,6 @@ export class Plan extends Schema.Class<Plan>("Plan")({
   handles: Schema.Array(Handle),
   resolutions: Schema.Array(HandleResolution),
   admission: AuthorityAdmission,
-  definitionDigests: Schema.Array(Sha256Digest),
   planDigest: Sha256Digest
 }) {}
 
@@ -754,7 +752,6 @@ export const closeExecution = (
       handles,
       resolutions,
       admission,
-      definitionDigests: draft.definitionDigests,
       planDigest
     })
   })

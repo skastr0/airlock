@@ -64,14 +64,12 @@ const seal = (daemonOps: ReadonlyArray<BoxGrantDaemonOp>) =>
       }),
       verbs: [],
       nativeActions: [],
-      catalog: [],
       daemonOps,
       binaryDigest: otherDigest
     }),
     grantDigest: sealDigest,
     binaryPath: "/fixture/airlock",
-    binaryDigest: otherDigest,
-    catalog: []
+    binaryDigest: otherDigest
   })
 
 type Staged = Extract<OutboxEmission, { readonly state: "staged" }>

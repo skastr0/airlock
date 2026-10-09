@@ -2,8 +2,8 @@
 /**
  * Live proof of the external-read slice.
  *
- * What it exercises: a `RequestExternal` intent lowered from either the native
- * `http.stage` action or a v2 `enqueue` tool definition, staged through the
+ * What it exercises: a `RequestExternal` intent lowered from the native
+ * `http.stage` action, staged through the
  * Outbox, and — only when the supervisor policy pre-authorized it — committed
  * through the ordinary `Outbox.commit`, with the receipt naming the grant, the
  * class, the dispatched endpoint, and bounded response metadata.
@@ -34,7 +34,7 @@ import { NativeFileSystemLive, NativeFilesystemConfig } from "../src/native/inde
 import { Outbox, OutboxLive } from "../src/Outbox.ts"
 import { ProcessRunnerLive } from "../src/process/Process.ts"
 import {
-  ProgramExecutionWithToolsLive,
+  ProgramExecutionLive,
   ProgramRequest,
   ProgramRunner
 } from "../src/program/index.ts"
@@ -44,25 +44,11 @@ import {
   RuntimeLive
 } from "../src/runtime/index.ts"
 import {
-  type ExportedToolAction,
-  ToolDefinitionDocument,
-  ToolDefinitionLocation,
-  ToolDefinitionRegistry,
-  decodeToolDefinition,
-  exportToolActions
-} from "../src/core/tools/index.ts"
-import {
   FIXTURE_LARGE_RESPONSE_BYTES,
   startFixtureEndpointProvider
 } from "../test/support/FixtureEndpointProvider.ts"
 
 const repository = fileURLToPath(new URL("../", import.meta.url))
-const exampleDefinitionFile = join(
-  repository,
-  "examples",
-  "tools",
-  "fixture-status.airlock-tool.json"
-)
 
 /** The bound `Outbox` enforces; the proof reads it from the receipt, not from here. */
 const EXPECTED_RESPONSE_LIMIT_BYTES = 65_536
@@ -108,27 +94,9 @@ type ProgramOutcome = {
   readonly outboxStates: ReadonlyArray<string>
 }
 
-const readExampleTools = Effect.gen(function* () {
-  const loaded = yield* decodeToolDefinition(
-    new ToolDefinitionDocument({
-      location: new ToolDefinitionLocation({
-        kind: "project",
-        directory: join(repository, "examples", "tools")
-      }),
-      file: exampleDefinitionFile,
-      json: readFileSync(exampleDefinitionFile, "utf8")
-    })
-  )
-  return yield* exportToolActions(
-    new ToolDefinitionRegistry({ definitions: [loaded] }),
-    new Set<string>()
-  )
-})
-
 const runProgram = async (
   policy: AdmissionPolicy,
-  source: string,
-  tools: ReadonlyArray<ExportedToolAction> = []
+  source: string
 ): Promise<ProgramOutcome> => {
   const home = mkdtempSync(join(tmpdir(), "airlock-external-read-"))
   const workspace = mkdtempSync(join(tmpdir(), "airlock-external-work-"))
@@ -167,11 +135,7 @@ const runProgram = async (
             NativeFileSystemLive(new NativeFilesystemConfig({ workspace }))
           )
         )
-        const programLayer = ProgramExecutionWithToolsLive(
-          policy,
-          new Map(tools.map((tool) => [tool.name, tool])),
-          "native-contained"
-        ).pipe(Layer.provideMerge(runtimeLayer))
+        const programLayer = ProgramExecutionLive(policy).pipe(Layer.provideMerge(runtimeLayer))
         const runner = yield* ProgramRunner.pipe(Effect.provide(programLayer))
         const run = yield* runner.run(new ProgramRequest({ source })).pipe(
           Effect.result
@@ -196,7 +160,7 @@ const runProgram = async (
             ? { state: run.success.state, failure: run.success.failure }
             : run.failure,
           ledger: ledgerText.split("\n").filter((line) => line.length > 0),
-          outboxStates: staged.map((emission) => emission.status)
+          outboxStates: staged.map((emission) => emission.state)
         } satisfies ProgramOutcome
       })
     )
@@ -221,7 +185,6 @@ const main = async () => {
     class: "read",
     commit: "auto"
   })
-  const tools = await Effect.runPromise(readExampleTools)
 
   try {
     // ---------------------------------------------------------------- positive
@@ -354,35 +317,6 @@ const main = async () => {
         diagnostics.slice(0, 220)
       )
     }
-    {
-      const smuggled = await Effect.runPromise(
-        decodeToolDefinition(
-          new ToolDefinitionDocument({
-            location: new ToolDefinitionLocation({
-              kind: "project",
-              directory: join(repository, "examples", "tools")
-            }),
-            file: "/proof/smuggled.airlock-tool.json",
-            json: JSON.stringify({
-              ...JSON.parse(readFileSync(exampleDefinitionFile, "utf8")),
-              actions: [
-                {
-                  ...JSON.parse(readFileSync(exampleDefinitionFile, "utf8"))
-                    .actions[0],
-                  commit: "auto"
-                }
-              ]
-            })
-          })
-        ).pipe(Effect.flip, Effect.result)
-      )
-      const tag = smuggled._tag === "Success" ? smuggled.success._tag : "no-refusal"
-      check(
-        "definition-class/typed refusal",
-        tag === "ToolGrantAssertionRejected",
-        `refusal=${tag}`
-      )
-    }
 
     // ------------------ negative: a mutating footprint is never auto-committed
     {
@@ -404,49 +338,6 @@ const main = async () => {
       check(
         "mutate-grant/never reached the provider",
         provider.requests.slice(before).length === 0,
-        `provider saw ${provider.requests.length - before} request(s)`
-      )
-    }
-    {
-      // The definition declares `mutate`; the grant classes the same endpoint
-      // `read` with `commit: "auto"`. The effective class is the stricter of
-      // the two, so this intent must stay staged.
-      const before = provider.requests.length
-      const outcome = await runProgram(
-        policyOf([readGrant]),
-        `return fixture_status.reconcile({ endpoint: "${origin}/v1/status" })`,
-        tools
-      )
-      const result = asRecord(outcome.result)
-      check(
-        "declared-mutate/narrows a read grant to staged",
-        result["state"] === "staged",
-        `state=${String(result["state"])} diagnostics=${String(JSON.stringify(outcome.diagnostics)).slice(0, 160)}`
-      )
-      check(
-        "declared-mutate/never reached the provider",
-        provider.requests.slice(before).length === 0,
-        `provider saw ${provider.requests.length - before} request(s)`
-      )
-    }
-    {
-      // The same declaration in its honest `read` form does auto-commit, which
-      // is what makes the previous proof a narrowing rather than a dead path.
-      const before = provider.requests.length
-      const outcome = await runProgram(
-        policyOf([readGrant]),
-        `return fixture_status.read({ endpoint: "${origin}/v1/status" })`,
-        tools
-      )
-      const result = asRecord(outcome.result)
-      check(
-        "declared-read/auto-commits through the same grant",
-        result["state"] === "committed" && result["dispatch_class"] === "read",
-        `state=${String(result["state"])} diagnostics=${String(JSON.stringify(outcome.diagnostics)).slice(0, 160)}`
-      )
-      check(
-        "declared-read/reached the provider",
-        provider.requests.slice(before).some((entry) => entry.path === "/v1/status"),
         `provider saw ${provider.requests.length - before} request(s)`
       )
     }

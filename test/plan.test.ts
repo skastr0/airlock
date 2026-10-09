@@ -68,7 +68,7 @@ const invoke = new InvokeNode({
 
 const draft = (nodes: ReadonlyArray<PlanNode> = [capture, apply]) => new PlanDraft({
   schemaVersion: "airlock/plan-draft/v1", id: PlanId.make("plan/test"), actionReference: "test.action",
-  nodes, requirements: [requirement], definitionDigests: [digest("sha256/definition")]
+  nodes, requirements: [requirement]
 })
 
 describe("Plan v1 kernel", () => {

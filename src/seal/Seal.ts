@@ -2,7 +2,7 @@ import {
   constants,
   type Stats
 } from "node:fs"
-import { lstat, open, readdir } from "node:fs/promises"
+import { lstat, open } from "node:fs/promises"
 import {
   createHash,
   createPublicKey,
@@ -13,21 +13,10 @@ import { BunCrypto } from "@effect/platform-bun"
 import { Effect, Schema } from "effect"
 import {
   BoxGrant,
-  BoxGrantCatalogPin,
   decodeBoxGrant,
   hashBoxGrant
 } from "../core/admission/BoxGrant.ts"
 import { Sha256Digest } from "../core/Canonical.ts"
-import {
-  ToolDefinition,
-  ToolDefinitionDocument,
-  ToolDefinitionLocation,
-  decodeToolDefinition
-} from "../core/tools/Definitions.ts"
-import {
-  DEFAULT_TOOL_DEFINITION_MAX_BYTES,
-  TOOL_DEFINITION_FILE_SUFFIX
-} from "../tools/FileReader.ts"
 
 /** The environment variable that opts startup into sealed operation. */
 export const AIRLOCK_SEAL_ENV = "AIRLOCK_SEAL"
@@ -36,7 +25,6 @@ export const AIRLOCK_SEAL_ENV = "AIRLOCK_SEAL"
 export const BOX_GRANT_FILE = "box-grant.json"
 export const BOX_GRANT_SIGNATURE_FILE = "box-grant.ed25519"
 export const OPERATOR_PUBLIC_KEY_FILE = "operator-ed25519.pub.pem"
-export const SEAL_CATALOG_DIRECTORY = "catalog"
 
 /**
  * Grant signatures bind decoded authority, rather than a particular spelling
@@ -56,32 +44,12 @@ export const boxGrantDigest = (grant: BoxGrant): Sha256Digest =>
 export const boxGrantSigningPayload = (grant: BoxGrant): Uint8Array =>
   new TextEncoder().encode(`${BOX_GRANT_SIGNATURE_DOMAIN}${boxGrantDigest(grant)}`)
 
-/**
- * Catalog ids are authority strings, not path fragments. A pin's digest is the
- * complete deterministic filename input and therefore cannot traverse out of
- * the catalog directory.
- */
-export const catalogFileNameForPin = (
-  pin: Pick<BoxGrantCatalogPin, "sha256">
-): string =>
-  `sha256-${pin.sha256.slice("sha256:".length)}${TOOL_DEFINITION_FILE_SUFFIX}`
-
 export class BinarySnapshot extends Schema.Class<BinarySnapshot>(
   "BinarySnapshot"
 )({
   path: Schema.String,
   rawBytes: Schema.Uint8Array
 }) {}
-
-/** A catalog document whose exact verified bytes are retained for later use. */
-export class VerifiedCatalogDocument
-  extends Schema.Class<VerifiedCatalogDocument>("VerifiedCatalogDocument")({
-    id: Schema.String,
-    path: Schema.String,
-    digest: Sha256Digest,
-    rawBytes: Schema.Uint8Array,
-    definition: ToolDefinition
-  }) {}
 
 export class UnsealedSeal extends Schema.TaggedClass<UnsealedSeal>()(
   "UnsealedSeal",
@@ -100,8 +68,7 @@ export class VerifiedSeal extends Schema.TaggedClass<VerifiedSeal>()(
     grant: BoxGrant,
     grantDigest: Sha256Digest,
     binaryPath: Schema.String,
-    binaryDigest: Sha256Digest,
-    catalog: Schema.Array(VerifiedCatalogDocument)
+    binaryDigest: Sha256Digest
   }
 ) {}
 
@@ -116,7 +83,6 @@ export const SealVerificationPhase = Schema.Literals([
   "grant",
   "key",
   "signature",
-  "catalog",
   "reverify"
 ])
 export type SealVerificationPhase = typeof SealVerificationPhase.Type
@@ -135,7 +101,6 @@ export const SealVerificationReason = Schema.Literals([
   "too-large",
   "changed-during-read",
   "read-failed",
-  "list-failed",
   "invalid-utf8",
   "invalid-json",
   "invalid-grant",
@@ -146,11 +111,6 @@ export const SealVerificationReason = Schema.Literals([
   "signature-invalid",
   "signature-verification-failed",
   "digest-mismatch",
-  "catalog-file-missing",
-  "catalog-file-extra",
-  "catalog-changed",
-  "invalid-tool-definition",
-  "tool-id-mismatch",
   "snapshot-mismatch",
   "installation-not-ready"
 ])
@@ -192,9 +152,6 @@ const failure = (
 
 const sha256 = (bytes: Uint8Array): Sha256Digest =>
   `sha256:${createHash("sha256").update(bytes).digest("hex")}` as Sha256Digest
-
-const lexical = (left: string, right: string) =>
-  left < right ? -1 : left > right ? 1 : 0
 
 const osCode = (cause: unknown): string | undefined =>
   typeof cause === "object" && cause !== null && "code" in cause &&
@@ -301,7 +258,7 @@ const decodeUtf8 = (
     catch: () => failure(phase, path, "invalid-utf8")
   })
 
-const metadataMaxBytes = DEFAULT_TOOL_DEFINITION_MAX_BYTES
+const metadataMaxBytes = 256 * 1024
 const keyMaxBytes = 16 * 1024
 const signatureMaxBytes = 16 * 1024
 
@@ -384,126 +341,6 @@ const verifyGrantSignature = (
           : Effect.fail(failure("signature", path, "signature-invalid")))
       )
     })
-  )
-}
-
-const listCatalogNames = (
-  catalogPath: string
-): Effect.Effect<ReadonlyArray<string>, SealVerificationFailed> =>
-  Effect.tryPromise({
-    try: () => readdir(catalogPath, { withFileTypes: true }),
-    catch: () => failure("catalog", catalogPath, "list-failed")
-  }).pipe(
-    Effect.map((entries) => entries
-      // Entry kind is intentionally not filtered: a suffix-bearing symlink,
-      // FIFO, or directory participates in the exact set and is then refused.
-      .map((entry) => entry.name)
-      .filter((name) => name.endsWith(TOOL_DEFINITION_FILE_SUFFIX))
-      .sort(lexical))
-  )
-
-const requireExactCatalogSet = (
-  actual: ReadonlyArray<string>,
-  expected: ReadonlyArray<string>,
-  catalogPath: string
-): Effect.Effect<void, SealVerificationFailed> => {
-  const actualSet = new Set(actual)
-  const expectedSet = new Set(expected)
-  const missing = expected.find((name) => !actualSet.has(name))
-  if (missing !== undefined) {
-    return Effect.fail(failure(
-      "catalog",
-      join(catalogPath, missing),
-      "catalog-file-missing"
-    ))
-  }
-  const extra = actual.find((name) => !expectedSet.has(name))
-  if (extra !== undefined) {
-    return Effect.fail(failure(
-      "catalog",
-      join(catalogPath, extra),
-      "catalog-file-extra"
-    ))
-  }
-  return Effect.void
-}
-
-const decodeCatalogDocument = (
-  pin: BoxGrantCatalogPin,
-  path: string,
-  rawBytes: Uint8Array,
-  catalogPath: string
-): Effect.Effect<VerifiedCatalogDocument, SealVerificationFailed> =>
-  Effect.gen(function* () {
-    const digest = sha256(rawBytes)
-    if (digest !== pin.sha256) {
-      return yield* failure("catalog", path, "digest-mismatch")
-    }
-    const json = yield* decodeUtf8(rawBytes, "catalog", path)
-    const document = new ToolDefinitionDocument({
-      location: new ToolDefinitionLocation({
-        // The current definition vocabulary has no authority-bearing "sealed"
-        // discovery tier. This value is only an input required by the current
-        // decoder; VerifiedCatalogDocument retains the authoritative path.
-        kind: "installed",
-        directory: catalogPath
-      }),
-      file: path,
-      json
-    })
-    const loaded = yield* decodeToolDefinition(document).pipe(
-      Effect.mapError(() => failure("catalog", path, "invalid-tool-definition"))
-    )
-    if (loaded.definition.id !== pin.id) {
-      return yield* failure("catalog", path, "tool-id-mismatch")
-    }
-    return new VerifiedCatalogDocument({
-      id: pin.id,
-      path,
-      digest,
-      rawBytes,
-      definition: loaded.definition
-    })
-  })
-
-const readCatalog = (
-  sealPath: string,
-  pins: ReadonlyArray<BoxGrantCatalogPin>
-): Effect.Effect<ReadonlyArray<VerifiedCatalogDocument>, SealVerificationFailed> => {
-  const catalogPath = join(sealPath, SEAL_CATALOG_DIRECTORY)
-  const orderedPins = [...pins].sort((left, right) =>
-    lexical(catalogFileNameForPin(left), catalogFileNameForPin(right))
-  )
-  const expectedNames = orderedPins.map(catalogFileNameForPin)
-
-  return inspectDirectory(catalogPath, "catalog").pipe(
-    Effect.flatMap(() => listCatalogNames(catalogPath)),
-    Effect.tap((names) => requireExactCatalogSet(names, expectedNames, catalogPath)),
-    Effect.flatMap(() => Effect.forEach(
-      orderedPins,
-      (pin) => {
-        const path = join(catalogPath, catalogFileNameForPin(pin))
-        return readRegularFile(
-          path,
-          "catalog",
-          DEFAULT_TOOL_DEFINITION_MAX_BYTES
-        ).pipe(
-          Effect.flatMap((rawBytes) =>
-            decodeCatalogDocument(pin, path, rawBytes, catalogPath)
-          )
-        )
-      },
-      { concurrency: 1 }
-    )),
-    Effect.tap(() => listCatalogNames(catalogPath).pipe(
-      Effect.flatMap((names) => {
-        const unchanged = names.length === expectedNames.length &&
-          names.every((name, index) => name === expectedNames[index])
-        return unchanged
-          ? Effect.void
-          : Effect.fail(failure("catalog", catalogPath, "catalog-changed"))
-      })
-    ))
   )
 }
 
@@ -592,14 +429,12 @@ export const verifySealAtPath = (
       return yield* failure("binary", binary.path, "digest-mismatch")
     }
 
-    const catalog = yield* readCatalog(sealPath, grant.catalog)
     return new VerifiedSeal({
       sealPath,
       grant,
       grantDigest,
       binaryPath: binary.path,
-      binaryDigest,
-      catalog: [...catalog]
+      binaryDigest
     })
   })
 
@@ -671,28 +506,8 @@ export const verifyInstalledReadiness = (
       : failure("seal", readinessPath, "installation-not-ready"))
   )
 
-const sameBytes = (left: Uint8Array, right: Uint8Array) => {
-  if (left.byteLength !== right.byteLength) return false
-  for (let index = 0; index < left.byteLength; index++) {
-    if (left[index] !== right[index]) return false
-  }
-  return true
-}
-
-const sameCatalogSnapshot = (
-  left: ReadonlyArray<VerifiedCatalogDocument>,
-  right: ReadonlyArray<VerifiedCatalogDocument>
-) => left.length === right.length && left.every((document, index) => {
-  const candidate = right[index]
-  return candidate !== undefined &&
-    document.id === candidate.id &&
-    document.path === candidate.path &&
-    document.digest === candidate.digest &&
-    sameBytes(document.rawBytes, candidate.rawBytes)
-})
-
 /**
- * Perform all filesystem, signature, binary, and catalog checks again, then
+ * Perform all filesystem, signature and binary checks again, then
  * require identity with the originally verified immutable-by-convention data.
  */
 export const reverifySeal = (
@@ -715,13 +530,6 @@ export const reverifySeal = (
         return Effect.fail(failure(
           "reverify",
           expected.binaryPath,
-          "snapshot-mismatch"
-        ))
-      }
-      if (!sameCatalogSnapshot(fresh.catalog, expected.catalog)) {
-        return Effect.fail(failure(
-          "reverify",
-          join(expected.sealPath, SEAL_CATALOG_DIRECTORY),
           "snapshot-mismatch"
         ))
       }

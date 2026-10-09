@@ -294,8 +294,7 @@ const makeDraft = (
       id: PlanId.make("plan/vouch-state-restore-proof"),
       actionReference: "examples.vouch.restore",
       nodes: [capture, invoke, observe, apply, request],
-      requirements,
-      definitionDigests: []
+      requirements
     }),
     artifacts: { beforeApply, cellDelta }
   }

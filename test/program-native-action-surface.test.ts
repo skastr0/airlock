@@ -9,79 +9,8 @@ import {
   ProgramRequest,
   ProgramRunner,
   ProgramRunnerLive,
-  ProgramRunnerWithNativeActionsLive,
-  ProgramRunnerWithToolsLive
+  ProgramRunnerWithNativeActionsLive
 } from "../src/program/index.ts"
-import {
-  decodeToolDefinition,
-  ExportedToolAction,
-  ToolDefinitionDocument,
-  ToolDefinitionLocation
-} from "../src/core/tools/index.ts"
-
-const location = new ToolDefinitionLocation({
-  kind: "builtin",
-  directory: "/opt/airlock/tools"
-})
-
-const definitionDocument = (definition: unknown) => new ToolDefinitionDocument({
-  location,
-  file: `/opt/airlock/tools/${String((definition as { readonly id?: unknown }).id)}.json`,
-  json: JSON.stringify(definition)
-})
-
-const invokeDefinition = {
-  schemaVersion: "airlock/tool-definition/v2",
-  id: "fixture.invoke",
-  version: "1.0.0",
-  executables: [{ realm: "local", selector: "/usr/bin/true" }],
-  actions: [{
-    name: "call",
-    inputSchema: { type: "object", additionalProperties: false },
-    args: [],
-    cwd: { _tag: "Literal", value: "/tmp" },
-    environment: {},
-    stdin: "discard",
-    stdout: "capture",
-    stderr: "capture",
-    resources: [],
-    lowering: "invoke",
-    effectFootprint: ["invoke"],
-    resultDecoder: "exit-status"
-  }]
-}
-
-const enqueueDefinition = {
-  schemaVersion: "airlock/tool-definition/v2",
-  id: "fixture.enqueue",
-  version: "1.0.0",
-  executables: [],
-  actions: [{
-    name: "send",
-    inputSchema: { type: "object", additionalProperties: false },
-    lowering: "enqueue",
-    request: {
-      method: "POST",
-      endpoint: { _tag: "Literal", value: "https://example.test/events" },
-      body: { _tag: "Literal", value: "payload" }
-    },
-    emissionEffect: "mutate",
-    effectFootprint: ["enqueue"],
-    resultDecoder: "none"
-  }]
-}
-
-const toolMap = async () => {
-  const loaded = await Promise.all([
-    Effect.runPromise(decodeToolDefinition(definitionDocument(invokeDefinition))),
-    Effect.runPromise(decodeToolDefinition(definitionDocument(enqueueDefinition)))
-  ])
-  return new Map(loaded.flatMap((item) => item.definition.actions.map((action) => {
-    const name = `${item.definition.id}.${action.name}`
-    return [name, new ExportedToolAction({ name, loaded: item, action })] as const
-  })))
-}
-
 const runWith = async (
   runnerLayer: ReturnType<typeof ProgramRunnerWithNativeActionsLive>,
   source: string
@@ -170,56 +99,11 @@ describe("Program native action surface", () => {
     expect(observed.requests[0]?.draft.nodes.map((node) => node._tag)).toEqual(["Apply"])
   })
 
-  it("denies invoke definitions unless process.run is included", async () => {
-    const actions = await toolMap()
-    const observed = await runWith(
-      ProgramRunnerWithToolsLive(actions, "native-contained", new Set(["file.write"])),
-      `return fixture.invoke.call({})`
-    )
-    expectPreEffectDenial(observed, "process.run")
-    expect(observed.result.failure?.action).toBe("fixture.invoke.call")
-  })
-
-  it("denies enqueue definitions unless http.stage is included", async () => {
-    const actions = await toolMap()
-    const observed = await runWith(
-      ProgramRunnerWithToolsLive(actions, "native-contained", new Set(["process.run"])),
-      `return fixture.enqueue.send({})`
-    )
-    expectPreEffectDenial(observed, "http.stage")
-    expect(observed.result.failure?.action).toBe("fixture.enqueue.send")
-  })
-
-  it("lowers allowed invoke and enqueue definitions only to the closed Plan tags", async () => {
-    const actions = await toolMap()
-    const observed = await runWith(
-      ProgramRunnerWithToolsLive(
-        actions,
-        "native-contained",
-        new Set(["process.run", "http.stage"])
-      ),
-      `
-        let invoked = fixture.invoke.call({})
-        return fixture.enqueue.send({})
-      `
-    )
-    expect(observed.result.state).toBe("succeeded")
-    expect(observed.requests).toHaveLength(2)
-    expect(observed.requests[0]?.call.input).toMatchObject({
-      action: "process.run",
-      cellProfile: "native-contained"
-    })
-    expect(observed.requests[0]?.draft.nodes.map((node) => node._tag)).toEqual([
-      "Invoke",
-      "Apply"
-    ])
-    expect(observed.requests[1]?.call.input).toMatchObject({ action: "http.stage" })
-    expect(observed.requests[1]?.draft.nodes.map((node) => node._tag)).toEqual([
-      "RequestExternal"
-    ])
-    expect(observed.requests.flatMap((request) => request.draft.nodes).every(
-      (node) => ["Capture", "Invoke", "Apply", "RequestExternal"].includes(node._tag)
-    )).toBe(true)
+  it("has no name outside the native surface: a namespaced definition call is unknown", async () => {
+    const observed = await runWith(ProgramRunnerLive, `return fixture.invoke.call({})`)
+    expect(observed.requests).toEqual([])
+    expect(observed.result.state).toBe("failed")
+    expect(observed.result.plans).toEqual([])
   })
 
   it("keeps the default runner at the explicit complete twelve-action surface", async () => {
