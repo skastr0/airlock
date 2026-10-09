@@ -10,6 +10,7 @@ import {
   type HttpOutcome,
   isLivePermit
 } from "../core/index.ts"
+import type { BoundResource } from "../core/contract/ToolHost.ts"
 import { consumeWireToken, type WireToken } from "../core/outbox/Outbox.ts"
 
 /**
@@ -90,16 +91,23 @@ export const dispatchHttp = Effect.fn("HttpDispatcher.dispatch")(function* (
  * The wire for a tool implementation. The kernel mints a wire token when it
  * hands an admitted call to its implementation; the token is good for one
  * request and only while that call is live. Without it nothing is sent.
+ *
+ * The address is not a string the implementation chooses: it is the endpoint
+ * resource admission bound and matched against the grant for this call.
  */
 export const sendHttp = Effect.fn("HttpDispatcher.send")(function* (
   token: WireToken,
-  dispatch: HttpDispatch,
+  endpoint: BoundResource,
+  request: Omit<HttpDispatch, "url">,
   responseLimitBytes: number
 ): Effect.fn.Return<Delivery<HttpOutcome>, DispatchFailed | DispatchRefused> {
+  if (endpoint.binding.kind !== "endpoint") {
+    return yield* new DispatchRefused({ reason: "the bound resource is not an endpoint" })
+  }
   if (!consumeWireToken(token)) {
     return yield* new DispatchRefused({ reason: "wire token is not live" })
   }
-  return yield* onWire(dispatch, responseLimitBytes)
+  return yield* onWire({ ...request, url: endpoint.binding.selector }, responseLimitBytes)
 })
 
 /**

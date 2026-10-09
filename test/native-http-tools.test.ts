@@ -9,7 +9,8 @@ import { makeMemoryLedgerState, makeMemoryOutboxState, memoryLedger, memoryOutbo
 import * as WebCrypto from "../src/core/WebCrypto.ts"
 import { sendHttp } from "../src/host/HttpDispatcher.ts"
 import { HttpGet, HttpStage } from "../src/native/index.ts"
-import { httpTools } from "../src/native/HttpTools.ts"
+import { type HttpToolContext, httpTools } from "../src/native/HttpTools.ts"
+import { endpointResources } from "../src/core/contract/PortableToolHost.ts"
 
 /**
  * The two HTTP tools against a real server, called the way the kernel calls
@@ -55,18 +56,26 @@ const tools = httpTools({
   keep: (bytes) => Effect.sync(() => ({ id: `kept-${kept.push(bytes)}` }))
 })
 
+const bound = (endpoint: string, right: "connect" | "emit") =>
+  endpointResources.bind({ kind: "endpoint", selector: endpoint, rights: [right], field: "endpoint" })
+
 /** Runs one admitted, committed call through the kernel and returns what its implementation answered. */
 const call = <Name extends "http.get" | "http.stage">(
   kind: Name,
   dispatch: unknown,
-  implementation: (input: never, context: { wireToken: WireToken }) => Effect.Effect<unknown, unknown> = tools[kind] as never
+  implementation: (input: never, context: HttpToolContext) => Effect.Effect<unknown, unknown> = tools[kind] as never
 ) =>
   Effect.gen(function* () {
     let answer: unknown
     const handlers = handlersFor(box.kinds, {
       ...tools,
-      [kind]: (input: never, context: { wireToken: WireToken }) =>
-        implementation(input, context).pipe(Effect.tap((value) => Effect.sync(() => { answer = value })))
+      // The kernel will hand over the admitted resources itself; until it
+      // does, the endpoint is bound here by the same resolver admission uses.
+      [kind]: (input: { readonly endpoint: string }, context: { wireToken: WireToken }) =>
+        bound(input.endpoint, kind === "http.get" ? "connect" : "emit").pipe(
+          Effect.flatMap((endpoint) => implementation(input as never, { wireToken: context.wireToken, resources: [endpoint] })),
+          Effect.tap((value) => Effect.sync(() => { answer = value }))
+        )
     } as never, {})
     yield* Effect.gen(function* () {
       const outbox = yield* box.Outbox
@@ -127,14 +136,15 @@ describe("local HTTP tools", () => {
   it.live("one call reaches the wire once, and never after it has settled", () =>
     Effect.scoped(Effect.gen(function* () {
       const { origin, seen } = yield* server
-      const request = { url: `${origin}/extra`, method: "GET" as const, headers: {} }
+      const request = { method: "GET" as const, headers: {} }
+      const extra = yield* bound(`${origin}/extra`, "connect")
       let saved: WireToken | undefined
       let second: unknown
       yield* call("http.get", { endpoint: `${origin}/status`, accept: "*/*" }, (input, context) =>
         Effect.gen(function* () {
           saved = context.wireToken
           const answer = yield* tools["http.get"](input, context)
-          second = yield* sendHttp(context.wireToken, request, 1_024).pipe(Effect.flip)
+          second = yield* sendHttp(context.wireToken, extra, request, 1_024).pipe(Effect.flip)
           return answer
         }))
       expect(second).toMatchObject({ _tag: "DispatchRefused" })
@@ -147,9 +157,36 @@ describe("local HTTP tools", () => {
           unused = context.wireToken
           return { status: 0, content_type: null, bytes: 0, truncated: false, body: null }
         }))
-      expect((yield* sendHttp(unused!, request, 1_024).pipe(Effect.flip))._tag).toBe("DispatchRefused")
-      expect((yield* sendHttp({ ...saved! }, request, 1_024).pipe(Effect.flip))._tag).toBe("DispatchRefused")
+      expect((yield* sendHttp(unused!, extra, request, 1_024).pipe(Effect.flip))._tag).toBe("DispatchRefused")
+      expect((yield* sendHttp({ ...saved! }, extra, request, 1_024).pipe(Effect.flip))._tag).toBe("DispatchRefused")
       expect(seen.map((entry) => entry.url)).toEqual(["/status"])
+    }))
+  )
+
+  it.live("sends only to the endpoint admission bound, whatever the input says", () =>
+    Effect.scoped(Effect.gen(function* () {
+      const { origin, seen } = yield* server
+      // An implementation handed a different input than the one admitted
+      // still reaches only the bound address.
+      const answer = yield* call("http.get", { endpoint: `${origin}/admitted`, accept: "*/*" }, (_input, context) =>
+        tools["http.get"]({ endpoint: `${origin}/somewhere-else`, accept: "*/*" }, context))
+      expect(answer).toMatchObject({ status: 200 })
+      expect(seen.map((entry) => entry.url)).toEqual(["/admitted"])
+      // Without an admitted endpoint, or with a resource that is not one, nothing is sent.
+      const none = yield* call("http.get", { endpoint: `${origin}/admitted`, accept: "*/*" }, (input, context) =>
+        tools["http.get"](input, { wireToken: context.wireToken, resources: [] }))
+      expect(none).toBeInstanceOf(Refused)
+      let wrongKind: unknown
+      yield* call("http.get", { endpoint: `${origin}/admitted`, accept: "*/*" }, (_input, context) =>
+        sendHttp(context.wireToken, {
+          binding: { field: "endpoint", kind: "path", rights: ["read"], selector: `${origin}/path`, identity: {} },
+          capability: undefined
+        }, { method: "GET", headers: {} }, 1_024).pipe(
+          Effect.flip,
+          Effect.tap((error) => Effect.sync(() => { wrongKind = error }))
+        ))
+      expect(wrongKind).toMatchObject({ _tag: "DispatchRefused" })
+      expect(seen.map((entry) => entry.url)).toEqual(["/admitted"])
     }))
   )
 })
