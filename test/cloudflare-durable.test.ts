@@ -40,7 +40,8 @@ const start = (storage = persist) => {
     durableObjects: {
       CONFORMANCE: { className: "ConformanceObject", useSQLite: true },
       AIRLOCK: { className: "ExampleAirlock", useSQLite: true },
-      ALARMED: { className: "AlarmedAirlock", useSQLite: true }
+      ALARMED: { className: "AlarmedAirlock", useSQLite: true },
+      QUEUED: { className: "QueuedAirlock", useSQLite: true }
     },
     // No Worker Loader and no nodejs_compat: a program is evaluated in the object itself.
     bindings: { MAIL_TOKEN: "token-canary" },
@@ -230,6 +231,36 @@ describe("cloud: a user's Airlock as a Durable Object", () => {
     expect(await run(`let s0 = "xxxxxxxx"\n${big}\nmail.list({ mailbox: "inbox", query: s12 })`))
       .toMatchObject({ ok: false, reason: "value_limit" })
     expect((await remote()).length).toBe(before + 8)
+  })
+})
+
+describe("cloud: one program at a time", () => {
+  type Outcome = { readonly ok?: boolean; readonly failed?: boolean; readonly code?: string; readonly reason?: string }
+  const slow = `return mail.list({ mailbox: "slow", query: "q" })`
+
+  it("runs programs in turn, holds a bounded line, refuses the rest, and keeps the supervisor available", async () => {
+    const remote = () => call<ReadonlyArray<{ tool: string; detail: string }>>(workerd, "/airlock/remote")
+    const before = (await remote()).length
+    const runs = ["a", "b", "c", "d"].map((runId) =>
+      call<Outcome>(workerd, "/queued/run?object=line", { runId, source: slow }))
+    // While programs are running and waiting, a supervisor's call is answered.
+    const pending = await call<ReadonlyArray<unknown>>(workerd, "/queued/pending?object=line")
+    expect(pending).toEqual([])
+    const outcomes = await Promise.all(runs)
+    expect(outcomes.filter((outcome) => outcome.ok === true).length).toBe(2)
+    expect(outcomes.filter((outcome) => outcome.failed === true).map((outcome) => outcome.code)).toEqual(["busy", "busy"])
+    // The two that ran did not overlap: each provider call started and ended before the next began.
+    expect((await remote()).slice(before).map((entry) => entry.detail)).toEqual([
+      "slow started", "slow", "slow started", "slow"
+    ])
+    // The line is free again afterwards.
+    expect(await call<Outcome>(workerd, "/queued/run?object=line", { runId: "e", source: "return 1" }))
+      .toMatchObject({ ok: true, result: 1 })
+  }, 30_000)
+
+  it("refuses a source too large to be a program before it can wait in the line", async () => {
+    const outcome = await call<Outcome>(workerd, "/queued/run?object=large", { runId: "big", source: "#".repeat(200_000) })
+    expect(outcome).toEqual({ ok: false, reason: "invalid_code", toolCalls: 0 })
   })
 })
 

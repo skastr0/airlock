@@ -55,6 +55,7 @@ interface Env {
   readonly CONFORMANCE: Namespace
   readonly AIRLOCK: Namespace
   readonly ALARMED: Namespace
+  readonly QUEUED: Namespace
   readonly MAIL_TOKEN: string
 }
 
@@ -215,7 +216,12 @@ const remote: Array<{ readonly tool: string; readonly detail: string }> = []
 const userAirlock = defineAirlock({
   contracts: [MailList, MailSend, LabelAdd, LabelRemove],
   implement: {
-    "mail.list": ({ mailbox }) => {
+    "mail.list": async ({ mailbox }) => {
+      // A slow provider, so a test can have one program running while others arrive.
+      if (mailbox === "slow") {
+        remote.push({ tool: "mail.list", detail: "slow started" })
+        await new Promise((resolve) => setTimeout(resolve, 400))
+      }
       remote.push({ tool: "mail.list", detail: mailbox })
       return { ids: [`${mailbox}-1`, `${mailbox}-2`] }
     },
@@ -246,6 +252,9 @@ const userAirlock = defineAirlock({
 })
 
 export const ExampleAirlock = airlockDurableObject(userAirlock)
+
+/** The same Airlock with room for one program to wait behind the one running. */
+export const QueuedAirlock = airlockDurableObject(userAirlock, { maxWaitingPrograms: 1 })
 
 /**
  * The same Airlock with a short recovery alarm, plus a way to look at the
@@ -295,6 +304,11 @@ export default {
   fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url)
     if (url.pathname.startsWith("/airlock/")) return trusted(request, env)
+    if (url.pathname.startsWith("/queued/")) {
+      const rewritten = new URL(request.url)
+      rewritten.pathname = rewritten.pathname.replace("/queued/", "/airlock/")
+      return trusted(new Request(rewritten.toString(), request), { ...env, AIRLOCK: env.QUEUED })
+    }
     if (url.pathname.startsWith("/alarmed/")) {
       if (url.pathname === "/alarmed/states") return env.ALARMED.get(env.ALARMED.idFromName("alarmed")).fetch(request)
       const rewritten = new URL(request.url)

@@ -6,6 +6,7 @@ import {
   type GuestAction,
   type GuestLimits,
   type GuestOutcome,
+  guestLimits,
   GuestRunner,
   programRunner,
   type ToolContracts,
@@ -48,6 +49,13 @@ export interface AirlockObjectApi {
 }
 
 export interface AirlockObjectOptions {
+  /**
+   * How many programs may wait while one runs. The object evaluates one
+   * program at a time, so what a program can hold in memory is held once; a
+   * run that finds the line full is refused as `busy` and may be retried.
+   * @default 8
+   */
+  readonly maxWaitingPrograms?: number
   /** Limits for every program this object runs. */
   readonly limits?: Partial<GuestLimits>
   /**
@@ -56,6 +64,8 @@ export interface AirlockObjectOptions {
    */
   readonly recoveryAlarmMillis?: number
 }
+
+const MAX_WAITING_PROGRAMS = 8
 
 /** Past the kernel's 30 second dispatch timeout, with room to spare. */
 const RECOVERY_ALARM_MILLIS = 60_000
@@ -90,6 +100,9 @@ export const airlockDurableObject = <Contracts extends ToolContracts, Env>(
     readonly #state: ObjectState
     /** Operations that may dispatch and have not finished. */
     #working = 0
+    /** Settles when the program now running, and every one ahead in the line, has ended. */
+    #lastProgram: Promise<unknown> = Promise.resolve()
+    #waitingPrograms = 0
     /** Built on first use; building it runs the kernel's startup recovery. */
     readonly #runtime: ManagedRuntime.ManagedRuntime<Services, unknown>
 
@@ -144,12 +157,38 @@ export const airlockDurableObject = <Contracts extends ToolContracts, Env>(
       await this.#runtime.runPromise(Effect.void).catch(() => undefined)
     }
 
+    /**
+     * Runs `program` once every program ahead of it has ended. Supervisor
+     * operations do not wait in this line.
+     */
+    #inTurn<Value>(program: () => Promise<Reply<Value>>): Promise<Reply<Value>> {
+      if (this.#waitingPrograms >= (options.maxWaitingPrograms ?? MAX_WAITING_PROGRAMS)) {
+        return Promise.resolve({
+          ok: false,
+          code: "busy",
+          message: "this Airlock is running as many programs as it holds; try again"
+        })
+      }
+      this.#waitingPrograms += 1
+      const turn = this.#lastProgram.then(() => {
+        this.#waitingPrograms -= 1
+        return program()
+      })
+      // The line moves on however this program ends.
+      this.#lastProgram = turn.catch(() => undefined)
+      return turn
+    }
+
     run(request: { readonly runId: string; readonly source: string }): Promise<Reply<GuestOutcome>> {
       // Copied out of the RPC argument before anything is awaited.
       const runId = String(request.runId)
       const source = String(request.source)
       const env = this.#env
-      return this.#guarded(() => this.#reply(Effect.gen(function* () {
+      // Refused before it can wait: the line never holds a source larger than a program may be.
+      if (source.length > guestLimits(options.limits).maxCodeBytes) {
+        return Promise.resolve({ ok: true, value: { ok: false, reason: "invalid_code", toolCalls: 0 } })
+      }
+      return this.#inTurn(() => this.#guarded(() => this.#reply(Effect.gen(function* () {
         const surface = yield* airlock.guest({ runId, env })
         const runner = yield* GuestRunner
         return yield* runner.run({
@@ -157,7 +196,7 @@ export const airlockDurableObject = <Contracts extends ToolContracts, Env>(
           surface,
           ...(options.limits === undefined ? {} : { limits: options.limits })
         })
-      })))
+      }))))
     }
 
     describe(): Promise<Reply<GuestDescription>> {

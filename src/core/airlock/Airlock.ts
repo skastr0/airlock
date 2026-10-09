@@ -37,6 +37,7 @@ export class AirlockFailure extends Schema.TaggedError<AirlockFailure>()("Airloc
     "not-found",
     "not-compensable",
     "invalid-policy",
+    "busy",
     "unavailable"
   ]),
   message: Schema.String
