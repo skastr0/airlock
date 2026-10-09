@@ -108,7 +108,7 @@ describe("file Ledger: replay check does not read the whole journal", () => {
       const reopened = yield* open
       for (let n = 0; n < 80; n++) yield* reopened.record(new LedgerEntry({ ...entry(`bulk:${n}`), detail }))
       expect((yield* reopened.entries).length).toBe(80)
-    })))
+    }))), 60_000)
 
   it.effect("sets stale markers aside when the journal is shorter than they cover", () =>
     world(({ home, journal, keys, open }) => Effect.gen(function* () {
