@@ -33,29 +33,53 @@ describe("core: the dispatch permit has one origin", () => {
   it("is made live in exactly one place and constructed by exactly one call", () => {
     expect(occurrences(/\blivePermits\s*\.\s*add\s*\(/g)).toEqual([kernel])
     expect(occurrences(/\bconst\s+mintPermit\b/g)).toEqual([kernel])
-    // One definition and one use: the commit path, after `staged → committing`.
+    // One definition and one use: the private dispatch entry shared by both admitted paths.
     expect(occurrences(/\bmintPermit\s*\(/g)).toEqual([kernel])
     expect(occurrences(/export\s+(?:const|function|let|var)\s+(?:mintPermit|livePermits)\b/g)).toEqual([])
     expect(occurrences(/export\s*\{[^}]*\b(?:mintPermit|livePermits)\b/g)).toEqual([])
   })
 
-  it("is minted only after the committing transition is persisted, and revoked after", () => {
+  it("revokes every minted permit after the single handler entry settles", () => {
     const source = sources.find(({ file }) => file === kernel)!.source
-    const persisted = source.indexOf("state: \"committing\"")
+    const dispatch = source.indexOf("const dispatchOnce =")
     const minted = source.indexOf("mintPermit(tag")
+    const call = source.indexOf("handlers[")
     const revoked = source.indexOf("livePermits.delete(permit)")
-    expect(persisted).toBeGreaterThan(-1)
-    expect(minted).toBeGreaterThan(persisted)
-    expect(revoked).toBeGreaterThan(minted)
+    const commit = source.indexOf('Effect.fn("Outbox.commit")')
+    expect(dispatch).toBeGreaterThan(-1)
+    expect(minted).toBeGreaterThan(dispatch)
+    expect(call).toBeGreaterThan(minted)
+    expect(revoked).toBeGreaterThan(call)
+    expect(revoked).toBeLessThan(commit)
+    expect(source.slice(call, revoked)).toContain("Effect.ensuring")
   })
 
-  it("has one handler call in the kernel, inside commit", () => {
+  it("has one private handler entry reached only by durable commit or exact capture-now", () => {
     const source = sources.find(({ file }) => file === kernel)!.source
     expect([...source.matchAll(/\bhandlers\s*\[/g)]).toHaveLength(1)
-    const commit = source.indexOf("Effect.fn(\"Outbox.commit\")")
-    const cancel = source.indexOf("Effect.fn(\"Outbox.cancel\")")
-    const call = source.indexOf("handlers[")
-    expect(call).toBeGreaterThan(commit)
-    expect(call).toBeLessThan(cancel)
+    expect(source).not.toMatch(/export\s+(?:const|function)\s+dispatchOnce\b/)
+    const dispatch = source.indexOf("const dispatchOnce =")
+    const commit = source.indexOf('Effect.fn("Outbox.commit")')
+    const capture = source.indexOf('const capture: OutboxService<Kinds>["capture"]')
+    const cancel = source.indexOf('Effect.fn("Outbox.cancel")')
+    const calls = [...source.matchAll(/\bdispatchOnce\(/g)].map((match) => match.index)
+    expect(calls).toHaveLength(2)
+    expect(source.indexOf("handlers[")).toBeGreaterThan(dispatch)
+    expect(source.indexOf("handlers[")).toBeLessThan(commit)
+    const persisted = source.indexOf('store.transition(id, "staged", {', commit)
+    expect(persisted).toBeGreaterThan(commit)
+    expect(source.slice(persisted, calls[0])).toContain('state: "committing"')
+    expect(calls[0]).toBeGreaterThan(persisted)
+    expect(calls[0]).toBeLessThan(capture)
+    const capturePath = source.slice(capture, calls[1])
+    expect(capturePath).toContain('Schema.toType(CaptureAdmission)')
+    expect(capturePath).toContain('registered.value.effect !== "capture"')
+    expect(capturePath).toContain('checked.success.execution.tool !== kind.tag')
+    expect(capturePath).toContain('checked.success.execution.version !== kind.version')
+    expect(calls[1]).toBeGreaterThan(capture)
+    expect(calls[1]).toBeLessThan(cancel)
+    const admission = sources.find(({ file }) => file === "core/outbox/Capture.ts")!.source
+    expect(admission).toContain('effect: Schema.Literal("capture")')
+    expect(admission).toContain('when: Schema.Literal("now")')
   })
 })

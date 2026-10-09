@@ -57,9 +57,9 @@ const PermitTypeId: unique symbol = Symbol("airlock/core/DispatchPermit")
 
 /**
  * The capability to touch the wire for exactly one emission. It is minted only
- * in this module, only after `staged → committing` is durable, and it is
- * revoked as soon as that dispatch settles. No other module can construct one,
- * so no other module can call a handler: wire authority is a value, not a
+ * in this module, after durable `staged → committing` or exact capture-now
+ * admission. It is revoked as soon as that dispatch settles. No other module
+ * can construct one or call a handler: wire authority is a value, not a
  * convention.
  */
 export interface DispatchPermit<Tag extends string = string> {
@@ -849,8 +849,31 @@ export const defineOutbox = <const Kinds extends IntentKinds>(
         Effect.andThen(Effect.fail(new EmissionDispatchUncertain({ id, reason })))
       )
 
-    // The point of no return. This body holds the only handler call in the
-    // kernel; every other operation manipulates inert durable state.
+    /** The sole permit mint and handler entry; callers establish their authority first. */
+    const dispatchOnce = <Selected extends Tag>(
+      tag: Selected,
+      id: EmissionId,
+      dispatchDigest: Sha256Digest,
+      canonical: string,
+      dispatch: IntentKind.DispatchOf<Kinds[Selected]>,
+      admission: EmissionAdmission | undefined,
+      wire: WireMaterial | undefined
+    ) => Effect.suspend(() => {
+      const permit = mintPermit(tag, id, dispatchDigest, canonical, admission, wire)
+      return Effect.suspend(() => handlers[tag]({ permit, dispatch, responseLimitBytes: RESPONSE_LIMIT_BYTES,
+        ...(admission === undefined ? {} : { admission }), inputDigest: dispatchDigest })).pipe(
+        Effect.timeoutOption(DISPATCH_TIMEOUT_MILLIS),
+        Effect.result,
+        Effect.ensuring(Effect.sync(() => {
+          livePermits.delete(permit)
+          permitDispatches.delete(permit)
+          permitAdmissions.delete(permit)
+          permitWires.delete(permit)
+        }))
+      )
+    })
+
+    // Writes become dispatchable only after the committing transition is durable.
     const commit: OutboxService<Kinds>["commit"] = Effect.fn("Outbox.commit")(function* (
       id,
       provenance
@@ -902,22 +925,8 @@ export const defineOutbox = <const Kinds extends IntentKinds>(
           // Dispatch is the interruptible portion. Once it has begun,
           // interruption is an honest uncertain outcome, not a bare fiber
           // interruption that erases the caller's receipt.
-          const permit = mintPermit(tag, id, committing.dispatchDigest, sealed.canonical, committing.admission, wire)
-          const delivered = yield* restore(
-            Effect.suspend(() => handlers[tag]({ permit, dispatch, responseLimitBytes: RESPONSE_LIMIT_BYTES,
-              ...(committing.admission === undefined ? {} : { admission: committing.admission }), inputDigest: committing.dispatchDigest })).pipe(
-              Effect.timeoutOption(DISPATCH_TIMEOUT_MILLIS),
-              Effect.result
-            )
-          ).pipe(
-            Effect.ensuring(Effect.sync(() => {
-              livePermits.delete(permit)
-              permitDispatches.delete(permit)
-              permitAdmissions.delete(permit)
-              permitWires.delete(permit)
-            })),
-            Effect.exit
-          )
+          const delivered = yield* restore(dispatchOnce(tag, id, committing.dispatchDigest,
+            sealed.canonical, dispatch, committing.admission, wire)).pipe(Effect.exit)
           if (Exit.isFailure(delivered)) {
             return yield* Cause.hasInterruptsOnly(delivered.cause)
               ? settleUncertain(id, "interrupted")
@@ -1034,13 +1043,8 @@ export const defineOutbox = <const Kinds extends IntentKinds>(
           return yield* new InvalidDispatchAuthorization({ field: "wire", reason: "capture contract has no wire declaration" })
         }
         const admitted = new EmissionAdmission(admission)
-        const permit = mintPermit(tag, id, dispatchDigest, canonical, admitted, wire)
-        const delivered = yield* restore(Effect.suspend(() => handlers[tag]({ permit, dispatch,
-          responseLimitBytes: RESPONSE_LIMIT_BYTES, admission: admitted, inputDigest: dispatchDigest })).pipe(
-            Effect.timeoutOption(DISPATCH_TIMEOUT_MILLIS), Effect.result)).pipe(
-          Effect.ensuring(Effect.sync(() => {
-            livePermits.delete(permit); permitDispatches.delete(permit); permitAdmissions.delete(permit); permitWires.delete(permit)
-          })), Effect.exit)
+        const delivered = yield* restore(dispatchOnce(tag, id, dispatchDigest, canonical,
+          dispatch, admitted, wire)).pipe(Effect.exit)
         const publishFailure = (code: CaptureFailed["code"], refused: boolean) => Effect.gen(function* () {
           if (prior === undefined) {
             const completedAt = yield* DateTime.now

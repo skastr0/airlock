@@ -9,6 +9,8 @@ import { makeMemoryLedgerState, memoryLedger } from "../src/core/testing/MemoryL
 import { makeMemoryOutboxState, memoryOutboxStore } from "../src/core/testing/MemoryOutboxStore.ts"
 import { OutboxStore } from "../src/core/outbox/OutboxStore.ts"
 import { IdempotencyKey, OutboxStoreFailed } from "../src/core/outbox/Records.ts"
+import { defineOutbox, isLivePermit, type DispatchPermit } from "../src/core/outbox/Outbox.ts"
+import { DispatchRefused } from "../src/core/outbox/Dispatcher.ts"
 import { toolPolicy } from "../src/core/session/ToolPolicy.ts"
 import { Sha256Digest } from "../src/core/Canonical.ts"
 import * as WebCrypto from "../src/core/WebCrypto.ts"
@@ -132,6 +134,38 @@ describe("core: capture-now terminal short path", () => {
     }).pipe(Effect.provide(airlock.layer(undefined).pipe(Layer.provideMerge(world.layer))))
     expect([...world.state.records.values()]).toMatchObject([{ outcome: { state: "done", metadata: { count: 3 } } }])
     expect(JSON.stringify([...world.state.records.values(), ...world.ledger.entries])).not.toContain("private-result-canary")
+  }))
+
+  it.effect("revokes capture permits on completion, proven refusal, defect and interruption", () => Effect.gen(function* () {
+    for (const outcome of ["done", "refused", "defect", "interrupted"] as const) {
+      const world = persistence()
+      const box = defineOutbox({ read })
+      let permit: DispatchPermit | undefined
+      let calls = 0
+      const handler: Parameters<typeof box.Dispatcher.of>[0]["read"] = (request) => {
+        permit = request.permit
+        calls++
+        expect(isLivePermit(request.permit)).toBe(true)
+        if (outcome === "refused") return Effect.fail(new DispatchRefused({ reason: "not performed" }))
+        if (outcome === "defect") throw new Error("handler construction failed")
+        if (outcome === "interrupted") return Effect.interrupt
+        return Effect.succeed({ outcome: 7, response: new Uint8Array(), truncated: false })
+      }
+      const digest = Sha256Digest.make(`sha256:${"a".repeat(64)}`)
+      const result = yield* Effect.gen(function* () {
+        const outbox = yield* box.Outbox
+        return yield* outbox.capture({ key: IdempotencyKey.make(`permit-${outcome}`), intent: { kind: "read", dispatch: { id: "a" } },
+          admission: { policyDigest: digest, grantIds: ["read"], execution: { runId: "permit", tool: "read", version: "1",
+            effect: "capture", when: "now", retention: "digest", resources: [] } } }).pipe(Effect.result)
+      }).pipe(Effect.provide(box.layer.pipe(Layer.provideMerge(Layer.mergeAll(world.layer, Layer.succeed(box.Dispatcher, { read: handler }))))))
+      expect(calls).toBe(1)
+      expect(permit).toBeDefined()
+      expect(isLivePermit(permit!)).toBe(false)
+      expect(result._tag).toBe(outcome === "done" || outcome === "refused" ? "Success" : "Failure")
+      expect([...world.state.records.values()]).toMatchObject([{ state: "captured", outcome: {
+        state: outcome === "done" ? "done" : outcome === "refused" ? "refused" : "failed" } }])
+      expect(world.ledger.entries.map((entry) => entry.act)).toEqual(["capture"])
+    }
   }))
 
   it.effect("blocks forged non-capture and approved authority before any implementation or storage", () => Effect.gen(function* () {
