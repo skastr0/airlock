@@ -22,6 +22,7 @@ import {
   CellRequest,
   WorkspaceDeltaCandidate
 } from "../cell/index.ts"
+import { type DeltaMergeEntry, preflightDeltaMerge } from "../cell/DeltaMerge.ts"
 import { Hold, HoldRecoveryRequired } from "../Hold.ts"
 import { ActId, RemoveReceipt } from "../core/domain.ts"
 import {
@@ -1225,49 +1226,6 @@ const safeWorkspacePath = (workspace: string, locator: string) => {
   return target === root || target.startsWith(`${root}${nodePath.sep}`) ? target : undefined
 }
 
-const relativeTopLevel = (path: string) =>
-  path.length > 0 && path !== "." && path !== ".." && !path.includes("/") && !path.includes("\\") && !path.includes("\0")
-
-type ManagedFingerprint = Readonly<{
-  readonly exists: boolean
-  readonly supported: boolean
-  readonly digest: string
-  readonly kind?: "file" | "directory"
-}>
-
-const fingerprintManagedEntryNative = async (path: string): Promise<ManagedFingerprint> => {
-  let info: Awaited<ReturnType<typeof lstat>>
-  try {
-    info = await lstat(path)
-  } catch (cause) {
-    if (typeof cause === "object" && cause !== null && "code" in cause && (cause as { code?: unknown }).code === "ENOENT") {
-      return { exists: false, supported: true, digest: "" }
-    }
-    throw cause
-  }
-  const kind = info.isFile() ? "file" as const : info.isDirectory() ? "directory" as const : undefined
-  if (kind === undefined) return { exists: true, supported: false, digest: "" }
-  const material = kind === "file"
-    ? await readFile(path)
-    : (await Promise.all((await readdir(path)).sort().map(async (entry) => {
-        const child = await fingerprintManagedEntryNative(nodePath.join(path, entry))
-        if (!child.exists || !child.supported) throw new Error(`unsupported directory child: ${entry}`)
-        return `${entry}\0${child.digest}\0`
-      }))).join("")
-  return {
-    exists: true,
-    supported: true,
-    kind,
-    digest: createHash("sha256").update(`${kind}\0${info.mode}\0${info.size}\0`).update(material).digest("hex")
-  }
-}
-
-/** Mirrors the Cell's top-level fingerprint algorithm without following links. */
-const fingerprintManagedEntry = (path: string) => Effect.tryPromise({
-  try: () => fingerprintManagedEntryNative(path),
-  catch: (cause) => new RuntimeNodeFailure({ nodeId: "runtime", operation: "fingerprint", reason: errorReason(cause) })
-})
-
 const deltaBytes = (receipt: CellReceipt) => text.encode(JSON.stringify({
   sourceWorkspace: receipt.sourceWorkspace,
   privateWorkspace: receipt.privateWorkspace,
@@ -1374,52 +1332,15 @@ const make = Effect.gen(function* () {
     return Effect.void
   }
 
-  type MergeEntry = Readonly<{ readonly candidate: WorkspaceDeltaCandidate; readonly target: string; readonly source?: string }>
-
-  const preflightMerge = (nodeId: string, receipt: CellReceipt): Effect.Effect<ReadonlyArray<MergeEntry>, RuntimeError> =>
-    Effect.gen(function* () {
-      if (receipt.drift.length > 0) {
-        return yield* new RuntimeMergeDrift({ nodeId, paths: receipt.drift.map((drift) => drift.path), reason: "live workspace changed while Cell ran" })
-      }
-      const drift = yield* cell.revalidate(receipt).pipe(
-        Effect.mapError((error) => new RuntimeNodeFailure({ nodeId, operation: "revalidate Cell baseline", reason: `${error._tag}: ${errorReason(error)}` }))
-      )
-      if (drift.length > 0) {
-        return yield* new RuntimeMergeDrift({ nodeId, paths: drift.map((entry) => entry.path), reason: "live workspace drifted before Apply" })
-      }
-      return yield* Effect.forEach(receipt.delta, (candidate) => Effect.gen(function* () {
-        if (!relativeTopLevel(candidate.path)) {
-          return yield* new RuntimeDeltaUnsupported({ nodeId, path: candidate.path, reason: "only top-level non-symlink paths are mergeable in host-native v1" })
-        }
-        const expected = candidate.kind === "deleted" ? candidate.baseline : candidate.private
-        if (expected === undefined || (expected.kind !== "file" && expected.kind !== "directory")) {
-          return yield* new RuntimeDeltaUnsupported({ nodeId, path: candidate.path, reason: "symlink and special-file Cell deltas are not mergeable in host-native v1" })
-        }
-        const target = nodePath.join(workspace, candidate.path)
-        const live = yield* fingerprintManagedEntry(target).pipe(Effect.mapError(() => new RuntimeDeltaUnsupported({
-          nodeId, path: candidate.path, reason: "live entry contains a symlink or special filesystem object"
-        })))
-        if (candidate.kind === "created") {
-          if (live.exists && !live.supported) {
-            return yield* new RuntimeDeltaUnsupported({ nodeId, path: candidate.path, reason: "created path is occupied by a symlink or special filesystem object" })
-          }
-          if (live.exists) return yield* new RuntimeMergeDrift({ nodeId, paths: [candidate.path], reason: "created path is now occupied in live workspace" })
-        } else if (live.exists && !live.supported) {
-          return yield* new RuntimeDeltaUnsupported({ nodeId, path: candidate.path, reason: "live entry is a symlink or special filesystem object" })
-        } else if (!live.exists || live.kind !== candidate.baseline?.kind || live.digest !== candidate.baseline?.digest) {
-          return yield* new RuntimeMergeDrift({ nodeId, paths: [candidate.path], reason: "live entry no longer matches Cell baseline" })
-        }
-        if (candidate.kind === "deleted") return { candidate, target } satisfies MergeEntry
-        const source = nodePath.join(receipt.privateWorkspace, candidate.path)
-        const privateEntry = yield* fingerprintManagedEntry(source).pipe(Effect.mapError(() => new RuntimeDeltaUnsupported({
-          nodeId, path: candidate.path, reason: "private Cell output contains a symlink or special filesystem object"
-        })))
-        if (!privateEntry.exists || !privateEntry.supported || privateEntry.kind !== candidate.private?.kind || privateEntry.digest !== candidate.private?.digest) {
-          return yield* new RuntimeDeltaUnsupported({ nodeId, path: candidate.path, reason: "private Cell output no longer matches the proposed managed entry" })
-        }
-        return { candidate, target, source } satisfies MergeEntry
-      }))
-    })
+  const preflightMerge = (nodeId: string, receipt: CellReceipt): Effect.Effect<ReadonlyArray<DeltaMergeEntry>, RuntimeError> =>
+    preflightDeltaMerge(cell, workspace, receipt).pipe(
+      Effect.mapError((refused): RuntimeError =>
+        refused.kind === "drift"
+          ? new RuntimeMergeDrift({ nodeId, paths: refused.paths, reason: refused.reason })
+          : refused.kind === "unsupported"
+            ? new RuntimeDeltaUnsupported({ nodeId, path: refused.paths[0]!, reason: refused.reason })
+            : new RuntimeNodeFailure({ nodeId, operation: "revalidate Cell baseline", reason: refused.reason }))
+    )
 
   const mergeCellDelta = (node: PlanNode & { readonly _tag: "Apply" }, source: RuntimeArtifact) =>
     Effect.gen(function* () {
