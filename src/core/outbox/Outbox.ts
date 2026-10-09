@@ -1,4 +1,4 @@
-import { canonicalExactJson } from "../ExactJson.ts"
+import { canonicalExactJson, exactJsonCodec } from "../ExactJson.ts"
 import { Cause, Context, Crypto, DateTime, Effect, Exit, Layer, Option, Result, Schema } from "effect"
 import {
   canonicalJson,
@@ -101,8 +101,8 @@ const mintPermit = <Tag extends string>(
   permitDispatches.set(permit, canonical)
   if (wire !== undefined) permitWires.set(permit, wire)
   if (admission !== undefined) {
-    const snapshot = Schema.decodeUnknownSync(Schema.fromJsonString(EmissionAdmission))(
-      Schema.encodeSync(Schema.fromJsonString(EmissionAdmission))(admission)
+    const snapshot = Schema.decodeUnknownSync(exactJsonCodec(EmissionAdmission))(
+      Schema.encodeSync(exactJsonCodec(EmissionAdmission))(admission)
     )
     const freeze = (value: unknown): void => {
       if (value !== null && typeof value === "object") { Object.values(value).forEach(freeze); Object.freeze(value) }
@@ -681,7 +681,7 @@ export const defineOutbox = <const Kinds extends IntentKinds>(
           return yield* corrupt(record.id, "dispatch", "sealed dispatch does not match its staged digest")
         }
         const dispatch: IntentKind.DispatchOf<Kinds[Tag]> = yield* Schema.decodeUnknownEffect(
-          Schema.fromJsonString(kind.dispatch)
+          exactJsonCodec(kind.dispatch)
         )(sealed.canonical).pipe(
           Effect.mapError((error) => corrupt(record.id, "dispatch", error.message))
         )
@@ -726,7 +726,7 @@ export const defineOutbox = <const Kinds extends IntentKinds>(
       if (Result.isFailure(encoded)) return Result.fail(invalid("dispatch")(encoded.failure))
       const canonical = canonicalJson(encoded.success)
       // The kernel's own copy, decoded from the bytes that will be stored.
-      const dispatch = Schema.decodeUnknownResult(Schema.fromJsonString(kind.dispatch))(canonical)
+      const dispatch = Schema.decodeUnknownResult(exactJsonCodec(kind.dispatch))(canonical)
       if (Result.isFailure(dispatch)) return Result.fail(invalid("dispatch")(dispatch.failure))
       const summary = kind.summarize(dispatch.success)
       if (Result.isFailure(summary)) return Result.fail(summary.failure)
@@ -754,8 +754,8 @@ export const defineOutbox = <const Kinds extends IntentKinds>(
         return Result.fail(new InvalidDispatchAuthorization({ field: "admission", reason: "must contain valid execution authority" }))
       }
       const admission = decodedAdmission === undefined ? undefined : Schema.decodeUnknownSync(
-        Schema.fromJsonString(EmissionAdmission), { onExcessProperty: "error" }
-      )(Schema.encodeSync(Schema.fromJsonString(EmissionAdmission))(decodedAdmission.success))
+        exactJsonCodec(EmissionAdmission), { onExcessProperty: "error" }
+      )(Schema.encodeSync(exactJsonCodec(EmissionAdmission))(decodedAdmission.success))
       return Result.succeed({
         tag,
         canonical,
@@ -962,8 +962,8 @@ export const defineOutbox = <const Kinds extends IntentKinds>(
           const outcome = ownJson(captured.success)
           const response = delivery.response.slice()
           const truncated = delivery.truncated
-          const held = delivery.held === undefined ? undefined : yield* Schema.encodeEffect(Schema.fromJsonString(HeldReference))(delivery.held).pipe(
-            Effect.flatMap(Schema.decodeUnknownEffect(Schema.fromJsonString(HeldReference))),
+          const held = delivery.held === undefined ? undefined : yield* Schema.encodeEffect(exactJsonCodec(HeldReference))(delivery.held).pipe(
+            Effect.flatMap(Schema.decodeUnknownEffect(exactJsonCodec(HeldReference))),
             Effect.catch(() => settleUncertain(id, "dispatch-failed")))
           if ((held !== undefined && held.callId !== id) || (staged.admission?.execution?.when === "now" &&
             (staged.admission.execution.effect === "apply" || staged.admission.execution.effect === "invoke") && held === undefined)) {
@@ -995,8 +995,8 @@ export const defineOutbox = <const Kinds extends IntentKinds>(
       const owned = own({ ...request, holdMillis: 0, admission: new EmissionAdmission(checked.success) } as StageRequest<Kinds>)
       if (Result.isFailure(owned)) return yield* owned.failure
       const { tag, canonical, encodedSummary, key } = owned.success
-      const admission = Schema.decodeUnknownSync(Schema.fromJsonString(CaptureAdmission))(
-        Schema.encodeSync(Schema.fromJsonString(CaptureAdmission))(checked.success))
+      const admission = Schema.decodeUnknownSync(exactJsonCodec(CaptureAdmission))(
+        Schema.encodeSync(exactJsonCodec(CaptureAdmission))(checked.success))
       const execution = admission.execution
       const dispatchDigest = yield* sha256Text(canonical).pipe(withCrypto)
       const requestDigest = yield* sha256Canonical({ path: "capture", kind: tag, dispatchDigest,
@@ -1028,7 +1028,7 @@ export const defineOutbox = <const Kinds extends IntentKinds>(
             Effect.mapError(() => corrupt(id, "response", "kept capture result no longer matches its contract")))
           return { state: "done" as const, id, result }
         }
-        const dispatch = yield* Schema.decodeUnknownEffect(Schema.fromJsonString(kind.dispatch))(canonical).pipe(
+        const dispatch = yield* Schema.decodeUnknownEffect(exactJsonCodec(kind.dispatch))(canonical).pipe(
           Effect.mapError(() => new InvalidIntent({ kind: tag, field: "dispatch", reason: "must match the capture contract" })))
         let wire: WireMaterial | undefined
         if ("wire" in kind && typeof kind.wire === "function") {

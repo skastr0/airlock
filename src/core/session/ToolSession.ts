@@ -1,3 +1,4 @@
+import { exactJsonCodec } from "../ExactJson.ts"
 import { type Crypto, DateTime, Effect, Schema } from "effect"
 import {
   fittingToolGrants,
@@ -137,7 +138,7 @@ export const openToolSession = <Contracts extends ToolContracts, Granted extends
     // The policy is decoded again here, so the session holds its own validated
     // copy. The JSON round trip also detaches nested FieldMatch JSON values;
     // a schema encode/decode alone can retain the caller's objects.
-    const policyCodec = Schema.fromJsonString(ToolPolicy)
+    const policyCodec = exactJsonCodec(ToolPolicy)
     const validated = yield* Schema.decodeUnknownEffect(Schema.toType(ToolPolicy), { onExcessProperty: "error" })(options.policy).pipe(
       Effect.mapError((error) => new InvalidToolSession({ field: "policy", reason: error.message }))
     )
@@ -187,7 +188,7 @@ export const openToolSession = <Contracts extends ToolContracts, Granted extends
           try: () => canonicalJson(wire),
           catch: () => new InvalidToolInput({ tool: contract.tag, reason: "must be JSON matching the tool's input schema" })
         })
-        const input = yield* Schema.decodeUnknownEffect(Schema.fromJsonString(contract.input), { onExcessProperty: "error" })(snapshot).pipe(
+        const input = yield* Schema.decodeUnknownEffect(exactJsonCodec(contract.input), { onExcessProperty: "error" })(snapshot).pipe(
           Effect.mapError((error) => new InvalidToolInput({ tool: contract.tag, reason: error.message }))
         )
         const summarized = contract.summarize(input)

@@ -1,3 +1,4 @@
+import { exactJsonCodec } from "../ExactJson.ts"
 import { Effect, Schema } from "effect"
 import { Sha256Digest } from "../Canonical.ts"
 
@@ -310,12 +311,12 @@ export class Receipt extends Schema.Class<Receipt>("Receipt")({
 // These codecs are the sole persistence/wire representation of Plan v1. They
 // intentionally preserve the declared array order (including canonical DAG
 // order after admission) instead of hiding it behind an object map.
-export const encodePlanDraftJson = Schema.encodeEffect(Schema.fromJsonString(PlanDraft))
-export const decodePlanDraftJson = Schema.decodeEffect(Schema.fromJsonString(PlanDraft))
-export const encodePlanJson = Schema.encodeEffect(Schema.fromJsonString(Plan))
-export const decodePlanJson = Schema.decodeEffect(Schema.fromJsonString(Plan))
-export const encodeReceiptJson = Schema.encodeEffect(Schema.fromJsonString(Receipt))
-export const decodeReceiptJson = Schema.decodeEffect(Schema.fromJsonString(Receipt))
+export const encodePlanDraftJson = Schema.encodeEffect(exactJsonCodec(PlanDraft))
+export const decodePlanDraftJson = Schema.decodeEffect(exactJsonCodec(PlanDraft))
+export const encodePlanJson = Schema.encodeEffect(exactJsonCodec(Plan))
+export const decodePlanJson = Schema.decodeEffect(exactJsonCodec(Plan))
+export const encodeReceiptJson = Schema.encodeEffect(exactJsonCodec(Receipt))
+export const decodeReceiptJson = Schema.decodeEffect(exactJsonCodec(Receipt))
 
 export class DuplicateNodeId extends Schema.TaggedError<DuplicateNodeId>()(
   "DuplicateNodeId",

@@ -51,6 +51,26 @@ describe("core: capture-now terminal short path", () => {
     expect(world.ledger.entries.map((entry) => entry.act)).toEqual(["capture"])
   }))
 
+  it.effect("preserves exact input authority through policy snapshots and permit dispatch", () => Effect.gen(function* () {
+    const world = persistence()
+    const exact = defineToolContract({ name: "exact", version: "1", effect: "capture",
+      input: Schema.Struct({ value: Schema.Number }), output: Schema.Number, public: ["value"] })
+    let calls = 0
+    const airlock = defineAirlock({ contracts: [exact], implement: { exact: ({ value }) => {
+      calls++; expect(Object.is(value, -0)).toBe(true); return value
+    } }, policy: toolPolicy({ toolGrants: [toolGrant(exact, { id: "negative-zero", when: "now", retention: "keep", where: { value: { equals: -0 } } })],
+      budget: { maxCalls: 2, maxInputBytes: 4096 } }) })
+    yield* Effect.gen(function* () {
+      const guest = yield* airlock.guest({ runId: "exact-input", env: undefined })
+      const first = yield* guest.call("exact", { value: -0 })
+      expect(first.state).toBe("done")
+      if (first.state === "done") expect(Object.is(first.result, -0)).toBe(true)
+      expect((yield* guest.call("exact", { value: 0 })).state).toBe("refused")
+    }).pipe(Effect.provide(airlock.layer(undefined).pipe(Layer.provideMerge(world.layer))))
+    expect(calls).toBe(1)
+    expect(world.ledger.entries).toHaveLength(1)
+  }))
+
   it.effect("kept replay uses the recorded encoded result after restart and validates its digest", () => Effect.gen(function* () {
     const world = persistence()
     let calls = 0

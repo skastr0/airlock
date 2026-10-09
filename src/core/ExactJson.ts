@@ -1,3 +1,5 @@
+import { Schema, SchemaGetter, SchemaTransformation } from "effect"
+
 /**
  * JSON text that parses back to exactly the value it was written from.
  *
@@ -26,3 +28,10 @@ export const canonicalExactJson = (value: ExactJson): string => {
   }
   return exactJsonText(sorted(value))
 }
+
+/** A Schema codec whose text boundary preserves its validated encoded JSON exactly. */
+export const exactJsonCodec = <S extends Schema.Constraint>(schema: S) =>
+  Schema.String.pipe(Schema.decodeTo(Schema.Json, new SchemaTransformation.Transformation<Schema.Json, string>(
+    SchemaGetter.parseJson(),
+    SchemaGetter.transform(exactJsonText)
+  )), Schema.decodeTo(schema))

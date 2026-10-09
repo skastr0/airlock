@@ -1,3 +1,4 @@
+import { canonicalExactJson } from "./ExactJson.ts"
 import { Crypto, Effect, Encoding, Schema } from "effect"
 
 /**
@@ -19,22 +20,17 @@ export class DigestUnavailable extends Schema.TaggedError<DigestUnavailable>()(
   { reason: Schema.String }
 ) {}
 
-const sortKeys = (value: Schema.Json): Schema.Json => {
+/** Optional encoded fields are omitted; no toJSON conversion changes a tool value. */
+const encodedJson = (value: unknown): unknown => {
   if (value === null || typeof value !== "object") return value
-  if (Array.isArray(value)) return value.map(sortKeys)
-  const record = value as Schema.JsonObject
-  return Object.fromEntries(
-    Object.keys(record).sort().map((key) => [key, sortKeys(record[key]!)])
-  )
+  if (Array.isArray(value)) return value.map((item) => item === undefined ? null : encodedJson(item))
+  return Object.fromEntries(Object.entries(value).filter(([, item]) => item !== undefined)
+    .map(([key, item]) => [key, encodedJson(item)]))
 }
 
-/**
- * One byte sequence per value: its JSON form (what `JSON.stringify` keeps, so
- * `toJSON` applies and `undefined` properties vanish) with object keys sorted
- * and no insignificant space.
- */
+/** One exact JSON byte sequence per encoded value, with recursively sorted keys. */
 export const canonicalJson = (value: unknown): string =>
-  JSON.stringify(sortKeys(JSON.parse(JSON.stringify(value)) as Schema.Json))
+  canonicalExactJson(Schema.decodeUnknownSync(Schema.Json)(encodedJson(value)))
 
 const encoder = new TextEncoder()
 

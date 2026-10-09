@@ -5,7 +5,7 @@ import { Effect, type Layer, Option, Ref, Result, Schema, type Scope } from "eff
 import { Ledger, LedgerEntry } from "../ledger/Ledger.ts"
 import { CapturedEmission, StoredCaptureResult } from "../outbox/Capture.ts"
 import { OutboxStore } from "../outbox/OutboxStore.ts"
-import { DispatchProvenance, type EmissionId, IdempotencyKey, ResponseCapture } from "../outbox/Records.ts"
+import { DispatchProvenance, type EmissionId, IdempotencyKey, ResponseCapture, SealedDispatch, StagedEmission } from "../outbox/Records.ts"
 import { holds, type Runner, same } from "./Check.ts"
 import { digestOf, emissionId, encoded, instant, sealedDispatch, stagedRecord } from "./Fixtures.ts"
 
@@ -107,6 +107,38 @@ export const outboxStoreConformance = (
       if (Option.isSome(read) && read.value.state === "captured" && read.value.outcome.state === "done") {
         holds(Object.is((read.value.outcome.metadata as Record<string, Schema.Json>)["zero"], -0), "public metadata is exact too")
       }
+    }))
+
+    test("full-lifecycle records and sealed inputs preserve every exact JSON leaf across restarts", () => Effect.gen(function* () {
+      const current = yield* world
+      const value: Schema.Json = { zero: -0, list: [-0, 0, 2 ** 53 + 2, 1e21, 5e-324, Number.MAX_VALUE, 0.1 + 0.2],
+        text: "😀\ud800\u0000\u2028\u2029\"\\", empty: {}, absent: null,
+        nested: JSON.parse('{"__proto__":{"zero":-0},"constructor":"safe"}') as Schema.Json }
+      const canonical = canonicalExactJson(value)
+      const digest = yield* sha256Text(canonical).pipe(Effect.provide(WebCrypto.layer))
+      const record = new StagedEmission({ ...stagedRecord(109, value), dispatchDigest: digest })
+      yield* session(current, (store) => store.putIfAbsent(record, new SealedDispatch({ canonical, digest })))
+      yield* session(current, (store) => store.transition(record.id, "staged", committing))
+      yield* session(current, (store) => store.transition(record.id, "committing", { ...committed(new Uint8Array()), outcome: value }))
+      const restored = yield* session(current, (store) => store.read(record.id))
+      holds(Option.isSome(restored) && restored.value.state === "committed", "committed record survives restart")
+      if (Option.isNone(restored) || restored.value.state !== "committed") return
+      const assertLeaves = (actual: Schema.Json, expected: Schema.Json): void => {
+        if (expected === null || typeof expected !== "object") {
+          holds(Object.is(actual, expected), "each stored leaf preserves its exact value")
+          return
+        }
+        holds(actual !== null && typeof actual === "object", "stored composite preserves its shape")
+        same(Object.keys(actual!), Object.keys(expected), "stored keys keep their order")
+        for (const key of Object.keys(expected)) assertLeaves((actual as Schema.JsonObject)[key]!, (expected as Schema.JsonObject)[key]!)
+      }
+      assertLeaves(restored.value.summary, value)
+      assertLeaves(restored.value.outcome, value)
+      same(yield* sha256Text(canonicalExactJson(restored.value.outcome)).pipe(Effect.provide(WebCrypto.layer)), digest)
+      const sealed = yield* session(current, (store) => store.readDispatch(record.id))
+      same(sealed.canonical, canonical)
+      same(sealed.digest, digest)
+      assertLeaves(JSON.parse(sealed.canonical) as Schema.Json, JSON.parse(canonical) as Schema.Json)
     }))
 
     test("captures one key once under racing publication and never replaces its private result", () => Effect.gen(function* () {

@@ -1,3 +1,4 @@
+import { exactJsonCodec, exactJsonText } from "../ExactJson.ts"
 import { type Crypto, Deferred, Effect, Fiber, Layer, Option, Result, Schema, type Scope } from "effect"
 import * as TestClock from "effect/testing/TestClock"
 import { Ledger, type LedgerEntry, LedgerFailed } from "../ledger/Ledger.ts"
@@ -398,8 +399,8 @@ export const outboxConformance = (
         same(Option.map(stored, encoded), Option.some(encoded(record)), "toRecord yields the stored record")
         same(yield* probes.fromRecord(record), committed, "fromRecord is its inverse")
         // The JSON form survives a trip through text, as an artifact would carry it.
-        const json = JSON.stringify(encoded(record))
-        const decoded = yield* Schema.decodeUnknownEffect(Schema.fromJsonString(EmissionRecord))(json)
+        const json = exactJsonText(encoded(record))
+        const decoded = yield* Schema.decodeUnknownEffect(exactJsonCodec(EmissionRecord))(json)
         same(yield* probes.fromRecord(decoded), committed)
         const stagedRecord = yield* probes.toRecord(staged)
         same([stagedRecord.state, "outcome" in stagedRecord], ["staged", false])

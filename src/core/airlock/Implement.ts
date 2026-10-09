@@ -1,3 +1,4 @@
+import { exactJsonCodec } from "../ExactJson.ts"
 import { Clock, DateTime, Effect, Result, Schema } from "effect"
 import { canonicalJson } from "../Canonical.ts"
 import type { ToolContract } from "../contract/ToolContract.ts"
@@ -100,7 +101,7 @@ export const handlersFor = <Contracts extends ToolContracts, Env>(
       const encoded = yield* Schema.encodeUnknownEffect(contract.dispatch)(request.dispatch).pipe(Effect.mapError(invalid))
       const canonical = yield* Effect.try({ try: () => canonicalJson(encoded), catch: invalid })
       if (!permitAuthorizes(request.permit, name, canonical)) return yield* new DispatchRefused({ reason: "permit does not authorize this exact dispatch" })
-      const input = yield* Schema.decodeUnknownEffect(Schema.fromJsonString(contract.dispatch))(canonical).pipe(Effect.mapError(invalid))
+      const input = yield* Schema.decodeUnknownEffect(exactJsonCodec(contract.dispatch))(canonical).pipe(Effect.mapError(invalid))
       const execution = permitAdmission(request.permit)?.execution
       if (execution !== undefined && (execution.tool !== name || execution.version !== contract.version || execution.effect !== contract.effect ||
         (execution.effect === "request" && execution.when === "now"))) return yield* invalid()
