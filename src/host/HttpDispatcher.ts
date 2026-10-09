@@ -95,7 +95,8 @@ export const dispatchHttp = Effect.fn("HttpDispatcher.dispatch")(function* (
  * while the call is live. The address is the endpoint admission bound.
  *
  * A body that is an artifact is read here, from the host's store, and sent
- * only if its bytes hash to the digest the request was approved with.
+ * only if its bytes hash to the digest the request was approved with. The
+ * digest covers the bytes that leave: no body is decoded and re-encoded.
  */
 export const sendHttp = Effect.fn("HttpDispatcher.send")(function* (
   token: WireToken,
@@ -109,7 +110,13 @@ export const sendHttp = Effect.fn("HttpDispatcher.send")(function* (
   if (request.endpoint.binding.kind !== "endpoint" || !isHttpMethod(request.method)) {
     return yield* new DispatchRefused({ reason: "the admitted request is not an HTTP request to an endpoint" })
   }
-  let body = request.body
+  // A text body is encoded here, once. A string that is not well-formed
+  // UTF-16 has no exact encoding (it would be silently repaired), so it is
+  // refused rather than altered.
+  if (request.body !== undefined && loneSurrogate.test(request.body)) {
+    return yield* new DispatchRefused({ reason: "the body text cannot be encoded exactly" })
+  }
+  let body: Uint8Array | undefined = request.body === undefined ? undefined : new TextEncoder().encode(request.body)
   if (request.bodyArtifact !== undefined) {
     const bytes = yield* readArtifact(request.bodyArtifact).pipe(
       Effect.mapError(() => new DispatchRefused({ reason: "the body artifact could not be read" }))
@@ -118,11 +125,9 @@ export const sendHttp = Effect.fn("HttpDispatcher.send")(function* (
     if (request.bodyArtifactDigest === undefined || digest !== request.bodyArtifactDigest) {
       return yield* new DispatchRefused({ reason: "the body artifact is not the content that was approved" })
     }
-    const text = yield* Effect.try({
-      try: () => new TextDecoder("utf-8", { fatal: true }).decode(bytes),
-      catch: () => new DispatchRefused({ reason: "the body artifact is not text" })
-    })
-    body = text
+    // Never decoded and re-encoded on the way out: the bytes that were just
+    // verified are the bytes that leave, whatever they are.
+    body = bytes
   }
   return yield* onWire(
     {
@@ -136,13 +141,15 @@ export const sendHttp = Effect.fn("HttpDispatcher.send")(function* (
 })
 
 const isHttpMethod = Schema.is(HttpMethod)
+const loneSurrogate = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/
 
 /**
  * Not exported, and reached only from the two functions above, each after
  * its authority check. Redirects are never followed.
  */
 const onWire = (
-  dispatch: HttpDispatch,
+  // A string body is the stored intent's; a tool call's body arrives as the exact bytes to send.
+  dispatch: Omit<HttpDispatch, "body"> & { readonly body?: string | Uint8Array },
   responseLimitBytes: number
 ): Effect.Effect<Delivery<HttpOutcome>, DispatchFailed> =>
   Effect.tryPromise({

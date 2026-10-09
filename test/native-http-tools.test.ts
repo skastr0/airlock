@@ -124,10 +124,9 @@ describe("local HTTP tools", () => {
 
       yield* call(origin, "http.stage", { endpoint: `${origin}/send`, method: "PUT", headers: {}, bodyArtifact: textArtifact, holdMillis: 0 })
       expect(seen[1]).toMatchObject({ method: "PUT", body: "artifact body" })
-      // A body that is not text is refused before anything is sent.
-      const refusal = yield* call(origin, "http.stage", { endpoint: `${origin}/send`, method: "PUT", headers: {}, bodyArtifact: binaryArtifact, holdMillis: 0 })
-      expect(refusal).toBeInstanceOf(Refused)
-      expect(seen).toHaveLength(2)
+      // Bytes that are not text leave exactly as they are (see native-http-wire-bytes.test.ts).
+      yield* call(origin, "http.stage", { endpoint: `${origin}/send`, method: "PUT", headers: {}, bodyArtifact: binaryArtifact, holdMillis: 0 })
+      expect(seen).toHaveLength(3)
     }))
   )
 
