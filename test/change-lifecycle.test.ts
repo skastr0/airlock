@@ -91,7 +91,7 @@ describe("explicit snapshot lifecycle", () => {
     const next = await proposal(root, change)
     expect((await run(change.status(next.id))).state).toBe("staged")
   }))
-  it("the limit is enforced by open proposals alone, with thousands settled beside them", () => world(async ({ root, home, change }) => {
+  it("the limit is enforced by open proposals alone, with thousands settled beside them", () => world(async ({ root, home, change, hold }) => {
     // History the budget must not walk: three thousand settled directories.
     const settled = path.join(home, "changes", "settled")
     const first = await proposal(root, change)
@@ -102,8 +102,14 @@ describe("explicit snapshot lifecycle", () => {
     const open: Array<Awaited<ReturnType<typeof proposal>>> = []
     for (let n = 0; n < 15; n++) open.push(await proposal(root, change))
     await refusedForBudget(root, change)
-    // Finishing one is what frees budget.
-    await finish(change, open[0]!.id)
+    // Finishing one is what frees budget. Its retirement digest is read from
+    // that one proposal: a listing would inspect all the history beside it,
+    // which is the listing's cost and no part of what is held here.
+    await run(change.cancel(open[0]!.id))
+    const plan = (await run(hold.inspectChangeSnapshots(open[0]!.id))).plan
+    expect(plan?.retirementDigest).toMatch(/^sha256:/)
+    await run(change.retire({ id: open[0]!.id, expectedDigest: plan!.retirementDigest }))
+    expect((await run(change.collect(open[0]!.id))).state).toBe("collected")
     await proposal(root, change)
     await refusedForBudget(root, change)
   }), 120000)
