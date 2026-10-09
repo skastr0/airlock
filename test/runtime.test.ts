@@ -763,6 +763,8 @@ describe("native-contained runtime", () => {
           retireChangeSnapshots: unused,
           collectChangeSnapshots: unused,
           undo: unused,
+          undoCheck: () => Effect.die("unused Hold operation"),
+          undoIfUnchanged: () => Effect.die("unused Hold operation"),
           undoLast: Effect.die("unused Hold operation"),
           held: Effect.die("unused Hold operation"),
           reap: unused
@@ -853,6 +855,8 @@ describe("native-contained runtime", () => {
             retireChangeSnapshots: unused,
             collectChangeSnapshots: unused,
             undo: unused,
+            undoCheck: () => Effect.die("unused Hold operation"),
+            undoIfUnchanged: () => Effect.die("unused Hold operation"),
             undoLast: Effect.die("unused Hold operation"),
             held: Effect.die("unused Hold operation"),
             reap: unused

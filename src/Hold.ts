@@ -156,6 +156,23 @@ export class ReplaceReceipt extends Schema.Class<ReplaceReceipt>("ReplaceReceipt
   at: Schema.DateTimeUtcFromString
 }) {}
 
+/**
+ * The call a Hold act belongs to. While it is set, every managed act is
+ * claimed for that call before its first rename, in order, so a caller that
+ * owns several acts can name exactly the ones that may have happened. An act
+ * that was never claimed never renamed anything.
+ */
+export interface HeldCallScope {
+  readonly claim: (id: ActId) => Effect.Effect<void, HoldFilesystemError>
+}
+export const HeldCall = Context.Reference<HeldCallScope | undefined>("airlock/Hold/HeldCall", {
+  defaultValue: () => undefined
+})
+
+/** Whether undoing an act now would put back exactly what it displaced. */
+export const UndoCheck = Schema.Literals(["undoable", "conflict", "restored", "no-longer-held"])
+export type UndoCheck = typeof UndoCheck.Type
+
 export class Hold extends Context.Service<
   Hold,
   {
@@ -223,6 +240,24 @@ export class Hold extends Context.Service<
       | TargetOccupied
     >
     readonly undo: (
+      id: ActId
+    ) => Effect.Effect<
+      UndoReceipt,
+      | TargetNotFound
+      | UnknownAct
+      | NotHeld
+      | RuntimePrivateNotUndoable
+      | UndoConflict
+      | UnsupportedReplacementSymlink
+      | HoldMutationError
+    >
+    /**
+     * Reads, and changes nothing. `conflict` means the target is no longer
+     * the object the act installed; `no-longer-held` means the act was reaped.
+     */
+    readonly undoCheck: (id: ActId) => Effect.Effect<UndoCheck, HoldMutationError>
+    /** `undo`, refused with `UndoConflict` unless `undoCheck` still says undoable. */
+    readonly undoIfUnchanged: (
       id: ActId
     ) => Effect.Effect<
       UndoReceipt,
@@ -822,6 +857,12 @@ const make = Effect.gen(function* () {
       new HoldJournal({ state: "prepared", manifest, ...(retained === undefined ? {} : { retained }),
         ...(checkedKey === undefined ? {} : { checkedKey, checkedPinned: true }) })
     )
+    // After the prepared journal and before any rename: a claimed act always
+    // has a journal to consult, and an unclaimed one has changed nothing.
+    const call = yield* HeldCall
+    if (call !== undefined && checkedKey === undefined && manifest.purpose === "managed") {
+      yield* call.claim(manifest.id)
+    }
   })
 
   const postRenameRecoveryRequired = (
@@ -1616,6 +1657,54 @@ const make = Effect.gen(function* () {
     )
   })
 
+  const undoCheck = Effect.fn("Hold.undoCheck")(function* (id: ActId) {
+    const read = yield* readJournal(id).pipe(Effect.result)
+    if (read._tag === "Failure") {
+      // A claimed act always had a journal, so a missing one was reaped.
+      return read.failure._tag === "UnknownAct" ? ("no-longer-held" as const) : yield* read.failure
+    }
+    let journal = read.success
+    if (journal.state === "prepared") {
+      // An act interrupted around its rename is settled the way construction
+      // settles it: by what the filesystem shows, or not at all.
+      const settled = yield* reconcileJournal(journal).pipe(Effect.result)
+      if (settled._tag === "Failure") return "conflict" as const
+      journal = yield* readJournal(id).pipe(
+        Effect.catchTag("UnknownAct", () => Effect.succeed(journal))
+      )
+    }
+    if (journal.state === "restored") return "restored" as const
+    if (journal.state !== "held" || journal.checkedKey !== undefined || journal.snapshotRetirementId !== undefined) {
+      return "conflict" as const
+    }
+    const { manifest } = journal
+    if (manifest.purpose === "runtime-private") return "conflict" as const
+    if (manifest.hasPayload && !(yield* pathExists(payloadFile(id)))) return "no-longer-held" as const
+    const present = yield* Effect.tryPromise({
+      try: () => lstat(manifest.target).catch((cause) => isNotFound(cause) ? undefined : Promise.reject(cause)),
+      catch: fsError("lstat undo target", manifest.target)
+    })
+    // A removal is undone into an empty place.
+    if (manifest.act !== "overwrite") return present === undefined ? ("undoable" as const) : ("conflict" as const)
+    const installed = journal.installed
+    if (present === undefined || installed === undefined) return "conflict" as const
+    // A directory's size and mode move as entries come and go beneath it, and
+    // those entries are checked by their own acts; its identity is what binds.
+    const same = installed.kind === "directory"
+      ? present.isDirectory() && present.dev === installed.device && present.ino === installed.inode &&
+        present.birthtimeMs === installed.birthtimeMillis
+      : yield* matchesInstalledIdentity(manifest.target, installed)
+    return same ? ("undoable" as const) : ("conflict" as const)
+  })
+
+  const undoIfUnchanged = Effect.fn("Hold.undoIfUnchanged")(function* (id: ActId) {
+    const journal = yield* readJournal(id)
+    const check = yield* undoCheck(id)
+    if (check === "restored") return yield* new NotHeld({ id, status: "restored" })
+    if (check !== "undoable") return yield* new UndoConflict({ target: journal.manifest.target })
+    return yield* undo(id)
+  })
+
   const held = listJournals.pipe(
     Effect.map((journals) =>
       journals
@@ -2094,6 +2183,8 @@ const make = Effect.gen(function* () {
     replaceByStaging: (target, kind, populate) =>
       withLock(replaceByStaging(target, kind, populate)),
     undo: (id) => withLock(undo(id)),
+    undoCheck: (id) => withLock(undoCheck(id)),
+    undoIfUnchanged: (id) => withLock(undoIfUnchanged(id)),
     undoLast: withLock(undoLast),
     held: withLock(held),
     reap: (olderThanMillis) => withLock(reap(olderThanMillis))

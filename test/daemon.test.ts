@@ -188,6 +188,8 @@ const fakeHold = (
   retireChangeSnapshots: () => Effect.die("daemon cannot retire review snapshots"),
   collectChangeSnapshots: () => Effect.die("daemon cannot collect review snapshots"),
   undo: () => Effect.die("unused undo"),
+  undoCheck: () => Effect.die("unused undoLast"),
+  undoIfUnchanged: () => Effect.die("unused undoLast"),
   undoLast: Effect.die("unused undoLast"),
   held: Effect.die("unused held"),
   reap: onReap

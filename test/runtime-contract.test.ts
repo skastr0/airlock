@@ -110,6 +110,8 @@ const impossibleHold = Layer.succeed(Hold, Hold.of({
   retireChangeSnapshots: () => Effect.die("Runtime cannot retire review snapshots"),
   collectChangeSnapshots: () => Effect.die("Runtime cannot collect review snapshots"),
   undo: () => Effect.die("unused"),
+  undoCheck: () => Effect.die("unused"),
+  undoIfUnchanged: () => Effect.die("unused"),
   undoLast: Effect.die("unused"),
   held: Effect.succeed([]),
   reap: () => Effect.die("unused")
