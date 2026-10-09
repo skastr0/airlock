@@ -107,6 +107,12 @@ export interface GuestRun {
   /** Airlock program source. Its result is what it returns, or null. */
   readonly source: string
   readonly surface: GuestSurface
+  /**
+   * Names the host binds for this run, as plain JSON. The program reads them
+   * like any name; each is a copy, bounded like a tool's result, and grants
+   * nothing.
+   */
+  readonly bindings?: { readonly [name: string]: unknown }
   readonly limits?: Partial<GuestLimits>
   readonly signal?: AbortSignal
 }

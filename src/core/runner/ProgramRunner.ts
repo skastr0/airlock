@@ -72,7 +72,7 @@ const reasons: { readonly [Tag in EvaluationError["_tag"]]?: GuestFailureReason 
  * Neither is a CPU quota. A program can still spend its whole loop budget on
  * arithmetic; the deadline is what ends that.
  */
-const runProgram = ({ source, surface, limits: overrides, signal }: GuestRun): Effect.Effect<GuestOutcome> =>
+const runProgram = ({ source, surface, bindings: bound, limits: overrides, signal }: GuestRun): Effect.Effect<GuestOutcome> =>
   Effect.suspend(() => {
     const limits = guestLimits(overrides)
     const deadline = Date.now() + limits.wallTimeMs
@@ -136,17 +136,26 @@ const runProgram = ({ source, surface, limits: overrides, signal }: GuestRun): E
         })
     }
 
+    // What the host binds crosses the same way a tool's result does.
+    const bindings = Effect.forEach(Object.entries(bound ?? {}), ([name, value]) =>
+      Effect.map(
+        cross(value, limits.maxToolResultBytes, limits, { tooLarge: "value_limit", notJson: "execution_failed" }),
+        (copy) => [name, copy as LanguageValue] as const
+      )).pipe(Effect.map((entries) => Object.fromEntries(entries)))
+
     // One turn passes before the first step, so an abort issued right after
     // the run was started is seen before anything is called.
     const settled: Effect.Effect<GuestOutcome> = Effect.yieldNow.pipe(
       Effect.andThen(Effect.suspend(() =>
         signal?.aborted === true
           ? stop("aborted")
-          : evaluate(program, resolver, {
-              maxLoopIterations: limits.maxLoopIterations,
-              maxStringLength: Math.max(limits.maxToolInputBytes, limits.maxOutputBytes),
-              maxValueNodes: limits.maxNodes
-            }))),
+          : Effect.flatMap(bindings, (names) =>
+              evaluate(program, resolver, {
+                maxLoopIterations: limits.maxLoopIterations,
+                maxStringLength: Math.max(limits.maxToolInputBytes, limits.maxOutputBytes),
+                maxValueNodes: limits.maxNodes,
+                bindings: names
+              })))),
       Effect.flatMap((evaluation) =>
         cross(evaluation.returned ? evaluation.value : null, limits.maxOutputBytes, limits, {
           tooLarge: "output_limit",

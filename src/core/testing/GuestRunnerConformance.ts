@@ -56,7 +56,12 @@ export const guestRunnerConformance = (
     current: GuestRunnerWorld,
     env: Env,
     source: string,
-    options: { readonly runId?: string; readonly limits?: Partial<GuestLimits>; readonly signal?: AbortSignal } = {}
+    options: {
+      readonly runId?: string
+      readonly limits?: Partial<GuestLimits>
+      readonly signal?: AbortSignal
+      readonly bindings?: { readonly [name: string]: unknown }
+    } = {}
   ): Effect.Effect<GuestOutcome, unknown> =>
     Effect.gen(function* () {
       const surface = yield* airlock.guest({ runId: options.runId ?? "run-1", env })
@@ -65,6 +70,7 @@ export const guestRunnerConformance = (
         source,
         surface,
         ...(options.limits === undefined ? {} : { limits: options.limits }),
+        ...(options.bindings === undefined ? {} : { bindings: options.bindings }),
         ...(options.signal === undefined ? {} : { signal: options.signal })
       })
     }).pipe(
@@ -90,6 +96,33 @@ export const guestRunnerConformance = (
           return { sum: total, text: "o" + "k", list: [true, null] }`)
         same(returned, { ok: true, result: { sum: 6, text: "ok", list: [true, null] }, toolCalls: 0 })
         same(yield* run(current, fresh(), "let unused = 1"), { ok: true, result: null, toolCalls: 0 })
+      }))
+
+    test("gives the program the names its host binds, as bounded copies that grant nothing", () =>
+      Effect.gen(function* () {
+        const current = yield* world
+        const env = fresh()
+        const workspace = { root: "/work", writable: ["a", "b"] }
+        const outcome = yield* run(current, env, `
+          let inbox = mail.list({ mailbox: workspace.root, query: "q" })
+          return { root: workspace.root, last: workspace.writable[1], enabled: enabled, inbox: inbox }`, {
+          bindings: { workspace, enabled: true }
+        })
+        same(outcome, {
+          ok: true,
+          result: { root: "/work", last: "b", enabled: true, inbox: { ids: ["/work-1"] } },
+          toolCalls: 1
+        })
+        // A bound name is a value, never a tool, and a name the host did not bind is still unbound.
+        same(reasonOf(yield* run(current, env, "return workspace({})", { bindings: { workspace } })), "tool_refused")
+        same(reasonOf(yield* run(current, env, "return workspace.root")), "execution_failed")
+        const getter = Object.defineProperty({}, "secret", { enumerable: true, get: () => "leaked" })
+        same([
+          yield* run(current, env, "return 1", { bindings: { big: "x".repeat(200) }, limits: { maxToolResultBytes: 64 } }),
+          yield* run(current, env, "return 1", { bindings: { wide: [1, 2, 3] }, limits: { maxNodes: 3 } }),
+          yield* run(current, env, "return live", { bindings: { live: getter } })
+        ].map(reasonOf), ["value_limit", "value_limit", "execution_failed"])
+        same(env.dispatched, ["mail.list"])
       }))
 
     test("calls granted tools by their dotted names: a read runs, a write is only recorded", () =>
