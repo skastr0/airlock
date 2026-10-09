@@ -57,7 +57,7 @@ const world = (
 
 const policyFor = (resource: Schema.Json) => toolPolicy({
   toolGrants: [Admission.toolGrant(JsonRead, {
-    id: "allowed-resource", class: "read", commit: "auto", where: { resource: { equals: resource } }
+    id: "allowed-resource", when: "now", where: { resource: { equals: resource } }
   })],
   budget: { maxCalls: 5, maxInputBytes: 4_096 }
 })
@@ -161,7 +161,7 @@ describe("security: tool-session admission owns its data", () => {
     return Effect.gen(function* () {
       const session = yield* openToolSession(tools, {
         runId: "private-input", policy: toolPolicy({
-          toolGrants: [Admission.toolGrant(PrivateRead, { id: "private-read", class: "read", commit: "auto" })],
+          toolGrants: [Admission.toolGrant(PrivateRead, { id: "private-read", when: "now" })],
           budget: { maxCalls: 5, maxInputBytes: 4_096 }
         })
       })

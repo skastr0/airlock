@@ -62,10 +62,10 @@ export const airlock = defineAirlock({
   policy: toolPolicy({
     budget: { maxCalls: 8, maxInputBytes: 16_384 },
     toolGrants: [
-      toolGrant(MailList, { id: "read-inbox", class: "read", commit: "auto", where: { mailbox: { equals: "inbox" } } }),
-      toolGrant(MailRead, { id: "read-mail", class: "read", commit: "auto" }),
+      toolGrant(MailList, { id: "read-inbox", when: "now", where: { mailbox: { equals: "inbox" } } }),
+      toolGrant(MailRead, { id: "read-mail", when: "now" }),
       toolGrant(MailSend, { id: "company-mail", where: { to: { endsWith: "@example.com" } } }),
-      toolGrant(LabelAdd, { id: "labels", class: "mutate" })
+      toolGrant(LabelAdd, { id: "labels", when: "approved" })
     ]
   })
 })

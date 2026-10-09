@@ -39,9 +39,9 @@ const airlock = defineAirlock({
   policy: toolPolicy({
     budget: { maxCalls: 6, maxInputBytes: 4_096 },
     toolGrants: [
-      Admission.toolGrant(MailList, { id: "read-inbox", class: "read", commit: "auto" }),
+      Admission.toolGrant(MailList, { id: "read-inbox", when: "now" }),
       Admission.toolGrant(MailSend, { id: "support-replies", where: { to: { endsWith: "@example.com" } } }),
-      Admission.toolGrant(LabelAdd, { id: "labels", class: "mutate" })
+      Admission.toolGrant(LabelAdd, { id: "labels", when: "approved" })
     ]
   })
 })

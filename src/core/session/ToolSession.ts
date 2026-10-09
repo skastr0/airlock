@@ -1,4 +1,4 @@
-import { type Crypto, Effect, Schema } from "effect"
+import { type Crypto, DateTime, Effect, Schema } from "effect"
 import {
   fittingToolGrants,
   toolDispatchDecision,
@@ -148,7 +148,7 @@ export const openToolSession = <Contracts extends ToolContracts, Granted extends
     // copy. The JSON round trip also detaches nested FieldMatch JSON values;
     // a schema encode/decode alone can retain the caller's objects.
     const policyCodec = Schema.fromJsonString(ToolPolicy)
-    const validated = yield* Schema.decodeUnknownEffect(ToolPolicy, { onExcessProperty: "error" })(options.policy).pipe(
+    const validated = yield* Schema.decodeUnknownEffect(Schema.toType(ToolPolicy), { onExcessProperty: "error" })(options.policy).pipe(
       Effect.mapError((error) => new InvalidToolSession({ field: "policy", reason: error.message }))
     )
     const policy = yield* Schema.encodeEffect(policyCodec)(validated).pipe(
@@ -233,14 +233,15 @@ export const openToolSession = <Contracts extends ToolContracts, Granted extends
           admission: new EmissionAdmission({ policyDigest, grantIds })
         }
 
-        const decision = toolDispatchDecision(grants, contracts, summary)
-        if (decision._tag === "AutoCommit") {
+        const decision = toolDispatchDecision(grants, contracts, summary, { now: yield* DateTime.now })
+        if (decision._tag === "Refused") return yield* new ToolCallNotGranted({ tool: contract.tag, unmet: [{ grantId: grantIds.join(","), field: decision.reason }] })
+        if (decision._tag === "Now") {
           const performed = yield* service.perform(
             request,
             new DispatchProvenance({
               committedBy: "policy-auto",
               grantId: grantIds.join(","),
-              grantSelector: decision.selector,
+              grantSelector: summary.tool,
               dispatchClass: "read",
               target: summary.target
             })

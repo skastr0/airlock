@@ -50,9 +50,9 @@ const makeMailbox = () => {
 const policy = toolPolicy({
   budget: { maxCalls: 8, maxInputBytes: 4_096 },
   toolGrants: [
-    toolGrant(MailList, { id: "read-inbox", class: "read", commit: "auto", where: { mailbox: { equals: "inbox" } } }),
+    toolGrant(MailList, { id: "read-inbox", when: "now", where: { mailbox: { equals: "inbox" } } }),
     toolGrant(MailSend, { id: "send-inside-company", where: { to: { endsWith: "@example.com" } } }),
-    toolGrant(LabelAdd, { id: "label-messages", class: "mutate" })
+    toolGrant(LabelAdd, { id: "label-messages", when: "approved" })
   ]
 })
 

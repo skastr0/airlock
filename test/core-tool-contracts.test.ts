@@ -85,38 +85,36 @@ describe("core: tool contracts", () => {
     expect(Admission.fittingToolGrants([company], list("inbox"))).toHaveLength(0)
 
     const mailboxes = toolGrant(MailList, { id: "g/2", 
-      class: "read",
-      commit: "auto",
+      when: "now",
       where: { mailbox: { oneOf: ["inbox", "archive"] } }
     })
     expect(toolDispatchDecision([mailboxes], exampleContracts, list("inbox"))).toMatchObject({
-      _tag: "AutoCommit",
-      effectiveClass: "read"
+      _tag: "Now"
     })
     expect(toolDispatchDecision([mailboxes], exampleContracts, list("drafts"))).toMatchObject({
-      _tag: "AwaitSupervisor"
+      _tag: "Refused"
     })
   })
 
-  it("never auto-commits a non-capture tool under a read grant", () => {
-    // A request does not become a capture because a grant describes it as a read.
-    const eager = new ToolGrantPolicy({ id: "eager", tool: "mail.send", class: "read", commit: "auto" })
+  it("never permits request-now, even when the request declares compensation", () => {
+    // Both an irreversible request and a compensated request require approval.
+    const eager = new ToolGrantPolicy({ id: "eager", tool: "mail.send", when: "now" })
     expect(toolDispatchDecision([eager], exampleContracts, send("ada@example.com"))).toMatchObject({
-      _tag: "AwaitSupervisor"
+      _tag: "Refused"
     })
     const label = Result.getOrThrow(LabelAdd.summarize({ messageId: "m", label: "l" }))
-    const labelGrant = new ToolGrantPolicy({ id: "label", tool: "label.add", class: "read", commit: "auto" })
+    const labelGrant = new ToolGrantPolicy({ id: "label", tool: "label.add", when: "now" })
     expect(toolDispatchDecision([labelGrant], exampleContracts, label)).toMatchObject({
-      _tag: "AwaitSupervisor"
+      _tag: "Refused"
     })
     // A grant that says nothing is the floor: staged until a supervisor commits.
-    expect(toolGrant(MailList, { id: "g/6" })).toMatchObject({ class: "irreversible-send", commit: "supervisor" })
+    expect(toolGrant(MailList, { id: "g/6" })).toMatchObject({ when: "approved" })
     expect(toolDispatchDecision([toolGrant(MailList, { id: "g/7" })], exampleContracts, list("inbox"))).toMatchObject({
-      _tag: "AwaitSupervisor"
+      _tag: "Approved"
     })
   })
 
-  it("refuses a grant on a private field, an unknown tool, or a non-read auto-commit", () => {
+  it("refuses a grant on a private field, an unknown tool, or request-now", () => {
     // @ts-expect-error subject is not a public field of mail.send
     toolGrant(MailSend, { id: "g/3", where: { subject: { equals: "hi" } } })
     // @ts-expect-error query is not a public field of mail.list
@@ -132,12 +130,12 @@ describe("core: tool contracts", () => {
       field: "policy.toolGrants[0].tool"
     })
     expect(
-      validateToolGrants([decode({ id: "auto", tool: "label.add", class: "mutate", commit: "auto" })], exampleContracts)
-    ).toMatchObject({ field: "policy.toolGrants[0].commit" })
-    const valid = toolGrant(MailList, { id: "g/5", class: "read", commit: "auto" })
+      validateToolGrants([decode({ id: "auto", tool: "label.add", when: "now" })], exampleContracts)
+    ).toMatchObject({ field: "policy.toolGrants[0].when" })
+    const valid = toolGrant(MailList, { id: "g/5", when: "now" })
     expect(toolDispatchDecision([valid, onPrivate], exampleContracts, list("inbox"))).toMatchObject({
-      _tag: "AwaitSupervisor",
-      reason: "policy tool grants are invalid"
+      _tag: "Refused",
+      reason: expect.stringContaining("invalid policy")
     })
   })
 

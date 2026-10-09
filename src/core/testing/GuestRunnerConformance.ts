@@ -39,7 +39,7 @@ const airlock = defineAirlock({
   policy: toolPolicy({
     budget: { maxCalls: 64, maxInputBytes: 1_000_000 },
     toolGrants: [
-      toolGrant(MailList, { id: "read", class: "read", commit: "auto" }),
+      toolGrant(MailList, { id: "read", when: "now" }),
       toolGrant(MailSend, { id: "company", where: { to: { endsWith: "@example.com" } } })
     ]
   })

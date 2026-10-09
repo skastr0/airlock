@@ -175,7 +175,7 @@ describe("core: what the types rule out", () => {
         policy: toolPolicy({
           budget: { maxCalls: 1, maxInputBytes: 1 },
           toolGrants: [
-            Admission.toolGrant(MailList, { id: "g/3", class: "read", commit: "auto" }),
+            Admission.toolGrant(MailList, { id: "g/3", when: "now" }),
             Admission.toolGrant(LabelAdd, { id: "g/4" })
           ]
         })

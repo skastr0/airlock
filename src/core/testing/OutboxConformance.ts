@@ -935,7 +935,7 @@ export const outboxConformance = (
         const current = yield* world
         const { calls, handlers } = toolWire()
         const grants = [
-          toolGrant(MailList, { id: "grant/maillist/1", class: "read", commit: "auto", where: { mailbox: { equals: "inbox" } } }),
+          toolGrant(MailList, { id: "grant/maillist/1", when: "now", where: { mailbox: { equals: "inbox" } } }),
           toolGrant(MailSend, { id: "grant/mailsend/2", where: { to: { endsWith: "@example.com" } } })
         ]
         const open = (runId: string) =>
@@ -1011,7 +1011,7 @@ export const outboxConformance = (
         const current = yield* world
         const { calls, handlers } = toolWire()
         const grants = [
-          toolGrant(MailList, { id: "grant/maillist/3", class: "read", commit: "auto", where: { mailbox: { equals: "inbox" } } }),
+          toolGrant(MailList, { id: "grant/maillist/3", when: "now", where: { mailbox: { equals: "inbox" } } }),
           toolGrant(MailSend, { id: "grant/mailsend/4", where: { to: { endsWith: "@example.com" } } })
         ]
         const refusals = yield* toolSession(current, handlers, (_, store) =>
@@ -1046,7 +1046,7 @@ export const outboxConformance = (
             openToolSession(tools, {
               runId: "run-3",
               policy: toolPolicy({
-                toolGrants: [toolGrant(MailList, { id: "grant/maillist/6", class: "read" })],
+                toolGrants: [toolGrant(MailList, { id: "grant/maillist/6", when: "approved" })],
                 budget: { maxCalls: 1, maxInputBytes: 1_000 }
               })
             }),
@@ -1072,7 +1072,7 @@ export const outboxConformance = (
       Effect.gen(function* () {
         const current = yield* world
         const { calls, handlers } = toolWire()
-        const grants = [toolGrant(MailList, { id: "grant/maillist/7", class: "read", commit: "auto" })]
+        const grants = [toolGrant(MailList, { id: "grant/maillist/7", when: "now" })]
         const outcome = yield* toolSession(current, handlers, (_, store) =>
           Effect.gen(function* () {
             const counted = yield* openToolSession(tools, {
