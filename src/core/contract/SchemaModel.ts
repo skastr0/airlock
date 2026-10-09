@@ -64,6 +64,7 @@ export const modelSchema = (schema: Schema.Codec<unknown, unknown>, options: {
       if (SchemaAST.isString(ast)) return register({ kind: "string" })
       if (SchemaAST.isNumber(ast)) return register({ kind: "number" })
       if (SchemaAST.isBoolean(ast)) return register({ kind: "boolean" })
+      if (SchemaAST.isNull(ast)) return register({ kind: "literal", value: null })
       if (SchemaAST.isLiteral(ast) && (ast.literal === null || typeof ast.literal === "string" ||
         typeof ast.literal === "boolean" || (typeof ast.literal === "number" && Number.isFinite(ast.literal)))) {
         return register({ kind: "literal", value: ast.literal })

@@ -3,6 +3,20 @@ import { Schema } from "effect"
 import { acceptsLiteral, hasSameSchema, modelSchema } from "../src/core/contract/SchemaModel.ts"
 
 describe("core: closed schema model", () => {
+  it("models null and nullable unions without erasing optional-key absence", () => {
+    for (const side of ["encoded", "decoded"] as const) {
+      const literal = modelSchema(Schema.Null, { identity: "null", side })
+      expect(literal).toEqual({ kind: "literal", value: null })
+      expect(acceptsLiteral(literal, null)).toBe(true)
+      expect(acceptsLiteral(literal, "null")).toBe(false)
+      const model = modelSchema(Schema.Struct({ value: Schema.optionalKey(Schema.Union([Schema.String, Schema.Null])) }), { identity: "nullable", side })
+      expect(model).toMatchObject({ kind: "record", fields: { value: { optional: true,
+        type: { kind: "union", members: [{ kind: "string" }, { kind: "literal", value: null }] } } } })
+      const values: Schema.Json[] = [{}, { value: null }, { value: "text" }]
+      for (const value of values) expect(acceptsLiteral(model, value)).toBe(true)
+      expect(acceptsLiteral(model, { value: false })).toBe(false)
+    }
+  })
   it("recognizes the same trusted schema at different model paths without equating lookalike checks or wire transforms", () => {
     const checked = Schema.String.check(Schema.isEndsWith("@example.test"))
     const output = modelSchema(checked, { identity: "result.from", side: "decoded" })
