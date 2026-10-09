@@ -11,6 +11,12 @@ export type SchemaModel =
 
 const validators = new WeakMap<object, Schema.Codec<unknown, unknown>>()
 
+/** Exact trusted schema identity can survive a different model path; structural copies cannot. */
+export const hasSameSchema = (left: SchemaModel, right: SchemaModel): boolean => {
+  const a = validators.get(left), b = validators.get(right)
+  return a !== undefined && b !== undefined && a.ast === b.ast
+}
+
 /** Read only the built-in length check; arbitrary annotations are not proof. */
 const maximumLength = (checks: SchemaAST.Checks | undefined): number | undefined => {
   const bounds: Array<number> = []

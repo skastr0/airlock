@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest"
 import { Result, Schema, SchemaGetter } from "effect"
-import { decodeValue, defineDecoder, defineDecoderCatalog, deriveValue, hasRefinement, InvalidDecoder, isTrackedValue, labeledValue, projectValue } from "../src/core/contract/Decoder.ts"
+import { attestValue, decodeValue, defineDecoder, defineDecoderCatalog, deriveValue, hasRefinement, InvalidDecoder, isTrackedValue, labeledValue, projectValue } from "../src/core/contract/Decoder.ts"
 import { InformationLabel } from "../src/core/labels/Labels.ts"
 
 const secret = new InformationLabel({ confidentiality: "secret", integrity: "untrusted", provenance: ["mail.body"] })
@@ -8,6 +8,23 @@ const Address = defineDecoder({ name: "mail.address", version: "1", schema: Sche
 const success = <Value>(result: Result.Result<Value, unknown>): Value => Result.getOrThrow(result)
 
 describe("core: trusted decoder refinements", () => {
+  it("attests decoded results without re-running a transform or changing prior values", () => {
+    const numeric = defineDecoder({ name: "number.positive", version: "1", schema: Schema.NumberFromString.check(Schema.isGreaterThan(0)) })
+    const source = labeledValue(12, secret)
+    expect(Result.isFailure(decodeValue(numeric, source))).toBe(true)
+    const attested = success(attestValue(source, numeric))
+    expect(attested.value).toBe(12)
+    expect(attested.label).toEqual(secret)
+    expect(hasRefinement(attested, numeric)).toBe(true)
+    expect(hasRefinement(source, numeric)).toBe(false)
+    expect(Result.isFailure(attestValue(labeledValue("12", secret), numeric))).toBe(true)
+    expect(Result.isFailure(attestValue({ ...source }, numeric))).toBe(true)
+    const zero = defineDecoder({ name: "number.negative-zero", version: "1", schema: Schema.Number.check(Schema.makeFilter((value) => Object.is(value, -0))) })
+    const proof = success(attestValue(labeledValue(-0, secret), zero))
+    expect(Object.is(proof.value, -0)).toBe(true)
+    expect(hasRefinement(proof, zero)).toBe(true)
+    expect(Result.isFailure(attestValue(labeledValue(0, secret), zero))).toBe(true)
+  })
   it("recognizes owned unrefined values and rejects copies, prototypes and primitive values", () => {
     const source = labeledValue("literal", secret)
     expect(isTrackedValue(source)).toBe(true)

@@ -154,6 +154,25 @@ export const decodeValue = <Decoder extends TrustedDecoder.Any>(
 export const hasRefinement = (value: TrackedValue, decoder: TrustedDecoder.Any): boolean =>
   decoders.has(decoder) && proofs.get(value)?.has(decoder) === true
 
+/** Prove an already-decoded boundary value without running its encoded transform again. */
+export const attestValue = <Decoder extends TrustedDecoder.Any>(
+  source: TrackedValue, decoder: Decoder
+): Result.Result<TrackedValue<TrustedDecoder.ValueOf<Decoder>>, DecoderRejected> => {
+  const reject = (reason: DecoderRejected["reason"]) => Result.fail(new DecoderRejected({ decoder: decoder.name, reason }))
+  if (!decoders.has(decoder)) return reject("untrusted-decoder")
+  const inherited = proofs.get(source)
+  if (inherited === undefined) return reject("untracked-value")
+  try {
+    const value = ownJson(source.value)
+    const checked = Schema.decodeUnknownResult(Schema.toType(decoder.schema), { onExcessProperty: "error" })(value)
+    if (Result.isFailure(checked)) return reject("schema")
+    // The checked value is deliberately ignored: an attestation cannot transform it.
+    return Result.succeed(track(value as TrustedDecoder.ValueOf<Decoder>, source.label, new Set([...inherited, decoder])))
+  } catch {
+    return reject("non-json-result")
+  }
+}
+
 /** Ordinary computation conservatively joins labels and discards proofs. */
 export const deriveValue = <Value extends Schema.Json>(
   value: Value,

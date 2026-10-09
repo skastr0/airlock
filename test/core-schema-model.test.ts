@@ -1,8 +1,20 @@
 import { describe, expect, it } from "vitest"
 import { Schema } from "effect"
-import { acceptsLiteral, modelSchema } from "../src/core/contract/SchemaModel.ts"
+import { acceptsLiteral, hasSameSchema, modelSchema } from "../src/core/contract/SchemaModel.ts"
 
 describe("core: closed schema model", () => {
+  it("recognizes the same trusted schema at different model paths without equating lookalike checks or wire transforms", () => {
+    const checked = Schema.String.check(Schema.isEndsWith("@example.test"))
+    const output = modelSchema(checked, { identity: "result.from", side: "decoded" })
+    const input = modelSchema(checked, { identity: "input.to", side: "encoded" })
+    expect(hasSameSchema(output, input)).toBe(true)
+    expect(hasSameSchema({ ...output }, input)).toBe(false)
+    const lookalike = modelSchema(Schema.String.check(Schema.isEndsWith("@example.test")), { identity: "input.to", side: "encoded" })
+    expect(hasSameSchema(output, lookalike)).toBe(false)
+    const transform = Schema.NumberFromString.check(Schema.isGreaterThan(0))
+    expect(hasSameSchema(modelSchema(transform, { identity: "result.number", side: "decoded" }),
+      modelSchema(transform, { identity: "input.text", side: "encoded" }))).toBe(false)
+  })
   it("describes records, optional keys, tagged unions and bounded lists", () => {
     const schema = Schema.Struct({
       name: Schema.String, optional: Schema.optionalKey(Schema.Boolean),
