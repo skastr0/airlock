@@ -2,6 +2,7 @@ import { Effect, Result, Schema } from "effect"
 import { canonicalJson, sha256Canonical, type Sha256Digest } from "../../src/core/Canonical.ts"
 import { fittingToolGrants, ToolGrantPolicy, validateToolGrants } from "../../src/core/admission/ToolGrant.ts"
 import { hasRefinement, isTrackedValue, type TrackedValue } from "../../src/core/contract/Decoder.ts"
+import { isRoleWitnessIssuer, type RoleWitnessIssuer } from "../../src/core/contract/RoleWitness.ts"
 import { FlowRule, validateFlowRules } from "../../src/core/contract/FlowRules.ts"
 import { modelSchema } from "../../src/core/contract/SchemaModel.ts"
 import { combine, checkSink, InformationLabel, SinkPolicy } from "../../src/core/labels/Labels.ts"
@@ -28,7 +29,7 @@ export const CallEnvelope = Schema.Struct({
   when: Schema.Literals(["reviewed", "staged"])
 })
 export const PrototypePlan = Schema.Struct({
-  schemaVersion: Schema.Literal("airlock/review-demo/v2"),
+  schemaVersion: Schema.Literal("airlock/review-demo/v3"),
   id: Schema.String,
   nodes: Schema.Array(CallEnvelope),
   maximumCalls: Schema.Record(Schema.String, Schema.Int),
@@ -154,8 +155,8 @@ export const lowerReviewPrototype = (source: string, review: Review, surface: Re
     registryDigest: surface.registryDigest, grants: surface.grants, sources: surface.sources, sinks: surface.sinks,
     limits: { maxCalls: review.environment.maxCalls, maxIterations: review.environment.maxIterations,
       maxListItems: review.environment.maxListItems, maxPlanBytes: surface.maxPlanBytes },
-    rules: surface.rules ?? [], semantics: "airlock/review-demo/v2" })
-  const body = { schemaVersion: "airlock/review-demo/v2" as const, nodes, maximumCalls: review.maximumCalls,
+    rules: surface.rules ?? [], semantics: "airlock/review-demo/v3" })
+  const body = { schemaVersion: "airlock/review-demo/v3" as const, nodes, maximumCalls: review.maximumCalls,
     iterations: review.iterations, contextDigest, rules: [...surface.rules ?? []] }
   const id = yield* sha256Canonical(body)
   const plan = Schema.decodeUnknownSync(PrototypePlan)({ ...body, id })
@@ -178,14 +179,14 @@ export class InstanceRefused extends Schema.TaggedError<InstanceRefused>()("Inst
   reason: Schema.Literals(["review-refused", "plan-mismatch", "argument", "proof", "grant", "label", "bound", "ended"])
 }) {}
 
-/** A trusted interpreter keeps selection influence separate from the exact value proof. */
+/** Only the configured evaluator's exact-value witness can separate roles. */
 export interface InstanceArgument {
   readonly value: TrackedValue
-  readonly control: TrackedValue
+  readonly witness?: unknown
 }
 
 /** Call-time guard demonstration, before any receipt or handler is invoked. */
-export const prototypeInstances = (report: DemonstrationReview, review: Review, surface: ReviewSurface) => {
+export const prototypeInstances = (report: DemonstrationReview, review: Review, surface: ReviewSurface, issuer: RoleWitnessIssuer) => {
   const counts = new Map<string, number>(), tools = new Map<string, number>()
   let ended = report.refusals.length > 0
   return (instance: { readonly planId: string; readonly nodeId: string; readonly occurrence: number; readonly tool: string },
@@ -194,8 +195,8 @@ export const prototypeInstances = (report: DemonstrationReview, review: Review, 
     if (ended) return yield* fail(report.refusals.length > 0 ? "review-refused" : "ended")
     const context = contexts.get(report)
     if (context?.review !== review || context.surface !== canonicalJson(surface) || context.program !== canonicalJson(review.program) || !sameEnvironment(review, context)) return yield* fail("plan-mismatch")
-    if (!isTrackedValue(control) || !Object.values(input).every((argument) => argument !== null && typeof argument === "object" &&
-      isTrackedValue(argument.value) && isTrackedValue(argument.control))) return yield* fail("label")
+    if (!isRoleWitnessIssuer(issuer) || !isTrackedValue(control) || !Object.values(input).every((argument) => argument !== null && typeof argument === "object" &&
+      isTrackedValue(argument.value))) return yield* fail("label")
     const node = report.plan.nodes.find((node) => node.id === instance.nodeId)
     if (instance.planId !== report.plan.id || node === undefined || node.tool !== instance.tool) return yield* fail("plan-mismatch")
     const occurrence = (counts.get(node.id) ?? 0) + 1, total = (tools.get(node.tool) ?? 0) + 1
@@ -215,13 +216,16 @@ export const prototypeInstances = (report: DemonstrationReview, review: Review, 
       }
       const sink = surface.sinks[node.tool]?.[arg.field]
       if (sink === undefined || arg.label === undefined) return yield* fail("label")
-      const actualControl = combine(argument!.control.label, control.label)
-      const actual = combine(value.label, actualControl)
+      const roles = issuer.inspect(value, argument!.witness)
+      // Missing, copied, stale or wrong-value witness never separates secrecy.
+      const actualData = roles?.data ?? value.label
+      const actualControl = combine(roles === undefined ? literal : combine(roles.selection, roles.control), control.label)
+      const actual = combine(actualData, actualControl)
       if (actual.provenance.some((origin) => !arg.label!.provenance.includes(origin))) return yield* fail("label")
       const envelope = new SinkPolicy({ id: "plan-envelope", confidentialityCeiling: arg.label.confidentiality, minimumIntegrity: arg.label.integrity })
       if (Result.isFailure(yield* checkSink(actual, envelope).pipe(Effect.result))) return yield* fail("label")
       const released: InformationLabel[] = []
-      for (const [mode, label] of [["data", value.label], ["control", actualControl]] as const) {
+      for (const [mode, label] of [["data", actualData], ["control", actualControl]] as const) {
         const role = arg.flows.filter((flow) => flow.mode === mode)
         if (role.some((edge) => edge.label === undefined)) return yield* fail("label")
         const roleLabel = combine(literal, ...role.map((edge) => edge.label!))

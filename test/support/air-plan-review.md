@@ -3,6 +3,10 @@
 Run `VITEST_MAX_WORKERS=2 bun run test test/program-review-demo.test.ts`.
 The fixtures come from `air-review-fixtures.ts`; language-owned typed facts
 feed the Plan in `air-plan-review.ts`. No production runner imports this code.
+The three programs also execute through the evaluator's awaited guard hook:
+refused reports reach no resolver, accepted forwarding returns exact-batch
+approval, and a selected fixed send returns program approval. The resolver
+is a test fixture; it sends no real mail or HTTP request.
 
 | Program | Report | Public-sink policy refuses | Private-mail policy |
 | --- | --- | --- | --- |
@@ -29,8 +33,9 @@ exact-owned decoder proof, permitted provenance, and unchanged trusted
 contract/decoder/binding-codec objects and tool grants. Any mismatch ends the guard permanently before it
 returns an instance for recording or acting. Dynamic requests remain staged
 even when validated. The guard rejects copied reports, copied tracked
-value/control tokens and changed context. Each field supplies mandatory
-`{ value, control }` tokens, plus call-wide PC. Decoder proof stays on the
+value/PC tokens and changed context. Each field supplies an owned `value`
+and optional `witness`, plus call-wide PC. The guard is configured with the
+same authenticated issuer as the evaluator. Decoder proof stays on the
 exact `value`; copying the outer field pair confers no new proof or label.
 Data and joined local/global control must each fit their own raw source
 envelope and exact origin tags, even when no author release is needed.
@@ -44,18 +49,33 @@ the trusted test; this prototype does not attest the checker or prove that
 its input AST came from those bytes. Tracked dynamic values and control
 labels must come from a trusted interpreter, not from a guest.
 
-The current guard conservatively treats the owned value's entire label as
-data. It never re-mints the value at a lower label to separate selection
-control. Captured or derived tokens whose labels already join data and
-control can therefore be refused even when the reviewed roles would allow
-them (`plan-flow-roles.test.ts`). The production seam needs an authenticated
-evaluator-issued role witness tied to this same owned value and run; it is
-not implemented here. The observer's separate role labels are test evidence,
-not such a witness. These manually supplied trusted fixtures do not prove
-that a producer included every actual influence: an authenticated token's
-label alone cannot detect a trusted producer omitting an origin or replacing
-control with a fresh public token. The language property checks observed
-roles against static bounds; production still needs the witness bridge.
+The contract-owned witness binds immutable data, selection and control
+labels to the exact authentic value and a fresh execution issuer. Their
+join must equal the token's aggregate label. The evaluator uses monotone
+`addInfluence` to raise the token's aggregate secrecy while preserving the
+same owned JSON and exact proof; the guard never re-mints a lower-label
+value. It reads payload data from the valid witness and joins selection and
+local control with call-wide PC. `beforeCall` awaits the guard before the
+trusted test resolver runs. An end-to-end selected-recipient test retains
+its proof, keeps private aggregate secrecy, and requires later exact-batch
+approval; a copied witness stops before the resolver.
+
+An absent, copied, wrong-value or older-execution witness yields no roles:
+the guard conservatively treats the value's entire label as data. This can
+refuse otherwise allowed control-only selections (`plan-flow-roles.test.ts`).
+Invalid witnesses do not automatically refuse a call that already fits as
+aggregate data. A copied issuer itself is rejected. The fresh issuer object,
+not its textual run ID, supplies the execution boundary; the trusted host
+must create it anew for every execution and retain its issuance authority.
+
+Authentication proves which trusted issuer attached these roles, not that
+an arbitrary producer classified every influence correctly. The issuer
+must remain inaccessible to guests. A role claiming payload-only origins
+as control is rejected by the separate Plan bounds, but when the same origin
+is statically allowed in both roles its actual classification relies on the
+trusted evaluator. Language and Plan properties check its observed roles
+against static bounds. This is an exercised test-only bridge, not a
+production runner or persisted authorization.
 
 Checked language bindings are included in the approval digest independently
 of the surface's binding JSON: encoded values, declared labels, and closed
@@ -101,7 +121,7 @@ recipient into each send field), all conditioned on the same exact recipient
 proof. The control grants deliberately reveal whether the send happens.
 Neither set opens HTTP URLs or mailbox-body-dependent branch choices.
 
-At runtime a scoped release additionally requires kernel-owned exact origin
+At runtime every call requires kernel-owned exact origin
 tags on data/control, verifies each component against its original source
 envelope, and checks the sibling proof again. Wrong-field substitutions,
 unidentified private provenance and copied proofs stop the guard. The

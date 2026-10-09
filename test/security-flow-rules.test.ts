@@ -2,7 +2,8 @@ import { describe, expect, it } from "vitest"
 import { Effect, Result, Schema } from "effect"
 import { sha256Canonical } from "../src/core/Canonical.ts"
 import { ToolGrantPolicy } from "../src/core/admission/ToolGrant.ts"
-import { decodeValue, defineDecoder, defineDecoderCatalog, deriveValue, labeledValue, type TrackedValue } from "../src/core/contract/Decoder.ts"
+import { addInfluence, decodeValue, defineDecoder, defineDecoderCatalog, deriveValue, labeledValue, type TrackedValue } from "../src/core/contract/Decoder.ts"
+import { createRoleWitnessIssuer } from "../src/core/contract/RoleWitness.ts"
 import { InvalidFlowRule, releaseRule, type FlowRule } from "../src/core/contract/FlowRules.ts"
 import { defineToolContract } from "../src/core/contract/ToolContract.ts"
 import { InformationLabel, SinkPolicy } from "../src/core/labels/Labels.ts"
@@ -40,10 +41,10 @@ const prepare = async (text = source("reading.result.body"), rules: readonly Flo
         new SinkPolicy({ id: `send.${field}`, confidentialityCeiling: "public", minimumIntegrity: "untrusted" })])) },
     registryDigest: await run(sha256Canonical("conditional-flow-security-v1")), bindings: {}, maxPlanBytes: 65_536, rules
   }
-  return { review, policy, prefix, report: await run(lowerReviewPrototype(text, review, policy)) }
+  return { review, policy, prefix, issuer: createRoleWitnessIssuer("security-flow-run"), report: await run(lowerReviewPrototype(text, review, policy)) }
 }
 const proof = (decoder: typeof CompanyRecipient | typeof ApprovedSubject, value: string) => Result.getOrThrow(decodeValue(decoder, labeledValue(value, publicLabel)))
-const direct = (value: TrackedValue) => ({ value, control: labeledValue(false, publicLabel) })
+const direct = (value: TrackedValue) => ({ value })
 
 describe("security: trusted flow rules grant only their written scope", () => {
   it("cannot override the source contract by reusing a record with an extra tool property", () => {
@@ -74,37 +75,40 @@ describe("security: trusted flow rules grant only their written scope", () => {
   })
 
   it("requires every conditional sibling proof on the exact owned value at runtime", async () => {
-    const { review, policy, report, prefix } = await prepare()
+    const { review, policy, report, prefix, issuer } = await prepare()
     expect(report.refusals, JSON.stringify(report.explanations)).toEqual([])
     const send = report.plan.nodes.find((node) => node.tool === "mail.send")!
     const instance = { planId: report.plan.id, nodeId: send.id, occurrence: 1, tool: send.tool }
     const input = { to: direct(proof(CompanyRecipient, "sink@example.com")), subject: direct(proof(ApprovedSubject, "Forward")),
       body: direct(labeledValue("private body", privateLabel(["mailbox", `${prefix}.result.body`]))) }
     const control = labeledValue(false, publicLabel)
-    expect(await run(prototypeInstances(report, review, policy)(instance, input, control))).toMatchObject({ approval: "exact-batch", when: "staged" })
+    expect(await run(prototypeInstances(report, review, policy, issuer)(instance, input, control))).toMatchObject({ approval: "exact-batch", when: "staged" })
     const Twin = defineDecoder({ name: ApprovedSubject.name, version: ApprovedSubject.version, schema: Schema.Literal("Forward") })
     for (const subject of [labeledValue("Forward", publicLabel), deriveValue(input.subject.value.value, input.subject.value), proof(Twin, "Forward")]) {
-      const result = await run(prototypeInstances(report, review, policy)(instance, { ...input, subject: direct(subject) }, control).pipe(Effect.result))
+      const result = await run(prototypeInstances(report, review, policy, issuer)(instance, { ...input, subject: direct(subject) }, control).pipe(Effect.result))
       expect(Result.isFailure(result) && result.failure.reason).toBe("label")
     }
   })
 
   it("refuses an extra origin at runtime even when it shares the mailbox label", async () => {
-    const { review, policy, report, prefix } = await prepare()
+    const { review, policy, report, prefix, issuer } = await prepare()
     const send = report.plan.nodes.find((node) => node.tool === "mail.send")!
     const input = { to: direct(proof(CompanyRecipient, "sink@example.com")), subject: direct(proof(ApprovedSubject, "Forward")),
       body: direct(labeledValue("mixed", privateLabel(["mailbox", `${prefix}.result.body`, `${prefix}.result.subject`]))) }
-    const result = await run(prototypeInstances(report, review, policy)({ planId: report.plan.id, nodeId: send.id, occurrence: 1, tool: send.tool },
+    const result = await run(prototypeInstances(report, review, policy, issuer)({ planId: report.plan.id, nodeId: send.id, occurrence: 1, tool: send.tool },
       input, labeledValue(false, publicLabel)).pipe(Effect.result))
     expect(Result.isFailure(result) && result.failure.reason).toBe("label")
   })
 
   it("does not let a data release authorize the same origin as field-local control", async () => {
-    const { review, policy, report, prefix } = await prepare()
+    const { review, policy, report, prefix, issuer } = await prepare()
     const send = report.plan.nodes.find((node) => node.tool === "mail.send")!
+    const selection = privateLabel(["mailbox", `${prefix}.result.body`])
+    const value = Result.getOrThrow(addInfluence(labeledValue("fixed", publicLabel), selection))
+    const witness = Result.getOrThrow(issuer.issue(value, { data: publicLabel, selection, control: publicLabel }))
     const input = { to: direct(proof(CompanyRecipient, "sink@example.com")), subject: direct(proof(ApprovedSubject, "Forward")),
-      body: { value: labeledValue("fixed", publicLabel), control: labeledValue(false, privateLabel(["mailbox", `${prefix}.result.body`])) } }
-    const result = await run(prototypeInstances(report, review, policy)({ planId: report.plan.id, nodeId: send.id, occurrence: 1, tool: send.tool },
+      body: { value, witness } }
+    const result = await run(prototypeInstances(report, review, policy, issuer)({ planId: report.plan.id, nodeId: send.id, occurrence: 1, tool: send.tool },
       input, labeledValue(false, publicLabel)).pipe(Effect.result))
     expect(Result.isFailure(result) && result.failure.reason).toBe("label")
   })

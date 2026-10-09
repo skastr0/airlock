@@ -3,6 +3,7 @@ import { Effect, Result, Schema } from "effect"
 import { sha256Canonical } from "../src/core/Canonical.ts"
 import { ToolGrantPolicy } from "../src/core/admission/ToolGrant.ts"
 import { labeledValue } from "../src/core/contract/Decoder.ts"
+import { createRoleWitnessIssuer } from "../src/core/contract/RoleWitness.ts"
 import { releaseRule } from "../src/core/contract/FlowRules.ts"
 import { defineToolContract } from "../src/core/contract/ToolContract.ts"
 import { InformationLabel, SinkPolicy } from "../src/core/labels/Labels.ts"
@@ -44,10 +45,10 @@ describe("test-only: review binds expanded language boundaries", () => {
     const report = await run(lowerReviewPrototype(source, review, surface))
     expect(report.refusals).toEqual([])
     const node = report.plan.nodes[0]!
-    const guard = prototypeInstances(report, review, surface)
+    const guard = prototypeInstances(report, review, surface, createRoleWitnessIssuer("boundary-run"))
     const instance = { planId: report.plan.id, nodeId: node.id, occurrence: 1, tool: node.tool }
     const control = labeledValue(false, literal)
-    const input = { url: { value: labeledValue("https://example.com/fixed", literal), control } }
+    const input = { url: { value: labeledValue("https://example.com/fixed", literal) } }
     if (kind === "value") env.bindings.config.value.token = "two"
     if (kind === "label") env.bindings.config.label = privateLabel
     if (kind === "codec") env.bindings.config.schema = Schema.Struct({ token: Schema.String })
@@ -85,7 +86,7 @@ describe("test-only: review binds expanded language boundaries", () => {
     expect(node.arguments).toHaveLength(1)
     expect(node.arguments[0]).toMatchObject({ field: "$", dependencies: expect.arrayContaining([`${root}.result`]) })
     expect(report.refusals).toEqual([{ nodeId: node.id, field: "$", reason: "argument-shape" }])
-    const result = await run(prototypeInstances(report, review, surface)({ planId: report.plan.id, nodeId: node.id, occurrence: 1, tool: node.tool }, {}, labeledValue(false, literal)).pipe(Effect.result))
+    const result = await run(prototypeInstances(report, review, surface, createRoleWitnessIssuer("boundary-run"))({ planId: report.plan.id, nodeId: node.id, occurrence: 1, tool: node.tool }, {}, labeledValue(false, literal)).pipe(Effect.result))
     expect(Result.isFailure(result) && result.failure.reason).toBe("review-refused")
   })
 
