@@ -63,7 +63,7 @@ export const reviewArgumentFlows = (
   rules: readonly FlowRule[]
 ) => Effect.gen(function* () {
   const facts: ReadonlyMap<string, Fact> = call.arguments.type.kind === "record" ? call.arguments.type.fields : new Map()
-  const argument = facts.get(field)
+  const argument = call.arguments.type.kind === "record" ? facts.get(field) : field === "$" ? call.arguments : undefined
   const conditions = (rule: FlowRule) => rule.when.every((condition) => {
     const decoder = review.environment.decoders[condition.decoder.name]
     return decoder !== undefined && decoder.version === condition.decoder.version && facts.get(condition.field)?.refinements.includes(decoderIdentity(decoder)) === true

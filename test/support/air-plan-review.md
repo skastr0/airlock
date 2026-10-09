@@ -21,7 +21,7 @@ bindings, trusted registry digest, grant and flow policy, semantics, and limits.
 Checked by the runtime guard tests: Plan/node identity, next occurrence and
 both bounds, exact fixed values, input codec, dynamic grants, labels and
 exact-owned decoder proof, permitted provenance, and unchanged trusted
-contract/decoder objects and tool grants. Any mismatch ends the guard permanently before it
+contract/decoder/binding-codec objects and tool grants. Any mismatch ends the guard permanently before it
 returns an instance for recording or acting. Dynamic requests remain staged
 even when validated. The guard rejects copied reports, copied value/control
 wrappers and changed context. Arguments and control must be kernel-owned tracked values.
@@ -35,6 +35,15 @@ the trusted test; this prototype does not attest the checker or prove that
 its input AST came from those bytes. Tracked dynamic values and control
 labels must come from a trusted interpreter, not from a guest.
 
+Checked language bindings are included in the approval digest independently
+of the surface's binding JSON: encoded values, declared labels, and closed
+encoded/decoded schema models are snapshotted, including unused bindings.
+At runtime the exact binding codec and AST references must also match. The
+trusted registry digest must identify binding codec implementations as well
+as tools and decoders; structural models do not fingerprint arbitrary checks.
+Changing a codec implementation requires a new registry digest and review.
+Adding, removing, or changing a binding ends an existing guard before a call.
+
 Review cannot know which receipt or decoder branch will occur, mailbox bytes,
 remote success, resource drift, or whether a run will finish. Grant narrowing
 on a dynamic recipient is an obligation checked later, not a static promise.
@@ -45,7 +54,7 @@ Over-rejection is deliberate: the checker carries receipt/decoder and
 branch/loop control to later statements, even where a finer termination
 analysis might prove the dependency irrelevant. A fixed harmless subject or
 a send after reconverging branches can therefore be refused. It also rejects
-unsupported schema/arithmetic forms, rather than guessing a type or label.
+unknown flow origins, rather than guessing a type or label.
 An approval never implies declassification or endorsement; the private-mail
 policy is a separately supplied supervisor flow policy permitting private
 data at that sink, with untrusted integrity, not an automatic label lowering.
@@ -80,3 +89,14 @@ persisted supervisor authorization or a production tracking interpreter.
 The simple origin resolver intentionally refuses nested/list paths; those
 need the language seat's typed origin tree. Transitive call-argument/control
 origins must also be supplied by that checker/interpreter bridge.
+Receipt IDs, refusal code/message, `wayBack` fields and binding paths are
+distinct origins that this resolver cannot yet represent. Even a supplied
+public label cannot authorize them; they refuse as `unknown-label`. A rule
+for receipt state never releases those metadata values. This rejects
+reasonable binding-dependent programs until the typed source bridge lands.
+Opaque whole tool inputs retain one `$` argument with their dependencies in
+the report and refuse as `argument-shape`: the current instance guard fits
+modeled field maps only. An opaque request is dynamic, requires exact-batch
+approval, and is staged; it is never represented as a fixed empty request.
+This is another explicit test-only over-rejection pending the production
+whole-input instance model.

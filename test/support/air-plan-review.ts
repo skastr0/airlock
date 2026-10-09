@@ -3,6 +3,7 @@ import { canonicalJson, sha256Canonical, type Sha256Digest } from "../../src/cor
 import { fittingToolGrants, ToolGrantPolicy, validateToolGrants } from "../../src/core/admission/ToolGrant.ts"
 import { hasRefinement, isTrackedValue, type TrackedValue } from "../../src/core/contract/Decoder.ts"
 import { FlowRule, validateFlowRules } from "../../src/core/contract/FlowRules.ts"
+import { modelSchema } from "../../src/core/contract/SchemaModel.ts"
 import { combine, checkSink, InformationLabel, SinkPolicy } from "../../src/core/labels/Labels.ts"
 import { PlanEffect } from "../../src/core/plan/Plan.ts"
 import { decoderIdentity, type Fact, type Review } from "./air-review.ts"
@@ -49,7 +50,7 @@ export interface ReviewSurface {
 }
 export const ReviewRefusal = Schema.Struct({
   nodeId: Schema.String, field: Schema.String,
-  reason: Schema.Literals(["grant", "rules", "unknown-label", "confidentiality", "integrity", "missing-sink", "plan-size"])
+  reason: Schema.Literals(["grant", "rules", "unknown-label", "confidentiality", "integrity", "missing-sink", "plan-size", "argument-shape"])
 })
 export type ReviewRefusal = typeof ReviewRefusal.Type
 export interface DemonstrationReview {
@@ -64,24 +65,37 @@ interface ContextWitness {
   readonly program: string
   readonly definitions: readonly { readonly name: string; readonly contract: import("../../src/core/contract/ToolContract.ts").ToolContract.Any; readonly input: unknown; readonly outcome: unknown; readonly summarize: unknown; readonly target: unknown }[]
   readonly decoders: readonly { readonly name: string; readonly decoder: import("../../src/core/contract/Decoder.ts").TrustedDecoder.Any }[]
+  readonly bindings: readonly { readonly name: string; readonly schema: unknown; readonly ast: unknown }[]
 }
 const contexts = new WeakMap<DemonstrationReview, ContextWitness>()
+const bindingDescription = (review: Review) => Object.entries(review.environment.bindings ?? {}).map(([name, binding]) => ({
+  name, value: binding.value, label: binding.label,
+  encoded: modelSchema(binding.schema, { identity: JSON.stringify(["binding", name]), side: "encoded" }),
+  decoded: modelSchema(binding.schema, { identity: JSON.stringify(["binding", name]), side: "decoded" })
+})).sort((a, b) => a.name < b.name ? -1 : a.name > b.name ? 1 : 0)
 const environmentDescription = (review: Review) => canonicalJson({
   granted: [...review.environment.granted].sort(), maxCalls: review.environment.maxCalls,
   maxIterations: review.environment.maxIterations, maxListItems: review.environment.maxListItems,
   tools: Object.entries(review.environment.tools).map(([name, tool]) => ({ name, tag: tool.contract.tag,
     version: tool.contract.version, effect: tool.contract.effect, publicFields: tool.contract.publicFields,
     resources: tool.contract.resources, flow: tool.contract.flow })),
-  decoders: Object.entries(review.environment.decoders).map(([name, decoder]) => ({ name, version: decoder.version }))
+  decoders: Object.entries(review.environment.decoders).map(([name, decoder]) => ({ name, version: decoder.version })),
+  bindings: bindingDescription(review)
 })
-const sameEnvironment = (review: Review, witness: ContextWitness) => environmentDescription(review) === witness.environment &&
+const sameEnvironment = (review: Review, witness: ContextWitness) => {
+  try { return environmentDescription(review) === witness.environment &&
   witness.definitions.every((definition) => {
     const contract = review.environment.tools[definition.name]?.contract
     return contract === definition.contract && contract.input === definition.input && contract.outcome === definition.outcome &&
       contract.summarize === definition.summarize && contract.target === definition.target
-  }) && witness.decoders.every((definition) => review.environment.decoders[definition.name] === definition.decoder)
+  }) && witness.decoders.every((definition) => review.environment.decoders[definition.name] === definition.decoder) &&
+  witness.bindings.every((definition) => {
+    const binding = review.environment.bindings?.[definition.name]
+    return binding !== undefined && binding.schema === definition.schema && binding.schema.ast === definition.ast
+  }) } catch { return false }
+}
 const literal = new InformationLabel({ confidentiality: "public", integrity: "runtime", provenance: [] })
-const fieldsOf = (value: Fact) => value.type.kind === "record" ? [...value.type.fields] : []
+const fieldsOf = (value: Fact): readonly (readonly [string, Fact])[] => value.type.kind === "record" ? [...value.type.fields] : [["$", value]]
 const summary = (review: Review, tool: string, publicFields: Record<string, Schema.Json>) => {
   const contract = review.environment.tools[tool]!.contract
   return { tool, version: contract.version, effect: contract.effect, target: `tool:${tool}`, fields: Object.keys(publicFields), public: publicFields, inputBytes: 0 }
@@ -99,6 +113,10 @@ export const lowerReviewPrototype = (source: string, review: Review, surface: Re
     const contract = review.environment.tools[call.tool]!.contract
     const id = `call:${index + 1}`
     const deny = (field: string, reason: ReviewRefusal["reason"]) => { refusals.push({ nodeId: id, field, reason }) }
+    // The field-map instance guard cannot fit an opaque whole input. Preserve
+    // its facts in the report, but never mistake it for a fixed empty record.
+    const modeledInput = call.arguments.type.kind === "record"
+    if (!modeledInput) deny("$", "argument-shape")
     const args: Array<typeof ArgumentEnvelope.Type> = []
     for (const [field, fact] of fieldsOf(call.arguments)) {
       const reviewed = yield* reviewArgumentFlows(id, call, field, review, surface.sources, surface.sinks[call.tool]?.[field], invalidRules === undefined ? surface.rules ?? [] : [])
@@ -130,9 +148,9 @@ export const lowerReviewPrototype = (source: string, review: Review, surface: Re
     }
     nodes.push({ id, tool: call.tool, version: contract.version, effect: contract.effect,
       sourceOffset: call.span.start, maximumOccurrences: call.maximumOccurrences,
-      arguments: args, approval: contract.effect === "request" && args.some((arg) => arg.fixed === undefined) ? "exact-batch" : "program", when: contract.effect === "request" ? "staged" : "reviewed" })
+      arguments: args, approval: contract.effect === "request" && (!modeledInput || args.some((arg) => arg.fixed === undefined)) ? "exact-batch" : "program", when: contract.effect === "request" ? "staged" : "reviewed" })
   }
-  const contextDigest = yield* sha256Canonical({ source, bindings: surface.bindings,
+  const contextDigest = yield* sha256Canonical({ source, bindings: surface.bindings, checkedBindings: bindingDescription(review),
     registryDigest: surface.registryDigest, grants: surface.grants, sources: surface.sources, sinks: surface.sinks,
     limits: { maxCalls: review.environment.maxCalls, maxIterations: review.environment.maxIterations,
       maxListItems: review.environment.maxListItems, maxPlanBytes: surface.maxPlanBytes },
@@ -147,7 +165,8 @@ export const lowerReviewPrototype = (source: string, review: Review, surface: Re
   const report = freeze({ plan: freeze(plan), refusals: freeze(refusals), explanations: freeze(explanations) }) satisfies DemonstrationReview
   contexts.set(report, { review, surface: canonicalJson(surface), environment: environmentDescription(review), program: canonicalJson(review.program),
     definitions: Object.entries(review.environment.tools).map(([name, { contract }]) => ({ name, contract, input: contract.input, outcome: contract.outcome, summarize: contract.summarize, target: contract.target })),
-    decoders: Object.entries(review.environment.decoders).map(([name, decoder]) => ({ name, decoder })) })
+    decoders: Object.entries(review.environment.decoders).map(([name, decoder]) => ({ name, decoder })),
+    bindings: Object.entries(review.environment.bindings ?? {}).map(([name, binding]) => ({ name, schema: binding.schema, ast: binding.schema.ast })) })
   return report
 })
 const freeze = <A>(value: A): A => {
