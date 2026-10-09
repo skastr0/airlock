@@ -3,6 +3,7 @@ import { canonicalJson } from "../Canonical.ts"
 import type { Compensation, IntentKind } from "../outbox/Intent.ts"
 import { InvalidIntent } from "../outbox/Records.ts"
 import { PlanEffect } from "../plan/Plan.ts"
+import { ResourceField, type ResourceFields, resourceFieldFits } from "./Resource.ts"
 
 /**
  * What a tool call looks like to everything except its handler: which tool,
@@ -39,6 +40,7 @@ export interface ToolShape {
   /** Names of the public input fields. */
   readonly public: string
   readonly effect: PlanEffect
+  readonly resources: Readonly<Record<string, ResourceField>>
   /** Name of the contract that answers a committed call; `never` when irreversible. */
   readonly answer: string
 }
@@ -55,6 +57,7 @@ export interface ToolContract<Shape extends ToolShape>
   readonly effect: Shape["effect"]
   /** The only input fields whose values a summary, grant or receipt may see. */
   readonly publicFields: ReadonlyArray<Shape["public"]>
+  readonly resources: Shape["resources"]
 }
 
 export declare namespace ToolContract {
@@ -64,7 +67,14 @@ export declare namespace ToolContract {
   export type WireOf<Contract> = ShapeOf<Contract>["wire"]
   export type OutputOf<Contract> = ShapeOf<Contract>["output"]
   export type EffectOf<Contract> = ShapeOf<Contract>["effect"]
+  export type ResourcesOf<Contract> = ShapeOf<Contract>["resources"]
 }
+
+export class InvalidToolContract extends Schema.TaggedError<InvalidToolContract>()("InvalidToolContract", {
+  tool: Schema.String,
+  field: Schema.String,
+  reason: Schema.String
+}) {}
 
 const encoder = new TextEncoder()
 
@@ -83,8 +93,9 @@ export const defineToolContract = <
   Wire extends JsonRecord,
   Output,
   const Declared extends PlanEffect,
-  const Public extends keyof Input & string = never,
-  Answer extends IntentKind.Any = never
+  const Public extends keyof Wire & string = never,
+  Answer extends IntentKind.Any = never,
+  const Resources extends Readonly<Record<string, ResourceField>> = {}
 >(spec: {
   readonly name: Name
   readonly version: string
@@ -92,6 +103,7 @@ export const defineToolContract = <
   readonly output: Schema.Codec<Output, Schema.Json>
   readonly effect: Declared
   readonly public?: ReadonlyArray<Public>
+  readonly resources?: Resources & ResourceFields<Wire, Public> & { readonly [Field in Exclude<keyof Resources, Public>]: never }
   /** Defaults to `tool:<name>`. Must not reveal a field that is not public. */
   readonly target?: (input: Input) => string
   /**
@@ -113,12 +125,32 @@ export const defineToolContract = <
   readonly output: Output
   readonly public: Public
   readonly effect: Declared
+  readonly resources: Resources
   readonly answer: Answer["tag"]
 }> => {
   const answer: Compensation<Input, Output, Answer["tag"]> | undefined = spec.compensate === undefined
     ? undefined
     : { kind: spec.compensate.with.tag, with: spec.compensate.with, intent: spec.compensate.intent }
-  const publicFields = spec.public ?? []
+  const publicFields = Object.freeze([...(spec.public ?? [])])
+  const declared = spec.resources ?? {}
+  const decoded = Schema.decodeUnknownResult(Schema.Record(Schema.String, ResourceField), { onExcessProperty: "error" })(declared)
+  const invalid = (field: string, reason: string) => new InvalidToolContract({ tool: spec.name, field, reason })
+  if (Result.isFailure(decoded)) throw invalid("resources", "must contain valid resource descriptors")
+  const resources: Record<string, ResourceField> = {}
+  for (const [field, descriptor] of Object.entries(decoded.success)) {
+    if (!publicFields.includes(field as Public)) throw invalid(`resources.${field}`, "must name a public encoded input field")
+    if (!resourceFieldFits(spec.input, field, descriptor)) {
+      throw invalid(`resources.${field}`, "must match a string field or each element of a string list on the encoded input")
+    }
+    if (new Set(descriptor.rights).size !== descriptor.rights.length) throw invalid(`resources.${field}.rights`, "must not repeat rights")
+    if (descriptor.kind === "executable" && descriptor.role === "descendant") {
+      const parent = decoded.success[descriptor.parent]
+      if (descriptor.parent === field || parent?.kind !== "executable" || parent.role !== "root" || parent.collection !== undefined) {
+        throw invalid(`resources.${field}.parent`, "must name a scalar executable root field")
+      }
+    }
+    resources[field] = Object.freeze({ ...descriptor, rights: Object.freeze([...descriptor.rights]) }) as ResourceField
+  }
   const encodeInput = Schema.encodeResult(spec.input)
   return {
     tag: spec.name,
@@ -126,6 +158,7 @@ export const defineToolContract = <
     input: spec.input,
     effect: spec.effect,
     publicFields,
+    resources: Object.freeze(resources) as Resources,
     dispatch: spec.input,
     summary: ToolSummary,
     outcome: spec.output,
