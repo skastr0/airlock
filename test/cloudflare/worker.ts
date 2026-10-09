@@ -159,7 +159,8 @@ const recordedRead = (storage: DurableStorage) =>
         intent: { kind: "mail.list", dispatch: { mailbox: "inbox", query: "is:unread" } },
         holdMillis: 0
       },
-      new DispatchProvenance({ committedBy: "policy-auto", dispatchClass: "read" })
+      // Policy-auto now needs an admitted grant; what this proves is the store, so a supervisor performs it.
+      new DispatchProvenance({ committedBy: "supervisor" })
     )
     return {
       id: performed.emission.id,
