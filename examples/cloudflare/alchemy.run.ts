@@ -5,7 +5,7 @@ import { Config, Effect, Redacted } from "effect"
 
 /**
  * Everything this example needs on Cloudflare: one Worker, its Airlock
- * Durable Object, the Worker Loader its guests run in, and one secret.
+ * Durable Object, and one secret.
  */
 export default Alchemy.Stack(
   "airlock-example",

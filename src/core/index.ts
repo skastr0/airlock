@@ -15,7 +15,7 @@ export {
   type StagedReceipt,
   type Supervisor
 } from "./airlock/Airlock.ts"
-export { guestDeclaration, guestDescription } from "./airlock/Declaration.ts"
+export { type GuestAction, guestDescription, LANGUAGE_PRIMER, STAGED_RECEIPT_SHAPE } from "./airlock/Declaration.ts"
 export {
   handlersFor,
   type ImplementContext,
@@ -94,22 +94,18 @@ export {
   type StageRequest
 } from "./outbox/Outbox.ts"
 export { OutboxStore } from "./outbox/OutboxStore.ts"
-export {
-  type GuestBridge,
-  guestLimits,
-  invalidSource,
-  makeGuestBridge,
-  settleGuest
-} from "./runner/GuestHost.ts"
+export { guestLimits } from "./runner/Bounds.ts"
 export {
   defaultGuestLimits,
   GuestFailureReason,
+  GuestFault,
   GuestLimits,
   GuestOutcome,
+  GuestRefusal,
   type GuestRun,
   GuestRunner
 } from "./runner/GuestRunner.ts"
-export { guestRuntimeSource } from "./runner/GuestRuntime.ts"
+export { programRunner } from "./runner/ProgramRunner.ts"
 export {
   type CallResult,
   InvalidToolInput,

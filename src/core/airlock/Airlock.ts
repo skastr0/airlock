@@ -13,7 +13,7 @@ import {
 } from "../outbox/Records.ts"
 import type { ToolPolicy } from "../session/ToolPolicy.ts"
 import { openToolSession, type ToolContracts } from "../session/ToolSession.ts"
-import { guestDeclaration, guestDescription } from "./Declaration.ts"
+import { type GuestAction, guestAction, guestDescription } from "./Declaration.ts"
 import { handlersFor, type Implementations } from "./Implement.ts"
 
 // ── what a user and a guest see ─────────────────────────────────────────────
@@ -52,7 +52,7 @@ export interface StagedReceipt {
 /** An emission as plain data: the stored record's JSON form. */
 export type EmissionView = typeof EmissionRecord.Encoded
 
-/** What a guest is handed: the granted tools, by name, and text describing them. */
+/** What a guest program is handed: the granted tools, by name, and what an agent needs to write for them. */
 export interface GuestSurface {
   /** Granted tool names, sorted. Nothing else can be called. */
   readonly tools: ReadonlyArray<string>
@@ -61,9 +61,9 @@ export interface GuestSurface {
    * returns its result; anything else returns a staged receipt.
    */
   readonly call: (tool: string, input: unknown) => Effect.Effect<Schema.Json | StagedReceipt, AirlockFailure>
-  /** TypeScript declaration of `tools` for exactly these tools. */
-  readonly declaration: string
-  /** One plain line per tool, for a prompt. */
+  /** Each granted tool as an action: its name, its shapes, and whether a call runs at once or is staged. */
+  readonly actions: ReadonlyArray<GuestAction>
+  /** The language in a few lines and one plain line per action, for a prompt. */
   readonly description: string
 }
 
@@ -202,21 +202,26 @@ export const defineAirlock = <const List extends ReadonlyArray<ToolContract.Any>
 
   const guest: Airlock<Contracts, Env>["guest"] = ({ runId, env }) =>
     forThisDefinition(Effect.gen(function* () {
-      const opened = yield* openToolSession(kernel, { runId, policy: policy(env) }).pipe(
+      const decided = policy(env)
+      const opened = yield* openToolSession(kernel, { runId, policy: decided }).pipe(
         Effect.mapError(explain("this session"))
       )
       const session: {
         readonly [name: string]: ((input: never) => Effect.Effect<unknown, Tagged>) | undefined
       } = opened
       const tools = Object.keys(session).sort()
-      const granted = tools.flatMap((name) => {
+      const actions = tools.flatMap((name) => {
         const contract = byName[name]
-        return contract === undefined ? [] : [contract]
+        if (contract === undefined) return []
+        const immediate = decided.toolGrants
+          .filter((grant) => grant.tool === name)
+          .map((grant) => contract.emissionEffect === "read" && grant.class === "read" && grant.commit === "auto")
+        return [guestAction(contract, immediate.every(Boolean) ? "all" : immediate.some(Boolean) ? "some" : "none")]
       })
       return {
         tools,
-        declaration: guestDeclaration(granted),
-        description: guestDescription(granted),
+        actions,
+        description: guestDescription(actions),
         call: (tool, input) => {
           const method = Object.hasOwn(session, tool) ? session[tool] : undefined
           if (method === undefined) {

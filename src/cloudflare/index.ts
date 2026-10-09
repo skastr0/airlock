@@ -16,8 +16,7 @@ export {
   type GuestDescription,
   type Reply
 } from "./AirlockObject.ts"
-export type { ObjectState, WorkerLoader, WorkerLoaderCode } from "./Platform.ts"
-export { workerLoaderRunner, type WorkerLoaderRunnerOptions } from "./WorkerLoaderRunner.ts"
+export type { ObjectState } from "./Platform.ts"
 
 // Everything a user writes against, from one entry point. Contracts are
 // declared with `Schema`, which is re-exported so a user needs no other import.
@@ -25,6 +24,8 @@ export { Schema } from "effect"
 export {
   defineAirlock,
   defineToolContract,
+  type GuestAction,
+  type GuestOutcome,
   type ImplementContext,
   Refused,
   refused,

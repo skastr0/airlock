@@ -4,12 +4,11 @@
  *
  *   bun examples/cloudflare/local.ts
  *
- * The bindings are read off `airlockBindings()`, the same recipe
+ * The binding is read off `airlockBindings()`, the same recipe
  * `alchemy.run.ts` deploys with, so what runs here is what would be deployed.
  * This file is tooling for the example, not part of what a user writes.
  */
 import { airlockBindings, airlockCompatibility } from "@skastr0/airlock/alchemy"
-import * as Cloudflare from "alchemy/Cloudflare"
 import { build } from "esbuild"
 import { Miniflare } from "miniflare"
 import { join, resolve } from "node:path"
@@ -34,13 +33,9 @@ export const startLocal = async (options: { readonly port?: number } = {}): Prom
   })).outputFiles[0]!.text
 
   const durableObjects: { [binding: string]: { className: string; useSQLite: true } } = {}
-  const workerLoaders: { [binding: string]: {} } = {}
-  for (const [binding, resource] of Object.entries<unknown>(airlockBindings())) {
-    if (Cloudflare.isWorkerLoader(resource)) workerLoaders[binding] = {}
+  for (const [binding, resource] of Object.entries(airlockBindings())) {
     // Alchemy creates every Durable Object class SQLite-backed.
-    else if (Cloudflare.isDurableObjectLike(resource)) {
-      durableObjects[binding] = { className: resource.className ?? resource.name, useSQLite: true }
-    }
+    durableObjects[binding] = { className: resource.className ?? resource.name, useSQLite: true }
   }
 
   return new Miniflare({
@@ -48,7 +43,6 @@ export const startLocal = async (options: { readonly port?: number } = {}): Prom
     compatibilityDate: airlockCompatibility.date,
     compatibilityFlags: [...airlockCompatibility.flags],
     durableObjects,
-    workerLoaders,
     bindings: { MAIL_TOKEN: "example-token" },
     ...(options.port === undefined ? {} : { host: "127.0.0.1", port: options.port })
   })

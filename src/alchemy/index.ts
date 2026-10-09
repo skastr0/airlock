@@ -1,5 +1,5 @@
 /**
- * Airlock's bindings as an Alchemy recipe. Spread what `airlockBindings`
+ * Airlock's binding as an Alchemy recipe. Spread what `airlockBindings`
  * returns into the `env` of the `Cloudflare.Worker` that exports the class
  * made by `airlockDurableObject`:
  *
@@ -14,17 +14,12 @@
  */
 import * as Cloudflare from "alchemy/Cloudflare"
 
-export interface AirlockBindingNames<Object extends string, Loader extends string> {
+export interface AirlockBindingNames<Object extends string> {
   /**
    * The Durable Object binding, as `airlockClient(env.AIRLOCK, ...)` reads it.
    * @default "AIRLOCK"
    */
   readonly object?: Object
-  /**
-   * The Worker Loader binding, as `airlockDurableObject`'s `loader` reads it.
-   * @default "LOADER"
-   */
-  readonly loader?: Loader
   /**
    * The name the Worker exports the Durable Object class under.
    * @default "Airlock"
@@ -33,24 +28,17 @@ export interface AirlockBindingNames<Object extends string, Loader extends strin
 }
 
 /**
- * The two bindings an Airlock needs and nothing else: its Durable Object,
- * which Alchemy creates SQLite-backed, and the Worker Loader its guests run
- * in. Worker Loader requires a paid Workers plan; on a free plan Cloudflare
- * refuses the deploy.
+ * The one binding an Airlock needs: its Durable Object, which Alchemy creates
+ * SQLite-backed. Programs are evaluated inside that object, so there is no
+ * loader, no second Worker and nothing that needs a paid plan.
  */
-export const airlockBindings = <const Object extends string = "AIRLOCK", const Loader extends string = "LOADER">(
-  names: AirlockBindingNames<Object, Loader> = {}
+export const airlockBindings = <const Object extends string = "AIRLOCK">(
+  names: AirlockBindingNames<Object> = {}
 ) => {
-  const object = names.object ?? "AIRLOCK"
-  const loader = names.loader ?? "LOADER"
-  if (object === loader) throw new TypeError(`the Airlock object and its loader are both bound as ${object}`)
   const className = names.className ?? "Airlock"
-  return {
-    [object]: Cloudflare.DurableObject(className, { className }),
-    [loader]: Cloudflare.WorkerLoader(loader)
-  } as
-    & { readonly [Name in Object]: ReturnType<typeof Cloudflare.DurableObject> }
-    & { readonly [Name in Loader]: ReturnType<typeof Cloudflare.WorkerLoader> }
+  return { [names.object ?? "AIRLOCK"]: Cloudflare.DurableObject(className, { className }) } as {
+    readonly [Name in Object]: Cloudflare.DurableObjectLike
+  }
 }
 
 /**

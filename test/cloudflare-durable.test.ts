@@ -42,8 +42,7 @@ const start = (storage = persist) => {
       AIRLOCK: { className: "ExampleAirlock", useSQLite: true },
       ALARMED: { className: "AlarmedAirlock", useSQLite: true }
     },
-    // The Worker Loader binding the guest runner uses. No nodejs_compat anywhere.
-    workerLoaders: { LOADER: {} },
+    // No Worker Loader and no nodejs_compat: a program is evaluated in the object itself.
     bindings: { MAIL_TOKEN: "token-canary" },
     durableObjectsPersist: storage
   })
@@ -75,7 +74,7 @@ describe("cloud: conformance inside workerd", () => {
     for (const suite of ["OutboxStore conformance", "Ledger conformance", "Outbox conformance"]) {
       expect(names.some((name) => name.startsWith(`${suite}: Durable Object SQLite`))).toBe(true)
     }
-    expect(names.some((name) => name.startsWith("GuestRunner conformance: Worker Loader isolate"))).toBe(true)
+    expect(names.some((name) => name.startsWith("GuestRunner conformance: Airlock programs in a Durable Object"))).toBe(true)
   })
 
   for (const [index, name] of names.entries()) {
@@ -123,23 +122,28 @@ describe("cloud: a user's Airlock as a Durable Object", () => {
   type Outcome = { readonly ok: boolean; readonly result?: unknown; readonly reason?: string; readonly toolCalls: number }
   type View = { readonly id: string; readonly kind: string; readonly state: string; readonly [field: string]: unknown }
   const guest = `
-    const inbox = await tools.mail.list({ mailbox: "inbox", query: "is:unread" });
-    const sent = await tools.mail.send({ to: "ada@example.com", subject: "unread", body: "you have " + inbox.ids.length });
-    const labelled = await tools.label.add({ messageId: inbox.ids[0], label: "triaged" });
-    return { inbox, sent: sent.staged, labelled: labelled.staged, sendId: sent.id, labelId: labelled.id };`
+    let inbox = mail.list({ mailbox: "inbox", query: "is:unread" })
+    let sent = mail.send({ to: "ada@example.com", subject: "unread", body: "the first is " + inbox.ids[0] })
+    let labelled = label.add({ messageId: inbox.ids[0], label: "triaged" })
+    return { inbox: inbox, sent: sent.staged, labelled: labelled.staged, sendId: sent.id, labelId: labelled.id }`
 
-  it("describes exactly the granted tools", async () => {
-    const described = await call<{ tools: ReadonlyArray<string>; declaration: string; description: string }>(
-      workerd,
-      "/airlock/describe?object=describe"
-    )
-    expect(described.tools).toEqual(["label.add", "mail.list", "mail.send"])
-    expect(described.declaration).toContain("list(input: { mailbox: string; query: string })")
-    expect(described.declaration).not.toContain("remove")
-    expect(described.description).toContain("tools.mail.send(input)")
+  it("describes exactly the granted actions, their shapes and which are staged", async () => {
+    const described = await call<{
+      actions: ReadonlyArray<{ name: string; input: string; result: string; returns: string }>
+      description: string
+    }>(workerd, "/airlock/describe?object=describe")
+    expect(described.actions.map((action) => [action.name, action.returns])).toEqual([
+      ["label.add", "staged"],
+      ["mail.list", "result"],
+      ["mail.send", "staged"]
+    ])
+    expect(described.actions[1]).toMatchObject({ input: "{ mailbox: string, query: string }", result: "{ ids: [string] }" })
+    expect(described.description).toContain("An Airlock program (.air)")
+    expect(described.description).toContain("- mail.send({ to: string, subject: string, body: string }) -> { staged: true, id: string, state: string }.")
+    expect(JSON.stringify(described)).not.toContain("label.remove(")
   })
 
-  it("runs a guest in an isolate, stages its writes, lets a supervisor commit, and replays", async () => {
+  it("runs an Airlock program, stages its writes, lets a supervisor commit, and replays", async () => {
     const object = "?object=flow"
     const remote = () => call<ReadonlyArray<{ tool: string; detail: string }>>(workerd, "/airlock/remote")
     const start = (await remote()).length
@@ -182,26 +186,50 @@ describe("cloud: a user's Airlock as a Durable Object", () => {
     expect((await remote()).length).toBe(before + 2)
   })
 
-  it("keeps the guest inside its grants and its isolate", async () => {
+  it("keeps a program inside its grants, its budgets and the language", async () => {
+    type Failed = Outcome & { readonly refusal?: { tool: string; code: string; message: string }; readonly fault?: string }
     const run = (source: string) =>
-      call<Outcome>(workerd, "/airlock/run?object=limits", { runId: crypto.randomUUID(), source })
-    const outside = await run(`
-      try { await tools.mail.send({ to: "eve@elsewhere.test", subject: "s", body: "b" }); return "sent"; }
-      catch (error) { return error.message; }`)
-    expect(outside.result).toBe("mail.send is not allowed: `to` is not allowed by grant \"support-replies\"")
-    expect(await run("return typeof tools.label.remove")).toMatchObject({ ok: true, result: "undefined" })
-    expect(await run(`
-      try { await fetch("https://example.com/"); return "reached"; } catch { return "blocked"; }`))
-      .toMatchObject({ ok: true, result: "blocked" })
-    // A budget of 8 calls in the policy: the ninth fails the run, caught or not.
-    expect(await run(`
-      for (let index = 0; index < 9; index++) {
-        try { await tools.mail.list({ mailbox: "inbox", query: String(index) }); } catch {}
+      call<Failed>(workerd, "/airlock/run?object=limits", { runId: crypto.randomUUID(), source })
+    const remote = () => call<ReadonlyArray<unknown>>(workerd, "/airlock/remote")
+    const before = (await remote()).length
+
+    const outside = await run(`mail.send({ to: "eve@elsewhere.test", subject: "s", body: "b" })\nreturn "sent"`)
+    expect(outside).toEqual({
+      ok: false,
+      reason: "tool_refused",
+      toolCalls: 1,
+      refusal: {
+        tool: "mail.send",
+        code: "not-allowed",
+        message: "mail.send is not allowed: `to` is not allowed by grant \"support-replies\""
       }
-      return "finished";`)).toMatchObject({ ok: false, reason: "tool_call_limit" })
-    expect(await run("return { get secret() { return 1; } }")).toMatchObject({ ok: false, reason: "invalid_output" })
-    expect(await run(`await tools.mail.list({ mailbox: "inbox", query: "x".repeat(20000) }); return 1;`))
-      .toMatchObject({ ok: false, reason: "tool_input_limit" })
+    })
+    // A tool the policy does not grant, and the things another language would offer, are not there.
+    expect(await run(`label.remove({ messageId: "m", label: "l" })`)).toMatchObject({
+      reason: "tool_refused",
+      refusal: { code: "unknown-tool" }
+    })
+    expect(await run(`fetch("https://example.com/")`)).toMatchObject({ reason: "tool_refused", refusal: { code: "unknown-tool" } })
+    expect(await run("return env.MAIL_TOKEN")).toMatchObject({ reason: "execution_failed", fault: "unbound-name" })
+    expect(await run("return await fetch(1)")).toMatchObject({ reason: "invalid_code" })
+    expect((await remote()).length).toBe(before)
+
+    // A budget of 8 calls in the policy: the ninth ends the run.
+    expect(await run(`for index in 0..9 { mail.list({ mailbox: "inbox", query: "q" }) }\nreturn "finished"`))
+      .toMatchObject({ ok: false, reason: "tool_call_limit" })
+    expect((await remote()).length).toBe(before + 8)
+    expect(await run(`for index in 0..5000 { let twice = index * 2 }\nreturn "finished"`))
+      .toMatchObject({ ok: false, reason: "loop_limit" })
+    expect(await run(`assert 1 == 2, "token-canary"`)).toEqual({
+      ok: false,
+      reason: "assert_failed",
+      toolCalls: 0,
+      at: { line: 1, column: 1 }
+    })
+    const big = Array.from({ length: 12 }, (_, index) => `let s${index + 1} = s${index} + s${index}`).join("\n")
+    expect(await run(`let s0 = "xxxxxxxx"\n${big}\nmail.list({ mailbox: "inbox", query: s12 })`))
+      .toMatchObject({ ok: false, reason: "value_limit" })
+    expect((await remote()).length).toBe(before + 8)
   })
 })
 
@@ -211,7 +239,7 @@ describe("cloud: the recovery alarm", () => {
     const first = start(storage)
     const run = await call<{ result: { id: string } }>(first, "/alarmed/run?object=alarmed", {
       runId: "run-1",
-      source: `const sent = await tools.mail.send({ to: "hang@example.com", subject: "s", body: "b" }); return { id: sent.id };`
+      source: `let sent = mail.send({ to: "hang@example.com", subject: "s", body: "b" })\nreturn { id: sent.id }`
     })
     // The provider never answers: the commit is in flight when the process dies.
     void call(first, "/alarmed/commit?object=alarmed", { id: run.result.id }).catch(() => undefined)
@@ -230,7 +258,7 @@ describe("cloud: the recovery alarm", () => {
   it("commits nothing on a timer: a staged write is still staged after the alarm time", async () => {
     const run = await call<{ result: { id: string } }>(workerd, "/alarmed/run?object=alarmed", {
       runId: "run-quiet",
-      source: `const sent = await tools.mail.send({ to: "ada@example.com", subject: "s", body: "b" }); return { id: sent.id };`
+      source: `let sent = mail.send({ to: "ada@example.com", subject: "s", body: "b" })\nreturn { id: sent.id }`
     })
     await new Promise((resolve) => setTimeout(resolve, 2_500))
     const view = await call<{ state: string }>(workerd, "/alarmed/inspect?object=alarmed", { id: run.result.id })

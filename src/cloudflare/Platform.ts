@@ -15,28 +15,10 @@ export interface ObjectState {
 }
 
 interface WorkersModule {
-  /** Base of anything passed by reference over Workers RPC. Only prototype methods are callable remotely. */
-  readonly RpcTarget: abstract new () => object
   /** Base of a Durable Object whose public methods are callable over RPC. */
   readonly DurableObject: abstract new (state: ObjectState, env: never) => object
 }
 
 const platform = workers as unknown as WorkersModule
 
-export const RpcTarget = platform.RpcTarget
 export const DurableObject = platform.DurableObject
-
-/** What a dynamically loaded Worker is given. Mirrors the Worker Loader binding. */
-export interface WorkerLoaderCode {
-  readonly compatibilityDate: string
-  readonly compatibilityFlags?: ReadonlyArray<string>
-  readonly mainModule: string
-  readonly modules: { readonly [name: string]: string }
-  /** `null` cuts the Worker off from the network entirely. */
-  readonly globalOutbound?: null
-  readonly limits?: { readonly cpuMs?: number; readonly subRequests?: number }
-}
-
-export interface WorkerLoader {
-  load(code: WorkerLoaderCode): { getEntrypoint(): unknown }
-}

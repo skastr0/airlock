@@ -1,0 +1,15 @@
+# Triage the inbox: read it, label the first unread message, and propose a
+# reply. Reading runs at once. The label and the mail are only recorded; a
+# supervisor decides whether they happen.
+let inbox = mail.list({ mailbox: "inbox", query: "is:unread" })
+assert inbox.ids != [], "nothing to triage"
+
+let first = inbox.ids[0]
+let labelled = label.add({ messageId: first, label: "triaged" })
+let draft = mail.send({
+  to: "ada@example.com",
+  subject: "Unread mail",
+  body: "The first unread message is " + first + "."
+})
+
+return { first: first, label: labelled.id, mail: draft.id }

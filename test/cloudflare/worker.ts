@@ -13,9 +13,7 @@ import {
   AirlockError,
   durableLedger,
   durableOutboxStore,
-  type DurableStorage,
-  type WorkerLoader,
-  workerLoaderRunner
+  type DurableStorage
 } from "../../src/cloudflare/index.ts"
 import {
   Admission,
@@ -24,6 +22,7 @@ import {
   DispatchProvenance,
   type EmissionId,
   IdempotencyKey,
+  programRunner,
   refused,
   toolPolicy,
   WebCrypto
@@ -56,7 +55,6 @@ interface Env {
   readonly CONFORMANCE: Namespace
   readonly AIRLOCK: Namespace
   readonly ALARMED: Namespace
-  readonly LOADER: WorkerLoader
   readonly MAIL_TOKEN: string
 }
 
@@ -101,7 +99,7 @@ const worlds = (storage: DurableStorage) => {
 }
 
 /** Collects the suites' tests instead of running them, so each can be run by name. */
-const collect = (storage: DurableStorage, loader: WorkerLoader): ReadonlyArray<Test> => {
+const collect = (storage: DurableStorage): ReadonlyArray<Test> => {
   const tests: Array<Test> = []
   const path: Array<string> = []
   const runner: Runner = {
@@ -118,13 +116,12 @@ const collect = (storage: DurableStorage, loader: WorkerLoader): ReadonlyArray<T
   outboxConformance(runner, "Durable Object SQLite", world.outbox)
   guestRunnerConformance(
     runner,
-    "Worker Loader isolate",
+    "Airlock programs in a Durable Object",
     Effect.map(world.outbox, (adapters) => ({
       store: adapters.store,
       ledger: adapters.ledger,
       crypto: adapters.crypto,
-      runner: workerLoaderRunner(loader),
-      isolated: true
+      runner: programRunner
     }))
   )
   return tests
@@ -185,9 +182,9 @@ export class ConformanceObject {
     const url = new URL(request.url)
     const storage = this.state.storage
     try {
-      if (url.pathname === "/tests") return json(collect(storage, this.env.LOADER).map((test) => test.name))
+      if (url.pathname === "/tests") return json(collect(storage).map((test) => test.name))
       if (url.pathname === "/run") {
-        const test = collect(storage, this.env.LOADER)[Number(url.searchParams.get("index"))]
+        const test = collect(storage)[Number(url.searchParams.get("index"))]
         if (test === undefined) return json({ ok: false, error: "no such test" }, 404)
         return await Effect.runPromise(Effect.scoped(test.body())).then(
           () => json({ ok: true, name: test.name }),
@@ -248,7 +245,7 @@ const userAirlock = defineAirlock({
   })
 })
 
-export const ExampleAirlock = airlockDurableObject(userAirlock, { loader: (env: Env) => env.LOADER })
+export const ExampleAirlock = airlockDurableObject(userAirlock)
 
 /**
  * The same Airlock with a short recovery alarm, plus a way to look at the
@@ -256,7 +253,6 @@ export const ExampleAirlock = airlockDurableObject(userAirlock, { loader: (env: 
  * so a test of the alarm must not do that.
  */
 export class AlarmedAirlock extends airlockDurableObject(userAirlock, {
-  loader: (env: Env) => env.LOADER,
   recoveryAlarmMillis: 1_500
 }) {
   readonly #storage: DurableStorage

@@ -1,10 +1,9 @@
-import { defineAirlock, refused, toolGrant, toolPolicy, type WorkerLoader } from "@skastr0/airlock/cloudflare"
+import { defineAirlock, refused, toolGrant, toolPolicy } from "@skastr0/airlock/cloudflare"
 import { LabelAdd, LabelRemove, MailList, MailSend } from "./contracts.ts"
 
-/** The Worker's bindings. `MAIL_TOKEN` is a secret; a guest never sees it. */
+/** The Worker's bindings. `MAIL_TOKEN` is a secret; an Airlock program has no way to name it. */
 export interface Env {
   readonly AIRLOCK: { idFromName(name: string): unknown; get(id: unknown): unknown }
-  readonly LOADER: WorkerLoader
   readonly MAIL_TOKEN: string
 }
 
@@ -45,7 +44,7 @@ export const airlock = defineAirlock({
     }
   },
 
-  // What this guest may do: read the inbox without asking, propose mail to the
+  // What a program may do: read the inbox without asking, propose mail to the
   // company's own addresses, propose labels. Nothing else exists for it.
   policy: toolPolicy({
     budget: { maxCalls: 8, maxInputBytes: 16_384 },

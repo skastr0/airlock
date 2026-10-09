@@ -1,12 +1,11 @@
 import { describe, it } from "@effect/vitest"
 import { Effect } from "effect"
-import { WebCrypto } from "../src/core/index.ts"
+import { programRunner, WebCrypto } from "../src/core/index.ts"
 import {
   ledgerConformance,
   makeMemoryLedgerState,
   makeMemoryOutboxState,
   guestRunnerConformance,
-  memoryGuestRunner,
   memoryLedger,
   memoryOutboxFaults,
   memoryOutboxStore,
@@ -47,12 +46,11 @@ outboxConformance(
 
 guestRunnerConformance(
   runner,
-  "in-process reference (not a sandbox)",
+  "Airlock programs over in-memory adapters",
   Effect.sync(() => ({
     store: memoryOutboxStore(makeMemoryOutboxState()),
     ledger: memoryLedger(makeMemoryLedgerState()),
     crypto: WebCrypto.layer,
-    runner: memoryGuestRunner,
-    isolated: false
+    runner: programRunner
   }))
 )

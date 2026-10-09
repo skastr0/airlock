@@ -1,15 +1,21 @@
 import { airlockClient, airlockDurableObject, AirlockError } from "@skastr0/airlock/cloudflare"
 import { airlock, type Env, mailbox } from "./airlock.ts"
 
-/** The Durable Object: this one export is the whole server side of Airlock. */
-export const Airlock = airlockDurableObject(airlock, { loader: (env: Env) => env.LOADER })
+/**
+ * The Durable Object: this one export is the whole server side of Airlock. It
+ * runs Airlock programs (.air), admits every action they call against the
+ * policy, and holds what they stage until a supervisor decides.
+ */
+export const Airlock = airlockDurableObject(airlock)
 
 const json = (value: unknown, status = 200) =>
   new Response(JSON.stringify(value, null, 2), { status, headers: { "content-type": "application/json" } })
 
 /**
  * The trusted side. In a real system this is your agent host and your approval
- * UI; here it is a few HTTP routes so the example can be driven with curl.
+ * UI: the agent's code mode is `POST /run` with a program it wrote, and
+ * `GET /tools` is what you put in its prompt. Here it is a few HTTP routes so
+ * the example can be driven with curl.
  * Put it behind your own authentication: whoever can call it is the supervisor.
  */
 export default {

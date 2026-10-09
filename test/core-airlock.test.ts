@@ -163,28 +163,43 @@ describe("core: defineAirlock", () => {
       expect(JSON.stringify(thrown)).not.toMatch(/token-canary|upstream said no/)
     }))
 
-  it.effect("describes exactly the granted tools, as TypeScript and as prose", () =>
+  it.effect("describes exactly the granted tools, as actions and as prose", () =>
     Effect.gen(function* () {
       const run = host()
       const env = environment()
       const guest = yield* run(env, airlock.guest({ runId: "run-1", env }))
-      expect(guest.declaration).toBe(
-        "declare const tools: {\n" +
-        "  readonly label: {\n" +
-        "    add(input: { messageId: string; label: string }): Promise<{ readonly staged: true; readonly id: string; readonly state: string }>\n" +
-        "  }\n" +
-        "  readonly mail: {\n" +
-        "    list(input: { mailbox: string; query: string }): Promise<{ ids: ReadonlyArray<string> } | { readonly staged: true; readonly id: string; readonly state: string }>\n" +
-        "    send(input: { to: string; subject: string; body: string }): Promise<{ readonly staged: true; readonly id: string; readonly state: string }>\n" +
-        "  }\n" +
-        "}\n"
-      )
-      expect(guest.description.split("\n")).toEqual([
-        "- tools.label.add(input): changes something; is recorded for approval and returns a staged receipt, never a result; can be answered by label.remove.",
-        "- tools.mail.list(input): reads; returns its result, or a staged receipt if it needs approval.",
-        "- tools.mail.send(input): sends something that cannot be undone; is recorded for approval and returns a staged receipt, never a result."
+      expect(guest.actions).toEqual([
+        {
+          name: "label.add",
+          input: "{ messageId: string, label: string }",
+          result: "{ added: boolean }",
+          returns: "staged",
+          effect: "mutate",
+          answeredBy: "label.remove"
+        },
+        {
+          name: "mail.list",
+          input: "{ mailbox: string, query: string }",
+          result: "{ ids: [string] }",
+          returns: "result",
+          effect: "read"
+        },
+        {
+          name: "mail.send",
+          input: "{ to: string, subject: string, body: string }",
+          result: "{ messageId: string }",
+          returns: "staged",
+          effect: "send"
+        }
       ])
-      expect(guest.declaration).not.toContain("remove")
+      const lines = guest.description.split("\n")
+      expect(lines[0]).toBe("An Airlock program (.air) is a list of statements, one per line.")
+      expect(lines.slice(-3)).toEqual([
+        "- label.add({ messageId: string, label: string }) -> { staged: true, id: string, state: string }. Changes something; is recorded for approval and returns a staged receipt, never a result; nothing happens until a supervisor commits it. Can be answered by label.remove.",
+        "- mail.list({ mailbox: string, query: string }) -> { ids: [string] }. Reads; runs at once and returns its result.",
+        "- mail.send({ to: string, subject: string, body: string }) -> { staged: true, id: string, state: string }. Sends something that cannot be undone; is recorded for approval and returns a staged receipt, never a result; nothing happens until a supervisor commits it."
+      ])
+      expect(JSON.stringify(guest.actions)).not.toContain("\"label.remove\",\"input\"")
     }))
 
   it("does not compile without one correctly typed implementation per contract", () => {

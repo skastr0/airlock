@@ -3,16 +3,17 @@ import {
   type Airlock,
   AirlockFailure,
   type EmissionView,
+  type GuestAction,
   type GuestLimits,
   type GuestOutcome,
   GuestRunner,
+  programRunner,
   type ToolContracts,
   WebCrypto
 } from "../core/index.ts"
 import { durableLedger } from "./DurableLedger.ts"
 import { durableOutboxStore } from "./DurableOutboxStore.ts"
-import { DurableObject, type ObjectState, type WorkerLoader } from "./Platform.ts"
-import { workerLoaderRunner, type WorkerLoaderRunnerOptions } from "./WorkerLoaderRunner.ts"
+import { DurableObject, type ObjectState } from "./Platform.ts"
 
 /**
  * What crosses the Durable Object's RPC boundary: plain data either way. A
@@ -23,16 +24,20 @@ export type Reply<Value> =
   | { readonly ok: true; readonly value: Value }
   | { readonly ok: false; readonly code: AirlockFailure["code"]; readonly message: string }
 
-/** What the guest is told it can do: for a prompt, and for typechecking guest code. */
+/** What an agent needs to write an Airlock program for this object. */
 export interface GuestDescription {
-  readonly tools: ReadonlyArray<string>
-  readonly declaration: string
+  /** The granted actions: name, input and result shapes, and whether a call runs at once or is staged. */
+  readonly actions: ReadonlyArray<GuestAction>
+  /** The language in a few lines and one line per action, ready for a prompt. */
   readonly description: string
 }
 
 /** The Durable Object's methods, as the trusted side calls them. */
 export interface AirlockObjectApi {
-  /** Runs untrusted guest source in a fresh isolate. Replaying a run id returns recorded results. */
+  /**
+   * Runs an untrusted Airlock program (.air). Every action it calls is admitted,
+   * recorded and staged by this object. Replaying a run id returns recorded results.
+   */
   run(request: { readonly runId: string; readonly source: string }): Promise<Reply<GuestOutcome>>
   describe(): Promise<Reply<GuestDescription>>
   pending(): Promise<Reply<ReadonlyArray<EmissionView>>>
@@ -42,11 +47,8 @@ export interface AirlockObjectApi {
   compensate(id: string, holdMillis?: number): Promise<Reply<EmissionView>>
 }
 
-export interface AirlockObjectOptions<Env> {
-  /** The Worker Loader binding, e.g. `(env) => env.LOADER`. */
-  readonly loader: (env: Env) => WorkerLoader
-  readonly runner?: WorkerLoaderRunnerOptions
-  /** Limits for every guest run of this object. */
+export interface AirlockObjectOptions {
+  /** Limits for every program this object runs. */
   readonly limits?: Partial<GuestLimits>
   /**
    * How long after an operation starts the object asks to be woken if that
@@ -63,12 +65,14 @@ const RECOVERY_ALARM_MILLIS = 60_000
  * returns from a Worker and bind it; that is the whole server side.
  *
  * One object is one Airlock: its own SQLite database holds its Outbox and its
- * Ledger. Implementations run here, with the Worker's bindings and secrets;
- * a guest runs in a separate isolate and is given none of them.
+ * Ledger. Implementations run here, with the Worker's bindings and secrets.
+ * A program is evaluated here too, and that is safe by what the language is:
+ * it has no way to name a binding, a secret or the network, only the actions
+ * its session grants.
  */
 export const airlockDurableObject = <Contracts extends ToolContracts, Env>(
   airlock: Airlock<Contracts, Env>,
-  options: AirlockObjectOptions<Env>
+  options: AirlockObjectOptions = {}
 ) => {
   const services = (state: ObjectState, env: Env) =>
     Layer.mergeAll(
@@ -77,7 +81,7 @@ export const airlockDurableObject = <Contracts extends ToolContracts, Env>(
           Layer.mergeAll(durableOutboxStore(state.storage), durableLedger(state.storage), WebCrypto.layer)
         )
       ),
-      workerLoaderRunner(options.loader(env), options.runner)
+      programRunner
     )
   type Services = Layer.Success<ReturnType<typeof services>>
 
@@ -160,8 +164,7 @@ export const airlockDurableObject = <Contracts extends ToolContracts, Env>(
       const env = this.#env
       return this.#reply(
         Effect.map(airlock.guest({ runId: "describe", env }), (surface) => ({
-          tools: surface.tools,
-          declaration: surface.declaration,
+          actions: surface.actions,
           description: surface.description
         }))
       )
