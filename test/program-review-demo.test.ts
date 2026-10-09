@@ -6,7 +6,7 @@ import { decodeValue, deriveValue, labeledValue } from "../src/core/contract/Dec
 import { defineToolContract } from "../src/core/contract/ToolContract.ts"
 import { InformationLabel, SinkPolicy } from "../src/core/labels/Labels.ts"
 import { run } from "./support/CoreTest.ts"
-import { reviewPrototype, type Review } from "./support/air-review.ts"
+import { decoderIdentity, reviewPrototype, type Review } from "./support/air-review.ts"
 import { CompanyRecipient, dataFlowPrograms, environment } from "./support/air-review-fixtures.ts"
 import { lowerReviewPrototype, prototypeInstances, type ReviewSurface } from "./support/air-plan-review.ts"
 
@@ -15,6 +15,7 @@ const Send = defineToolContract({ name: "mail.send", version: "1", effect: "requ
   output: Schema.Struct({ messageId: Schema.String }), public: ["to", "subject"] })
 const env = { ...environment, tools: { ...environment.tools, "mail.send": { ...environment.tools["mail.send"]!, contract: Send } } }
 const mailbox = new InformationLabel({ confidentiality: "private", integrity: "untrusted", provenance: ["mailbox"] })
+const pc = labeledValue(false, mailbox)
 const literal = new InformationLabel({ confidentiality: "public", integrity: "runtime", provenance: [] })
 const sink = (id: string, confidentialityCeiling: SinkPolicy["confidentialityCeiling"] = "public", minimumIntegrity: SinkPolicy["minimumIntegrity"] = "untrusted") =>
   new SinkPolicy({ id, confidentialityCeiling, minimumIntegrity })
@@ -47,7 +48,7 @@ describe("test-only: whole-program Plan review demonstration", () => {
     ])
     const send = report.plan.nodes[1]!
     expect(send.arguments.map((arg) => [arg.field, arg.fixed, arg.label?.confidentiality, arg.proofs])).toEqual([
-      ["to", undefined, "private", ["companyRecipient@1"]], ["subject", "Forward", "private", []], ["body", undefined, "private", []]
+      ["to", undefined, "private", [decoderIdentity(CompanyRecipient)]], ["subject", "Forward", "private", []], ["body", undefined, "private", []]
     ])
     expect(send.arguments.find((arg) => arg.field === "to")!.dependencies.some((origin) => origin.endsWith("result.from"))).toBe(true)
     expect(send.arguments.every((arg) => arg.control.some((origin) => origin.endsWith(".state")))).toBe(true)
@@ -132,14 +133,16 @@ describe("test-only: whole-program Plan review demonstration", () => {
     const input = { to: recipient, subject: labeledValue("Forward", literal), body: labeledValue("new content unknown at review", mailbox) }
     const instance = { planId: report.plan.id, nodeId: send.id, occurrence: 1, tool: send.tool }
     const guard = prototypeInstances(report, review, policy)
-    expect((await run(guard(instance, input, mailbox))).approval).toBe("exact-batch")
-    expect(await run(reason(guard({ ...instance, occurrence: 2 }, input, mailbox)))).toBe("bound")
-    expect(await run(reason(guard(instance, input, mailbox)))).toBe("ended")
-    expect(await run(reason(prototypeInstances(report, review, policy)(instance, { ...input, to: deriveValue(recipient.value, recipient) }, mailbox)))).toBe("proof")
-    expect(await run(reason(prototypeInstances(report, review, policy)(instance, { ...input, subject: labeledValue("changed", literal) }, mailbox)))).toBe("argument")
-    expect(await run(reason(prototypeInstances(report, review, policy)({ ...instance, nodeId: "absent" }, input, mailbox)))).toBe("plan-mismatch")
-    expect(await run(reason(prototypeInstances(report, review, { ...policy, bindings: { changed: true } })(instance, input, mailbox)))).toBe("plan-mismatch")
-    expect(await run(reason(prototypeInstances({ ...report }, review, policy)(instance, input, mailbox)))).toBe("plan-mismatch")
+    expect((await run(guard(instance, input, pc))).approval).toBe("exact-batch")
+    expect(await run(reason(guard({ ...instance, occurrence: 2 }, input, pc)))).toBe("bound")
+    expect(await run(reason(guard(instance, input, pc)))).toBe("ended")
+    expect(await run(reason(prototypeInstances(report, review, policy)(instance, { ...input, to: deriveValue(recipient.value, recipient) }, pc)))).toBe("proof")
+    expect(await run(reason(prototypeInstances(report, review, policy)(instance, { ...input, subject: labeledValue("changed", literal) }, pc)))).toBe("argument")
+    expect(await run(reason(prototypeInstances(report, review, policy)({ ...instance, nodeId: "absent" }, input, pc)))).toBe("plan-mismatch")
+    expect(await run(reason(prototypeInstances(report, review, { ...policy, bindings: { changed: true } })(instance, input, pc)))).toBe("plan-mismatch")
+    expect(await run(reason(prototypeInstances({ ...report }, review, policy)(instance, input, pc)))).toBe("plan-mismatch")
+    expect(await run(reason(prototypeInstances(report, review, policy)(instance, { ...input, body: { ...input.body } }, pc)))).toBe("label")
+    expect(await run(reason(prototypeInstances(report, review, policy)(instance, input, { ...pc })))).toBe("label")
   })
 
   it("preserves runtime dynamic grant, label and occurrence checks after static acceptance", async () => {
@@ -150,8 +153,26 @@ describe("test-only: whole-program Plan review demonstration", () => {
     expect(reviewed.refusals).toEqual([])
     const send = report.plan.nodes[1]!
     const input = { to: Result.getOrThrow(decodeValue(CompanyRecipient, labeledValue("other@example.com", mailbox))), subject: labeledValue("Forward", literal), body: labeledValue("body", mailbox) }
-    expect(await run(reason(prototypeInstances(reviewed, review, narrowed)({ planId: reviewed.plan.id, nodeId: send.id, occurrence: 1, tool: send.tool }, input, mailbox)))).toBe("grant")
+    expect(await run(reason(prototypeInstances(reviewed, review, narrowed)({ planId: reviewed.plan.id, nodeId: send.id, occurrence: 1, tool: send.tool }, input, pc)))).toBe("grant")
     const secret = new InformationLabel({ confidentiality: "secret", integrity: "untrusted", provenance: ["other-source"] })
-    expect(await run(reason(prototypeInstances(report, review, policy)({ planId: report.plan.id, nodeId: send.id, occurrence: 1, tool: send.tool }, { ...input, body: labeledValue("secret", secret) }, mailbox)))).toBe("label")
+    expect(await run(reason(prototypeInstances(report, review, policy)({ planId: report.plan.id, nodeId: send.id, occurrence: 1, tool: send.tool }, { ...input, body: labeledValue("secret", secret) }, pc)))).toBe("label")
+    const unrelated = new InformationLabel({ ...mailbox, provenance: ["unreviewed-mailbox"] })
+    expect(await run(reason(prototypeInstances(report, review, policy)({ planId: report.plan.id, nodeId: send.id, occurrence: 1, tool: send.tool }, { ...input, body: labeledValue("other private data", unrelated) }, pc)))).toBe("label")
+  })
+
+  it("ends if the trusted contract registry drifts after review, even with unchanged names and versions", async () => {
+    const source = dataFlowPrograms.forward
+    const mutable = { ...env, tools: { ...env.tools }, granted: new Set(env.granted) }
+    const review = await run(reviewPrototype(source, mutable))
+    const policy = await run(surface(review, true))
+    const report = await run(lowerReviewPrototype(source, review, policy))
+    const send = report.plan.nodes[1]!
+    const instance = { planId: report.plan.id, nodeId: send.id, occurrence: 1, tool: send.tool }
+    const input = { to: Result.getOrThrow(decodeValue(CompanyRecipient, labeledValue("alice@example.com", mailbox))), subject: labeledValue("Forward", literal), body: labeledValue("body", mailbox) }
+    mutable.tools["mail.send"] = { ...mutable.tools["mail.send"], contract: { ...Send } }
+    expect(await run(reason(prototypeInstances(report, review, policy)(instance, input, pc)))).toBe("plan-mismatch")
+    mutable.tools["mail.send"] = { ...env.tools["mail.send"] }
+    mutable.granted.delete("mail.send")
+    expect(await run(reason(prototypeInstances(report, review, policy)(instance, input, pc)))).toBe("plan-mismatch")
   })
 })

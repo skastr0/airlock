@@ -20,9 +20,11 @@ bindings, trusted registry digest, grant and flow policy, semantics, and limits.
 
 Checked by the runtime guard tests: Plan/node identity, next occurrence and
 both bounds, exact fixed values, input codec, dynamic grants, labels and
-exact-owned decoder proof. Any mismatch ends the guard permanently before it
+exact-owned decoder proof, permitted provenance, and unchanged trusted
+contract/decoder objects and tool grants. Any mismatch ends the guard permanently before it
 returns an instance for recording or acting. Dynamic requests remain staged
-even when validated. The guard rejects copied reports and changed context.
+even when validated. The guard rejects copied reports, copied value/control
+wrappers and changed context. Arguments and control must be kernel-owned tracked values.
 
 Not established here: host execution, persistent/replay approval storage,
 physical resource identity, real network or filesystem behavior, and the

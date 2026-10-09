@@ -1,10 +1,10 @@
 import { Effect, Result, Schema } from "effect"
 import { canonicalJson, sha256Canonical, type Sha256Digest } from "../../src/core/Canonical.ts"
 import { fittingToolGrants, ToolGrantPolicy, validateToolGrants } from "../../src/core/admission/ToolGrant.ts"
-import { hasRefinement, type TrackedValue } from "../../src/core/contract/Decoder.ts"
+import { hasRefinement, isTrackedValue, type TrackedValue } from "../../src/core/contract/Decoder.ts"
 import { combine, checkSink, InformationLabel, SinkPolicy } from "../../src/core/labels/Labels.ts"
 import { PlanEffect } from "../../src/core/plan/Plan.ts"
-import { type Fact, type Review } from "./air-review.ts"
+import { decoderIdentity, type Fact, type Review } from "./air-review.ts"
 
 /** Test-only lowering of language-owned typed facts. No host imports this. */
 export const ArgumentEnvelope = Schema.Struct({
@@ -50,7 +50,29 @@ export interface DemonstrationReview {
   readonly plan: PrototypePlan
   readonly refusals: readonly ReviewRefusal[]
 }
-const contexts = new WeakMap<DemonstrationReview, { readonly review: Review; readonly surface: string }>()
+interface ContextWitness {
+  readonly review: Review
+  readonly surface: string
+  readonly environment: string
+  readonly program: string
+  readonly definitions: readonly { readonly name: string; readonly contract: import("../../src/core/contract/ToolContract.ts").ToolContract.Any; readonly input: unknown; readonly outcome: unknown; readonly summarize: unknown; readonly target: unknown }[]
+  readonly decoders: readonly { readonly name: string; readonly decoder: import("../../src/core/contract/Decoder.ts").TrustedDecoder.Any }[]
+}
+const contexts = new WeakMap<DemonstrationReview, ContextWitness>()
+const environmentDescription = (review: Review) => canonicalJson({
+  granted: [...review.environment.granted].sort(), maxCalls: review.environment.maxCalls,
+  maxIterations: review.environment.maxIterations, maxListItems: review.environment.maxListItems,
+  tools: Object.entries(review.environment.tools).map(([name, tool]) => ({ name, tag: tool.contract.tag,
+    version: tool.contract.version, effect: tool.contract.effect, publicFields: tool.contract.publicFields,
+    resources: tool.contract.resources, requires: tool.requires })),
+  decoders: Object.entries(review.environment.decoders).map(([name, decoder]) => ({ name, version: decoder.version }))
+})
+const sameEnvironment = (review: Review, witness: ContextWitness) => environmentDescription(review) === witness.environment &&
+  witness.definitions.every((definition) => {
+    const contract = review.environment.tools[definition.name]?.contract
+    return contract === definition.contract && contract.input === definition.input && contract.outcome === definition.outcome &&
+      contract.summarize === definition.summarize && contract.target === definition.target
+  }) && witness.decoders.every((definition) => review.environment.decoders[definition.name] === definition.decoder)
 const literal = new InformationLabel({ confidentiality: "public", integrity: "runtime", provenance: [] })
 const labelOf = (origins: readonly string[], sources: ReviewSurface["sources"]): InformationLabel | undefined => {
   const labels = origins.map((origin) => Object.hasOwn(sources, origin) ? sources[origin] : undefined)
@@ -111,7 +133,9 @@ export const lowerReviewPrototype = (source: string, review: Review, surface: Re
     refusals.push({ nodeId: "$", field: "$", reason: "plan-size" })
   }
   const report = freeze({ plan: freeze(plan), refusals: freeze(refusals) }) satisfies DemonstrationReview
-  contexts.set(report, { review, surface: canonicalJson(surface) })
+  contexts.set(report, { review, surface: canonicalJson(surface), environment: environmentDescription(review), program: canonicalJson(review.program),
+    definitions: Object.entries(review.environment.tools).map(([name, { contract }]) => ({ name, contract, input: contract.input, outcome: contract.outcome, summarize: contract.summarize, target: contract.target })),
+    decoders: Object.entries(review.environment.decoders).map(([name, decoder]) => ({ name, decoder })) })
   return report
 })
 const freeze = <A>(value: A): A => {
@@ -128,11 +152,12 @@ export const prototypeInstances = (report: DemonstrationReview, review: Review, 
   const counts = new Map<string, number>(), tools = new Map<string, number>()
   let ended = report.refusals.length > 0
   return (instance: { readonly planId: string; readonly nodeId: string; readonly occurrence: number; readonly tool: string },
-    input: Readonly<Record<string, TrackedValue>>, control: InformationLabel) => Effect.gen(function* () {
+    input: Readonly<Record<string, TrackedValue>>, control: TrackedValue) => Effect.gen(function* () {
     const fail = (reason: InstanceRefused["reason"]) => { ended = true; return Effect.fail(new InstanceRefused({ reason })) }
     if (ended) return yield* fail(report.refusals.length > 0 ? "review-refused" : "ended")
     const context = contexts.get(report)
-    if (context?.review !== review || context.surface !== canonicalJson(surface)) return yield* fail("plan-mismatch")
+    if (context?.review !== review || context.surface !== canonicalJson(surface) || context.program !== canonicalJson(review.program) || !sameEnvironment(review, context)) return yield* fail("plan-mismatch")
+    if (!isTrackedValue(control) || !Object.values(input).every(isTrackedValue)) return yield* fail("label")
     const node = report.plan.nodes.find((node) => node.id === instance.nodeId)
     if (instance.planId !== report.plan.id || node === undefined || node.tool !== instance.tool) return yield* fail("plan-mismatch")
     const occurrence = (counts.get(node.id) ?? 0) + 1, total = (tools.get(node.tool) ?? 0) + 1
@@ -146,12 +171,13 @@ export const prototypeInstances = (report: DemonstrationReview, review: Review, 
       const value = Object.hasOwn(input, arg.field) ? input[arg.field] : undefined
       if (value === undefined || (arg.fixed !== undefined && canonicalJson(arg.fixed) !== canonicalJson(value.value))) return yield* fail("argument")
       for (const required of arg.proofs) {
-        const decoder = Object.values(review.environment.decoders).find((decoder) => `${decoder.name}@${decoder.version}` === required)
+        const decoder = Object.values(review.environment.decoders).find((decoder) => decoderIdentity(decoder) === required)
         if (decoder === undefined || !hasRefinement(value, decoder)) return yield* fail("proof")
       }
       const sink = surface.sinks[node.tool]?.[arg.field]
       if (sink === undefined || arg.label === undefined) return yield* fail("label")
-      const actual = combine(value.label, control)
+      const actual = combine(value.label, control.label)
+      if (actual.provenance.some((origin) => !arg.label!.provenance.includes(origin))) return yield* fail("label")
       const envelope = new SinkPolicy({ id: "plan-envelope", confidentialityCeiling: arg.label.confidentiality, minimumIntegrity: arg.label.integrity })
       for (const policy of [envelope, sink]) {
         if (Result.isFailure(yield* checkSink(actual, policy).pipe(Effect.result))) return yield* fail("label")
