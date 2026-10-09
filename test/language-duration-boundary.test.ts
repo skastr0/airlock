@@ -12,7 +12,8 @@ describe("language: current duration contract boundary", () => {
     let handled = 0
     const duration = defineToolContract({ name: "duration.echo", version: "1", effect: "capture", input: Schema.Struct({ duration: DurationSchema }), output: Schema.Boolean })
     const airlock = defineAirlock({ contracts: [duration], implement: { "duration.echo": () => { handled++; return true } }, policy: toolPolicy({ budget: { maxCalls: 4, maxInputBytes: 4096 }, toolGrants: [Admission.toolGrant(duration, { id: "duration", when: "now" })] }) })
-    const layer = airlock.layer(undefined).pipe(Layer.provideMerge(Layer.mergeAll(memoryLedger(makeMemoryLedgerState()), memoryOutboxStore(makeMemoryOutboxState()), WebCrypto.layer)))
+    const ledger = makeMemoryLedgerState()
+    const layer = airlock.layer(undefined).pipe(Layer.provideMerge(Layer.mergeAll(memoryLedger(ledger), memoryOutboxStore(makeMemoryOutboxState(), ledger), WebCrypto.layer)))
     const outcomes = yield* Effect.gen(function* () {
       const guest = yield* airlock.guest({ runId: "duration-boundary", env: undefined })
       const runner = yield* GuestRunner
