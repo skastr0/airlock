@@ -64,6 +64,15 @@ export interface DispatchPermit<Tag extends string = string> {
 
 const livePermits = new WeakSet<object>()
 const permitDispatches = new WeakMap<object, string>()
+const WireTypeId: unique symbol = Symbol("airlock/core/WireToken")
+
+/** One host network operation inside an admitted implementation's live call. */
+export interface WireToken {
+  readonly [WireTypeId]: true
+  readonly callId: EmissionId
+}
+
+const wireTokens = new WeakMap<object, { readonly permit: DispatchPermit; readonly signal?: AbortSignal; available: boolean }>()
 
 const mintPermit = <Tag extends string>(
   kind: Tag,
@@ -99,6 +108,31 @@ export const consumePermit = (permit: DispatchPermit, kind: string, canonical: s
   const bound = permitDispatches.get(permit)
   if (bound === undefined || bound !== canonical) return false
   permitDispatches.delete(permit)
+  return true
+}
+
+/**
+ * Implementation entry: consumes the exact call permit before deriving its
+ * one-use wire authority. A substituted call cannot get a token.
+ */
+export const enterImplementation = (permit: DispatchPermit, kind: string, canonical: string, signal?: AbortSignal): WireToken | undefined => {
+  if (signal?.aborted === true || !consumePermit(permit, kind, canonical)) return undefined
+  const token: WireToken = Object.freeze({ [WireTypeId]: true as const, callId: permit.emissionId })
+  wireTokens.set(token, { permit, ...(signal === undefined ? {} : { signal }), available: true })
+  return token
+}
+
+/** Checking does not consume; the host wire function must consume before I/O. */
+export const isLiveWireToken = (token: WireToken): boolean => {
+  const entry = wireTokens.get(token)
+  return entry !== undefined && entry.available && entry.signal?.aborted !== true && isLivePermit(entry.permit)
+}
+
+/** Atomic, single use. Copies, forged tokens, aborted and settled calls refuse. */
+export const consumeWireToken = (token: WireToken): boolean => {
+  const entry = wireTokens.get(token)
+  if (entry === undefined || !entry.available || entry.signal?.aborted === true || !isLivePermit(entry.permit)) return false
+  entry.available = false
   return true
 }
 

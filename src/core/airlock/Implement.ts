@@ -8,7 +8,7 @@ import {
   DispatchRefused,
   type DispatchRequest
 } from "../outbox/Dispatcher.ts"
-import { consumePermit, isLivePermit } from "../outbox/Outbox.ts"
+import { enterImplementation, isLivePermit, type WireToken } from "../outbox/Outbox.ts"
 import type { ToolContracts } from "../session/ToolSession.ts"
 
 const RefusedTypeId: unique symbol = Symbol.for("airlock/Refused")
@@ -47,6 +47,8 @@ export interface ImplementContext<Env> {
    * again. Forward it to a remote API that accepts an idempotency key.
    */
   readonly idempotencyKey: string
+  /** One-use host wire authority, valid only while this admitted call is live. */
+  readonly wireToken: WireToken
 }
 
 type Awaitable<Value> = Value | Promise<Value> | Effect.Effect<Value, unknown>
@@ -87,9 +89,6 @@ export const handlersFor = <Contracts extends ToolContracts, Env>(
       const encoded = yield* Schema.encodeUnknownEffect(contract.dispatch)(request.dispatch).pipe(Effect.mapError(invalid))
       const canonical = yield* Effect.try({ try: () => canonicalJson(encoded), catch: invalid })
       const input = yield* Schema.decodeUnknownEffect(Schema.fromJsonString(contract.dispatch))(canonical).pipe(Effect.mapError(invalid))
-      if (!consumePermit(request.permit, name, canonical)) {
-        return yield* new DispatchRefused({ reason: "dispatch permit does not authorize this request" })
-      }
       // `defineAirlock` typed this record against the contracts; here it is read by name.
       const run = implement[name] as (input: unknown, context: ImplementContext<Env>) => Awaitable<unknown>
       const failed = () => new DispatchFailed({ reason: `${name} implementation failed` })
@@ -97,10 +96,13 @@ export const handlersFor = <Contracts extends ToolContracts, Env>(
         try: (signal) =>
           Promise.resolve().then(() => {
             if (signal.aborted || !isLivePermit(request.permit)) throw refused("dispatch permit is not live")
+            const wireToken = enterImplementation(request.permit, name, canonical, signal)
+            if (wireToken === undefined) throw refused("dispatch permit does not authorize this request")
             const result = run(input, {
               env,
               signal,
-              idempotencyKey: request.permit.emissionId
+              idempotencyKey: request.permit.emissionId,
+              wireToken
             })
             if (!Effect.isEffect(result)) return result
             // An Effect's typed failure is handled like a thrown value.
