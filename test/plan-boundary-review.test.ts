@@ -46,7 +46,8 @@ describe("test-only: review binds expanded language boundaries", () => {
     const node = report.plan.nodes[0]!
     const guard = prototypeInstances(report, review, surface)
     const instance = { planId: report.plan.id, nodeId: node.id, occurrence: 1, tool: node.tool }
-    const input = { url: labeledValue("https://example.com/fixed", literal) }, control = labeledValue(false, literal)
+    const control = labeledValue(false, literal)
+    const input = { url: { value: labeledValue("https://example.com/fixed", literal), control } }
     if (kind === "value") env.bindings.config.value.token = "two"
     if (kind === "label") env.bindings.config.label = privateLabel
     if (kind === "codec") env.bindings.config.schema = Schema.Struct({ token: Schema.String })

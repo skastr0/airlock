@@ -70,7 +70,7 @@ export const reviewArgumentFlows = (
   })
   const explanations: FlowExplanation[] = []
   const flows: FlowObligation[] = []
-  for (const [mode, origins] of [["data", argument?.origins ?? []], ["control", call.control]] as const) {
+  for (const [mode, origins] of [["data", argument?.dataOrigins ?? []], ["control", [...call.control, ...(argument?.controlOrigins ?? [])]]] as const) {
     for (const origin of [...new Set(origins)]) {
       const source = sourceOf(origin, review), declared = Object.hasOwn(sources, origin) ? sources[origin] : undefined
       const label = declared === undefined ? undefined : new InformationLabel({ ...declared, provenance: [...new Set([...declared.provenance, origin])] })

@@ -14,7 +14,12 @@ Statically established for these fixtures: every syntactic call site is
 enumerated, including unreachable branches; tools must be granted; all fixed
 conditions must fit one grant; per-site and per-tool bounds are finite; value
 and control labels join through the existing lattice; unknown labels and
-missing sinks refuse review. The Plan holds these facts; there is no second
+missing sinks refuse review. Mandatory `dataOrigins` and `controlOrigins`
+from the checker lower separately: payload origins become `dependencies`;
+local selection/decoder control joins call-wide branch/loop control in
+`control`. Aggregate `origins` never supplies a missing role. A private index
+choosing fixed public text is control, so a data release cannot authorize it.
+The Plan holds these facts; there is no second
 execution manifest. The initial approval identity binds source bytes,
 bindings, trusted registry digest, grant and flow policy, semantics, and limits.
 
@@ -23,8 +28,12 @@ both bounds, exact fixed values, input codec, dynamic grants, labels and
 exact-owned decoder proof, permitted provenance, and unchanged trusted
 contract/decoder/binding-codec objects and tool grants. Any mismatch ends the guard permanently before it
 returns an instance for recording or acting. Dynamic requests remain staged
-even when validated. The guard rejects copied reports, copied value/control
-wrappers and changed context. Arguments and control must be kernel-owned tracked values.
+even when validated. The guard rejects copied reports, copied tracked
+value/control tokens and changed context. Each field supplies mandatory
+`{ value, control }` tokens, plus call-wide PC. Decoder proof stays on the
+exact `value`; copying the outer field pair confers no new proof or label.
+Data and joined local/global control must each fit their own raw source
+envelope and exact origin tags, even when no author release is needed.
 
 Not established here: host execution, persistent/replay approval storage,
 physical resource identity, real network or filesystem behavior, and the
@@ -34,6 +43,19 @@ JavaScript schema functions. The checker input and source are supplied by
 the trusted test; this prototype does not attest the checker or prove that
 its input AST came from those bytes. Tracked dynamic values and control
 labels must come from a trusted interpreter, not from a guest.
+
+The current guard conservatively treats the owned value's entire label as
+data. It never re-mints the value at a lower label to separate selection
+control. Captured or derived tokens whose labels already join data and
+control can therefore be refused even when the reviewed roles would allow
+them (`plan-flow-roles.test.ts`). The production seam needs an authenticated
+evaluator-issued role witness tied to this same owned value and run; it is
+not implemented here. The observer's separate role labels are test evidence,
+not such a witness. These manually supplied trusted fixtures do not prove
+that a producer included every actual influence: an authenticated token's
+label alone cannot detect a trusted producer omitting an origin or replacing
+control with a fresh public token. The language property checks observed
+roles against static bounds; production still needs the witness bridge.
 
 Checked language bindings are included in the approval digest independently
 of the surface's binding JSON: encoded values, declared labels, and closed

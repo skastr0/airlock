@@ -28,7 +28,7 @@ export const CallEnvelope = Schema.Struct({
   when: Schema.Literals(["reviewed", "staged"])
 })
 export const PrototypePlan = Schema.Struct({
-  schemaVersion: Schema.Literal("airlock/review-demo/v1"),
+  schemaVersion: Schema.Literal("airlock/review-demo/v2"),
   id: Schema.String,
   nodes: Schema.Array(CallEnvelope),
   maximumCalls: Schema.Record(Schema.String, Schema.Int),
@@ -124,7 +124,7 @@ export const lowerReviewPrototype = (source: string, review: Review, surface: Re
       const labels = reviewed.flows.map((flow) => flow.label)
       const label = labels.some((value) => value === undefined) ? undefined : combine(literal, ...labels as InformationLabel[])
       args.push({ field, ...(fact.constant === undefined ? {} : { fixed: fact.constant }),
-        dependencies: [...fact.origins], control: [...call.control], ...(label === undefined ? {} : { label }),
+        dependencies: [...fact.dataOrigins], control: [...new Set([...call.control, ...fact.controlOrigins])], ...(label === undefined ? {} : { label }),
         ...(reviewed.label === undefined ? {} : { effectiveLabel: reviewed.label }), flows: reviewed.flows,
         proofs: (contract.flow.requires[field] ?? []).map(decoderIdentity) })
     }
@@ -154,8 +154,8 @@ export const lowerReviewPrototype = (source: string, review: Review, surface: Re
     registryDigest: surface.registryDigest, grants: surface.grants, sources: surface.sources, sinks: surface.sinks,
     limits: { maxCalls: review.environment.maxCalls, maxIterations: review.environment.maxIterations,
       maxListItems: review.environment.maxListItems, maxPlanBytes: surface.maxPlanBytes },
-    rules: surface.rules ?? [], semantics: "airlock/review-demo/v1" })
-  const body = { schemaVersion: "airlock/review-demo/v1" as const, nodes, maximumCalls: review.maximumCalls,
+    rules: surface.rules ?? [], semantics: "airlock/review-demo/v2" })
+  const body = { schemaVersion: "airlock/review-demo/v2" as const, nodes, maximumCalls: review.maximumCalls,
     iterations: review.iterations, contextDigest, rules: [...surface.rules ?? []] }
   const id = yield* sha256Canonical(body)
   const plan = Schema.decodeUnknownSync(PrototypePlan)({ ...body, id })
@@ -178,28 +178,36 @@ export class InstanceRefused extends Schema.TaggedError<InstanceRefused>()("Inst
   reason: Schema.Literals(["review-refused", "plan-mismatch", "argument", "proof", "grant", "label", "bound", "ended"])
 }) {}
 
+/** A trusted interpreter keeps selection influence separate from the exact value proof. */
+export interface InstanceArgument {
+  readonly value: TrackedValue
+  readonly control: TrackedValue
+}
+
 /** Call-time guard demonstration, before any receipt or handler is invoked. */
 export const prototypeInstances = (report: DemonstrationReview, review: Review, surface: ReviewSurface) => {
   const counts = new Map<string, number>(), tools = new Map<string, number>()
   let ended = report.refusals.length > 0
   return (instance: { readonly planId: string; readonly nodeId: string; readonly occurrence: number; readonly tool: string },
-    input: Readonly<Record<string, TrackedValue>>, control: TrackedValue) => Effect.gen(function* () {
+    input: Readonly<Record<string, InstanceArgument>>, control: TrackedValue) => Effect.gen(function* () {
     const fail = (reason: InstanceRefused["reason"]) => { ended = true; return Effect.fail(new InstanceRefused({ reason })) }
     if (ended) return yield* fail(report.refusals.length > 0 ? "review-refused" : "ended")
     const context = contexts.get(report)
     if (context?.review !== review || context.surface !== canonicalJson(surface) || context.program !== canonicalJson(review.program) || !sameEnvironment(review, context)) return yield* fail("plan-mismatch")
-    if (!isTrackedValue(control) || !Object.values(input).every(isTrackedValue)) return yield* fail("label")
+    if (!isTrackedValue(control) || !Object.values(input).every((argument) => argument !== null && typeof argument === "object" &&
+      isTrackedValue(argument.value) && isTrackedValue(argument.control))) return yield* fail("label")
     const node = report.plan.nodes.find((node) => node.id === instance.nodeId)
     if (instance.planId !== report.plan.id || node === undefined || node.tool !== instance.tool) return yield* fail("plan-mismatch")
     const occurrence = (counts.get(node.id) ?? 0) + 1, total = (tools.get(node.tool) ?? 0) + 1
     if (occurrence !== instance.occurrence || occurrence > node.maximumOccurrences || total > (report.plan.maximumCalls[node.tool] ?? 0)) return yield* fail("bound")
     if (Object.keys(input).length !== node.arguments.length) return yield* fail("argument")
     const contract = review.environment.tools[node.tool]!.contract
-    const raw = Object.fromEntries(Object.entries(input).map(([field, value]) => [field, value.value]))
+    const raw = Object.fromEntries(Object.entries(input).map(([field, argument]) => [field, argument.value.value]))
     const decoded = Schema.decodeUnknownResult(contract.input, { onExcessProperty: "error" })(raw)
     if (Result.isFailure(decoded)) return yield* fail("argument")
     for (const arg of node.arguments) {
-      const value = Object.hasOwn(input, arg.field) ? input[arg.field] : undefined
+      const argument = Object.hasOwn(input, arg.field) ? input[arg.field] : undefined
+      const value = argument?.value
       if (value === undefined || (arg.fixed !== undefined && canonicalJson(arg.fixed) !== canonicalJson(value.value))) return yield* fail("argument")
       for (const required of arg.proofs) {
         const decoder = Object.values(review.environment.decoders).find((decoder) => decoderIdentity(decoder) === required)
@@ -207,34 +215,35 @@ export const prototypeInstances = (report: DemonstrationReview, review: Review, 
       }
       const sink = surface.sinks[node.tool]?.[arg.field]
       if (sink === undefined || arg.label === undefined) return yield* fail("label")
-      const actual = combine(value.label, control.label)
+      const actualControl = combine(argument!.control.label, control.label)
+      const actual = combine(value.label, actualControl)
       if (actual.provenance.some((origin) => !arg.label!.provenance.includes(origin))) return yield* fail("label")
       const envelope = new SinkPolicy({ id: "plan-envelope", confidentialityCeiling: arg.label.confidentiality, minimumIntegrity: arg.label.integrity })
       if (Result.isFailure(yield* checkSink(actual, envelope).pipe(Effect.result))) return yield* fail("label")
-      let effective = actual
-      if (arg.flows.some((flow) => flow.rules.length > 0)) {
-        const released: InformationLabel[] = []
-        for (const [mode, tracked] of [["data", value], ["control", control]] as const) {
-          const edges = arg.flows.filter((flow) => flow.mode === mode && tracked.label.provenance.includes(flow.origin))
-          if (tracked.label.confidentiality !== "public" && edges.length === 0) return yield* fail("label")
-          const allOrigins = report.plan.nodes.flatMap((node) => node.arguments.flatMap((arg) => arg.flows.map((flow) => flow.origin)))
-          if (tracked.label.provenance.some((origin) => allOrigins.includes(origin) && !edges.some((edge) => edge.origin === origin))) return yield* fail("label")
-          if (edges.length === 0) { released.push(tracked.label); continue }
-          if (edges.some((edge) => edge.label === undefined)) return yield* fail("label")
-          const raw = combine(literal, ...edges.map((edge) => edge.label!))
-          const rawBoundary = new SinkPolicy({ id: "origin-envelope", confidentialityCeiling: raw.confidentiality, minimumIntegrity: raw.integrity })
-          if (Result.isFailure(yield* checkSink(tracked.label, rawBoundary).pipe(Effect.result))) return yield* fail("label")
-          for (const edge of edges) {
-            const applied = dischargeFlow(edge, node.tool, arg.field, report.plan.rules, (rule) => rule.when.every((condition) => {
-              const decoder = review.environment.decoders[condition.decoder.name], sibling = input[condition.field]
-              return decoder !== undefined && decoder.version === condition.decoder.version && sibling !== undefined && hasRefinement(sibling, decoder)
-            }))
-            if (applied.effective === undefined) return yield* fail("label")
-            released.push(applied.effective)
-          }
+      const released: InformationLabel[] = []
+      for (const [mode, label] of [["data", value.label], ["control", actualControl]] as const) {
+        const role = arg.flows.filter((flow) => flow.mode === mode)
+        if (role.some((edge) => edge.label === undefined)) return yield* fail("label")
+        const roleLabel = combine(literal, ...role.map((edge) => edge.label!))
+        if (label.provenance.some((origin) => !roleLabel.provenance.includes(origin))) return yield* fail("label")
+        const roleBoundary = new SinkPolicy({ id: `plan-${mode}-envelope`, confidentialityCeiling: roleLabel.confidentiality, minimumIntegrity: roleLabel.integrity })
+        if (Result.isFailure(yield* checkSink(label, roleBoundary).pipe(Effect.result))) return yield* fail("label")
+        const edges = role.filter((flow) => label.provenance.includes(flow.origin))
+        if (label.confidentiality !== "public" && edges.length === 0) return yield* fail("label")
+        if (edges.length === 0) { released.push(label); continue }
+        const raw = combine(literal, ...edges.map((edge) => edge.label!))
+        const rawBoundary = new SinkPolicy({ id: "origin-envelope", confidentialityCeiling: raw.confidentiality, minimumIntegrity: raw.integrity })
+        if (Result.isFailure(yield* checkSink(label, rawBoundary).pipe(Effect.result))) return yield* fail("label")
+        for (const edge of edges) {
+          const applied = dischargeFlow(edge, node.tool, arg.field, report.plan.rules, (rule) => rule.when.every((condition) => {
+            const decoder = review.environment.decoders[condition.decoder.name], sibling = input[condition.field]
+            return decoder !== undefined && decoder.version === condition.decoder.version && sibling !== undefined && hasRefinement(sibling.value, decoder)
+          }))
+          if (applied.effective === undefined) return yield* fail("label")
+          released.push(applied.effective)
         }
-        effective = combine(literal, ...released)
       }
+      const effective = combine(literal, ...released)
       if (Result.isFailure(yield* checkSink(effective, sink).pipe(Effect.result))) return yield* fail("label")
     }
     const described = contract.summarize(decoded.success)

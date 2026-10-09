@@ -43,7 +43,8 @@ return true`
     const [fixed, selected] = report.plan.nodes.filter((node) => node.tool === "http.get")
     expect(fixed!.arguments[0]!.dependencies).toEqual([])
     expect(fixed!.arguments[0]!.fixed).toBe("https://example.com/fixed")
-    expect(selected!.arguments[0]!.dependencies).toContain(origin)
+    expect(selected!.arguments[0]!.dependencies).not.toContain(origin)
+    expect(selected!.arguments[0]!.control).toContain(origin)
     expect(report.refusals).toEqual([{ nodeId: selected!.id, field: "url", reason: "confidentiality" }])
     expect(report.plan.maximumCalls).toEqual({ "choice.read": 1, "http.get": 2 })
     expect(report.plan.nodes.every((node) => node.maximumOccurrences === 1)).toBe(true)
@@ -67,7 +68,7 @@ return true`
       registryDigest: await run(sha256Canonical("plan-selection-v1")), bindings: {}, maxPlanBytes: 65_536
     }))
     const get = report.plan.nodes.find((node) => node.tool === "http.get")!
-    expect(get.arguments[0]!.dependencies).toContain(origin)
+    expect(get.arguments[0]!.dependencies).not.toContain(origin)
     expect(get.arguments[0]!.control).toContain(origin)
     expect(report.refusals).toEqual([{ nodeId: get.id, field: "url", reason: "confidentiality" }])
   })
@@ -108,8 +109,8 @@ return true`
           for (const [field, actual] of Object.entries(observed.fields)) {
             const envelope = node!.arguments.find((argument) => argument.field === field)
             expect(envelope, `sample=${sample} field=${field}`).toBeDefined()
-            for (const origin of actual.provenance) expect(envelope!.dependencies, `sample=${sample} ${field} data=${origin}`).toContain(origin)
-            for (const origin of observed.control.provenance) expect(envelope!.control, `sample=${sample} ${field} control=${origin}`).toContain(origin)
+            for (const origin of actual.data.provenance) expect(envelope!.dependencies, `sample=${sample} ${field} data=${origin}`).toContain(origin)
+            for (const origin of [...actual.control.provenance, ...observed.control.provenance]) expect(envelope!.control, `sample=${sample} ${field} control=${origin}`).toContain(origin)
           }
         },
         resolve: (tool) => {
