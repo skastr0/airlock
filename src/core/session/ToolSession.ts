@@ -145,8 +145,11 @@ export const openToolSession = <Contracts extends ToolContracts, Granted extends
     // copy. The JSON round trip also detaches nested FieldMatch JSON values;
     // a schema encode/decode alone can retain the caller's objects.
     const policyCodec = Schema.fromJsonString(ToolPolicy)
-    const policy = yield* Schema.encodeEffect(policyCodec)(options.policy).pipe(
-      Effect.flatMap(Schema.decodeUnknownEffect(policyCodec)),
+    const validated = yield* Schema.decodeUnknownEffect(ToolPolicy, { onExcessProperty: "error" })(options.policy).pipe(
+      Effect.mapError((error) => new InvalidToolSession({ field: "policy", reason: error.message }))
+    )
+    const policy = yield* Schema.encodeEffect(policyCodec)(validated).pipe(
+      Effect.flatMap(Schema.decodeUnknownEffect(policyCodec, { onExcessProperty: "error" })),
       Effect.mapError((error) => new InvalidToolSession({ field: "policy", reason: error.message }))
     )
     const grants: ReadonlyArray<ToolGrantPolicy> = Object.freeze([...policy.toolGrants])
@@ -177,7 +180,7 @@ export const openToolSession = <Contracts extends ToolContracts, Granted extends
           try: () => canonicalJson(wire),
           catch: () => new InvalidToolInput({ tool: contract.tag, reason: "must be JSON matching the tool's input schema" })
         })
-        const input = yield* Schema.decodeUnknownEffect(Schema.fromJsonString(contract.input))(snapshot).pipe(
+        const input = yield* Schema.decodeUnknownEffect(Schema.fromJsonString(contract.input), { onExcessProperty: "error" })(snapshot).pipe(
           Effect.mapError((error) => new InvalidToolInput({ tool: contract.tag, reason: error.message }))
         )
         const summarized = contract.summarize(input)

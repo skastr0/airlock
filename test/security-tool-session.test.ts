@@ -5,6 +5,7 @@ import {
   defineOutbox,
   defineToolContract,
   openToolSession,
+  ToolPolicy,
   toolPolicy,
   WebCrypto
 } from "../src/core/index.ts"
@@ -62,6 +63,44 @@ const policyFor = (resource: Schema.Json) => toolPolicy({
 })
 
 describe("security: tool-session admission owns its data", () => {
+  it.effect("refuses unknown policy and matcher fields instead of dropping them", () => {
+    const seen: Array<Schema.Json> = []
+    const state = makeMemoryOutboxState()
+    return Effect.gen(function* () {
+      const plain = Schema.encodeSync(ToolPolicy)(policyFor("allowed"))
+      for (const policy of [
+        { ...plain, endpointGrants: [] },
+        { ...plain, toolGrants: plain.toolGrants.map((grant) => ({ ...grant, where: { resource: { equals: "allowed", startsWith: "denied" } } })) }
+      ]) {
+        const result = yield* openToolSession(tools, { runId: "excess-policy", policy: policy as never }).pipe(Effect.result)
+        expect(Result.isFailure(result)).toBe(true)
+        if (Result.isFailure(result)) expect(result.failure._tag).toBe("InvalidToolSession")
+      }
+      expect(seen).toEqual([])
+      expect(state.records.size).toBe(0)
+    }).pipe(Effect.provide(world(seen, WebCrypto.layer, state)))
+  })
+
+  it.effect("refuses undeclared input fields before matching, staging or dispatch", () => {
+    const seen: Array<Schema.Json> = []
+    const state = makeMemoryOutboxState()
+    return Effect.gen(function* () {
+      const session = yield* openToolSession(tools, { runId: "excess-input", policy: policyFor("allowed") })
+      for (const input of [
+        { resource: "allowed", extra: "private-excess-canary" },
+        JSON.parse('{"resource":"allowed","__proto__":{"extra":"private-excess-canary"}}')
+      ]) {
+        const result = yield* session["security.read"](input).pipe(Effect.result)
+        expect(Result.isFailure(result)).toBe(true)
+        if (Result.isFailure(result)) expect(result.failure._tag).toBe("InvalidToolInput")
+        expect(JSON.stringify(result)).not.toContain("private-excess-canary")
+      }
+      expect(seen).toEqual([])
+      expect(state.records.size).toBe(0)
+      expect(state.dispatches.size).toBe(0)
+    }).pipe(Effect.provide(world(seen, WebCrypto.layer, state)))
+  })
+
   it.effect("sends the admitted JSON snapshot when the caller mutates input during hashing", () => {
     const wire = { resource: { bucket: "allowed" } }
     const seen: Array<Schema.Json> = []
