@@ -42,6 +42,10 @@ const decoders = new WeakSet<object>()
 const proofs = new WeakMap<object, ReadonlySet<TrustedDecoder.Any>>()
 const json = Schema.decodeUnknownSync(Schema.Json)
 
+/** Only wrappers issued here are tracked; copying the private symbol is insufficient. */
+export const isTrackedValue = (value: unknown): value is TrackedValue =>
+  typeof value === "object" && value !== null && proofs.has(value)
+
 const freezeJson = <Value extends Schema.Json>(value: Value): Value => {
   if (typeof value === "object" && value !== null) {
     for (const child of Object.values(value)) freezeJson(child)

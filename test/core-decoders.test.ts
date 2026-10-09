@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest"
 import { Result, Schema, SchemaGetter } from "effect"
-import { decodeValue, defineDecoder, defineDecoderCatalog, deriveValue, hasRefinement, InvalidDecoder, labeledValue, projectValue } from "../src/core/contract/Decoder.ts"
+import { decodeValue, defineDecoder, defineDecoderCatalog, deriveValue, hasRefinement, InvalidDecoder, isTrackedValue, labeledValue, projectValue } from "../src/core/contract/Decoder.ts"
 import { InformationLabel } from "../src/core/labels/Labels.ts"
 
 const secret = new InformationLabel({ confidentiality: "secret", integrity: "untrusted", provenance: ["mail.body"] })
@@ -8,6 +8,15 @@ const Address = defineDecoder({ name: "mail.address", version: "1", schema: Sche
 const success = <Value>(result: Result.Result<Value, unknown>): Value => Result.getOrThrow(result)
 
 describe("core: trusted decoder refinements", () => {
+  it("recognizes owned unrefined values and rejects copies, prototypes and primitive values", () => {
+    const source = labeledValue("literal", secret)
+    expect(isTrackedValue(source)).toBe(true)
+    expect(hasRefinement(source, Address)).toBe(false)
+    for (const value of [null, undefined, 1, "literal", {}, { ...source }, Object.create(source), JSON.parse(JSON.stringify(source))]) {
+      expect(isTrackedValue(value)).toBe(false)
+    }
+  })
+
   it("issues an exact-value proof only after successful decoding, preserving the label", () => {
     const source = labeledValue("alice@example.com", secret)
     const decoded = success(decodeValue(Address, source))
