@@ -39,10 +39,11 @@ const world = (
   seen: Array<Schema.Json>,
   crypto: Layer.Layer<Crypto.Crypto> = WebCrypto.layer,
   state = makeMemoryOutboxState()
-) =>
-  tools.layer.pipe(Layer.provideMerge(Layer.mergeAll(
-    memoryOutboxStore(state),
-    memoryLedger(makeMemoryLedgerState()),
+) => {
+  const ledgerState = makeMemoryLedgerState()
+  return tools.layer.pipe(Layer.provideMerge(Layer.mergeAll(
+    memoryOutboxStore(state, ledgerState),
+    memoryLedger(ledgerState),
     crypto,
     Layer.succeed(tools.Dispatcher, {
       "security.read": (request) => Effect.sync(() => {
@@ -54,10 +55,11 @@ const world = (
       })
     })
   )))
+}
 
-const policyFor = (resource: Schema.Json) => toolPolicy({
+const policyFor = (resource: Schema.Json, retention: "digest" | "keep" = "digest") => toolPolicy({
   toolGrants: [Admission.toolGrant(JsonRead, {
-    id: "allowed-resource", when: "now", where: { resource: { equals: resource } }
+    id: "allowed-resource", when: "now", retention, where: { resource: { equals: resource } }
   })],
   budget: { maxCalls: 5, maxInputBytes: 4_096 }
 })
@@ -121,8 +123,9 @@ describe("security: tool-session admission owns its data", () => {
       expect(wire.resource.bucket).toBe("denied")
       expect({
         result: result.state,
-        sealed: [...state.dispatches.values()].map((dispatch) => JSON.parse(dispatch.canonical))
-      }).toEqual({ result: "done", sealed: [{ resource: { bucket: "allowed" } }] })
+        records: [...state.records.values()],
+        dispatches: state.dispatches.size
+      }).toMatchObject({ result: "done", records: [{ state: "captured", summary: { public: { resource: { bucket: "allowed" } } } }], dispatches: 0 })
       expect(seen).toEqual([{ bucket: "allowed" }])
     }).pipe(Effect.provide(world(seen, crypto, state)))
   })
@@ -142,7 +145,7 @@ describe("security: tool-session admission owns its data", () => {
 
   it.effect("keeps the run identity fixed after opening a session", () => {
     const seen: Array<Schema.Json> = []
-    const options = { runId: "original-run", policy: policyFor({ bucket: "allowed" }) }
+    const options = { runId: "original-run", policy: policyFor({ bucket: "allowed" }, "keep") }
     return Effect.gen(function* () {
       const session = yield* openToolSession(tools, options)
       options.runId = "replacement-run"

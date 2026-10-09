@@ -1,4 +1,6 @@
 import { Context, type Effect, type Option } from "effect"
+import type { LedgerEntry } from "../ledger/Ledger.ts"
+import type { CapturedEmission, StoredCaptureResult } from "./Capture.ts"
 import type { ActiveState, EmissionState, Next } from "./Lifecycle.ts"
 import type {
   Arrival,
@@ -46,6 +48,19 @@ export class OutboxStore extends Context.Service<
       { readonly created: boolean; readonly record: EmissionRecord },
       OutboxStoreFailed | OutboxStateCorrupt
     >
+    /** One atomic, durable publication of record, private payload and receipt. */
+    readonly putCapture: (
+      record: CapturedEmission,
+      result: StoredCaptureResult | undefined,
+      receipt: LedgerEntry
+    ) => Effect.Effect<
+      { readonly created: boolean; readonly record: EmissionRecord },
+      OutboxStoreFailed | OutboxStateCorrupt
+    >
+    /** Private kept payload, never exposed by record or Ledger discovery. */
+    readonly readCapture: (
+      id: EmissionId
+    ) => Effect.Effect<Option.Option<StoredCaptureResult>, OutboxStoreFailed | OutboxStateCorrupt>
     readonly read: (
       id: EmissionId
     ) => Effect.Effect<Option.Option<EmissionRecord>, OutboxStoreFailed | OutboxStateCorrupt>

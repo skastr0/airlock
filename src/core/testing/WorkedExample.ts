@@ -50,7 +50,7 @@ const makeMailbox = () => {
 const policy = toolPolicy({
   budget: { maxCalls: 8, maxInputBytes: 4_096 },
   toolGrants: [
-    toolGrant(MailList, { id: "read-inbox", when: "now", where: { mailbox: { equals: "inbox" } } }),
+    toolGrant(MailList, { id: "read-inbox", when: "now", retention: "keep", where: { mailbox: { equals: "inbox" } } }),
     toolGrant(MailSend, { id: "send-inside-company", where: { to: { endsWith: "@example.com" } } }),
     toolGrant(LabelAdd, { id: "label-messages", when: "approved" })
   ]
@@ -194,5 +194,5 @@ export const expectedTranscript = {
   sameEmissions: true,
   admitted: { underThisPolicy: true, sent: ["send-inside-company"], labelled: ["label-messages"] },
   dispatched: ["mail.list", "mail.send", "label.add", "label.remove"],
-  receipts: ["stage", "commit", "stage", "stage", "commit", "commit", "stage", "commit"]
+  receipts: ["capture", "stage", "stage", "commit", "commit", "stage", "commit"]
 } as const

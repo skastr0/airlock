@@ -4,6 +4,7 @@ import {
   advance,
   type EmissionId,
   EmissionRecord,
+  LedgerEntry,
   OutboxStateCorrupt,
   OutboxStore,
   OutboxStoreFailed,
@@ -15,6 +16,8 @@ import {
   UnknownEmission
 } from "../core/index.ts"
 import type { EmissionState } from "../core/index.ts"
+import { StoredCaptureResult, validateCaptureEntry } from "../core/outbox/Capture.ts"
+import { type ExactJson, exactJsonText } from "../core/ExactJson.ts"
 import { type DurableStorage, ensureSchema, type SqlValue } from "./Storage.ts"
 
 /**
@@ -50,8 +53,25 @@ type Row = { readonly state: string; readonly record: string }
 /** The `owing` column: 1 while the record owes the Ledger a receipt. */
 const owing = (record: EmissionRecord): number => (owesReceipt(record) ? 1 : 0)
 
-const encodeRecord = Schema.encodeSync(Schema.fromJsonString(EmissionRecord))
-const decodeRecord = Schema.decodeUnknownResult(Schema.fromJsonString(EmissionRecord))
+// Stored text must parse back to exactly what was written: a kept result is
+// replayed to a program, and a value that is merely equal may fail a
+// refinement the first one passed.
+const toRecord = Schema.encodeSync(EmissionRecord)
+const fromRecord = Schema.decodeUnknownResult(EmissionRecord)
+const encodeRecord = (record: EmissionRecord): string => exactJsonText(toRecord(record) as ExactJson)
+const toCapture = Schema.encodeSync(StoredCaptureResult)
+const fromCapture = Schema.decodeUnknownResult(StoredCaptureResult)
+const encodeCapture = (result: StoredCaptureResult): string => exactJsonText(toCapture(result) as ExactJson)
+const parsed = <A>(decode: (value: unknown) => Result.Result<A, unknown>) => (text: string): Result.Result<A, unknown> => {
+  try {
+    return decode(JSON.parse(text))
+  } catch (error) {
+    return Result.fail(error)
+  }
+}
+const decodeRecord = parsed(fromRecord)
+const decodeCapture = parsed(fromCapture)
+const encodeReceipt = Schema.encodeSync(Schema.fromJsonString(LedgerEntry))
 
 /** A failure raised inside a transaction, carried out of it as a value. */
 class Abort {
@@ -144,19 +164,87 @@ export const durableOutboxStore = (storage: DurableStorage): Layer.Layer<OutboxS
             }
           ),
 
+        /**
+         * One transaction writes the record, its private result and its Ledger
+         * line: the Ledger's table is in this same database. A second writer
+         * of the same id finds the first one's row and writes nothing.
+         */
+        putCapture: (record, result, receipt) =>
+          Effect.suspend(() => {
+            const checked = validateCaptureEntry({ record, ...(result === undefined ? {} : { result }), receipt })
+            if (Result.isFailure(checked)) {
+              return Effect.fail(
+                new OutboxStoreFailed({ operation: "put-capture", id: record.id, reason: checked.failure.reason })
+              )
+            }
+            // Everything is text before the transaction opens, so nothing inside it can fail halfway on encoding.
+            const entry = checked.success
+            const row = {
+              record: encodeRecord(entry.record),
+              capture: entry.result === undefined ? null : encodeCapture(entry.result),
+              receipt: encodeReceipt(entry.receipt)
+            }
+            return transaction<{ readonly created: boolean; readonly record: EmissionRecord }, OutboxStateCorrupt>(
+              "put-capture",
+              record.id,
+              () => {
+                const existing = find(entry.record.id)
+                if (Option.isSome(existing)) return { created: false, record: existing.value }
+                const attested = storage.sql
+                  .exec<{ readonly seq: number }>("SELECT seq FROM airlock_ledger WHERE key = ?", entry.receipt.key ?? null)
+                  .toArray()
+                if (attested.length > 0) {
+                  throw new Abort(new OutboxStateCorrupt({
+                    id: entry.record.id, part: "record", reason: "capture receipt exists without its record"
+                  }))
+                }
+                storage.sql.exec(
+                  "INSERT INTO airlock_emission (id, state, record, dispatch_digest, capture, owing) VALUES (?, ?, ?, ?, ?, ?)",
+                  entry.record.id,
+                  entry.record.state,
+                  row.record,
+                  entry.record.dispatchDigest,
+                  row.capture,
+                  owing(entry.record)
+                )
+                // No ON CONFLICT: a key already there fails the insert and takes the record with it.
+                storage.sql.exec("INSERT INTO airlock_ledger (key, entry) VALUES (?, ?)", entry.receipt.key ?? null, row.receipt)
+                return { created: true, record: entry.record }
+              }
+            )
+          }),
+
+        readCapture: (id) =>
+          transaction<Option.Option<StoredCaptureResult>, OutboxStateCorrupt>("read-capture", id, () => {
+            const rows = storage.sql
+              .exec<{ readonly state: string; readonly capture: string | null }>(
+                "SELECT state, capture FROM airlock_emission WHERE id = ?",
+                id
+              )
+              .toArray()
+            const row = rows[0]
+            if (row === undefined || row.state !== "captured" || row.capture === null) return Option.none()
+            const decoded = decodeCapture(row.capture)
+            if (Result.isFailure(decoded)) {
+              throw new Abort(new OutboxStateCorrupt({ id, part: "response", reason: "stored capture result does not decode" }))
+            }
+            return Option.some(decoded.success)
+          }),
+
         read: (id) =>
           transaction<Option.Option<EmissionRecord>, OutboxStateCorrupt>("read", id, () => find(id)),
 
         readDispatch: (id) =>
           transaction<SealedDispatch, UnknownEmission | OutboxStateCorrupt>("read-dispatch", id, () => {
             const rows = storage.sql
-              .exec<{ readonly dispatch_digest: string; readonly dispatch: string }>(
+              .exec<{ readonly dispatch_digest: string; readonly dispatch: string | null }>(
                 "SELECT dispatch_digest, dispatch FROM airlock_emission WHERE id = ?",
                 id
               )
               .toArray()
             const row = rows[0]
-            if (row === undefined) throw new Abort(new UnknownEmission({ id }))
+            // A captured read was never staged: it has no sealed dispatch to hand out.
+            if (row === undefined || row.dispatch === null) throw new Abort(new UnknownEmission({ id }))
             const digest = Schema.decodeUnknownResult(Canonical.Sha256Digest)(row.dispatch_digest)
             if (Result.isFailure(digest)) {
               throw new Abort(new OutboxStateCorrupt({ id, part: "dispatch", reason: "stored digest is malformed" }))

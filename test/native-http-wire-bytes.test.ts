@@ -47,13 +47,14 @@ const send = (origin: string, artifacts: ReturnType<typeof memoryArtifacts>, bod
         budget: { maxCalls: 10, maxInputBytes: 100_000 }
       })
     })
+    const ledger = makeMemoryLedgerState()
     return yield* Effect.gen(function* () {
       const guest = yield* airlock.guest({ runId: `run-${crypto.randomUUID()}`, env: undefined })
       const staged = yield* guest.call("http.stage", { endpoint: `${origin}/send`, method: "POST", headers: {}, holdMillis: 0, ...body })
       if (staged.state !== "staged") return yield* Effect.fail(staged)
       return yield* (yield* airlock.supervisor(undefined)).commit(staged.id)
     }).pipe(Effect.provide(airlock.layer(undefined).pipe(Layer.provideMerge(Layer.mergeAll(
-      memoryOutboxStore(makeMemoryOutboxState()), memoryLedger(makeMemoryLedgerState()), WebCrypto.layer
+      memoryOutboxStore(makeMemoryOutboxState(), ledger), memoryLedger(ledger), WebCrypto.layer
     )))), Effect.result)
   })
 

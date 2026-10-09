@@ -1,3 +1,4 @@
+import { canonicalExactJson } from "../ExactJson.ts"
 import { Cause, Context, Crypto, DateTime, Effect, Exit, Layer, Option, Result, Schema } from "effect"
 import {
   canonicalJson,
@@ -20,6 +21,9 @@ import type {
 } from "./Intent.ts"
 import type { EmissionState } from "./Lifecycle.ts"
 import { OutboxStore } from "./OutboxStore.ts"
+import { CaptureAdmission, CapturedEmission, CAPTURE_RESULT_LIMIT_BYTES } from "./Capture.ts"
+import { ownJson } from "../contract/Decoder.ts"
+import type { Done, Refused } from "../contract/Receipt.ts"
 import {
   acknowledge,
   DispatchAuthorization,
@@ -287,6 +291,22 @@ export type CancelError = UnknownEmission | EmissionNotPending | OutboxRecoveryR
 export type CompensateError = UnknownEmission | NotCompensable | StageError
 export type PerformError = StageError | CommitError
 
+/** A read can fail or change on replay, but never become an uncertain write. */
+export class CaptureFailed extends Schema.TaggedError<CaptureFailed>()("CaptureFailed", {
+  id: EmissionId,
+  code: Schema.Literals(["failed", "timeout", "interrupted", "expired", "result-changed", "invalid-result"])
+}) {}
+export type CaptureError = StageError | CaptureFailed
+export type CaptureTag<Kinds extends IntentKinds> = {
+  [Tag in keyof Kinds & string]: Kinds[Tag] extends { readonly effect: "capture" } ? Tag : never
+}[keyof Kinds & string]
+export interface CaptureRequest<Kinds extends IntentKinds> {
+  readonly key: IdempotencyKey
+  readonly intent: Intent<Kinds>
+  readonly admission: typeof CaptureAdmission.Type
+}
+
+
 /** A committed emission of one kind, with the response bytes its dispatch retained. */
 export interface Performed<Kinds extends IntentKinds, Tag extends keyof Kinds & string> {
   readonly emission: Emission<Pick<Kinds, Tag>, "committed">
@@ -296,6 +316,11 @@ export interface Performed<Kinds extends IntentKinds, Tag extends keyof Kinds & 
 // ── the service ─────────────────────────────────────────────────────────────
 
 export interface OutboxService<Kinds extends IntentKinds> {
+  /** Only capture-now: one terminal journal entry; kept replay never reads again. */
+  readonly capture: <Tag extends CaptureTag<Kinds>>(
+    request: CaptureRequest<Pick<Kinds, Tag>>
+  ) => Effect.Effect<Done<IntentKind.OutcomeOf<Kinds[Tag]>> | Refused, CaptureError>
+
   /**
    * Durably records intent and sends nothing. Replay-idempotent: the same key
    * with the same content returns the existing emission in whatever state it
@@ -923,6 +948,11 @@ export const defineOutbox = <const Kinds extends IntentKinds>(
           if (delivery.response.byteLength > RESPONSE_LIMIT_BYTES) {
             return yield* settleUncertain(id, "dispatch-failed")
           }
+          const captured = Schema.encodeUnknownResult(kind.outcome)(delivery.outcome)
+          if (Result.isFailure(captured)) return yield* settleUncertain(id, "dispatch-failed")
+          const outcome = ownJson(captured.success)
+          const response = delivery.response.slice()
+          const truncated = delivery.truncated
           const held = delivery.held === undefined ? undefined : yield* Schema.encodeEffect(Schema.fromJsonString(HeldReference))(delivery.held).pipe(
             Effect.flatMap(Schema.decodeUnknownEffect(Schema.fromJsonString(HeldReference))),
             Effect.catch(() => settleUncertain(id, "dispatch-failed")))
@@ -932,27 +962,147 @@ export const defineOutbox = <const Kinds extends IntentKinds>(
           }
 
           const completedAt = yield* DateTime.now
-          const committed = yield* Schema.encodeEffect(kind.outcome)(delivery.outcome).pipe(
-            Effect.flatMap((outcome) =>
-              store.transition(id, "committing", {
-                state: "committed",
-                outcome,
-                capture: new ResponseCapture({
-                  retainedBytes: delivery.response.byteLength,
-                  truncated: delivery.truncated,
-                  limitBytes: RESPONSE_LIMIT_BYTES
-                }),
-                completedAt,
-                response: delivery.response,
-                ...(held === undefined ? {} : { held })
-              })
-            ),
-            Effect.catch(() => settleUncertain(id, "persistence-failed-after-dispatch"))
-          )
+          const committed = yield* store.transition(id, "committing", {
+            state: "committed", outcome,
+            capture: new ResponseCapture({ retainedBytes: response.byteLength, truncated, limitBytes: RESPONSE_LIMIT_BYTES }),
+            completedAt, response, ...(held === undefined ? {} : { held })
+          }).pipe(Effect.catch(() => settleUncertain(id, "persistence-failed-after-dispatch")))
           return yield* view(yield* settleReceipts(committed))
         })
       ))
     })
+
+    const capture: OutboxService<Kinds>["capture"] = (request) => Effect.gen(function* () {
+      const checked = Schema.decodeUnknownResult(Schema.toType(CaptureAdmission), { onExcessProperty: "error" })(request.admission)
+      if (Result.isFailure(checked)) return yield* new InvalidDispatchAuthorization({ field: "admission", reason: "short path requires capture-now authority" })
+      const registered = kindFor(request.intent.kind)
+      if (Option.isNone(registered) || !("effect" in registered.value) || registered.value.effect !== "capture") {
+        return yield* new InvalidDispatchAuthorization({ field: "effect", reason: "short path requires a capture contract" })
+      }
+      const kind = registered.value
+      if (checked.success.execution.tool !== kind.tag || !("version" in kind) || checked.success.execution.version !== kind.version) {
+        return yield* new InvalidDispatchAuthorization({ field: "admission.execution", reason: "must name the exact capture contract" })
+      }
+      const owned = own({ ...request, holdMillis: 0, admission: new EmissionAdmission(checked.success) } as StageRequest<Kinds>)
+      if (Result.isFailure(owned)) return yield* owned.failure
+      const { tag, canonical, encodedSummary, key } = owned.success
+      const admission = Schema.decodeUnknownSync(Schema.fromJsonString(CaptureAdmission))(
+        Schema.encodeSync(Schema.fromJsonString(CaptureAdmission))(checked.success))
+      const execution = admission.execution
+      const dispatchDigest = yield* sha256Text(canonical).pipe(withCrypto)
+      const requestDigest = yield* sha256Canonical({ path: "capture", kind: tag, dispatchDigest,
+        admission: Schema.encodeSync(CaptureAdmission)(admission) }).pipe(withCrypto)
+      const id = yield* emissionIdFor(key).pipe(withCrypto)
+      return yield* store.exclusive(Effect.uninterruptibleMask((restore) => Effect.gen(function* () {
+        const previous = yield* store.read(id)
+        const prior = Option.isSome(previous) ? previous.value : undefined
+        if (prior !== undefined && (prior.state !== "captured" || prior.requestDigest !== requestDigest)) {
+          return yield* new IdempotencyConflict({ id, key })
+        }
+        if (prior?.state === "captured" && prior.outcome.state === "refused") {
+          return { state: "refused" as const, refusal: { code: prior.outcome.code, message: prior.outcome.message } }
+        }
+        if (prior?.state === "captured" && prior.outcome.state === "failed") {
+          const code = Schema.decodeUnknownResult(CaptureFailed.fields.code)(prior.outcome.code)
+          return yield* new CaptureFailed({ id, code: Result.isSuccess(code) ? code.success : "failed" })
+        }
+        if (execution.validUntil !== undefined && DateTime.toEpochMillis(execution.validUntil) <= DateTime.toEpochMillis(yield* DateTime.now)) {
+          return yield* new CaptureFailed({ id, code: "expired" })
+        }
+        if (prior?.state === "captured" && execution.retention === "keep") {
+          const held = yield* store.readCapture(id)
+          if (Option.isNone(held) || held.value.value === undefined || prior.outcome.state !== "done" ||
+            held.value.digest !== prior.outcome.digest || (yield* sha256Text(canonicalExactJson(held.value.value)).pipe(withCrypto)) !== prior.outcome.digest) {
+            return yield* corrupt(id, "response", "kept capture result does not match its digest")
+          }
+          const result = yield* Schema.decodeUnknownEffect(kind.outcome)(held.value.value).pipe(
+            Effect.mapError(() => corrupt(id, "response", "kept capture result no longer matches its contract")))
+          return { state: "done" as const, id, result }
+        }
+        const dispatch = yield* Schema.decodeUnknownEffect(Schema.fromJsonString(kind.dispatch))(canonical).pipe(
+          Effect.mapError(() => new InvalidIntent({ kind: tag, field: "dispatch", reason: "must match the capture contract" })))
+        let wire: WireMaterial | undefined
+        if ("wire" in kind && typeof kind.wire === "function") {
+          if (execution.wire === undefined) return yield* new InvalidDispatchAuthorization({ field: "wire", reason: "capture lacks exact request authority" })
+          const described = describeWire(kind as unknown as ToolContract.Any, dispatch, execution.resources, execution.wire.bodyArtifactDigest)
+          if (Result.isFailure(described) || described.success === undefined ||
+            (yield* sha256Canonical(described.success).pipe(withCrypto)) !== execution.wire.digest) {
+            return yield* new InvalidDispatchAuthorization({ field: "wire", reason: "capture request does not match its authority" })
+          }
+          wire = described.success
+        } else if (execution.wire !== undefined) {
+          return yield* new InvalidDispatchAuthorization({ field: "wire", reason: "capture contract has no wire declaration" })
+        }
+        const admitted = new EmissionAdmission(admission)
+        const permit = mintPermit(tag, id, dispatchDigest, canonical, admitted, wire)
+        const delivered = yield* restore(Effect.suspend(() => handlers[tag]({ permit, dispatch,
+          responseLimitBytes: RESPONSE_LIMIT_BYTES, admission: admitted, inputDigest: dispatchDigest })).pipe(
+            Effect.timeoutOption(DISPATCH_TIMEOUT_MILLIS), Effect.result)).pipe(
+          Effect.ensuring(Effect.sync(() => {
+            livePermits.delete(permit); permitDispatches.delete(permit); permitAdmissions.delete(permit); permitWires.delete(permit)
+          })), Effect.exit)
+        const publishFailure = (code: CaptureFailed["code"], refused: boolean) => Effect.gen(function* () {
+          if (prior === undefined) {
+            const completedAt = yield* DateTime.now
+            const record = new CapturedEmission({ id, key, kind: tag, dispatchDigest, requestDigest, summary: encodedSummary,
+              admission, completedAt, ledgered: ["capture"], outcome: { state: refused ? "refused" : "failed",
+                code: refused ? "refused" : code, message: refused ? "read was refused" : "read did not complete" } })
+            yield* store.putCapture(record, undefined, new LedgerEntry({ at: completedAt, effect: "observation", act: "capture", ref: id, key: `${id}:capture` }))
+          }
+          if (refused) return { state: "refused" as const, refusal: { code: "refused", message: "read was refused" } }
+          return yield* new CaptureFailed({ id, code })
+        })
+        if (execution.validUntil !== undefined && DateTime.toEpochMillis(execution.validUntil) <= DateTime.toEpochMillis(yield* DateTime.now)) {
+          return yield* publishFailure("expired", false)
+        }
+        if (Exit.isFailure(delivered)) return yield* publishFailure(Cause.hasInterruptsOnly(delivered.cause) ? "interrupted" : "failed", false)
+        if (Result.isFailure(delivered.value)) return yield* publishFailure("failed", delivered.value.failure._tag === "DispatchRefused")
+        if (Option.isNone(delivered.value.success)) return yield* publishFailure("timeout", false)
+        const delivery = delivered.value.success.value
+        const encoded = Schema.encodeUnknownResult(kind.outcome)(delivery.outcome)
+        if (Result.isFailure(encoded) || delivery.held !== undefined || delivery.response.byteLength > RESPONSE_LIMIT_BYTES) {
+          return yield* publishFailure("invalid-result", false)
+        }
+        const json = Schema.decodeUnknownResult(Schema.Json)(encoded.success)
+        if (Result.isFailure(json)) return yield* publishFailure("invalid-result", false)
+        const value = ownJson(json.success)
+        const response = delivery.response.slice()
+        if (execution.retention === "keep" && new TextEncoder().encode(canonicalJson(value)).byteLength > CAPTURE_RESULT_LIMIT_BYTES) {
+          return yield* publishFailure("invalid-result", false)
+        }
+        const decodedSnapshot = Schema.decodeUnknownResult(kind.outcome)(value)
+        if (Result.isFailure(decodedSnapshot)) return yield* publishFailure("invalid-result", false)
+        const snapshot = decodedSnapshot.success
+        const digest = yield* sha256Text(canonicalExactJson(value)).pipe(withCrypto)
+        if (prior?.state === "captured") {
+          if (prior.outcome.state !== "done" || prior.outcome.digest !== digest) return yield* new CaptureFailed({ id, code: "result-changed" })
+        } else {
+          const metadata: Record<string, Schema.Json> = Object.create(null)
+          if ("flow" in kind) {
+            const contract = kind as unknown as ToolContract.Any
+            const root = contract.flow.sources["$"]
+            if (root === undefined || root.confidentiality === "public") {
+              for (const [field, label] of Object.entries<import("../labels/Labels.ts").InformationLabel>(contract.flow.sources)) {
+                if (field === "$" || label.confidentiality !== "public" || typeof snapshot !== "object" || snapshot === null || !Object.hasOwn(snapshot, field)) continue
+                const fieldValue = Schema.decodeUnknownResult(Schema.Json)((snapshot as Record<string, unknown>)[field])
+                if (Result.isSuccess(fieldValue)) Object.defineProperty(metadata, field, { value: ownJson(fieldValue.success), enumerable: true })
+              }
+            }
+          }
+          const completedAt = yield* DateTime.now
+          const record = new CapturedEmission({ id, key, kind: tag, dispatchDigest, requestDigest, summary: encodedSummary,
+            admission, completedAt, ledgered: ["capture"], outcome: { state: "done", digest,
+              ...(Object.keys(metadata).length === 0 ? {} : { metadata }) } })
+          const result = execution.retention === "keep" ? { digest, value, response } : { digest }
+          const put = yield* store.putCapture(record, result, new LedgerEntry({ at: completedAt, effect: "observation", act: "capture", ref: id, key: `${id}:capture` }))
+          if (!put.created && (put.record.state !== "captured" || put.record.requestDigest !== requestDigest ||
+            put.record.outcome.state !== "done" || put.record.outcome.digest !== digest)) return yield* new IdempotencyConflict({ id, key })
+        }
+        return { state: "done" as const, id, result: snapshot }
+      })))
+    // The runtime tag selected the matching outcome codec; this assertion carries
+    // that registry correlation into the caller's generic result type.
+    }) as ReturnType<OutboxService<Kinds>["capture"]>
 
     const cancel: OutboxService<Kinds>["cancel"] = Effect.fn("Outbox.cancel")(function* (id) {
       return yield* store.exclusive(Effect.uninterruptible(
@@ -1089,7 +1239,7 @@ export const defineOutbox = <const Kinds extends IntentKinds>(
       )
     })
 
-    return { stage, inspect, commit, cancel, perform, compensate, response, pending, pendingAuthorized, flush }
+    return { stage, inspect, commit, cancel, perform, capture, compensate, response, pending, pendingAuthorized, flush }
   })
 
   return { kinds, Outbox, Dispatcher, fromRecord: view, toRecord, layer: Layer.effect(Outbox, make) }

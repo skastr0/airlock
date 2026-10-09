@@ -937,7 +937,7 @@ export const outboxConformance = (
         const current = yield* world
         const { calls, handlers } = toolWire()
         const grants = [
-          toolGrant(MailList, { id: "grant/maillist/1", when: "now", where: { mailbox: { equals: "inbox" } } }),
+          toolGrant(MailList, { id: "grant/maillist/1", when: "now", retention: "keep", where: { mailbox: { equals: "inbox" } } }),
           toolGrant(MailSend, { id: "grant/mailsend/2", where: { to: { endsWith: "@example.com" } } })
         ]
         const open = (runId: string) =>
@@ -977,7 +977,7 @@ export const outboxConformance = (
           Option.map(listedRecord, (record) => [
             record.admission?.policyDigest === digest,
             record.admission?.grantIds,
-            record.state === "committed" ? record.provenance.grantId : record.state
+            record.state === "committed" ? record.provenance.grantId : record.state === "captured" ? record.admission.grantIds.join(",") : record.state
           ]),
           Option.some([true, ["grant/maillist/1"], "grant/maillist/1"])
         )

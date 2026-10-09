@@ -1,8 +1,13 @@
-import { Effect, type Layer, Option, Ref, Result, type Scope } from "effect"
+import { canonicalExactJson, exactJsonText } from "../ExactJson.ts"
+import { sha256Text } from "../Canonical.ts"
+import * as WebCrypto from "../WebCrypto.ts"
+import { Effect, type Layer, Option, Ref, Result, Schema, type Scope } from "effect"
+import { Ledger, LedgerEntry } from "../ledger/Ledger.ts"
+import { CapturedEmission, StoredCaptureResult } from "../outbox/Capture.ts"
 import { OutboxStore } from "../outbox/OutboxStore.ts"
-import { DispatchProvenance, type EmissionId, ResponseCapture } from "../outbox/Records.ts"
+import { DispatchProvenance, type EmissionId, IdempotencyKey, ResponseCapture } from "../outbox/Records.ts"
 import { holds, type Runner, same } from "./Check.ts"
-import { emissionId, encoded, instant, sealedDispatch, stagedRecord } from "./Fixtures.ts"
+import { digestOf, emissionId, encoded, instant, sealedDispatch, stagedRecord } from "./Fixtures.ts"
 
 /**
  * One isolated store for one test. `store` is a Layer over that state, and
@@ -11,6 +16,7 @@ import { emissionId, encoded, instant, sealedDispatch, stagedRecord } from "./Fi
  */
 export interface OutboxStoreWorld {
   readonly store: Layer.Layer<OutboxStore, unknown>
+  readonly ledger: Layer.Layer<Ledger, unknown>
   /**
    * Damages the stored record for `id` so that it no longer decodes, the way
    * a bad disk or a hostile writer would. Required: an adapter that cannot be
@@ -50,7 +56,112 @@ export const outboxStoreConformance = (
     body: (store: Store) => Effect.Effect<A, E>
   ) => Effect.flatMap(OutboxStore, body).pipe(Effect.provide(current.store))
 
+  const capture = (n: number, retention: "digest" | "keep" = "digest", state: "done" | "failed" | "refused" = "done") => {
+    const record = new CapturedEmission({ state: "captured", id: emissionId(n), key: IdempotencyKey.make(`capture-${n}`),
+      kind: "probe", dispatchDigest: digestOf("a"), requestDigest: digestOf("b"), summary: { tool: "probe" },
+      admission: { policyDigest: digestOf("c"), grantIds: ["read"], execution: { runId: "run", tool: "probe", version: "1",
+        effect: "capture", when: "now", retention, resources: [] } },
+      outcome: state === "done" ? { state, digest: digestOf("d") } : { state, code: "read-failed", message: "read did not complete" },
+      completedAt: instant(n), ledgered: ["capture"] })
+    const result: StoredCaptureResult | undefined = state !== "done" ? undefined : retention === "keep"
+      ? { digest: digestOf("d"), value: { private: "capture-secret-canary" }, response: new Uint8Array([0, 255]) }
+      : { digest: digestOf("d") }
+    const receipt = new LedgerEntry({ at: record.completedAt, effect: "observation", act: "capture", ref: record.id, key: `${record.id}:capture` })
+    return { record, result, receipt }
+  }
+  const entries = (current: OutboxStoreWorld) => Effect.flatMap(Ledger, (ledger) => ledger.entries).pipe(Effect.provide(current.ledger))
+
   describe(`OutboxStore conformance: ${name}`, () => {
+    test("publishes a completed capture, kept result and one receipt atomically across restart", () => Effect.gen(function* () {
+      const current = yield* world
+      const held = capture(101, "keep")
+      const put = yield* session(current, (store) => store.putCapture(held.record, held.result, held.receipt))
+      same(put.created, true)
+      const [record, result, pending, owing] = yield* session(current, (store) => Effect.all([
+        store.read(held.record.id), store.readCapture(held.record.id), store.list("staged"), store.listOwing ]))
+      same(Option.map(record, encoded), Option.some(encoded(held.record)))
+      same(Option.map(result, (value) => Schema.encodeSync(StoredCaptureResult)(value)), Option.some(Schema.encodeSync(StoredCaptureResult)(held.result!)))
+      same(pending, [])
+      same(owing, [])
+      same((yield* entries(current)).map((entry) => [entry.act, entry.ref, entry.key]), [["capture", held.record.id, `${held.record.id}:capture`]])
+      holds(!JSON.stringify(put.record).includes("capture-secret-canary"), "public records exclude kept values")
+      holds(!JSON.stringify(yield* entries(current)).includes("capture-secret-canary"), "ledger excludes kept values")
+    }))
+
+    test("kept replay preserves exact encoded leaves and the first result digest on every host", () => Effect.gen(function* () {
+      const current = yield* world
+      const value = { z: -0, list: [-0, 0, 2 ** 53 + 2, 1e21, 5e-324, Number.MAX_VALUE],
+        text: "😀\ud800\u0000\u2028\u2029", nested: JSON.parse('{"__proto__":{"zero":-0},"constructor":"safe"}') as Schema.Json }
+      const digest = yield* sha256Text(canonicalExactJson(value)).pipe(Effect.provide(WebCrypto.layer))
+      const held = capture(108, "keep")
+      const record = new CapturedEmission({ ...held.record, outcome: { state: "done", digest, metadata: { zero: -0 } } })
+      yield* session(current, (store) => store.putCapture(record, { digest, value, response: new Uint8Array([0, 255]) }, held.receipt))
+      const result = yield* session(current, (store) => store.readCapture(record.id))
+      holds(Option.isSome(result) && result.value.value !== undefined, "kept result survives restart")
+      if (Option.isNone(result) || result.value.value === undefined) return
+      same(exactJsonText(result.value.value), exactJsonText(value), "every original leaf survives encoding exactly")
+      holds(Object.is((result.value.value as Record<string, Schema.Json>)["z"], -0), "negative zero stays negative zero")
+      same(yield* sha256Text(canonicalExactJson(result.value.value)).pipe(Effect.provide(WebCrypto.layer)), digest)
+      const read = yield* session(current, (store) => store.read(record.id))
+      holds(Option.isSome(read) && read.value.state === "captured", "capture survives restart")
+      if (Option.isSome(read) && read.value.state === "captured" && read.value.outcome.state === "done") {
+        holds(Object.is((read.value.outcome.metadata as Record<string, Schema.Json>)["zero"], -0), "public metadata is exact too")
+      }
+    }))
+
+    test("captures one key once under racing publication and never replaces its private result", () => Effect.gen(function* () {
+      const current = yield* world
+      const held = capture(102, "keep")
+      const puts = yield* session(current, (store) => Effect.all(Array.from({ length: 16 }, () =>
+        store.putCapture(held.record, held.result, held.receipt)), { concurrency: "unbounded" }))
+      same(puts.filter((put) => put.created).length, 1)
+      const changed = { ...held.result!, value: { private: "replacement" } }
+      same((yield* session(current, (store) => store.putCapture(held.record, changed, held.receipt))).created, false)
+      same((yield* entries(current)).length, 1)
+      const result = yield* session(current, (store) => store.readCapture(held.record.id))
+      same(Option.map(result, (value) => value.value), Option.some(held.result!.value))
+    }))
+
+    test("digest retention stores no private result bytes and failed reads still have one capture receipt", () => Effect.gen(function* () {
+      const current = yield* world
+      for (const [n, state] of [[103, "done"], [104, "failed"], [105, "refused"]] as const) {
+        const held = capture(n, "digest", state)
+        yield* session(current, (store) => store.putCapture(held.record, held.result, held.receipt))
+        const result = yield* session(current, (store) => store.readCapture(held.record.id))
+        if (state === "done") same(Option.map(result, (value) => Object.keys(value)), Option.some(["digest"]))
+        else holds(Option.isNone(result), "failed reads keep no result")
+      }
+      same((yield* entries(current)).map((entry) => entry.act), ["capture", "capture", "capture"])
+    }))
+
+    test("rejects invalid capture authority, retention and excessive bytes without partial publication", () => Effect.gen(function* () {
+      const current = yield* world
+      const held = capture(106)
+      for (const bad of [
+        { ...held, record: new CapturedEmission({ ...held.record, kind: "different-tool" }) },
+        { ...held, result: { digest: digestOf("d"), value: "forbidden-digest-bytes" } },
+        { ...held, result: { digest: digestOf("a") } },
+        { ...capture(106, "keep"), result: { digest: digestOf("d"), value: "x".repeat(65536) } },
+        { ...capture(106, "keep"), result: { digest: digestOf("d"), value: true, response: new Uint8Array(65537) } },
+        { ...held, receipt: new LedgerEntry({ ...held.receipt, act: "commit" }) }
+      ]) {
+        holds(Result.isFailure(yield* session(current, (store) => store.putCapture(bad.record, bad.result, bad.receipt).pipe(Effect.result))), "invalid publication refuses")
+        holds(Option.isNone(yield* session(current, (store) => store.read(held.record.id))), "invalid capture publishes no record")
+        holds(Option.isNone(yield* session(current, (store) => store.readCapture(held.record.id))), "invalid capture publishes no payload")
+        same(yield* entries(current), [])
+      }
+    }))
+
+    test("a captured record cannot transition or collide into a staged act", () => Effect.gen(function* () {
+      const current = yield* world
+      const held = capture(107)
+      yield* session(current, (store) => store.putCapture(held.record, held.result, held.receipt))
+      const conflict = yield* session(current, (store) => store.transition(held.record.id, "staged", committing).pipe(Effect.flip))
+      same(conflict._tag, "TransitionConflict")
+      same((yield* session(current, (store) => store.putIfAbsent(stagedRecord(107), sealedDispatch()))).record.state, "captured")
+      same((yield* entries(current)).length, 1)
+    }))
+
     test("stores a staged emission durably and returns it unchanged", () =>
       Effect.gen(function* () {
         const current = yield* world

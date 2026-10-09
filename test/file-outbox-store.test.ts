@@ -6,6 +6,7 @@ import { OutboxStore } from "../src/core/outbox/OutboxStore.ts"
 import { DispatchProvenance, type EmissionId, ResponseCapture } from "../src/core/outbox/Records.ts"
 import { outboxStoreConformance } from "../src/core/testing/index.ts"
 import { instant, sealedDispatch, stagedRecord } from "../src/core/testing/Fixtures.ts"
+import { FileLedgerLive, ledgerLayer } from "../src/host/FileLedger.ts"
 import * as FileOutboxStore from "../src/host/FileOutboxStore.ts"
 
 /**
@@ -21,11 +22,11 @@ outboxStoreConformance(
     const path = yield* Path.Path
     const home = yield* fs.makeTempDirectoryScoped({ prefix: "airlock-outbox-store-" })
     const outbox = path.join(home, "outbox")
+    // One home: the store's captures are lines of this same ledger journal.
+    const host = AirlockHome.layer(home).pipe(Layer.provideMerge(BunServices.layer))
     return {
-      store: FileOutboxStore.layer.pipe(
-        Layer.provide(AirlockHome.layer(home)),
-        Layer.provide(BunServices.layer)
-      ),
+      store: FileOutboxStore.layer.pipe(Layer.provide(FileLedgerLive), Layer.provide(host)),
+      ledger: ledgerLayer.pipe(Layer.provide(FileLedgerLive), Layer.provide(host)),
       corruptRecord: (id: EmissionId) =>
         Effect.gen(function* () {
           const directory = (yield* fs.readDirectory(outbox)).find((entry) =>
@@ -55,7 +56,7 @@ describe("file OutboxStore: settled emissions leave the scanned root", () => {
       const home = yield* fs.makeTempDirectoryScoped({ prefix: "airlock-outbox-settled-" })
       const outbox = path.join(home, "outbox")
       return yield* body({ outbox, settled: path.join(outbox, "settled") }).pipe(
-        Effect.provide(FileOutboxStore.layer.pipe(Layer.provide(AirlockHome.layer(home))))
+        Effect.provide(FileOutboxStore.layer.pipe(Layer.provide(FileLedgerLive), Layer.provide(AirlockHome.layer(home))))
       )
     })).pipe(Effect.provide(BunServices.layer))
 

@@ -1,5 +1,6 @@
 import { Effect, FileSystem, Layer, Option, Path, PlatformError, Result, Schema } from "effect"
 import { AirlockHome } from "../AirlockHome.ts"
+import { CaptureEntry, CapturedEmission, StoredCaptureResult, validateCaptureEntry } from "../core/outbox/Capture.ts"
 import { type EmissionState, isTerminal, transitions } from "../core/outbox/Lifecycle.ts"
 import { OutboxStore } from "../core/outbox/OutboxStore.ts"
 import {
@@ -15,6 +16,7 @@ import {
   UnknownEmission
 } from "../core/outbox/Records.ts"
 import { makeExclusiveFileLock } from "../platform/ExclusiveFileLock.ts"
+import { CaptureJournal } from "./FileLedger.ts"
 
 /**
  * The OutboxStore port over one Airlock home.
@@ -36,6 +38,11 @@ import { makeExclusiveFileLock } from "../platform/ExclusiveFileLock.ts"
  * move, so an outbox that settled nothing holds nothing). Finding one emission by id probes its
  * possible names; nothing lists the root except the operations that ask for
  * unsettled emissions, and nothing lists history unless history is asked for.
+ *
+ * A capture is not kept here at all. It is one line of the ledger journal
+ * that carries the record, the stored result and the receipt together, and
+ * that line is the capture: this store reads captures back out of the
+ * journal and keeps no second copy that could disagree with it.
  */
 
 const states = Object.keys(transitions) as ReadonlyArray<EmissionState>
@@ -72,6 +79,7 @@ export const make = Effect.gen(function* () {
   const fs = yield* FileSystem.FileSystem
   const path = yield* Path.Path
   const home = yield* AirlockHome
+  const ledger = yield* CaptureJournal
 
   const failed = (operation: string, id?: string) => (cause: unknown) =>
     new OutboxStoreFailed({
@@ -237,11 +245,62 @@ export const make = Effect.gen(function* () {
           Effect.ignore
         )
 
-  const read = (id: EmissionId) =>
+  /** What the journal line of a capture carries beside its receipt. */
+  const Carried = Schema.Struct({ record: CapturedEmission, result: Schema.optionalKey(StoredCaptureResult) })
+  const captureKey = (id: EmissionId) => `${id}:capture`
+  const decodeCarried = (id: string) => (carried: Schema.Json) =>
+    Schema.decodeUnknownEffect(Carried)(carried).pipe(
+      Effect.mapError(() => corrupt(id, "record", "capture journal entry does not decode"))
+    )
+  const readCarried = (id: EmissionId) =>
+    ledger.carried(captureKey(id)).pipe(
+      Effect.mapError(failed("read-capture", id)),
+      Effect.flatMap(Option.match({
+        onNone: () => Effect.succeed(Option.none<typeof Carried.Type>()),
+        onSome: (carried) => Effect.asSome(decodeCarried(id)(carried).pipe(
+          Effect.filterOrFail(
+            (entry) => entry.record.id === id,
+            () => corrupt(id, "record", "capture journal entry is filed under another id")
+          )
+        ))
+      }))
+    )
+
+  const read = (id: EmissionId): Effect.Effect<Option.Option<EmissionRecord>, OutboxStoreFailed | OutboxStateCorrupt> =>
     Effect.flatMap(locate(id), Option.match({
-      onNone: () => Effect.succeed(Option.none<EmissionRecord>()),
+      onNone: () => Effect.map(readCarried(id), Option.map((entry): EmissionRecord => entry.record)),
       onSome: (found) => Effect.asSome(readRecord(found))
     }))
+
+  const putCapture: OutboxStore["Service"]["putCapture"] = (record, result, receipt) =>
+    atomically(Effect.gen(function* () {
+      const id = record.id
+      const checked = validateCaptureEntry({ record, ...(result === undefined ? {} : { result }), receipt })
+      if (Result.isFailure(checked)) {
+        return yield* new OutboxStoreFailed({ operation: "put-capture", id, reason: checked.failure.reason })
+      }
+      // An emission of another kind already has this id.
+      const other = yield* locate(id)
+      if (Option.isSome(other)) return { created: false, record: yield* readRecord(other.value) }
+      const encoded = yield* Schema.encodeEffect(CaptureEntry)(checked.success).pipe(
+        Effect.mapError(failed("encode-capture", id))
+      )
+      // One fsynced append: record, result and receipt exist together or not at all.
+      const created = yield* ledger.recordCarrying(
+        Object.assign(checked.success.receipt, { key: captureKey(id) }),
+        { record: encoded.record, ...(encoded.result === undefined ? {} : { result: encoded.result }) } as Schema.Json
+      ).pipe(Effect.mapError(failed("put-capture", id)))
+      if (created) return { created: true, record: checked.success.record as EmissionRecord }
+      // The journal already holds this key: that capture stands, unchanged.
+      const existing = yield* readCarried(id)
+      return Option.isSome(existing)
+        ? { created: false, record: existing.value.record as EmissionRecord }
+        // The key carries no capture: a receipt without its record.
+        : yield* corrupt(id, "record", "capture receipt exists without its record")
+    }))
+
+  const readCapture: OutboxStore["Service"]["readCapture"] = (id) =>
+    Effect.map(readCarried(id), Option.flatMap((entry) => Option.fromNullishOr(entry.result)))
 
   const require = (id: EmissionId) =>
     Effect.flatMap(locate(id), Option.match({
@@ -302,7 +361,17 @@ export const make = Effect.gen(function* () {
 
   const transition: OutboxStore["Service"]["transition"] = (id, from, arrival) =>
     atomically(Effect.gen(function* () {
-      const found = yield* require(id)
+      const located = yield* locate(id)
+      if (Option.isNone(located)) {
+        // A capture is complete from the moment it exists: nothing follows it.
+        const captured = yield* readCarried(id)
+        if (Option.isNone(captured)) return yield* new UnknownEmission({ id })
+        const refused = advance(captured.value.record, from, arrival)
+        return yield* Result.isFailure(refused)
+          ? refused.failure
+          : corrupt(id, "record", "a captured record has no next state")
+      }
+      const found = located.value
       const next = advance(yield* readRecord(found), from, arrival)
       if (Result.isFailure(next)) return yield* next.failure
 
@@ -389,12 +458,20 @@ export const make = Effect.gen(function* () {
   const settled = Effect.flatMap(entriesOf(settledRoot), (entries) =>
     Effect.forEach(entries, readRecord, { concurrency: 16 }))
 
+  /** Captures are history from the moment they exist; they are read from the journal. */
+  const captures = ledger.allCarried.pipe(
+    Effect.mapError(failed("list-captures")),
+    Effect.flatMap((all) => Effect.forEach(all, (carried) =>
+      Effect.map(decodeCarried("capture")(carried), (entry): EmissionRecord => entry.record)))
+  )
+
   const list: OutboxStore["Service"]["list"] = <State extends EmissionState>(wanted?: State) =>
     Effect.gen(function* () {
       const open = yield* unsettled
       const history = wanted === undefined || isTerminal(wanted) ? yield* settled : []
+      const captured = wanted === undefined || wanted === "captured" ? yield* captures : []
       const seen = new Set(open.map((record) => record.id))
-      return [...open, ...history.filter((record) => !seen.has(record.id))]
+      return [...open, ...history.filter((record) => !seen.has(record.id)), ...captured]
         .filter((record): record is RecordIn<State> => wanted === undefined || record.state === wanted)
         .sort(byStagedAt)
     })
@@ -405,6 +482,8 @@ export const make = Effect.gen(function* () {
   return OutboxStore.of({
     exclusive: (effect) => sectionLock.withLock(effect),
     putIfAbsent,
+    putCapture,
+    readCapture,
     read,
     readDispatch,
     transition,
@@ -418,5 +497,5 @@ export const make = Effect.gen(function* () {
 export const layer: Layer.Layer<
   OutboxStore,
   OutboxStoreFailed,
-  FileSystem.FileSystem | Path.Path | AirlockHome
+  FileSystem.FileSystem | Path.Path | AirlockHome | CaptureJournal
 > = Layer.effect(OutboxStore, make)

@@ -1,3 +1,4 @@
+import { memoryAdapters } from "./support/memory.ts"
 import { describe, expect, it } from "@effect/vitest"
 import { Effect, Layer, Schema } from "effect"
 import { handlersFor } from "../src/core/airlock/Implement.ts"
@@ -18,7 +19,7 @@ const authority = new DispatchProvenance({ committedBy: "supervisor" })
 const world = (implementation: Parameters<typeof handlersFor>[1], observe?: (permit: DispatchPermit) => void) => {
   const handlers = handlersFor(box.kinds, implementation, {})
   return box.layer.pipe(Layer.provideMerge(Layer.mergeAll(
-    memoryOutboxStore(makeMemoryOutboxState()), memoryLedger(makeMemoryLedgerState()), WebCrypto.layer,
+    memoryAdapters(), WebCrypto.layer,
     Layer.succeed(box.Dispatcher, { "http.get": (request) => { observe?.(request.permit); return handlers["http.get"](request) } })
   )))
 }
@@ -61,7 +62,7 @@ describe("core: implementation wire token", () => {
 
   it.effect("cannot derive a token for a substituted call while the parent permit is live", () => {
     const layer = box.layer.pipe(Layer.provideMerge(Layer.mergeAll(
-      memoryOutboxStore(makeMemoryOutboxState()), memoryLedger(makeMemoryLedgerState()), WebCrypto.layer,
+      memoryAdapters(), WebCrypto.layer,
       Layer.succeed(box.Dispatcher, { "http.get": (request) => Effect.gen(function* () {
         expect(enterImplementation(request.permit, "http.get", '{"endpoint":"https://outside.test/"}')).toBeUndefined()
         const resource = yield* endpointResources.rebind({ binding: request.admission!.execution!.resources[0]! }).pipe(Effect.orDie)
@@ -75,7 +76,7 @@ describe("core: implementation wire token", () => {
 
   it.effect("refuses an aborted token before the parent call has settled", () => {
     const layer = box.layer.pipe(Layer.provideMerge(Layer.mergeAll(
-      memoryOutboxStore(makeMemoryOutboxState()), memoryLedger(makeMemoryLedgerState()), WebCrypto.layer,
+      memoryAdapters(), WebCrypto.layer,
       Layer.succeed(box.Dispatcher, { "http.get": (request) => Effect.gen(function* () {
         const controller = new AbortController()
         const resource = yield* endpointResources.rebind({ binding: request.admission!.execution!.resources[0]! }).pipe(Effect.orDie)

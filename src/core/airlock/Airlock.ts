@@ -143,6 +143,9 @@ const explain = (subject: string) => (tagged: Tagged): AirlockFailure => {
           ? `${subject} was not run: this session has used its ${String(error["limit"])} calls`
           : `${subject} was not run: this session has used its ${String(error["limit"])} bytes of input`
       )
+    case "CaptureFailed":
+      return failure(error["code"] === "expired" ? "expired" : error["code"] === "result-changed" ? "conflict" : "unavailable",
+        error["code"] === "result-changed" ? `${subject} changed since its recorded capture` : `${subject} read did not complete (${String(error["code"])})`)
     case "ToolGrantExpired":
       return failure("expired", `${subject} was not run: its grant has expired`)
     case "EmissionRefused":
@@ -182,8 +185,8 @@ export const defineAirlock = <const List extends ReadonlyArray<ToolContract.Any>
   readonly implement: Implementations<ByName<List>, Env>
   readonly policy: ToolPolicy | ((env: Env) => ToolPolicy)
   readonly host?: ToolHost | ((env: Env) => ToolHost)
-} & (ByName<List> extends infer Kinds extends ToolContracts ? { readonly __closed?: ClosedUnderCompensation<Kinds> } : never)): Airlock<ByName<List> & ToolContracts, Env> => {
-  type Contracts = ByName<List> & ToolContracts
+} & (ByName<List> extends infer Kinds extends ToolContracts ? { readonly __closed?: ClosedUnderCompensation<Kinds> } : never)): Airlock<ByName<List>, Env> => {
+  type Contracts = ByName<List>
   const decoders = defineDecoderCatalog(definition.decoders ?? [])
   const byName: { [name: string]: ToolContract.Any } = {}
   for (const contract of definition.contracts) {
@@ -196,7 +199,7 @@ export const defineAirlock = <const List extends ReadonlyArray<ToolContract.Any>
   }
   // Keyed by each contract's own name; the mapped type says the same thing.
   const contracts = byName as Contracts
-  const outbox = defineOutbox(contracts as Contracts & ClosedUnderCompensation<Contracts>)
+  const outbox = defineOutbox<Contracts>(contracts as Contracts & ClosedUnderCompensation<Contracts>)
   // The same definition, seen without the per-contract types: the facade works
   // by tool name and returns plain data, so it has no use for them.
   const kernel = outbox as unknown as OutboxDefinition<ToolContracts>
@@ -229,10 +232,12 @@ export const defineAirlock = <const List extends ReadonlyArray<ToolContract.Any>
       const actions = tools.flatMap((name) => {
         const contract = byName[name]
         if (contract === undefined) return []
-        const immediate = decided.toolGrants
-          .filter((grant) => grant.tool === name)
-          .map((grant) => grant.when === "now")
-        return [guestAction(contract, immediate.every(Boolean) ? "all" : immediate.some(Boolean) ? "some" : "none")]
+        const grants = decided.toolGrants.filter((grant) => grant.tool === name)
+        const immediate = grants.map((grant) => grant.when === "now")
+        const captureGrants = contract.effect === "capture" ? grants.filter((grant) => grant.when === "now") : []
+        const modes = new Set(captureGrants.map((grant) => grant.retention ?? "digest"))
+        const retention = modes.size === 0 ? undefined : modes.size > 1 ? "by-grant" : modes.has("keep") ? "keep" : "digest"
+        return [guestAction(contract, immediate.every(Boolean) ? "all" : immediate.some(Boolean) ? "some" : "none", retention)]
       })
       return {
         tools,

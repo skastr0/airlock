@@ -10,7 +10,7 @@ import {
   HoldReapRecoveryRequired,
   HoldRecoveryRequired
 } from "../src/Hold.ts"
-import { FileLedger } from "../src/host/FileLedger.ts"
+import { FileLedger, FileLedgerLive } from "../src/host/FileLedger.ts"
 import { DispatchProvenance, IdempotencyKey } from "../src/core/index.ts"
 import { Outbox, OutboxLive } from "../src/Outbox.ts"
 import { ExclusiveRenameTestLive } from "./support/ExclusiveRenameTestLive.ts"
@@ -261,6 +261,8 @@ describe("durable cancellation receipts", () => {
         const release = yield* Deferred.make<void>()
         const layer = OutboxLive.pipe(
           Layer.provideMerge(gatedLedger("stage", started, release)),
+          // The store reads captures from the real journal; only receipts are gated.
+          Layer.provideMerge(FileLedgerLive),
           Layer.provideMerge(AirlockHome.layer(home)),
           Layer.provideMerge(BunServices.layer)
         )
@@ -320,6 +322,8 @@ describe("durable cancellation receipts", () => {
         const address = server.address() as AddressInfo
         const layer = OutboxLive.pipe(
           Layer.provideMerge(gatedLedger("commit", started, release)),
+          // The store reads captures from the real journal; only receipts are gated.
+          Layer.provideMerge(FileLedgerLive),
           Layer.provideMerge(AirlockHome.layer(home)),
           Layer.provideMerge(BunServices.layer)
         )

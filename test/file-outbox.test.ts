@@ -28,7 +28,7 @@ outboxConformance(
           : Effect.succeed(path.join(outbox, found))
       })
     return {
-      store: FileOutboxStore.layer.pipe(Layer.provide(host)),
+      store: FileOutboxStore.layer.pipe(Layer.provide(FileLedgerLive), Layer.provide(host)),
       ledger: ledgerLayer.pipe(Layer.provide(FileLedgerLive), Layer.provide(host)),
       crypto: BunServices.layer,
       corruptRecord: (id: EmissionId) =>

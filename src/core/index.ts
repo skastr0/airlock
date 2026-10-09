@@ -86,6 +86,10 @@ export {
   OutboxRecoveryRequired,
   type OutboxService,
   type Performed,
+  CaptureFailed,
+  type CaptureError,
+  type CaptureRequest,
+  type CaptureTag,
   type PerformError,
   type ReadError,
   RESPONSE_LIMIT_BYTES,
@@ -152,3 +156,6 @@ export {
   UncertainReason,
   UnknownEmission
 } from "./outbox/Records.ts"
+
+export { CaptureAdmission, CaptureEntry, CaptureOutcome, CaptureRetention, CapturedEmission,
+  CAPTURE_RESULT_LIMIT_BYTES, InvalidCapture, StoredCaptureResult, validateCaptureEntry } from "./outbox/Capture.ts"

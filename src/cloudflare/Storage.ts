@@ -28,6 +28,9 @@ export interface DurableStorage {
  * `owing` is 1 while the emission owes the Ledger a receipt; a partial index
  * over it is what a starting kernel reads, so startup never scans settled
  * history.
+ * A captured read is one row with no sealed dispatch: it was never staged, so
+ * `dispatch` is NULL. `capture` is its private result, kept only where the
+ * grant says so; it is read by `readCapture` and by nothing else.
  * `ledger.key` is unique; SQLite treats NULLs as distinct, so entries without
  * a key are always appended.
  */
@@ -38,8 +41,9 @@ export const ensureSchema = (storage: DurableStorage): void => {
       state TEXT NOT NULL,
       record TEXT NOT NULL,
       dispatch_digest TEXT NOT NULL,
-      dispatch TEXT NOT NULL,
+      dispatch TEXT,
       response BLOB,
+      capture TEXT,
       owing INTEGER NOT NULL
     ) WITHOUT ROWID
   `)

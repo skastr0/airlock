@@ -49,8 +49,9 @@ const airlock = defineAirlock({
 // ── a host: memory adapters ─────────────────────────────────────────────────
 
 const host = () => {
-  const store = memoryOutboxStore(makeMemoryOutboxState())
-  const ledger = memoryLedger(makeMemoryLedgerState())
+  const ledgerState = makeMemoryLedgerState()
+  const store = memoryOutboxStore(makeMemoryOutboxState(), ledgerState)
+  const ledger = memoryLedger(ledgerState)
   return <A, E>(env: Env, body: Effect.Effect<A, E, typeof airlock.outbox.Outbox.Identifier | import("effect").Crypto.Crypto>) =>
     body.pipe(
       Effect.provide(airlock.layer(env).pipe(Layer.provideMerge(Layer.mergeAll(store, ledger, WebCrypto.layer))))
@@ -182,7 +183,8 @@ describe("core: defineAirlock", () => {
           input: "{ mailbox: string, query: string }",
           result: "{ ids: [string] }",
           returns: "result",
-          effect: "capture"
+          effect: "capture",
+          resultRetention: "digest"
         },
         {
           name: "mail.send",
@@ -196,7 +198,7 @@ describe("core: defineAirlock", () => {
       expect(lines[0]).toBe("An Airlock program (.air) is a list of statements, one per line.")
       expect(lines.slice(-3)).toEqual([
         `- label.add({ messageId: string, label: string }) -> { state: "staged", id: string }. Makes an external request; is recorded for approval and returns a staged receipt, never a result; nothing happens until a supervisor commits it. Can be answered by label.remove.`,
-        `- mail.list({ mailbox: string, query: string }) -> { state: "done", id: string, result: { ids: [string] } }. Captures a value; runs at once and returns a done receipt with its result.`,
+        `- mail.list({ mailbox: string, query: string }) -> { state: "done", id: string, result: { ids: [string] } }. Captures a value; runs at once and returns a done receipt with its result. Keeps only the result digest; replay reads again and stops if the result changed.`,
         `- mail.send({ to: string, subject: string, body: string }) -> { state: "staged", id: string }. Makes an external request; is recorded for approval and returns a staged receipt, never a result; nothing happens until a supervisor commits it.`,
       ])
       expect(JSON.stringify(guest.actions)).not.toContain("\"label.remove\",\"input\"")

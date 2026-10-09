@@ -1,4 +1,8 @@
+import { exactJsonText } from "../ExactJson.ts"
 import { Effect, Layer, Option, Result, Semaphore } from "effect"
+import type { MemoryLedgerState } from "./MemoryLedger.ts"
+import { CaptureEntry, validateCaptureEntry, StoredCaptureResult } from "../outbox/Capture.ts"
+import { Schema } from "effect"
 import type { EmissionState } from "../outbox/Lifecycle.ts"
 import { OutboxStore } from "../outbox/OutboxStore.ts"
 import {
@@ -7,6 +11,7 @@ import {
   type EmissionId,
   type EmissionRecord,
   OutboxStateCorrupt,
+  OutboxStoreFailed,
   owesReceipt,
   type RecordIn,
   SealedDispatch,
@@ -21,6 +26,7 @@ import {
 export interface MemoryOutboxState {
   readonly records: Map<EmissionId, EmissionRecord>
   readonly dispatches: Map<EmissionId, SealedDispatch>
+  readonly captures: Map<EmissionId, StoredCaptureResult>
   readonly responses: Map<EmissionId, Uint8Array>
   /** Ids whose stored record has been damaged and no longer decodes. */
   readonly damaged: Set<EmissionId>
@@ -31,6 +37,7 @@ export const makeMemoryOutboxState = (): MemoryOutboxState => ({
   records: new Map(),
   dispatches: new Map(),
   responses: new Map(),
+  captures: new Map(),
   damaged: new Set(),
   lock: Semaphore.makeUnsafe(1)
 })
@@ -54,7 +61,7 @@ export const memoryOutboxFaults = (state: MemoryOutboxState) => ({
  * Reference adapter. Each operation is one synchronous step, so it is atomic
  * by construction; it is the executable statement of what the port means.
  */
-export const memoryOutboxStore = (state: MemoryOutboxState): Layer.Layer<OutboxStore> => {
+export const memoryOutboxStore = (state: MemoryOutboxState, ledger: MemoryLedgerState): Layer.Layer<OutboxStore> => {
   const damaged = (id: EmissionId) =>
     new OutboxStateCorrupt({ id, part: "record", reason: "stored record does not decode" })
 
@@ -81,6 +88,25 @@ export const memoryOutboxStore = (state: MemoryOutboxState): Layer.Layer<OutboxS
         state.dispatches.set(record.id, dispatch)
         return { created: true, record }
       }),
+    putCapture: (record, result, receipt) => Effect.gen(function* () {
+      const checked = validateCaptureEntry({ record, ...(result === undefined ? {} : { result }), receipt })
+      if (Result.isFailure(checked)) return yield* new OutboxStoreFailed({ operation: "put-capture", id: record.id, reason: checked.failure.reason })
+      // Own the complete journal material before the one synchronous publication.
+      const owned = Schema.decodeUnknownSync(CaptureEntry)(JSON.parse(exactJsonText(Schema.encodeSync(CaptureEntry)(checked.success))))
+      const existing = yield* load(record.id)
+      if (Option.isSome(existing)) return { created: false, record: existing.value }
+      if (ledger.entries.some((entry) => entry.key === receipt.key)) {
+        return yield* new OutboxStateCorrupt({ id: record.id, part: "record", reason: "capture receipt exists without its record" })
+      }
+      return yield* Effect.sync(() => {
+        state.records.set(record.id, owned.record)
+        if (owned.result !== undefined) state.captures.set(record.id, owned.result)
+        ledger.entries.push(owned.receipt)
+        return { created: true, record: owned.record }
+      })
+    }),
+    readCapture: (id) => Effect.map(load(id), () => Option.map(Option.fromNullishOr(state.captures.get(id)), (result) =>
+      Schema.decodeUnknownSync(StoredCaptureResult)(JSON.parse(exactJsonText(Schema.encodeSync(StoredCaptureResult)(result)))))),
     read: load,
     readDispatch: (id) =>
       Effect.suspend(() => {

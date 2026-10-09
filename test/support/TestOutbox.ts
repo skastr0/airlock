@@ -29,12 +29,13 @@ export const stagingOnlyOutbox = (observe: {
   }) => void
   readonly committed?: (id: EmissionId) => void
 } = {}): Layer.Layer<Outbox> => {
+  const ledger = makeMemoryLedgerState()
   const kernel = AirlockOutbox.layer.pipe(
     Layer.provide(Layer.succeed(Dispatcher, Dispatcher.of({
       http: () => Effect.die("this test Outbox must never reach the wire")
     }))),
-    Layer.provide(memoryOutboxStore(makeMemoryOutboxState())),
-    Layer.provide(memoryLedger(makeMemoryLedgerState())),
+    Layer.provide(memoryOutboxStore(makeMemoryOutboxState(), ledger)),
+    Layer.provide(memoryLedger(ledger)),
     Layer.provide(WebCrypto.layer),
     Layer.orDie
   )

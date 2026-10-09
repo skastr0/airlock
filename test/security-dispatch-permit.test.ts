@@ -39,10 +39,13 @@ const serverFor = (paths: Array<string>) => Effect.acquireRelease(
   })
 ).pipe(Effect.map((server) => `http://127.0.0.1:${(server.address() as AddressInfo).port}`))
 
-const httpWorld = (handler: typeof dispatchHttp) => httpBox.layer.pipe(Layer.provideMerge(Layer.mergeAll(
-  memoryOutboxStore(makeMemoryOutboxState()), memoryLedger(makeMemoryLedgerState()), WebCrypto.layer,
-  Layer.succeed(httpBox.Dispatcher, { http: handler })
-)))
+const httpWorld = (handler: typeof dispatchHttp) => {
+  const ledgerState = makeMemoryLedgerState()
+  return httpBox.layer.pipe(Layer.provideMerge(Layer.mergeAll(
+    memoryOutboxStore(makeMemoryOutboxState(), ledgerState), memoryLedger(ledgerState), WebCrypto.layer,
+    Layer.succeed(httpBox.Dispatcher, { http: handler })
+  )))
+}
 
 const stage = (url: string) => Effect.flatMap(httpBox.Outbox, (outbox) => outbox.stage({
   key: IdempotencyKey.make("security-http-permit"),
@@ -112,8 +115,9 @@ describe("security: a dispatch permit authorizes one exact request", () => {
       "security.read": () => { calls += 1; return { ok: true } }
     }, {})
     let deferred: ReturnType<typeof handlers["security.read"]> | undefined
+    const ledgerState = makeMemoryLedgerState()
     const layer = toolBox.layer.pipe(Layer.provideMerge(Layer.mergeAll(
-      memoryOutboxStore(makeMemoryOutboxState()), memoryLedger(makeMemoryLedgerState()), WebCrypto.layer,
+      memoryOutboxStore(makeMemoryOutboxState(), ledgerState), memoryLedger(ledgerState), WebCrypto.layer,
       Layer.succeed(toolBox.Dispatcher, {
         "security.read": (request) => {
           deferred = handlers["security.read"](request)
@@ -158,8 +162,9 @@ describe("security: a dispatch permit authorizes one exact request", () => {
       "security.read": () => { calls.push("read"); return { ok: true } },
       "security.other": () => { calls.push("other"); return { ok: true } }
     }, {})
+    const ledgerState = makeMemoryLedgerState()
     const layer = box.layer.pipe(Layer.provideMerge(Layer.mergeAll(
-      memoryOutboxStore(makeMemoryOutboxState()), memoryLedger(makeMemoryLedgerState()), WebCrypto.layer,
+      memoryOutboxStore(makeMemoryOutboxState(), ledgerState), memoryLedger(ledgerState), WebCrypto.layer,
       Layer.succeed(box.Dispatcher, {
         ...handlers,
         "security.read": (request) => Effect.gen(function* () {

@@ -89,8 +89,9 @@ const world = <A, E>(body: (args: {
               host,
               policy: policy(workspace)
             })
+            const ledger = makeMemoryLedgerState()
             const context = yield* Layer.build(airlock.layer(undefined).pipe(Layer.provideMerge(Layer.mergeAll(
-              memoryOutboxStore(makeMemoryOutboxState()), memoryLedger(makeMemoryLedgerState()), WebCrypto.layer
+              memoryOutboxStore(makeMemoryOutboxState(), ledger), memoryLedger(ledger), WebCrypto.layer
             ))))
             const guest = yield* airlock.guest({ runId: `run-${++runs}`, env: undefined }).pipe(Effect.provide(context))
             const supervisor = yield* airlock.supervisor(undefined).pipe(Effect.provide(context))

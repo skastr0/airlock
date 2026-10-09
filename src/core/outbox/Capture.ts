@@ -1,9 +1,12 @@
 import { Result, Schema } from "effect"
-import { Sha256Digest } from "../Canonical.ts"
+import { canonicalJson, Sha256Digest } from "../Canonical.ts"
 import { HostParameters, ResourceBinding } from "../contract/ToolHost.ts"
 import { WireAuthority } from "../contract/Wire.ts"
 import { LedgerEntry } from "../ledger/Ledger.ts"
 import { EmissionId, IdempotencyKey } from "./Identifiers.ts"
+
+/** Each private result value and response has this construction bound. */
+export const CAPTURE_RESULT_LIMIT_BYTES = 65_536
 
 export const CaptureRetention = Schema.Literals(["digest", "keep"])
 export type CaptureRetention = typeof CaptureRetention.Type
@@ -53,7 +56,7 @@ export class CapturedEmission extends Schema.Class<CapturedEmission>("CapturedEm
 export const StoredCaptureResult = Schema.Struct({
   digest: Sha256Digest,
   value: Schema.optionalKey(Schema.Json),
-  response: Schema.optionalKey(Schema.Uint8Array)
+  response: Schema.optionalKey(Schema.Uint8ArrayFromBase64)
 })
 export type StoredCaptureResult = typeof StoredCaptureResult.Type
 
@@ -88,6 +91,12 @@ export const validateCaptureEntry = (entry: unknown): Result.Result<CaptureEntry
   }
   if (record.admission.execution.retention === "keep" && result.value === undefined) {
     return invalid("result.value", "keep retention requires the private encoded result")
+  }
+  if (result.value !== undefined && new TextEncoder().encode(canonicalJson(result.value)).byteLength > CAPTURE_RESULT_LIMIT_BYTES) {
+    return invalid("result.value", "encoded result exceeds the capture bound")
+  }
+  if (result.response !== undefined && result.response.byteLength > CAPTURE_RESULT_LIMIT_BYTES) {
+    return invalid("result.response", "response exceeds the capture bound")
   }
   return Result.succeed(decoded.success)
 }

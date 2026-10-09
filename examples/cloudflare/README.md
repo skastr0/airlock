@@ -6,6 +6,11 @@ world: call the actions you grant it. Reads happen at once; writes are only
 recorded until a supervisor commits them. Everything is in a ledger, and a
 program that is run again gets its recorded results instead of acting twice.
 
+A read is recorded as one entry. By default Airlock keeps only a digest of
+what was read, and a program run again reads again and fails if the answer
+changed; a grant with `retention: "keep"` stores the result, so a second run
+gets the first run's answer. The example keeps its mail reads.
+
 Nothing leaves the system without a person. Each grant says when its tool
 runs: `when: "now"` for reading, `when: "approved"` for everything that
 changes something outside. Airlock refuses a policy that grants a request
@@ -20,7 +25,7 @@ You write four files:
 | File | What it is | Lines |
 | --- | --- | --- |
 | `src/contracts.ts` | What each tool takes and returns | 61 |
-| `src/airlock.ts` | What each tool does, and what a program may do | 71 |
+| `src/airlock.ts` | What each tool does, and what a program may do | 72 |
 | `src/worker.ts` | The Durable Object export and your trusted routes | 44 |
 | `alchemy.run.ts` | The Worker and its binding on Cloudflare | 24 |
 

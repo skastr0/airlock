@@ -13,9 +13,10 @@ import {
 describe("core: the worked example", () => {
   it.effect("plays the hosted-guest path end to end on the in-memory adapters", () =>
     Effect.gen(function* () {
+      const ledger = makeMemoryLedgerState()
       const transcript = yield* runWorkedExample({
-        store: memoryOutboxStore(makeMemoryOutboxState()),
-        ledger: memoryLedger(makeMemoryLedgerState()),
+        store: memoryOutboxStore(makeMemoryOutboxState(), ledger),
+        ledger: memoryLedger(ledger),
         crypto: WebCrypto.layer
       })
       expect(transcript).toEqual(expectedTranscript)

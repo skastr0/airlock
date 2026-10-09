@@ -18,10 +18,11 @@ const wire = Layer.succeed(AirlockOutbox.Dispatcher, AirlockOutbox.Dispatcher.of
       : Effect.fail(new Core.DispatchFailed({ reason: "dispatch permit is not live" }))
 }))
 
+const ledgerState = Testing.makeMemoryLedgerState()
 const kernel = AirlockOutbox.layer.pipe(
   Layer.provide(wire),
-  Layer.provide(Testing.memoryOutboxStore(Testing.makeMemoryOutboxState())),
-  Layer.provide(Testing.memoryLedger(Testing.makeMemoryLedgerState())),
+  Layer.provide(Testing.memoryOutboxStore(Testing.makeMemoryOutboxState(), ledgerState)),
+  Layer.provide(Testing.memoryLedger(ledgerState)),
   Layer.provide(Core.WebCrypto.layer)
 )
 

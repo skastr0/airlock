@@ -89,6 +89,8 @@ export interface GuestAction {
    */
   readonly returns: "result" | "staged" | "result-or-staged"
   readonly effect: PlanEffect
+  /** Capture-now replay retention; mixed narrowed grants are resolved per call. */
+  readonly resultRetention?: "digest" | "keep" | "by-grant"
   /** The action that answers this one, if its contract declares a compensation. */
   readonly answeredBy?: string
 }
@@ -97,12 +99,13 @@ export interface GuestAction {
  * The action for one granted contract. `immediate` says how the session's
  * grants for it commit: every one pre-authorizes a read, none does, or some do.
  */
-export const guestAction = (contract: ToolContract.Any, immediate: "all" | "none" | "some"): GuestAction => ({
+export const guestAction = (contract: ToolContract.Any, immediate: "all" | "none" | "some", resultRetention?: GuestAction["resultRetention"]): GuestAction => ({
   name: contract.tag,
   input: typeText(contract.input),
   result: typeText(contract.outcome),
   returns: immediate === "all" ? "result" : immediate === "none" ? "staged" : "result-or-staged",
   effect: contract.effect,
+  ...(resultRetention === undefined ? {} : { resultRetention }),
   ...(contract.compensate === undefined ? {} : { answeredBy: contract.compensate.kind })
 })
 
@@ -150,6 +153,11 @@ export const guestDescription = (actions: ReadonlyArray<GuestAction>): string =>
               ? STAGED_RECEIPT_SHAPE
               : `${doneShape(action.result)} or ${STAGED_RECEIPT_SHAPE}`
           const answer = action.answeredBy === undefined ? "" : ` Can be answered by ${action.answeredBy}.`
-          return `- ${action.name}(${action.input}) -> ${shape}. ${effectWords[action.effect]}; ${returnWords[action.returns]}.${answer}`
+          const retention = action.resultRetention === undefined ? "" : action.resultRetention === "keep"
+            ? " Keeps the result privately; replay returns it without reading again."
+            : action.resultRetention === "digest"
+              ? " Keeps only the result digest; replay reads again and stops if the result changed."
+              : " Keeps the result only when every fitting grant explicitly keeps it; otherwise replay reads again and checks the digest."
+          return `- ${action.name}(${action.input}) -> ${shape}. ${effectWords[action.effect]}; ${returnWords[action.returns]}.${retention}${answer}`
         }).join("\n")
   ].join("\n")

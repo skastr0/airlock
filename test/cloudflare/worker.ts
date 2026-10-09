@@ -86,7 +86,7 @@ const worlds = (storage: DurableStorage) => {
   return {
     store: Effect.sync(() => {
       fresh()
-      return { store: durableOutboxStore(storage), ...faults }
+      return { store: durableOutboxStore(storage), ledger: durableLedger(storage), ...faults }
     }),
     ledger: Effect.sync(() => {
       fresh()
@@ -250,7 +250,8 @@ const userAirlock = defineAirlock({
   policy: toolPolicy({
     budget: { maxCalls: 8, maxInputBytes: 4_096 },
     toolGrants: [
-      Admission.toolGrant(MailList, { id: "read-inbox", when: "now" }),
+      // Kept, so a replayed run is answered from the record and the provider is not asked again.
+      Admission.toolGrant(MailList, { id: "read-inbox", when: "now", retention: "keep" }),
       Admission.toolGrant(MailSend, { id: "support-replies", where: { to: { endsWith: "@example.com" } } }),
       Admission.toolGrant(LabelAdd, { id: "labels", when: "approved" })
     ]

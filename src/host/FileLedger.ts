@@ -1,4 +1,5 @@
-import { Context, Effect, Layer, Result, Schema, Semaphore } from "effect"
+import { exactJsonText } from "../core/ExactJson.ts"
+import { Context, Effect, Layer, Option, Result, Schema, Semaphore } from "effect"
 import { createHash, randomUUID } from "node:crypto"
 import { constants } from "node:fs"
 import {
@@ -23,6 +24,11 @@ import { reasonOf } from "../FailureText.ts"
  * the ledger file has been fsynced, and its parent directory has been fsynced.
  * A realm-wide macOS descriptor lease serializes both readers and writers
  * across runtimes and processes.
+ *
+ * A keyed entry may carry a private payload in the same line. The line is
+ * then the one durable publication of both: there is no moment at which the
+ * receipt exists without what it carries, or the reverse. `entries` shows the
+ * receipt and never the payload.
  */
 export class FileLedger extends Context.Service<
   FileLedger,
@@ -31,6 +37,29 @@ export class FileLedger extends Context.Service<
     readonly entries: Effect.Effect<ReadonlyArray<LedgerEntry>, LedgerError>
   }
 >()("airlock/host/FileLedger") {}
+
+/**
+ * The same journal, for the store whose captures are lines of it. A separate
+ * service only so that code which just records receipts does not see it; it
+ * is built with `FileLedger`, over the same file and the same lock.
+ */
+export class CaptureJournal extends Context.Service<
+  CaptureJournal,
+  {
+    /**
+     * Appends `entry` and `payload` as one line, unless the key is already
+     * recorded. Answers whether this call recorded it.
+     */
+    readonly recordCarrying: (
+      entry: LedgerEntry & { readonly key: string },
+      payload: Schema.Json
+    ) => Effect.Effect<boolean, LedgerError>
+    /** The payload recorded under `key`, if that key is recorded and carries one. */
+    readonly carried: (key: string) => Effect.Effect<Option.Option<Schema.Json>, LedgerError>
+    /** Every payload in the journal, in the order recorded. */
+    readonly allCarried: Effect.Effect<ReadonlyArray<Schema.Json>, LedgerError>
+  }
+>()("airlock/host/CaptureJournal") {}
 
 const LedgerFilesystemOperation = Schema.Literals([
   "lock",
@@ -201,21 +230,33 @@ const syncDirectory = async (directory: string) =>
     ioStep("sync-directory", directory, () => handle.sync())
   )
 
+/** Journals whose name this process has already made durable. */
+const published = new Set<string>()
+
 const appendDurably = (ledgerFile: string, bytes: Buffer) => {
   const directory = dirname(ledgerFile)
   return ioEffect("append", ledgerFile, async () => {
-    await withFile(
+    const offset = await withFile(
       ledgerFile,
       constants.O_WRONLY | constants.O_CREAT | constants.O_APPEND,
       0o600,
       async (handle) => {
+        const before = await ioStep("append", ledgerFile, () => handle.stat())
         await ioStep("append", ledgerFile, () => writeFully(handle, bytes))
         await ioStep("sync-file", ledgerFile, () => handle.sync())
+        return before.size
       }
     )
-    // File fsync makes the bytes durable; directory fsync makes first
-    // publication of the ledger name durable as well.
-    await syncDirectory(directory)
+    // File fsync makes the bytes durable; directory fsync makes the ledger's
+    // name durable. The name does not change afterwards, so the directory is
+    // flushed by the first append this process makes and not again. It is not
+    // skipped for a journal that merely has bytes: an earlier process may
+    // have died between its file flush and its directory flush.
+    if (!published.has(ledgerFile)) {
+      await syncDirectory(directory)
+      published.add(ledgerFile)
+    }
+    return offset
   })
 }
 
@@ -327,6 +368,22 @@ const readAppended = (ledgerFile: string, from: number) =>
       throw cause
     }
   })
+
+
+
+/** What one journal line carries beside its entry, if it is the line for `key`. */
+const carriedByLine = (line: Buffer, key?: string): Option.Option<Schema.Json> => {
+  try {
+    const parsed: unknown = JSON.parse(line.toString("utf8"))
+    return typeof parsed === "object" && parsed !== null && "carried" in parsed &&
+        (key === undefined || ("key" in parsed && parsed.key === key))
+      ? Option.some(parsed.carried as Schema.Json)
+      : Option.none()
+  } catch {
+    // An undecodable line is reported by `entries`; it carries nothing.
+    return Option.none()
+  }
+}
 
 /** The `key` of one journal line, if it is a keyed entry. */
 const keyOfLine = (line: Buffer): string | undefined => {
@@ -484,8 +541,7 @@ const normalizeTail = Effect.fnUntraced(function* (ledgerFile: string) {
   return yield* Effect.fail(yield* quarantineTail(ledgerFile, split))
 })
 
-export const FileLedgerLive = Layer.effect(
-  FileLedger,
+export const FileLedgerLive = Layer.effectContext(
   Effect.gen(function* () {
     const { ledgerFile } = yield* AirlockHome
     const lockRoot = dirname(ledgerFile)
@@ -618,7 +674,95 @@ export const FileLedgerLive = Layer.effect(
       return yield* Effect.fail(yield* quarantineTail(ledgerFile, split))
     })
 
-    return FileLedger.of({
+    /*
+     * Where a carrying line is, so reading one payload does not read the
+     * journal. The marker of such a key holds `<offset> <length>`. It is a
+     * hint and is never believed: the line it points at must parse and name
+     * the key, or the journal itself is read and the marker written again.
+     */
+    const locate = (key: string, offset: number, length: number) =>
+      ioEffect("append", keysDirectory, async () => {
+        await mkdir(keysDirectory, { recursive: true, mode: 0o700 })
+        await writeFile(markerOf(key), `${offset} ${length}`, { mode: 0o600 })
+      })
+    const readLocated = (key: string) =>
+      ioEffect("read", ledgerFile, async () => {
+        try {
+          const [offset, length] = (await readFile(markerOf(key), "utf8")).split(" ").map(Number)
+          if (!Number.isSafeInteger(offset) || !Number.isSafeInteger(length) || offset! < 0 || length! < 1) return undefined
+          return await withFile(ledgerFile, "r", undefined, async (handle) => {
+            // One byte more: the line must end where the marker says it does.
+            const bytes = Buffer.alloc(length! + 1)
+            const read = await handle.read(bytes, 0, bytes.length, offset!)
+            return read.bytesRead === bytes.length && bytes[length!] === 0x0a ? bytes.subarray(0, length!) : undefined
+          })
+        } catch {
+          return undefined
+        }
+      })
+
+    const carriedCritical = Effect.fnUntraced(function* (key: string) {
+      yield* normalizeTail(ledgerFile)
+      const located = yield* readLocated(key)
+      if (located !== undefined) {
+        const hit = carriedByLine(located, key)
+        if (Option.isSome(hit)) return hit
+      }
+      // A key that was never recorded is answered from the markers and the
+      // short unscanned stretch, without reading the journal.
+      if (!(yield* alreadyRecorded(key))) return Option.none<Schema.Json>()
+      const split = splitJournal(yield* readLedger(ledgerFile))
+      let offset = 0
+      for (const line of split.completeLines) {
+        const hit = carriedByLine(line, key)
+        if (Option.isSome(hit)) {
+          yield* locate(key, offset, line.length)
+          return hit
+        }
+        offset += line.length + 1
+      }
+      return Option.none<Schema.Json>()
+    })
+
+    const recordCarryingCritical = Effect.fnUntraced(function* (
+      entry: LedgerEntry & { readonly key: string },
+      payload: Schema.Json
+    ) {
+      const encoded = yield* Schema.encodeEffect(LedgerEntry)(entry).pipe(
+        Effect.mapError(
+          (cause) =>
+            new LedgerDecodeError({
+              path: ledgerFile,
+              line: 0,
+              reason: `cannot encode receipt: ${reasonOf(cause)}`
+            })
+        )
+      )
+      const line = Buffer.from(`${JSON.stringify(encoded).slice(0, -1)},"carried":${exactJsonText(payload)}}`, "utf8")
+      yield* normalizeTail(ledgerFile)
+      if (yield* alreadyRecorded(entry.key)) return false
+      // The one write. Everything after it is derived from the journal.
+      const offset = yield* appendDurably(ledgerFile, Buffer.concat([line, Buffer.from("\n")]))
+      yield* Effect.ignore(locate(entry.key, offset, line.length))
+      return true
+    })
+
+    const allCarriedCritical = Effect.fnUntraced(function* () {
+      yield* normalizeTail(ledgerFile)
+      return splitJournal(yield* readLedger(ledgerFile)).completeLines.flatMap((line) =>
+        Option.toArray(carriedByLine(line)))
+    })
+
+    const critical = <A>(effect: Effect.Effect<A, LedgerError>) =>
+      lock.withLock(Effect.uninterruptible(effect)).pipe(Semaphore.withPermit(localMutex))
+
+    const captures = CaptureJournal.of({
+      recordCarrying: (entry, payload) => critical(recordCarryingCritical(entry, payload)),
+      carried: (key) => critical(carriedCritical(key)),
+      allCarried: critical(allCarriedCritical())
+    })
+
+    return Context.make(CaptureJournal, captures).pipe(Context.add(FileLedger, FileLedger.of({
       // The descriptor must not be released while a non-cancellable Node I/O
       // promise still owns a journal transition. Waiting for the lease remains
       // interruptible; once admitted, the short durability transaction is not.
@@ -629,7 +773,7 @@ export const FileLedgerLive = Layer.effect(
       entries: lock
         .withLock(Effect.uninterruptible(entriesCritical()))
         .pipe(Semaphore.withPermit(localMutex))
-    })
+    })))
   })
 )
 

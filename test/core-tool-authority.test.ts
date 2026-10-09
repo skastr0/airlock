@@ -1,3 +1,4 @@
+import { memoryAdapters } from "./support/memory.ts"
 import { describe, expect, it } from "@effect/vitest"
 import { DateTime, Effect, Layer, Result, Schema } from "effect"
 import { defineAirlock } from "../src/core/airlock/Airlock.ts"
@@ -26,7 +27,7 @@ describe("core: durable tool execution authority", () => {
     const actual = handlersFor(box.kinds, { "http.get": (_input: unknown, context: ImplementContext<undefined>) => {
       seen.push(context.resources[0]!.binding.selector); return true
     } }, undefined)
-    const layer = box.layer.pipe(Layer.provideMerge(Layer.mergeAll(memoryOutboxStore(makeMemoryOutboxState()), memoryLedger(makeMemoryLedgerState()), WebCrypto.layer,
+    const layer = box.layer.pipe(Layer.provideMerge(Layer.mergeAll(memoryAdapters(), WebCrypto.layer,
       Layer.succeed(box.Dispatcher, { "http.get": (request) => {
         const execution = request.admission!.execution!, binding = execution.resources[0]!
         return actual["http.get"]({ ...request,
@@ -53,7 +54,7 @@ describe("core: durable tool execution authority", () => {
         toolGrants: [toolGrant(read, { id: "read", when: "now", where: { url: { within: ["https://example.test/private/*"] } } })],
         budget: { maxCalls: 3, maxInputBytes: 4096 } }) })
     const state = makeMemoryOutboxState()
-    const layer = airlock.layer(undefined).pipe(Layer.provideMerge(Layer.mergeAll(memoryOutboxStore(state), memoryLedger(makeMemoryLedgerState()), WebCrypto.layer)))
+    const layer = airlock.layer(undefined).pipe(Layer.provideMerge(Layer.mergeAll(memoryAdapters(state), WebCrypto.layer)))
     return Effect.gen(function* () {
       const guest = yield* airlock.guest({ runId: "binding", env: undefined })
       yield* guest.call("http.get", { url: "https://EXAMPLE.test/private/a" })
@@ -68,7 +69,7 @@ describe("core: durable tool execution authority", () => {
       const missing = defineAirlock({ contracts: [read], implement: { "http.get": () => true },
         policy: toolPolicy({ toolGrants: [toolGrant(read, { id: "read" })], budget: { maxCalls: 1, maxInputBytes: 4096 } }) })
       const invalid = yield* missing.guest({ runId: "missing", env: undefined }).pipe(Effect.result,
-        Effect.provide(missing.layer(undefined).pipe(Layer.provideMerge(Layer.mergeAll(memoryOutboxStore(makeMemoryOutboxState()), memoryLedger(makeMemoryLedgerState()), WebCrypto.layer)))))
+        Effect.provide(missing.layer(undefined).pipe(Layer.provideMerge(Layer.mergeAll(memoryAdapters(), WebCrypto.layer)))))
       expect(invalid).toMatchObject({ _tag: "Failure", failure: { code: "invalid-policy" } })
     }).pipe(Effect.provide(layer))
   })
@@ -78,7 +79,7 @@ describe("core: durable tool execution authority", () => {
     const airlock = defineAirlock({ contracts: [send], implement: { send: () => { calls.push("sent"); return true } },
       policy: toolPolicy({ toolGrants: [toolGrant(send, { id: "send" })], budget: { maxCalls: 3, maxInputBytes: 4096 } }) })
     const state = makeMemoryOutboxState()
-    const layer = airlock.layer(undefined).pipe(Layer.provideMerge(Layer.mergeAll(memoryOutboxStore(state), memoryLedger(makeMemoryLedgerState()), WebCrypto.layer)))
+    const layer = airlock.layer(undefined).pipe(Layer.provideMerge(Layer.mergeAll(memoryAdapters(state), WebCrypto.layer)))
     return Effect.gen(function* () {
       const guest = yield* airlock.guest({ runId: "request-authority", env: undefined })
       const receipt = yield* guest.call("send", { body: "private-content" })
@@ -115,7 +116,7 @@ describe("core: durable tool execution authority", () => {
       expect(context.held?.recoveryId).toBe("recovery")
       events.push("implemented"); return true
     } }, policy: toolPolicy({ toolGrants: [toolGrant(apply, { id: "write", when: "now" })], budget: { maxCalls: 1, maxInputBytes: 4096 } }) })
-    const layer = airlock.layer(undefined).pipe(Layer.provideMerge(Layer.mergeAll(memoryOutboxStore(makeMemoryOutboxState()), memoryLedger(makeMemoryLedgerState()), WebCrypto.layer)))
+    const layer = airlock.layer(undefined).pipe(Layer.provideMerge(Layer.mergeAll(memoryAdapters(), WebCrypto.layer)))
     return Effect.gen(function* () {
       const guest = yield* airlock.guest({ runId: "held", env: undefined })
       expect(yield* guest.call("write", { body: "content" })).toMatchObject({ state: "done", result: true, wayBack: { recoveryId: "recovery" } })

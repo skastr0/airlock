@@ -1,3 +1,4 @@
+import { memoryAdapters } from "./support/memory.ts"
 import { describe, expect, it } from "@effect/vitest"
 import { DateTime, Effect, Layer, Result, Schema } from "effect"
 import { TestClock } from "effect/testing"
@@ -30,7 +31,7 @@ describe("core: completed host recovery receipts", () => {
       implement: { write: () => { implemented++; return true } }, policy: toolPolicy({
         toolGrants: [toolGrant(write, { id: "write", when: "now", validUntil: DateTime.add(now, { seconds: 1 }) })],
         budget: { maxCalls: 2, maxInputBytes: 4096 } }) })
-    const layer = () => airlock.layer(env).pipe(Layer.provideMerge(Layer.mergeAll(memoryOutboxStore(state), memoryLedger(ledger), WebCrypto.layer)))
+    const layer = () => airlock.layer(env).pipe(Layer.provideMerge(Layer.mergeAll(memoryOutboxStore(state, ledger), memoryLedger(ledger), WebCrypto.layer)))
     yield* Effect.gen(function* () {
       const guest = yield* airlock.guest({ runId: "held-reference", env })
       yield* guest.call("write", { body: "private-before-image-canary" })
@@ -72,7 +73,7 @@ describe("core: completed host recovery receipts", () => {
         const guest = yield* airlock.guest({ runId: "invalid-reference", env: undefined })
         return yield* guest.call("write", { body: "value" })
       }).pipe(Effect.provide(airlock.layer(undefined).pipe(Layer.provideMerge(Layer.mergeAll(
-        memoryOutboxStore(makeMemoryOutboxState()), memoryLedger(makeMemoryLedgerState()), WebCrypto.layer)))))
+        memoryAdapters(), WebCrypto.layer)))))
       expect(result).toMatchObject({ state: "refused", refusal: { code: "refused" } })
       expect(implemented).toBe(0)
     }

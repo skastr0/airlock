@@ -1,3 +1,4 @@
+import { memoryAdapters } from "./support/memory.ts"
 import { describe, expect, it } from "@effect/vitest"
 import { Effect, Layer, Result, Schema } from "effect"
 import { defineAirlock } from "../src/core/airlock/Airlock.ts"
@@ -33,7 +34,7 @@ describe("core: declared exact wire requests", () => {
       return true
     } } })
     const state = makeMemoryOutboxState()
-    const layer = airlock.layer(undefined).pipe(Layer.provideMerge(Layer.mergeAll(memoryOutboxStore(state), memoryLedger(makeMemoryLedgerState()), WebCrypto.layer)))
+    const layer = airlock.layer(undefined).pipe(Layer.provideMerge(Layer.mergeAll(memoryAdapters(state), WebCrypto.layer)))
     return Effect.gen(function* () {
       const guest = yield* airlock.guest({ runId: "exact-wire", env: undefined })
       const staged = yield* guest.call("http.stage", { url: "https://example.test/admitted", body: "private-body-canary" })
@@ -54,7 +55,7 @@ describe("core: declared exact wire requests", () => {
     const contract = defineToolContract({ name: "http.stage", version: "1", effect: "request", input, output: Schema.Boolean, public: ["url"],
       resources: { url: { kind: "endpoint", rights: ["emit"] } }, wire: () => ({ endpoint: "url", method: "POST", headers: current.headers, body: current.body }) })
     const airlock = defineAirlock({ contracts: [contract], policy, implement: { "http.stage": () => { calls++; return true } } })
-    const layer = airlock.layer(undefined).pipe(Layer.provideMerge(Layer.mergeAll(memoryOutboxStore(makeMemoryOutboxState()), memoryLedger(makeMemoryLedgerState()), WebCrypto.layer)))
+    const layer = airlock.layer(undefined).pipe(Layer.provideMerge(Layer.mergeAll(memoryAdapters(), WebCrypto.layer)))
     return Effect.gen(function* () {
       const guest = yield* airlock.guest({ runId: "declaration-drift", env: undefined })
       const receipt = yield* guest.call("http.stage", { url: "https://example.test/admitted" })
@@ -90,6 +91,6 @@ describe("core: declared exact wire requests", () => {
     return Effect.gen(function* () {
       const guest = yield* airlock.guest({ runId: "no-wire", env: undefined })
       yield* guest.call("pure.read", { id: "value" })
-    }).pipe(Effect.provide(airlock.layer(undefined).pipe(Layer.provideMerge(Layer.mergeAll(memoryOutboxStore(makeMemoryOutboxState()), memoryLedger(makeMemoryLedgerState()), WebCrypto.layer)))))
+    }).pipe(Effect.provide(airlock.layer(undefined).pipe(Layer.provideMerge(Layer.mergeAll(memoryAdapters(), WebCrypto.layer)))))
   })
 })

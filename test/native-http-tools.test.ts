@@ -78,12 +78,13 @@ const call = <Name extends "http.get" | "http.stage">(
         budget: { maxCalls: 10, maxInputBytes: 100_000 }
       })
     })
+    const ledger = makeMemoryLedgerState()
     yield* Effect.gen(function* () {
       const guest = yield* airlock.guest({ runId: `run-${crypto.randomUUID()}`, env: undefined })
       const result = yield* guest.call(kind, input)
       if (result.state === "staged") yield* (yield* airlock.supervisor(undefined)).commit(result.id)
     }).pipe(Effect.provide(airlock.layer(undefined).pipe(Layer.provideMerge(Layer.mergeAll(
-      memoryOutboxStore(makeMemoryOutboxState()), memoryLedger(makeMemoryLedgerState()), WebCrypto.layer
+      memoryOutboxStore(makeMemoryOutboxState(), ledger), memoryLedger(ledger), WebCrypto.layer
     )))), Effect.result)
     return answer
   })

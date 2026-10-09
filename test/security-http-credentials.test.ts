@@ -25,10 +25,10 @@ describe("security: standard HTTP credential aliases", () => {
         key: IdempotencyKey.make("sas-1"), intent: { kind: "http", dispatch: request("sig") }, holdMillis: 0
       }))
     }).pipe(Effect.provide(http.layer.pipe(Layer.provideMerge(Layer.mergeAll(
-      memoryOutboxStore(storeState), memoryLedger(ledgerState), WebCrypto.layer,
+      memoryOutboxStore(storeState, ledgerState), memoryLedger(ledgerState), WebCrypto.layer,
       Layer.succeed(http.Dispatcher, { http: () => Effect.die("staging must not dispatch") })
     )))))
-    const records = yield* Effect.flatMap(OutboxStore, (store) => store.list()).pipe(Effect.provide(memoryOutboxStore(storeState)))
+    const records = yield* Effect.flatMap(OutboxStore, (store) => store.list()).pipe(Effect.provide(memoryOutboxStore(storeState, ledgerState)))
     const entries = yield* Effect.flatMap(Ledger, (ledger) => ledger.entries).pipe(Effect.provide(memoryLedger(ledgerState)))
     expect({
       state: outcome._tag, records: records.length, entries: entries.length,

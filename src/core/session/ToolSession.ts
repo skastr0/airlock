@@ -15,7 +15,7 @@ import { type ToolHost, ResourceRefused } from "../contract/ToolHost.ts"
 import { loadResourcePolicy } from "../admission/ResourcePolicy.ts"
 import { prepareWire } from "../contract/Wire.ts"
 import type { Done, Refused, Staged } from "../contract/Receipt.ts"
-import type { OutboxDefinition, OutboxOf, PerformError, StageError } from "../outbox/Outbox.ts"
+import type { OutboxDefinition, OutboxOf, CaptureError, CaptureTag, PerformError, StageError } from "../outbox/Outbox.ts"
 import {
   DispatchProvenance,
   EmissionAdmission,
@@ -73,6 +73,7 @@ export class ToolGrantExpired extends Schema.TaggedError<ToolGrantExpired>()("To
 }) {}
 
 export type ToolCallError =
+  | CaptureError
   | SessionBudgetExceeded
   | ToolGrantExpired
   | DigestUnavailable
@@ -236,6 +237,12 @@ export const openToolSession = <Contracts extends ToolContracts, Granted extends
           } })
         }
 
+        if (decision._tag === "Now" && contract.effect === "capture") {
+          return yield* service.capture({ key, intent: request.intent as { kind: CaptureTag<Contracts>; dispatch: any }, admission: {
+            policyDigest, grantIds, execution: { ...request.admission.execution!, effect: "capture", when: "now",
+              retention: decision.retention ?? "digest" }
+          } })
+        }
         if (decision._tag === "Now") {
           const performed = yield* service.perform(
             request,

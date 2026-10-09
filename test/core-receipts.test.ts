@@ -1,3 +1,4 @@
+import { memoryAdapters } from "./support/memory.ts"
 import { describe, expect, it } from "@effect/vitest"
 import { DateTime, Effect, Layer, Result, Schema } from "effect"
 import { defineAirlock } from "../src/core/airlock/Airlock.ts"
@@ -11,7 +12,7 @@ import { makeMemoryLedgerState, makeMemoryOutboxState, memoryLedger, memoryOutbo
 const read = defineToolContract({ name: "read", version: "1", effect: "capture", input: Schema.Struct({ id: Schema.String }),
   public: ["id"], output: Schema.NumberFromString })
 const send = defineToolContract({ name: "send", version: "1", effect: "request", input: Schema.Struct({ text: Schema.String }), output: Schema.Boolean })
-const adapters = () => Layer.mergeAll(memoryOutboxStore(makeMemoryOutboxState()), memoryLedger(makeMemoryLedgerState()), WebCrypto.layer)
+const adapters = () => Layer.mergeAll(memoryAdapters(), WebCrypto.layer)
 
 describe("core: program call receipts", () => {
   it.effect("returns the decoded result only under done.result, and never reveals a committed request result on replay", () => {
@@ -49,7 +50,7 @@ describe("core: program call receipts", () => {
       expect(fault).toMatchObject({ _tag: "Failure", failure: { code: "budget-exceeded" } })
       expect(state.records.size).toBe(0)
       expect(calls).toBe(0)
-    }).pipe(Effect.provide(airlock.layer(undefined).pipe(Layer.provideMerge(Layer.mergeAll(memoryOutboxStore(state), memoryLedger(makeMemoryLedgerState()), WebCrypto.layer)))))
+    }).pipe(Effect.provide(airlock.layer(undefined).pipe(Layer.provideMerge(Layer.mergeAll(memoryAdapters(state), WebCrypto.layer)))))
   })
 
   it.effect("terminates on an expired grant instead of handing the program a refusal", () => Effect.gen(function* () {

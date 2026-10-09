@@ -68,7 +68,7 @@ describe("core: the HTTP kind holds no credentials", () => {
       const layer = http.layer.pipe(
         Layer.provideMerge(
           Layer.mergeAll(
-            memoryOutboxStore(outboxState),
+            memoryOutboxStore(outboxState, ledgerState),
             memoryLedger(ledgerState),
             WebCrypto.layer,
             Layer.succeed(http.Dispatcher, { http: () => Effect.die("a refused request is never dispatched") })
@@ -89,7 +89,7 @@ describe("core: the HTTP kind holds no credentials", () => {
       expect(failure).toMatchObject({ _tag: "InvalidIntent", kind: "http", field: "headers.authorization" })
 
       const stored = yield* Effect.flatMap(OutboxStore, (store) => store.list()).pipe(
-        Effect.provide(memoryOutboxStore(outboxState))
+        Effect.provide(memoryOutboxStore(outboxState, ledgerState))
       )
       const entries = yield* Effect.flatMap(Ledger, (ledger) => ledger.entries).pipe(
         Effect.provide(memoryLedger(ledgerState))

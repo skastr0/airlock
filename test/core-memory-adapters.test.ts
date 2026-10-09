@@ -20,7 +20,8 @@ outboxStoreConformance(
   "in-memory reference adapter",
   Effect.sync(() => {
     const state = makeMemoryOutboxState()
-    return { store: memoryOutboxStore(state), ...memoryOutboxFaults(state) }
+    const ledger = makeMemoryLedgerState()
+    return { store: memoryOutboxStore(state, ledger), ledger: memoryLedger(ledger), ...memoryOutboxFaults(state) }
   })
 )
 
@@ -35,9 +36,10 @@ outboxConformance(
   "in-memory reference adapters",
   Effect.sync(() => {
     const state = makeMemoryOutboxState()
+    const ledger = makeMemoryLedgerState()
     return {
-      store: memoryOutboxStore(state),
-      ledger: memoryLedger(makeMemoryLedgerState()),
+      store: memoryOutboxStore(state, ledger),
+      ledger: memoryLedger(ledger),
       crypto: WebCrypto.layer,
       ...memoryOutboxFaults(state)
     }
@@ -47,10 +49,13 @@ outboxConformance(
 guestRunnerConformance(
   runner,
   "Airlock programs over in-memory adapters",
-  Effect.sync(() => ({
-    store: memoryOutboxStore(makeMemoryOutboxState()),
-    ledger: memoryLedger(makeMemoryLedgerState()),
+  Effect.sync(() => {
+    const ledger = makeMemoryLedgerState()
+    return {
+    store: memoryOutboxStore(makeMemoryOutboxState(), ledger),
+    ledger: memoryLedger(ledger),
     crypto: WebCrypto.layer,
     runner: programRunner
-  }))
+    }
+  })
 )
