@@ -52,7 +52,7 @@ const world = <A, E>(body: (args: {
         hold: services.hold,
         calls: services.calls,
         applies: fileApplies({
-          fs: services.native,
+          files: services.native,
           calls: services.calls,
           artifact: (id) =>
             id === "artifact-1" ? Effect.succeed(new TextEncoder().encode("from artifact")) : Effect.fail("unknown artifact")

@@ -31,12 +31,12 @@ export type FileApplies = {
 }
 
 export const fileApplies = (services: {
-  readonly fs: NativeFileSystem["Service"]
+  readonly files: NativeFileSystem["Service"]
   readonly calls: HeldCalls["Service"]
   /** The bytes of an artifact of this run. Artifacts are host state. */
   readonly artifact: (id: string) => Effect.Effect<Uint8Array, unknown>
 }): FileApplies => {
-  const { fs, calls } = services
+  const { files, calls } = services
   const held = <A, B>(
     tool: string,
     reference: HeldCallReference,
@@ -52,8 +52,8 @@ export const fileApplies = (services: {
         "file.write",
         reference,
         input.content !== undefined
-          ? fs.writeText(input.path, input.content)
-          : Effect.flatMap(services.artifact(input.sourceArtifact!), (bytes) => fs.writeBytes(input.path, bytes)),
+          ? files.writeText(input.path, input.content)
+          : Effect.flatMap(services.artifact(input.sourceArtifact!), (bytes) => files.writeBytes(input.path, bytes)),
         (written) => ({
           act_id: ActId.make(written.receipt.id),
           target: written.receipt.target,
@@ -62,13 +62,13 @@ export const fileApplies = (services: {
         })
       ),
     "file.remove": (input, reference) =>
-      held("file.remove", reference, fs.remove(input.path), (removed) => ({
+      held("file.remove", reference, files.remove(input.path), (removed) => ({
         act_id: removed.id,
         target: removed.target,
         kind: removed.kind
       })),
     "file.copy": (input, reference) =>
-      held("file.copy", reference, fs.copy(input.source, input.destination), (copied) => ({
+      held("file.copy", reference, files.copy(input.source, input.destination), (copied) => ({
         act_id: ActId.make(copied.receipt.id),
         source: copied.receipt.source,
         target: copied.receipt.target,
@@ -76,14 +76,14 @@ export const fileApplies = (services: {
         bytes: copied.bytes
       })),
     "file.move": (input, reference) =>
-      held("file.move", reference, fs.move(input.source, input.destination), (moved) => ({
+      held("file.move", reference, files.move(input.source, input.destination), (moved) => ({
         install_act_id: ActId.make(moved.install.receipt.id),
         remove_act_id: ActId.make(moved.sourceRemoval.id),
         source: moved.sourceRemoval.target,
         target: moved.install.receipt.target
       })),
     "file.mkdir": (input, reference) =>
-      held("file.mkdir", reference, fs.mkdir(input.path, { parents: input.parents }), (made) => ({
+      held("file.mkdir", reference, files.mkdir(input.path, { parents: input.parents }), (made) => ({
         path: made.path,
         act_ids: made.installs.map((install) => ActId.make(install.receipt.id))
       }))
