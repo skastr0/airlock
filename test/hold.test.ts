@@ -87,6 +87,24 @@ describe("Hold — finished acts leave the scanned directory", () => {
   )
 })
 
+describe("Hold — reaping an act the same listing just settled", () => {
+  it.effect("reaps an undone act once, without a second process in between", () =>
+    world(({ fs, hold, path, tmp }) =>
+      Effect.gen(function* () {
+        const target = path.join(tmp, "undone-then-reaped.txt")
+        yield* fs.writeFileString(target, "before")
+        const act = yield* hold.overwrite(target, "after")
+        yield* hold.undo(act.id)
+        // The reaper's own listing moves the finished act to hold/settled and
+        // then lists hold/settled: the act must be reaped once, not twice.
+        const report = yield* hold.reap(0)
+        expect(report.reaped.filter((id) => id === act.id)).toHaveLength(1)
+        expect(yield* fs.readFileString(target)).toBe("before")
+      })
+    )
+  )
+})
+
 describe("Hold — undoable mutations", () => {
   it.effect("remove then undo restores the exact bytes", () =>
     world(({ fs, hold, path, tmp }) =>

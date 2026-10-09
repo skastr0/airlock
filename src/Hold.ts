@@ -1726,7 +1726,11 @@ const make = Effect.gen(function* () {
   const reap = Effect.fn("Hold.reap")(function* (olderThanMillis: number, retirement?: HoldJournal) {
     const now = yield* DateTime.now
     const cutoff = DateTime.subtract(now, { milliseconds: olderThanMillis })
-    const all = retirement === undefined ? [...(yield* listJournals), ...(yield* settledJournals)] : []
+    // Listing moves a finished act into `settled/`, where the second listing
+    // finds it again; one act is one journal here.
+    const seen = new Set<string>()
+    const all = (retirement === undefined ? [...(yield* listJournals), ...(yield* settledJournals)] : [])
+      .filter((journal) => !seen.has(journal.manifest.id) && seen.add(journal.manifest.id))
     const expired: HoldJournal[] = []
     if (retirement !== undefined) expired.push(retirement)
     for (const journal of all) {
