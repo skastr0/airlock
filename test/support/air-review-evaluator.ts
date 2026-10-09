@@ -1,5 +1,6 @@
 import { Effect, Result, Schema } from "effect"
-import { attestValue, decodeValue, deriveValue, hasRefinement, labeledValue, projectValue, type TrackedValue } from "../../src/core/contract/Decoder.ts"
+import { addInfluence, attestValue, decodeValue, deriveValue, hasRefinement, labeledValue, projectValue, type TrackedValue } from "../../src/core/contract/Decoder.ts"
+import { createRoleWitnessIssuer, isRoleWitnessIssuer, type RoleWitness, type RoleWitnessIssuer } from "../../src/core/contract/RoleWitness.ts"
 import { combine, InformationLabel } from "../../src/core/labels/Labels.ts"
 import type { Expression, Span, Statement } from "../../src/core/language/ast.ts"
 import { DurationSchema, SpanSchema } from "../../src/core/language/ast.ts"
@@ -12,14 +13,18 @@ export class PrototypeStop extends Schema.TaggedError<PrototypeStop>()("Prototyp
   reason: Schema.Literals(["dynamic-type-error", "host-result", "budget", "out-of-plan", "refinement", "value-limit", "arithmetic_failure", "index_out_of_range", "range_bound", "assert_failed"]), span: SpanSchema
 }) {}
 export interface ObservedRoles { readonly data: InformationLabel; readonly control: InformationLabel }
+export interface ObservedArgument extends ObservedRoles { readonly value: TrackedValue; readonly witness: RoleWitness }
 export interface CallObservation {
   readonly tool: string
   readonly span: Span
-  readonly fields: Readonly<Record<string, ObservedRoles>>
-  readonly argument: ObservedRoles
+  readonly fields: Readonly<Record<string, ObservedArgument>>
+  readonly argument: ObservedArgument
   readonly control: InformationLabel
+  readonly pc: TrackedValue
 }
 export interface PrototypeHost<E = never, R = never> {
+  readonly roleIssuer?: RoleWitnessIssuer
+  readonly beforeCall?: (call: CallObservation) => Effect.Effect<unknown, E, R>
   readonly observe?: (call: CallObservation) => void
   readonly resolve: (tool: string, input: Schema.Json, control: InformationLabel) => Effect.Effect<Schema.Json, E, R>
 }
@@ -28,6 +33,7 @@ type Scope = ReadonlyMap<string, Box>
 const literalLabel = new InformationLabel({ confidentiality: "public", integrity: "runtime", provenance: [] })
 const durationModel = modelSchema(DurationSchema, { identity: "language.Duration", side: "decoded" })
 const empty = () => labeledValue(false, literalLabel)
+const usedRoleIssuers = new WeakSet<RoleWitnessIssuer>()
 const stop: (reason: PrototypeStop["reason"], span: Span) => never = (reason, span) => { throw new PrototypeStop({ reason, span }) }
 
 /** Dynamic checks are deliberately retained, even after successful review. */
@@ -35,7 +41,22 @@ export const runReviewedPrototype = <E, R>(review: Review, host: PrototypeHost<E
   const callCounts = new Map<string, number>()
   let iterations = 0, fuel = 20_000
   const effect = <A>(body: () => A, span: Span): Effect.Effect<A, PrototypeStop> => Effect.try({ try: body, catch: (error) => error instanceof PrototypeStop ? error : new PrototypeStop({ reason: "dynamic-type-error", span }) })
+  const roleIssuer = yield* effect(() => {
+    const issuer = host.roleIssuer ?? createRoleWitnessIssuer("prototype")
+    if (!isRoleWitnessIssuer(issuer) || usedRoleIssuers.has(issuer)) stop("out-of-plan", review.program.span)
+    usedRoleIssuers.add(issuer)
+    return issuer
+  }, review.program.span)
   const labelOf = (box: Box): InformationLabel => combine(box.data, box.control)
+  const observed = (box: Box, span: Span): ObservedArgument => {
+    const aggregate = addInfluence(box.tracked, labelOf(box))
+    if (Result.isFailure(aggregate)) stop("out-of-plan", span)
+    const witness = roleIssuer.issue(aggregate.success, { data: box.data, selection: literalLabel, control: box.control })
+    if (Result.isFailure(witness)) stop("out-of-plan", span)
+    const roles = roleIssuer.inspect(aggregate.success, witness.success)
+    if (roles === undefined) stop("out-of-plan", span)
+    return Object.freeze({ value: aggregate.success, witness: witness.success, data: roles.data, control: roles.control })
+  }
   // Selection changes influence, not the selected JSON or its exact-value proof.
   const influenced = (box: Box, ...parents: readonly Box[]): Box => {
     const control = combine(box.control, ...parents.map(labelOf))
@@ -274,10 +295,12 @@ export const runReviewedPrototype = <E, R>(review: Review, host: PrototypeHost<E
           }
           return { name, tool, input }
         }, expression.span)
-        yield* effect(() => host.observe?.({
-          tool: selected.name, span: expression.span, argument: { data: argument.data, control: argument.control }, control: pc.label,
-          fields: Object.fromEntries([...argument.children].filter(([field]) => typeof field === "string" && selected.input !== null && typeof selected.input === "object" && Object.hasOwn(selected.input, field)).map(([field, child]) => [field, { data: child.data, control: child.control }]))
+        const observation = yield* effect((): CallObservation => Object.freeze({
+          tool: selected.name, span: expression.span, argument: observed(argument, expression.span), control: pc.label, pc,
+          fields: Object.freeze(Object.fromEntries([...argument.children].filter(([field]) => typeof field === "string" && selected.input !== null && typeof selected.input === "object" && Object.hasOwn(selected.input, field)).map(([field, child]) => [field, observed(child, expression.span)])))
         }), expression.span)
+        yield* effect(() => host.observe?.(observation), expression.span)
+        if (host.beforeCall !== undefined) yield* Effect.suspend(() => host.beforeCall!(observation)).pipe(Effect.catchCause(() => Effect.fail(new PrototypeStop({ reason: "out-of-plan", span: expression.span }))))
         const response = yield* host.resolve(selected.name, selected.input, combine(pc.label, labelOf(argument))).pipe(Effect.catchCause(() => Effect.fail(new PrototypeStop({ reason: "host-result", span: expression.span }))))
         return yield* effect(() => {
           const receipt = Schema.decodeUnknownResult(Receipt, { onExcessProperty: "error" })(response)

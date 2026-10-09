@@ -37,6 +37,12 @@ control to every descendant, decoder reconstruction preserves both roles, and
 capture results retain input data and input/PC control separately. The aggregate
 origins field is diagnostic only; policy consumers must use the explicit roles.
 Argument-local control is combined with the call PC for outbound policy checking.
+Every execution uses a fresh authenticated role issuer. Observer arguments carry
+the exact frozen tracked value and a witness bound to that value and issuer;
+selection influence raises its aggregate label monotonically while retaining its
+exact decoder proof. The evaluator rejects copied or reused execution issuers.
+An effectful beforeCall hook runs before resolution and stops the run on refusal.
+The observer is empirical evidence; the hook enables an actual test-only guard.
 
 Typed host bindings decode before execution, contract flow.provides validates
 unchanged decoded values, and nominal checks follow exact trusted Schema identity

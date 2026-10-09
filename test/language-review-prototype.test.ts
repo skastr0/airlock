@@ -3,7 +3,8 @@ import { Effect, Schema } from "effect"
 import { DurationSchema } from "../src/core/language/ast.ts"
 import { InformationLabel } from "../src/core/labels/Labels.ts"
 import { defineToolContract } from "../src/core/contract/ToolContract.ts"
-import { defineDecoder } from "../src/core/contract/Decoder.ts"
+import { defineDecoder, hasRefinement } from "../src/core/contract/Decoder.ts"
+import { createRoleWitnessIssuer } from "../src/core/contract/RoleWitness.ts"
 import { decoderIdentity, reviewPrototype, ReviewError, type Review } from "./support/air-review.ts"
 import { runReviewedPrototype, type CallObservation, type PrototypeHost } from "./support/air-review-evaluator.ts"
 import { CompanyRecipient, environment, triage } from "./support/air-review-fixtures.ts"
@@ -343,6 +344,48 @@ describe("current-syntax type checker prototype", () => {
     expect(call.arguments.dataOrigins.some((origin) => origin.endsWith(".result.other"))).toBe(true)
     const variants: readonly Schema.Json[] = [{ tag: "a", value: "first" }, { tag: "b", other: "second" }]
     for (const value of variants) expect(yield* runReviewedPrototype(review, { observe: assertObservedDependencies(review), resolve: (name) => Effect.succeed(name === "variant.read" ? done(value) : done(true)) })).toBe(true)
+  }))
+
+  it.effect("issues exact role witnesses without lowering selection secrecy or losing decoder proof", () => Effect.gen(function* () {
+    const choice = defineToolContract({ name: "choice.read", version: "1", effect: "capture", input: Schema.Struct({ id: Schema.String }), output: Schema.Struct({ index: Schema.Number }) })
+    const env = { ...environment, tools: { ...environment.tools, "choice.read": { contract: choice } }, granted: new Set([...environment.granted, "choice.read"]) }
+    const review = yield* reviewPrototype('let r = choice.read({id:"one"}); if r.state == "done" { let selected = ["a@example.com","b@example.com"][r.result.index]; let checked = decode(schema.companyRecipient,selected); if checked.state == "ok" { mail.send({to:checked.value,subject:"hi",body:"body"}) } }; return true', env)
+    const issuer = createRoleWitnessIssuer("same-id")
+    let guarded = 0, handled = 0
+    const host: PrototypeHost = { roleIssuer: issuer, observe: assertObservedDependencies(review), beforeCall: (call) => Effect.sync(() => {
+      guarded++
+      expect(issuer.inspect(call.argument.value, call.argument.witness)).toBeDefined()
+      for (const field of Object.values(call.fields)) {
+        const roles = issuer.inspect(field.value, field.witness)!
+        expect(roles.data).toEqual(field.data)
+        expect(roles.control).toEqual(field.control)
+      }
+      if (call.tool === "mail.send") {
+        const to = call.fields.to!
+        expect(to.data.confidentiality).toBe("public")
+        expect(to.control.confidentiality).toBe("private")
+        expect(to.value.label.confidentiality).toBe("private")
+        expect(hasRefinement(to.value, CompanyRecipient)).toBe(true)
+      }
+    }), resolve: (name) => Effect.sync(() => { handled++; return name === "choice.read" ? done({ index: 0 }) : done({ messageId: "sent" }) }) }
+    expect(yield* runReviewedPrototype(review, host)).toBe(true)
+    expect({ guarded, handled }).toEqual({ guarded: 2, handled: 2 })
+    const replay = yield* runReviewedPrototype(review, host).pipe(Effect.flip)
+    expect(replay.reason).toBe("out-of-plan")
+    expect(handled).toBe(2)
+  }))
+
+  it.effect("awaits guard refusal before any handler and rejects a copied issuer", () => Effect.gen(function* () {
+    const review = yield* reviewPrototype('return http.get({url:"https://example.com"})', environment)
+    let handled = 0
+    const resolve = () => Effect.sync(() => { handled++; return done({ text: "ok" }) })
+    const denied = yield* runReviewedPrototype(review, { beforeCall: () => Effect.fail("private policy text"), resolve }).pipe(Effect.flip)
+    expect(denied.reason).toBe("out-of-plan")
+    expect(JSON.stringify(denied)).not.toContain("private policy text")
+    const copied = { ...createRoleWitnessIssuer("copied") }
+    const invalid = yield* runReviewedPrototype(review, { roleIssuer: copied, resolve }).pipe(Effect.flip)
+    expect(invalid.reason).toBe("out-of-plan")
+    expect(handled).toBe(0)
   }))
 })
 
