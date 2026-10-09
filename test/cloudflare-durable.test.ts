@@ -284,6 +284,40 @@ describe("cloud: one program at a time", () => {
       .toEqual({ ok: false, reason: "invalid_code", toolCalls: 0 })
     expect(await running).toMatchObject({ ok: true })
   }, 30_000)
+
+  it("replays duplicate runs in the line without repeating their capture", async () => {
+    const remote = () => call<ReadonlyArray<{ tool: string; detail: string }>>(workerd, "/airlock/remote")
+    const before = (await remote()).length
+    const request = { runId: "same-run", source: slow }
+    const outcomes = await Promise.all(Array.from({ length: 8 }, () =>
+      call<Outcome>(workerd, "/queued/run?object=duplicate-line", request)))
+    const accepted = outcomes.filter((outcome) => outcome.ok === true)
+    expect(accepted).toHaveLength(2)
+    expect(accepted[0]).toEqual(accepted[1])
+    expect(outcomes.filter((outcome) => outcome.failed).map((outcome) => outcome.code))
+      .toEqual(Array.from({ length: 6 }, () => "busy"))
+    expect((await remote()).slice(before).map((entry) => entry.detail)).toEqual(["slow started", "slow"])
+    expect(await call<Outcome>(workerd, "/queued/run?object=duplicate-line", request)).toEqual(accepted[0])
+    expect((await remote()).length).toBe(before + 2)
+  }, 30_000)
+
+  it("releases capacity after an admitted program ends in a fault", async () => {
+    const remote = () => call<ReadonlyArray<{ tool: string; detail: string }>>(workerd, "/airlock/remote")
+    const before = (await remote()).length
+    const running = call<Outcome>(workerd, "/queued/run?object=fault-line", { runId: "running", source: slow })
+    await expect.poll(async () => (await remote()).slice(before).map((entry) => entry.detail), {
+      timeout: 2_000,
+      interval: 10
+    }).toContain("slow started")
+    const fault = call<Outcome>(workerd, "/queued/run?object=fault-line", { runId: "fault", source: "assert false" })
+    expect(await running).toMatchObject({ ok: true })
+    expect(await fault).toMatchObject({ ok: false, reason: "assert_failed", toolCalls: 0 })
+    expect(await call<Outcome>(workerd, "/queued/run?object=fault-line", { runId: "after", source: slow }))
+      .toMatchObject({ ok: true })
+    expect((await remote()).slice(before).map((entry) => entry.detail)).toEqual([
+      "slow started", "slow", "slow started", "slow"
+    ])
+  }, 30_000)
 })
 
 describe("cloud: the recovery alarm", () => {
