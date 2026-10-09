@@ -37,7 +37,7 @@ describe("core: declared exact wire requests", () => {
     return Effect.gen(function* () {
       const guest = yield* airlock.guest({ runId: "exact-wire", env: undefined })
       const staged = yield* guest.call("http.stage", { url: "https://example.test/admitted", body: "private-body-canary" })
-      const supervisor = yield* airlock.supervisor
+      const supervisor = yield* airlock.supervisor(undefined)
       expect(seen).toEqual([])
       const stored = [...state.records.values()][0]!
       expect(stored.admission?.execution?.wire?.digest).toMatch(/^sha256:/)
@@ -60,7 +60,7 @@ describe("core: declared exact wire requests", () => {
       const receipt = yield* guest.call("http.stage", { url: "https://example.test/admitted" })
       current.headers["x-checked"] = "injected"
       current.body = "unreviewed body"
-      const supervisor = yield* airlock.supervisor
+      const supervisor = yield* airlock.supervisor(undefined)
       const rejected = yield* supervisor.commit((receipt as { id: string }).id).pipe(Effect.result)
       expect(Result.isFailure(rejected)).toBe(true)
       expect(calls).toBe(0)

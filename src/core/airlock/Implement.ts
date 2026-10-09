@@ -3,7 +3,7 @@ import { canonicalJson } from "../Canonical.ts"
 import type { ToolContract } from "../contract/ToolContract.ts"
 import type { ResourceField } from "../contract/Resource.ts"
 import { portableToolHost } from "../contract/PortableToolHost.ts"
-import { type BoundResource, type HeldReference, type HostParameters, type ToolHost } from "../contract/ToolHost.ts"
+import { type BoundResource, HeldReference, type HostParameters, type ToolHost } from "../contract/ToolHost.ts"
 import {
   type Delivery,
   DispatchFailed,
@@ -144,11 +144,16 @@ export const handlersFor = <Contracts extends ToolContracts, Env>(
       if (execution?.when === "now" && (contract.effect === "apply" || contract.effect === "invoke") && !reversible) {
         return yield* new DispatchRefused({ reason: "now has no durable way back" })
       }
-      const held = !reversible ? undefined : execution === undefined
+      const prepared = !reversible ? undefined : execution === undefined
         ? undefined : yield* host.recovery!.prepare({
           callId: request.permit.emissionId, runId: execution.runId, tool: name, version: contract.version,
           inputDigest: request.permit.dispatchDigest, resources: evidence, host: execution.host ?? {}
         }).pipe(Effect.mapError(() => new DispatchRefused({ reason: "durable recovery could not be prepared" })))
+      const held = prepared === undefined ? undefined : yield* Schema.decodeUnknownEffect(Schema.toType(HeldReference), { onExcessProperty: "error" })(prepared).pipe(
+        Effect.mapError(() => new DispatchRefused({ reason: "host recovery reference is invalid" })))
+      if (held !== undefined && (held.callId !== request.permit.emissionId || DateTime.toEpochMillis(held.heldUntil) <= clock.currentTimeMillisUnsafe())) {
+        return yield* new DispatchRefused({ reason: "host recovery reference does not hold this call" })
+      }
       if (execution?.when === "now" && (contract.effect === "apply" || contract.effect === "invoke") && held === undefined) {
         return yield* new DispatchRefused({ reason: "now recovery was not durably prepared" })
       }
@@ -182,7 +187,8 @@ export const handlersFor = <Contracts extends ToolContracts, Env>(
         Effect.flatMap((result) =>
           isRefused(result)
             ? Effect.fail(new DispatchRefused({ reason: result.reason }))
-            : Effect.succeed({ outcome: result, response: encoder.encode(""), truncated: false })
+            : Effect.succeed({ outcome: result, response: encoder.encode(""), truncated: false,
+              ...(held === undefined ? {} : { held }) })
         )
       )
     })

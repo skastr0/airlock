@@ -9,7 +9,7 @@ import {
 import { Ledger, LedgerEntry, type LedgerFailed } from "../ledger/Ledger.ts"
 import { describeWire, type WireMaterial, type WireRequest } from "../contract/Wire.ts"
 import type { ToolContract } from "../contract/ToolContract.ts"
-import type { BoundResource } from "../contract/ToolHost.ts"
+import { type BoundResource, HeldReference } from "../contract/ToolHost.ts"
 import type { DispatchHandlers } from "./Dispatcher.ts"
 import type {
   ClosedUnderCompensation,
@@ -922,6 +922,13 @@ export const defineOutbox = <const Kinds extends IntentKinds>(
           if (delivery.response.byteLength > RESPONSE_LIMIT_BYTES) {
             return yield* settleUncertain(id, "dispatch-failed")
           }
+          const held = delivery.held === undefined ? undefined : yield* Schema.encodeEffect(Schema.fromJsonString(HeldReference))(delivery.held).pipe(
+            Effect.flatMap(Schema.decodeUnknownEffect(Schema.fromJsonString(HeldReference))),
+            Effect.catch(() => settleUncertain(id, "dispatch-failed")))
+          if ((held !== undefined && held.callId !== id) || (staged.admission?.execution?.when === "now" &&
+            (staged.admission.execution.effect === "apply" || staged.admission.execution.effect === "invoke") && held === undefined)) {
+            return yield* settleUncertain(id, "dispatch-failed")
+          }
 
           const completedAt = yield* DateTime.now
           const committed = yield* Schema.encodeEffect(kind.outcome)(delivery.outcome).pipe(
@@ -935,7 +942,8 @@ export const defineOutbox = <const Kinds extends IntentKinds>(
                   limitBytes: RESPONSE_LIMIT_BYTES
                 }),
                 completedAt,
-                response: delivery.response
+                response: delivery.response,
+                ...(held === undefined ? {} : { held })
               })
             ),
             Effect.catch(() => settleUncertain(id, "persistence-failed-after-dispatch"))

@@ -93,7 +93,7 @@ describe("core: defineAirlock", () => {
       const committed = yield* run(env, Effect.gen(function* () {
         const guest = yield* airlock.guest({ runId: "run-1", env })
         const staged = yield* guest.call("mail.send", { to: "ada@example.com", subject: "hi", body: "text" })
-        const supervisor = yield* airlock.supervisor
+        const supervisor = yield* airlock.supervisor(env)
         const pending = yield* supervisor.pending
         const id = "staged" in (staged as object) ? (staged as { id: string }).id : ""
         return {
@@ -145,7 +145,7 @@ describe("core: defineAirlock", () => {
         return run(env, Effect.gen(function* () {
           const guest = yield* airlock.guest({ runId: "run-1", env })
           const staged = yield* guest.call("mail.send", { to: "ada@example.com", subject: "hi", body: "text" })
-          const supervisor = yield* airlock.supervisor
+          const supervisor = yield* airlock.supervisor(env)
           const id = (staged as { id: string }).id
           const failure = yield* Effect.flip(supervisor.commit(id))
           return { failure, emission: yield* supervisor.inspect(id) }

@@ -1,6 +1,6 @@
 import { Result, Schema } from "effect"
 import { Sha256Digest } from "../Canonical.ts"
-import { GrantWhen, HostParameters, ResourceBinding } from "../contract/ToolHost.ts"
+import { GrantWhen, HeldReference, HostParameters, ResourceBinding } from "../contract/ToolHost.ts"
 import { PlanEffect } from "../plan/Plan.ts"
 import { WireAuthority } from "../contract/Wire.ts"
 import type { ActiveState, EmissionState, Next } from "./Lifecycle.ts"
@@ -154,6 +154,7 @@ export class CommittedEmission extends Schema.Class<CommittedEmission>("Committe
   /** The kind's outcome, encoded. */
   outcome: Schema.Json,
   capture: ResponseCapture,
+  held: Schema.optionalKey(HeldReference),
   completedAt: Schema.DateTimeUtcFromString
 }) {}
 
@@ -200,7 +201,7 @@ export interface Arrivals {
   readonly committing: Pick<CommittingEmission, "state" | "provenance" | "committingAt">
   readonly cancelled: Pick<CancelledEmission, "state" | "cancelledAt">
   readonly committed:
-    & Pick<CommittedEmission, "state" | "outcome" | "capture" | "completedAt">
+    & Pick<CommittedEmission, "state" | "outcome" | "capture" | "completedAt" | "held">
     & { readonly response: Uint8Array }
   readonly uncertain: Pick<UncertainEmission, "state" | "reason" | "uncertainAt">
   readonly refused: Pick<RefusedEmission, "state" | "reason" | "refusedAt">
@@ -257,6 +258,7 @@ const build = (
           committingAt: record.committingAt,
           outcome: arrival.outcome,
           capture: arrival.capture,
+          ...(arrival.held === undefined ? {} : { held: arrival.held }),
           completedAt: arrival.completedAt
         })
       )
@@ -339,6 +341,7 @@ export const rebuild = <Record extends EmissionRecord>(record: Record): Record =
         committingAt: record.committingAt,
         outcome: record.outcome,
         capture: record.capture,
+        ...(record.held === undefined ? {} : { held: record.held }),
         completedAt: record.completedAt
       }) as Record
     case "uncertain":

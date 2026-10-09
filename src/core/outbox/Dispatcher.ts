@@ -3,6 +3,7 @@ import type { IntentKind, IntentKinds } from "./Intent.ts"
 import type { DispatchPermit } from "./Outbox.ts"
 import type { Sha256Digest } from "../Canonical.ts"
 import type { EmissionAdmission } from "./Records.ts"
+import type { HeldReference } from "../contract/ToolHost.ts"
 
 /** What a handler returns for a dispatch that completed. */
 export interface Delivery<Outcome> {
@@ -11,6 +12,8 @@ export interface Delivery<Outcome> {
   readonly response: Uint8Array
   /** True when the far side sent more than the limit allowed. */
   readonly truncated: boolean
+  /** Prepared by the host before the act; retained with its completed receipt. */
+  readonly held?: HeldReference
 }
 
 /**

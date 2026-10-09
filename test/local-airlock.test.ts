@@ -91,7 +91,7 @@ const world = <A, E>(body: (args: {
               memoryOutboxStore(makeMemoryOutboxState()), memoryLedger(makeMemoryLedgerState()), WebCrypto.layer
             ))))
             const guest = yield* airlock.guest({ runId: `run-${++runs}`, env: undefined }).pipe(Effect.provide(context))
-            const supervisor = yield* airlock.supervisor.pipe(Effect.provide(context))
+            const supervisor = yield* airlock.supervisor(undefined).pipe(Effect.provide(context))
             return {
               call: (tool, input) => guest.call(tool, input).pipe(Effect.provide(context)),
               commit: (id) => supervisor.commit(id).pipe(Effect.provide(context)),

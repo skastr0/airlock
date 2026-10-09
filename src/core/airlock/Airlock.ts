@@ -3,7 +3,7 @@ import { InvalidToolContract, type ToolContract } from "../contract/ToolContract
 import { defineDecoderCatalog, type TrustedDecoder } from "../contract/Decoder.ts"
 import { validateFlowDecoders } from "../contract/Flow.ts"
 import { portableToolHost } from "../contract/PortableToolHost.ts"
-import type { ToolHost } from "../contract/ToolHost.ts"
+import { HeldReference, RecoveryRestoration, type ToolHost } from "../contract/ToolHost.ts"
 import type { Ledger } from "../ledger/Ledger.ts"
 import type { ClosedUnderCompensation } from "../outbox/Intent.ts"
 import { defineOutbox, type OutboxDefinition, type OutboxOf } from "../outbox/Outbox.ts"
@@ -80,6 +80,8 @@ export interface Supervisor {
   readonly cancel: (id: string) => Effect.Effect<EmissionView, AirlockFailure>
   /** Stages the act that answers a committed call, if its contract declares one. */
   readonly compensate: (id: string, holdMillis?: number) => Effect.Effect<EmissionView, AirlockFailure>
+  /** Restores the stored host recovery reference; forward grant expiry is irrelevant. */
+  readonly restore: (id: string) => Effect.Effect<typeof RecoveryRestoration.Encoded, AirlockFailure>
 }
 
 export interface Airlock<Contracts extends ToolContracts, Env> {
@@ -103,7 +105,7 @@ export interface Airlock<Contracts extends ToolContracts, Env> {
     readonly runId: string
     readonly env: Env
   }) => Effect.Effect<GuestSurface, AirlockFailure, OutboxOf<Contracts> | Crypto.Crypto>
-  readonly supervisor: Effect.Effect<Supervisor, never, OutboxOf<Contracts>>
+  readonly supervisor: (env: Env) => Effect.Effect<Supervisor, never, OutboxOf<Contracts>>
 }
 
 // ── plain words for kernel errors ───────────────────────────────────────────
@@ -260,7 +262,7 @@ export const defineAirlock = <const List extends ReadonlyArray<ToolContract.Any>
       } satisfies GuestSurface
     }))
 
-  const supervisorOf: Effect.Effect<Supervisor, never, OutboxOf<ToolContracts>> = Effect.gen(function* () {
+  const supervisorOf = (env: Env): Effect.Effect<Supervisor, never, OutboxOf<ToolContracts>> => Effect.gen(function* () {
     const service = yield* kernel.Outbox
     const view = (emission: Parameters<typeof kernel.toRecord>[0], subject: string) =>
       kernel.toRecord(emission).pipe(
@@ -295,6 +297,23 @@ export const defineAirlock = <const List extends ReadonlyArray<ToolContract.Any>
             Effect.mapError(explain(id)),
             Effect.flatMap((emission) => view(emission, id))
           )),
+      restore: (id) =>
+        Effect.flatMap(idOf(id), (decoded) => service.inspect(decoded).pipe(
+          Effect.mapError(explain(id)),
+          Effect.flatMap((emission) => Effect.gen(function* () {
+            if (emission.state !== "committed" || emission.held === undefined) {
+              return yield* failure("not-compensable", `${id} has no completed host recovery reference`)
+            }
+            const reference = yield* Schema.decodeUnknownEffect(Schema.toType(HeldReference), { onExcessProperty: "error" })(emission.held).pipe(
+              Effect.mapError(() => failure("unavailable", `${id} has an invalid host recovery reference`)))
+            if (reference.callId !== id) return yield* failure("unavailable", `${id} has a mismatched host recovery reference`)
+            const recovery = host(env).recovery
+            if (recovery === undefined) return yield* failure("unavailable", "this host cannot restore held calls")
+            const restored = yield* recovery.restore(reference).pipe(Effect.mapError(explain(id)))
+            return yield* Schema.encodeEffect(RecoveryRestoration)(restored).pipe(
+              Effect.mapError(() => failure("unavailable", `${id} returned an invalid host restoration result`)))
+          }))
+        )),
       compensate: (id, holdMillis = 0) =>
         Effect.flatMap(idOf(id), (decoded) =>
           service.inspect(decoded).pipe(
@@ -309,7 +328,8 @@ export const defineAirlock = <const List extends ReadonlyArray<ToolContract.Any>
     }
   })
 
-  const supervisor = forThisDefinition(supervisorOf) as Airlock<Contracts, Env>["supervisor"]
+  const supervisor: Airlock<Contracts, Env>["supervisor"] = (env) =>
+    supervisorOf(env) as unknown as Effect.Effect<Supervisor, never, OutboxOf<Contracts>>
 
   return { contracts, decoders, outbox, policy, host, layer, guest, supervisor }
 }

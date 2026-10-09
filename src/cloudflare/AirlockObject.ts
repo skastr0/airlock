@@ -213,25 +213,25 @@ export const airlockDurableObject = <Contracts extends ToolContracts, Env>(
     }
 
     pending(): Promise<Reply<ReadonlyArray<EmissionView>>> {
-      return this.#reply(Effect.flatMap(airlock.supervisor, (supervisor) => supervisor.pending))
+      return this.#reply(Effect.flatMap(airlock.supervisor(this.#env), (supervisor) => supervisor.pending))
     }
 
     inspect(id: string): Promise<Reply<EmissionView>> {
-      return this.#reply(Effect.flatMap(airlock.supervisor, (supervisor) => supervisor.inspect(String(id))))
+      return this.#reply(Effect.flatMap(airlock.supervisor(this.#env), (supervisor) => supervisor.inspect(String(id))))
     }
 
     commit(id: string): Promise<Reply<EmissionView>> {
       return this.#guarded(() =>
-        this.#reply(Effect.flatMap(airlock.supervisor, (supervisor) => supervisor.commit(String(id)))))
+        this.#reply(Effect.flatMap(airlock.supervisor(this.#env), (supervisor) => supervisor.commit(String(id)))))
     }
 
     cancel(id: string): Promise<Reply<EmissionView>> {
-      return this.#reply(Effect.flatMap(airlock.supervisor, (supervisor) => supervisor.cancel(String(id))))
+      return this.#reply(Effect.flatMap(airlock.supervisor(this.#env), (supervisor) => supervisor.cancel(String(id))))
     }
 
     compensate(id: string, holdMillis?: number): Promise<Reply<EmissionView>> {
       return this.#reply(
-        Effect.flatMap(airlock.supervisor, (supervisor) =>
+        Effect.flatMap(airlock.supervisor(this.#env), (supervisor) =>
           supervisor.compensate(String(id), typeof holdMillis === "number" ? holdMillis : 0))
       )
     }
