@@ -39,7 +39,12 @@ export const HeldCallClaim = Schema.Struct({
 })
 export type HeldCallClaim = typeof HeldCallClaim.Type
 
-export const HeldCallReference = Schema.Struct({ callId: Schema.String, recoveryId: Schema.String })
+export const HeldCallReference = Schema.Struct({
+  callId: Schema.String,
+  recoveryId: Schema.String,
+  /** Until at least then, Hold's reaper leaves the call's before-images alone. */
+  heldUntil: Schema.String
+})
 export type HeldCallReference = typeof HeldCallReference.Type
 
 const ActStatus = Schema.Literals(["held", "restored", "conflict", "no-longer-held", "failed"])
@@ -48,7 +53,9 @@ export type HeldActReport = typeof ActReport.Type
 
 /**
  * - `prepared`: claimed, and no act began.
- * - `done`: the call finished and can be put back until `heldUntil`.
+ * - `done`: the call finished and can be put back.
+ * - `no-longer-held`: the call finished and a before-image has been reaped,
+ *   so it can no longer be put back.
  * - `refused`: the call is not in effect. `partial-application-restored`
  *   says acts did happen and every one was reversed.
  * - `restored`: a finished call was put back.
@@ -56,10 +63,9 @@ export type HeldActReport = typeof ActReport.Type
  *   says which.
  */
 export const HeldCallState = Schema.Struct({
-  state: Schema.Literals(["prepared", "done", "refused", "restored", "uncertain"]),
+  state: Schema.Literals(["prepared", "done", "no-longer-held", "refused", "restored", "uncertain"]),
   reason: Schema.optionalKey(Schema.String),
-  acts: Schema.Array(ActReport),
-  heldUntil: Schema.optionalKey(Schema.String)
+  acts: Schema.Array(ActReport)
 })
 export type HeldCallState = typeof HeldCallState.Type
 
@@ -99,7 +105,7 @@ export class HeldCallFailed extends Schema.TaggedError<HeldCallFailed>()("HeldCa
 
 /** How forward work ended when it did not fail the call into uncertainty. */
 export type HeldCallOutcome<A> =
-  | { readonly _tag: "done"; readonly value: A; readonly heldUntil: string }
+  | { readonly _tag: "done"; readonly value: A }
   | { readonly _tag: "refused"; readonly reason: "nothing-applied" | "partial-application-restored" }
 
 export class HeldCalls extends Context.Service<
@@ -197,18 +203,18 @@ const make = (config: HeldCallsConfig) =>
       }
     }
 
-    const directory = (reference: HeldCallReference) => path.join(root, reference.recoveryId)
+    const directory = (reference: { readonly recoveryId: string }) => path.join(root, reference.recoveryId)
     const recoveryIdOf = (callId: string) => createHash("sha256").update(callId).digest("hex")
     const order = (index: number) => String(index).padStart(6, "0")
     const actOf = (name: string) => ActId.make(name.slice(name.indexOf(".") + 1))
 
     /** The acts claimed for a call, oldest first. */
-    const claimed = (reference: HeldCallReference) =>
+    const claimed = (reference: { readonly recoveryId: string }) =>
       io("list claimed acts", () => names(path.join(directory(reference), "acts"))).pipe(
         Effect.map((files) => files.map(actOf))
       )
 
-    const stored = <A>(reference: HeldCallReference, file: string, schema: Schema.Codec<A, string>) =>
+    const stored = <A>(reference: { readonly recoveryId: string }, file: string, schema: Schema.Codec<A, string>) =>
       io(`read ${file}`, () => read(path.join(directory(reference), file))).pipe(
         Effect.flatMap((text) =>
           text === undefined
@@ -216,7 +222,7 @@ const make = (config: HeldCallsConfig) =>
             : Schema.decodeUnknownEffect(schema)(text).pipe(Effect.mapError(failed(`decode ${file}`)))
         )
       )
-    const record = <A>(reference: HeldCallReference, file: string, schema: Schema.Codec<A, string>, value: A) =>
+    const record = <A>(reference: { readonly recoveryId: string }, file: string, schema: Schema.Codec<A, string>, value: A) =>
       Schema.encodeEffect(schema)(value).pipe(
         Effect.mapError(failed(`encode ${file}`)),
         Effect.flatMap((text) => io(`record ${file}`, () => create(path.join(directory(reference), file), text)))
@@ -289,10 +295,15 @@ const make = (config: HeldCallsConfig) =>
       if (restored !== undefined) return { state: "restored", acts: restored.acts } satisfies HeldCallState
       const done = yield* stored(reference, "done.json", StoredDone)
       if (done !== undefined) {
+        const checks = yield* Effect.forEach(done.acts, (id) =>
+          hold.undoCheck(id).pipe(Effect.mapError(failed("check held act"))))
+        const acts = done.acts.map((id, index): HeldActReport => ({
+          id,
+          status: checks[index] === "undoable" ? "held" : checks[index]!
+        }))
         return {
-          state: "done",
-          acts: done.acts.map((id) => ({ id, status: "held" as const })),
-          heldUntil: heldUntil(done.at)
+          state: acts.some((act) => act.status === "no-longer-held") ? "no-longer-held" : "done",
+          acts
         } satisfies HeldCallState
       }
       const refused = yield* stored(reference, "refused.json", StoredRefused)
@@ -307,12 +318,15 @@ const make = (config: HeldCallsConfig) =>
     return HeldCalls.of({
       prepare: (claim) =>
         lock.withLock(Effect.gen(function* () {
-          const reference = { callId: claim.callId, recoveryId: recoveryIdOf(claim.callId) }
-          const existing = yield* stored(reference, "call.json", StoredClaim)
+          const recoveryId = recoveryIdOf(claim.callId)
+          const existing = yield* stored({ recoveryId }, "call.json", StoredClaim)
+          // Every act is made after the claim, so none can be reaped sooner.
+          const preparedAt = existing?.preparedAt ?? new Date().toISOString()
+          const reference = { callId: claim.callId, recoveryId, heldUntil: heldUntil(preparedAt) }
           if (existing === undefined) {
             yield* io("create held call", () => mkdir(path.join(directory(reference), "acts"), { recursive: true, mode: 0o700 }))
             yield* io("create held call restore log", () => mkdir(path.join(directory(reference), "restore"), { recursive: true, mode: 0o700 }))
-            yield* record(reference, "call.json", StoredClaim, { ...claim, preparedAt: new Date().toISOString() })
+            yield* record(reference, "call.json", StoredClaim, { ...claim, preparedAt })
             return reference
           }
           const { preparedAt: _preparedAt, ...before } = existing
@@ -349,7 +363,7 @@ const make = (config: HeldCallsConfig) =>
           if (result._tag === "Success") {
             const at = new Date().toISOString()
             yield* record(reference, "done.json", StoredDone, { acts, at })
-            return { _tag: "done", value: result.success, heldUntil: heldUntil(at) } satisfies HeldCallOutcome<unknown> as HeldCallOutcome<typeof result.success>
+            return { _tag: "done", value: result.success } satisfies HeldCallOutcome<typeof result.success>
           }
           const settled = yield* settle(reference, acts)
           if (settled.state === "uncertain") {

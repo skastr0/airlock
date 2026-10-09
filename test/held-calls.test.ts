@@ -10,6 +10,8 @@ import {
   HeldCallsConfig,
   HeldCallsLive
 } from "../src/host/HeldCalls.ts"
+import { localRecovery } from "../src/host/LocalRecovery.ts"
+import { Sha256Digest } from "../src/core/Canonical.ts"
 import { NativeFileSystem, NativeFileSystemLive, NativeFilesystemConfig } from "../src/native/index.ts"
 import { ExclusiveRenameTestLive } from "./support/ExclusiveRenameTestLive.ts"
 
@@ -84,7 +86,7 @@ describe("HeldCalls", () => {
         const state = yield* calls.inspect(reference)
         expect(state.state).toBe("done")
         expect(state.acts).toHaveLength(2)
-        expect(Date.parse(state.heldUntil!)).toBeGreaterThan(Date.now())
+        expect(Date.parse(reference.heldUntil)).toBeGreaterThan(Date.now())
 
         const restored = yield* calls.restore(reference)
         expect(restored.state).toBe("restored")
@@ -192,6 +194,7 @@ describe("HeldCalls", () => {
         yield* calls.run(reference, native.writeText("old.txt", "after"))
         yield* hold.reap(0)
 
+        expect((yield* calls.inspect(reference)).state).toBe("no-longer-held")
         const restored = yield* calls.restore(reference)
         expect(restored.state).toBe("no-longer-held")
         expect(restored.acts.map((act) => act.status)).toEqual(["no-longer-held"])
@@ -258,6 +261,51 @@ describe("HeldCalls", () => {
         yield* calls.restore(reference)
         expect(yield* fs.exists(at("inside.txt"))).toBe(false)
         expect(yield* fs.readFileString(at("outside.txt"))).toBe("not part of any call")
+      })
+    )
+  )
+})
+
+describe("localRecovery", () => {
+  it.effect("answers the kernel's recovery port from Hold", () =>
+    world(({ fs, at, native, hold, calls }) =>
+      Effect.gen(function* () {
+        const recovery = localRecovery(calls)
+        const call = {
+          callId: "session:1:run:0:file.write:abc",
+          runId: "run",
+          tool: "file.write",
+          version: "1",
+          inputDigest: Sha256Digest.make(`sha256:${"a".repeat(64)}`),
+          resources: [],
+          host: {}
+        }
+        yield* fs.writeFileString(at("port.txt"), "before")
+        const reference = yield* recovery.prepare(call)
+        expect(yield* recovery.prepare(call)).toEqual(reference)
+        expect((yield* recovery.prepare({ ...call, version: "2" }).pipe(Effect.flip))._tag).toBe("RecoveryFailed")
+        expect((yield* recovery.inspect(reference)).state).toBe("prepared")
+        // A finished call that was never run cannot be put back, and says so.
+        expect(yield* recovery.restore(reference)).toMatchObject({ state: "conflict", reason: "call is not done" })
+
+        yield* calls.run(
+          { callId: reference.callId, recoveryId: reference.recoveryId, heldUntil: "" },
+          native.writeText("port.txt", "after")
+        )
+        expect((yield* recovery.inspect(reference)).state).toBe("done")
+        expect((yield* recovery.restore(reference)).state).toBe("restored")
+        expect(yield* fs.readFileString(at("port.txt"))).toBe("before")
+        expect(yield* recovery.inspect(reference)).toMatchObject({ state: "refused", reason: "restored" })
+
+        const second = yield* recovery.prepare({ ...call, callId: "session:1:run:1:file.write:def" })
+        yield* calls.run(
+          { callId: second.callId, recoveryId: second.recoveryId, heldUntil: "" },
+          native.writeText("port.txt", "again")
+        )
+        yield* hold.reap(0)
+        expect((yield* recovery.inspect(second)).state).toBe("no-longer-held")
+        expect((yield* recovery.restore(second)).state).toBe("no-longer-held")
+        expect(yield* fs.readFileString(at("port.txt"))).toBe("again")
       })
     )
   )
