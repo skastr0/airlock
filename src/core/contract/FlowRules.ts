@@ -57,7 +57,7 @@ const authorScope = {
 }
 const ReleaseSpec = Schema.Struct({ ...authorScope, from: Confidentiality, to: Confidentiality })
 const EndorsementSpec = Schema.Struct({ ...authorScope, from: Integrity, to: Integrity })
-const validateAuthorSpec = (schema: Schema.Top, spec: unknown): void => {
+const validateAuthorSpec = (schema: typeof ReleaseSpec | typeof EndorsementSpec, spec: unknown): void => {
   if (Result.isFailure(Schema.decodeUnknownResult(schema, { onExcessProperty: "error" })(spec))) {
     throw new InvalidFlowRule({ field: "spec", reason: "must contain exact author rule fields" })
   }
@@ -66,7 +66,10 @@ const validateAuthorSpec = (schema: Schema.Top, spec: unknown): void => {
 const ruleScope = <Source extends ToolContract.Any, Sink extends ToolContract.Any>(
   source: Source, sink: Sink, spec: RuleScope<Source, Sink>
 ) => ({
-  id: spec.id, source: { tool: source.tag, part: spec.source.part, field: spec.source.field }, sink: { tool: sink.tag, field: spec.sink }, mode: spec.mode,
+  id: spec.id, source: spec.source.part === "receipt"
+    ? { tool: source.tag, part: "receipt" as const, field: "state" as const }
+    : { tool: source.tag, part: "result" as const, field: spec.source.field },
+  sink: { tool: sink.tag, field: spec.sink }, mode: spec.mode,
   when: (spec.when ?? []).map(({ field, decoder }) => ({ field, decoder: { name: decoder.name, version: decoder.version } }))
 })
 
