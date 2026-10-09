@@ -2,6 +2,7 @@ import { BunServices } from "@effect/platform-bun"
 import { describe, expect, it } from "@effect/vitest"
 import { Effect, FileSystem, Layer, Option, Path } from "effect"
 import * as AirlockHome from "../src/AirlockHome.ts"
+import { canonicalExactJson } from "../src/core/ExactJson.ts"
 import { OutboxStore } from "../src/core/outbox/OutboxStore.ts"
 import { DispatchProvenance, type EmissionId, ResponseCapture } from "../src/core/outbox/Records.ts"
 import { outboxStoreConformance } from "../src/core/testing/index.ts"
@@ -42,6 +43,68 @@ outboxStoreConformance(
     }
   }).pipe(Effect.provide(BunServices.layer))
 )
+
+/**
+ * A record is read back as the values it was written with. JSON text written
+ * the ordinary way turns negative zero into zero, which is a different value
+ * to an exact refinement and to a digest.
+ */
+describe("file OutboxStore: a record survives a restart as exactly the values it held", () => {
+  const same = (left: unknown, right: unknown): boolean =>
+    typeof left === "object" && left !== null && typeof right === "object" && right !== null
+      ? Array.isArray(left) === Array.isArray(right) &&
+        JSON.stringify(Object.keys(left)) === JSON.stringify(Object.keys(right)) &&
+        Object.keys(left).every((key) => same((left as never)[key], (right as never)[key]))
+      : Object.is(left, right)
+
+  it.effect("stage, commit, reopen: every leaf of the summary and the outcome is the same value", () =>
+    Effect.scoped(Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem
+      const home = yield* fs.makeTempDirectoryScoped({ prefix: "airlock-outbox-exact-" })
+      const store = FileOutboxStore.layer.pipe(Layer.provide(FileLedgerLive), Layer.provide(AirlockHome.layer(home)))
+      /** Each use opens the home again, as a new process would. */
+      const open = <A, E>(use: (store: OutboxStore["Service"]) => Effect.Effect<A, E>) =>
+        Effect.flatMap(OutboxStore, use).pipe(Effect.provide(store))
+
+      const values = {
+        negativeZero: -0, inList: [-0, 0, [-0]], nested: { zero: -0 },
+        beyondSafe: 2 ** 53 + 2, huge: 1e21, tiny: 5e-324, fraction: 0.1 + 0.2,
+        astral: "\u{1f512}", loneSurrogate: "a\ud800b", controls: "\u0000\u2028\"\\",
+        zebra: 1, alpha: 2, "10": "ten", "9": "nine", empty: {}, none: [], nothing: null
+      }
+      const record = stagedRecord(7, { summary: values })
+      yield* open((opened) => opened.putIfAbsent(record, sealedDispatch()))
+      const staged = Option.getOrThrow(yield* open((opened) => opened.read(record.id)))
+      expect(same(staged.summary, { summary: values })).toBe(true)
+
+      yield* open((opened) => opened.transition(record.id, "staged", {
+        state: "committing",
+        provenance: new DispatchProvenance({ committedBy: "supervisor" }),
+        committingAt: instant(10)
+      }))
+      const response = new Uint8Array([0, 255])
+      yield* open((opened) => opened.transition(record.id, "committing", {
+        state: "committed",
+        outcome: { value: -0, all: values },
+        capture: new ResponseCapture({ retainedBytes: response.byteLength, truncated: false, limitBytes: 65_536 }),
+        completedAt: instant(20),
+        response
+      }))
+      yield* open((opened) => opened.acknowledge(record.id, "commit"))
+
+      const committed = Option.getOrThrow(yield* open((opened) => opened.read(record.id)))
+      if (committed.state !== "committed") throw new Error("the emission did not commit")
+      const outcome = committed.outcome as { readonly value: number; readonly all: typeof values }
+      expect(Object.is(outcome.value, -0)).toBe(true)
+      expect(Object.is(outcome.all.inList[0], -0)).toBe(true)
+      expect(Object.is(outcome.all.inList[1], 0)).toBe(true)
+      expect(same(outcome, { value: -0, all: values })).toBe(true)
+      expect(same(committed.summary, { summary: values })).toBe(true)
+      // The same value has the same exact canonical text, and so the same digest.
+      expect(canonicalExactJson(outcome)).toBe(canonicalExactJson({ value: -0, all: values }))
+      expect(canonicalExactJson(outcome)).not.toBe(canonicalExactJson({ value: 0, all: values }))
+    })).pipe(Effect.provide(BunServices.layer)))
+})
 
 /**
  * Where this adapter keeps things, which the port does not say: a settled

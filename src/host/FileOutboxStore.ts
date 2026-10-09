@@ -1,5 +1,6 @@
 import { Effect, FileSystem, Layer, Option, Path, PlatformError, Result, Schema } from "effect"
 import { AirlockHome } from "../AirlockHome.ts"
+import { type ExactJson, exactJsonText } from "../core/ExactJson.ts"
 import { CaptureEntry, CapturedEmission, StoredCaptureResult, validateCaptureEntry } from "../core/outbox/Capture.ts"
 import { type EmissionState, isTerminal, transitions } from "../core/outbox/Lifecycle.ts"
 import { OutboxStore } from "../core/outbox/OutboxStore.ts"
@@ -48,12 +49,14 @@ import { CaptureJournal } from "./FileLedger.ts"
 const states = Object.keys(transitions) as ReadonlyArray<EmissionState>
 const entryPattern = new RegExp(`^(emi_[0-9a-f]{32})\\.(${states.join("|")})$`)
 
-const recordCodec = Schema.fromJsonString(EmissionRecord)
-const encodeRecord = Schema.encodeEffect(recordCodec)
-const decodeRecord = Schema.decodeUnknownEffect(recordCodec)
-const dispatchCodec = Schema.fromJsonString(SealedDispatch)
-const encodeDispatch = Schema.encodeEffect(dispatchCodec)
-const decodeDispatch = Schema.decodeUnknownEffect(dispatchCodec)
+// Written with the exact writer: an outcome or summary holding negative zero
+// must be read back as the value it was. `JSON.parse` already reads exactly.
+const exactly = <A, I, R>(schema: Schema.Codec<A, I, R>) => (value: A) =>
+  Effect.map(Schema.encodeEffect(schema)(value), (encoded) => exactJsonText(encoded as ExactJson))
+const encodeRecord = exactly(EmissionRecord)
+const decodeRecord = Schema.decodeUnknownEffect(Schema.fromJsonString(EmissionRecord))
+const encodeDispatch = exactly(SealedDispatch)
+const decodeDispatch = Schema.decodeUnknownEffect(Schema.fromJsonString(SealedDispatch))
 
 const encoder = new TextEncoder()
 
