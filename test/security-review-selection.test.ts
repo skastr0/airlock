@@ -37,9 +37,10 @@ return true`
       registryDigest: await run(sha256Canonical("selection-test-v1")), bindings: {}, maxPlanBytes: 65_536
     }))
     const get = report.plan.nodes.find((node) => node.tool === "http.get")!
-    expect({ dependencies: get.arguments[0]!.dependencies, refusals: report.refusals }).toEqual({
-      dependencies: expect.arrayContaining([origin]),
+    expect({ control: get.arguments[0]!.control, refusals: report.refusals }).toEqual({
+      control: expect.arrayContaining([origin]),
       refusals: expect.arrayContaining([{ nodeId: get.id, field: "url", reason: "confidentiality" }])
     })
+    expect(get.arguments[0]!.flows).toContainEqual(expect.objectContaining({ origin, mode: "control" }))
   })
 })
