@@ -1,37 +1,18 @@
-import { build } from "esbuild"
-import { Miniflare } from "miniflare"
-import { join, resolve } from "node:path"
+import * as Cloudflare from "alchemy/Cloudflare"
 import { afterAll, describe, expect, it } from "vitest"
+import { startLocal } from "../examples/cloudflare/local.ts"
+import { airlockBindings, airlockCompatibility } from "../src/alchemy/index.ts"
 
 /**
  * `examples/cloudflare`, exactly as a user would write it, run in real
  * workerd with no `nodejs_compat`: a guest run in an isolate, a staged send,
  * a supervisor's commit, and a replay.
+ *
+ * `examples/cloudflare/local.ts` starts workerd with the bindings read off the
+ * Alchemy recipe the example deploys with, so the recipe and what is proven
+ * here cannot drift apart.
  */
-const repository = resolve(import.meta.dirname, "..")
-
-const script = (await build({
-  entryPoints: [join(repository, "examples", "cloudflare", "src", "worker.ts")],
-  bundle: true,
-  write: false,
-  format: "esm",
-  platform: "neutral",
-  mainFields: ["module", "main"],
-  conditions: ["worker", "browser", "import"],
-  target: "es2022",
-  // The example imports the package by name; inside this repository that is this file.
-  alias: { "@skastr0/airlock/cloudflare": join(repository, "src", "cloudflare", "index.ts") },
-  external: ["cloudflare:workers"],
-  logLevel: "silent"
-})).outputFiles[0]!.text
-
-const workerd = new Miniflare({
-  modules: [{ type: "ESModule", path: "worker.mjs", contents: script }],
-  compatibilityDate: "2026-07-08",
-  durableObjects: { AIRLOCK: { className: "Airlock", useSQLite: true } },
-  workerLoaders: { LOADER: {} },
-  bindings: { MAIL_TOKEN: "example-token" }
-})
+const workerd = await startLocal()
 afterAll(() => workerd.dispose())
 
 const request = async <Result>(method: "GET" | "POST", path: string, body?: unknown): Promise<Result> =>
@@ -48,6 +29,30 @@ const guest = `
     body: "You have " + inbox.ids.length + " unread messages."
   });
   return { unread: inbox.ids.length, waiting: draft.id };`
+
+describe("the Alchemy recipe", () => {
+  it("declares exactly the Durable Object and the Worker Loader, under the names the Worker reads", () => {
+    const bindings = airlockBindings()
+    expect(bindings.AIRLOCK).toMatchObject({ className: "Airlock" })
+    expect(Cloudflare.isDurableObjectLike(bindings.AIRLOCK)).toBe(true)
+    expect(Cloudflare.isWorkerLoader(bindings.LOADER)).toBe(true)
+    expect(Object.keys(airlockBindings())).toEqual(["AIRLOCK", "LOADER"])
+    expect(airlockCompatibility.flags).toEqual([])
+  })
+
+  it("follows the names it is given and refuses one name for both bindings", () => {
+    const named = airlockBindings({ object: "BOX", loader: "GUESTS", className: "MailAirlock" })
+    expect(Object.keys(named)).toEqual(["BOX", "GUESTS"])
+    expect(named.BOX).toMatchObject({ className: "MailAirlock" })
+    expect(Cloudflare.isWorkerLoader(named.GUESTS)).toBe(true)
+    expect(() => airlockBindings({ object: "SAME", loader: "SAME" })).toThrow("both bound as SAME")
+  })
+
+  it("is what the example's stack is built from", async () => {
+    const stack = await import("../examples/cloudflare/alchemy.run.ts")
+    expect(stack.default).toBeDefined()
+  })
+})
 
 describe("examples/cloudflare in workerd", () => {
   type Entry = { readonly did: string; readonly detail: string }

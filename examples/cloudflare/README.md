@@ -5,15 +5,19 @@ The only things it can touch are the tools you grant it. Reads happen at once;
 writes wait until a supervisor commits them. Everything is recorded, and a run
 that is executed again gets its recorded results instead of acting twice.
 
-You write three things:
+You write four files:
 
 | File | What it is | Lines |
 | --- | --- | --- |
 | `src/contracts.ts` | What each tool takes and returns | 43 |
 | `src/airlock.ts` | What each tool does, and what the guest may do | 58 |
 | `src/worker.ts` | The Durable Object export and your trusted routes | 38 |
+| `alchemy.run.ts` | The Worker and its bindings on Cloudflare | 24 |
 
-All three import from `@skastr0/airlock/cloudflare` and nothing else.
+The three Worker files import from `@skastr0/airlock/cloudflare` and nothing
+else. `alchemy.run.ts` adds `@skastr0/airlock/alchemy`, Alchemy and Effect.
+`local.ts` is tooling that runs the example on your machine; you would not
+write it.
 
 ## What guest code looks like
 
@@ -34,19 +38,48 @@ ready to put in a prompt.
 
 ## Run it locally
 
-The example is proven in real workerd, the runtime Cloudflare runs, by a test
-in this repository:
+No Cloudflare account is needed. This starts the Worker in workerd, the
+runtime Cloudflare runs, with a SQLite Durable Object, a Worker Loader and a
+`MAIL_TOKEN` variable:
 
 ```sh
 git clone https://github.com/skastr0/airlock && cd airlock
 bun install
-bunx vitest run test/cloudflare-example.test.ts
+bun examples/cloudflare/local.ts
 ```
 
-That test bundles `src/worker.ts` unchanged, starts workerd with a SQLite
-Durable Object bound as `AIRLOCK`, a Worker Loader bound as `LOADER` and a
-`MAIL_TOKEN` variable, and walks the flow below. No `nodejs_compat` flag is
-needed.
+Then, in another terminal:
+
+```sh
+curl localhost:8787/tools
+curl -X POST localhost:8787/run -d '{"runId":"run-1","source":"return await tools.mail.send({ to: \"ada@example.com\", subject: \"Hello\", body: \"Hi\" })"}'
+curl localhost:8787/pending
+curl -X POST localhost:8787/commit -d '{"id":"<the id from /pending>"}'
+curl localhost:8787/mailbox
+```
+
+`PORT=9000 bun examples/cloudflare/local.ts` picks another port. The same
+setup is walked by a test, `bunx vitest run test/cloudflare-example.test.ts`.
+No `nodejs_compat` flag is used anywhere.
+
+## Deploy it
+
+`alchemy.run.ts` declares the Worker. The Airlock part of it is one line,
+`...airlockBindings()`, which adds the Durable Object (bound as `AIRLOCK`,
+class `Airlock`, SQLite-backed) and the Worker Loader (bound as `LOADER`).
+`airlockBindings({ object, loader, className })` renames them.
+
+```sh
+cd examples/cloudflare
+bun --bun ../../node_modules/alchemy/bin/cli.js profile edit --profile default --add Cloudflare
+MAIL_TOKEN=... bun --bun ../../node_modules/alchemy/bin/cli.js deploy
+```
+
+Alchemy needs a Cloudflare account for `deploy` and for its own `dev`
+command, which is why the local run above does not go through it. This
+repository has never deployed the example: the recipe is checked by loading
+the stack and by starting workerd from the same bindings, not against a live
+account.
 
 ## The flow
 
@@ -87,5 +120,3 @@ Each of these is checked in workerd by `test/cloudflare-durable.test.ts`:
   proof the isolate stopped running.
 - **The mail service here is a stand-in.** `src/airlock.ts` shows where a real
   call goes, with `env.MAIL_TOKEN` and the idempotency key.
-- **Deployment is not covered yet.** An Alchemy recipe that declares the
-  bindings is planned; nothing in this example deploys anything.
