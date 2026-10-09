@@ -167,6 +167,19 @@ describe("local tool host — executables", () => {
         expect(yield* refused({ kind: "executable", selector: workspace, rights: ["invoke"], field: "executable" })).toBe("ResourceRefused")
         expect(yield* refused({ kind: "executable", selector: helper, rights: ["execute"], field: "d" })).toBe("ResourceRefused")
         expect(yield* refused({ kind: "executable", selector: helper, rights: ["invoke"], field: "d", parent: root })).toBe("ResourceRefused")
+        // Only a root can be a parent: not a descendant, and not a bound path.
+        expect(yield* refused({ kind: "executable", selector: helper, rights: ["execute"], field: "d", parent: child })).toBe("ResourceRefused")
+        const asPath = yield* resources.bind({ kind: "path", selector: "tool", rights: ["read"], field: "path" })
+        expect(yield* refused({ kind: "executable", selector: helper, rights: ["execute"], field: "d", parent: asPath })).toBe("ResourceRefused")
+
+        // Evidence cannot be changed after binding, at any depth.
+        for (const bound of [root, child, asPath]) {
+          expect(Object.isFrozen(bound.binding)).toBe(true)
+          expect(Object.isFrozen(bound.binding.rights)).toBe(true)
+          expect(Object.isFrozen(bound.binding.identity)).toBe(true)
+          expect(() => { (bound.binding.rights as unknown as Array<string>).push("write") }).toThrow()
+          expect(() => { (bound.binding.identity as { path: string }).path = "/elsewhere" }).toThrow()
+        }
       })
     )
   )

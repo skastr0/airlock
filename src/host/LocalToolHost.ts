@@ -45,6 +45,15 @@ type PathScope = ReadonlyArray<string>
 
 const refuse = (field: string, reason: string) => new ResourceRefused({ field, reason })
 
+/** Evidence is read again at dispatch and when persisted; nothing may change it in between. */
+const frozen = <A>(value: A): A => {
+  if (typeof value === "object" && value !== null && !Object.isFrozen(value)) {
+    for (const inner of Object.values(value)) frozen(inner)
+    Object.freeze(value)
+  }
+  return value
+}
+
 const identityOf = (physical: string) =>
   Effect.tryPromise({
     try: async () => {
@@ -74,6 +83,8 @@ export const localToolHost = (
     const fs = yield* FileSystem.FileSystem
     const paths = new WeakMap<object, PathCapability>()
     const executables = new WeakMap<object, ExecutableCapability>()
+    /** Only a root, bound with `invoke`, may be the parent of a descendant. */
+    const roots = new WeakSet<object>()
     const pathScopes = new WeakMap<object, PathScope>()
     const executableScopes = new WeakMap<object, ReadonlySet<string>>()
 
@@ -91,7 +102,10 @@ export const localToolHost = (
         rights: [...request.rights],
         selector,
         identity
-      }).pipe(Effect.mapError(() => refuse(request.field, "binding evidence is invalid or too large")))
+      }).pipe(
+        Effect.map(frozen),
+        Effect.mapError(() => refuse(request.field, "binding evidence is invalid or too large"))
+      )
 
     const bindPath = Effect.fnUntraced(function* (request: ResourceBindRequest) {
       if (request.parent !== undefined || !request.rights.every((right) => right === "read" || right === "write")) {
@@ -136,8 +150,8 @@ export const localToolHost = (
       if (root !== (request.parent === undefined)) {
         return yield* refuse(request.field, "an executable root has no parent and a descendant has exactly one")
       }
-      if (request.parent !== undefined && !executables.has(request.parent)) {
-        return yield* refuse(request.field, "descendant parent was not bound by this host")
+      if (request.parent !== undefined && !roots.has(request.parent)) {
+        return yield* refuse(request.field, "descendant parent is not an executable root bound by this host")
       }
       if (!nodePath.isAbsolute(request.selector)) return yield* refuse(request.field, "executable must be an absolute path")
       // An executable is named by the file that will run, so a symlinked
@@ -156,6 +170,7 @@ export const localToolHost = (
       })
       const resource: BoundResource = Object.freeze({ binding, capability: Object.freeze({ kind: "executable", physical }) })
       executables.set(resource, { kind: "executable", physical })
+      if (root) roots.add(resource)
       return resource
     })
 
