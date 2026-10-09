@@ -1,4 +1,5 @@
 import { Result, Schema, SchemaAST } from "effect"
+import { ownJson } from "./Decoder.ts"
 
 /** Closed transport shapes. Opaque schemas confer no operations to a program. */
 export type SchemaModel =
@@ -10,6 +11,38 @@ export type SchemaModel =
   | { readonly kind: "nominal"; readonly identity: string; readonly base?: SchemaModel }
 
 const validators = new WeakMap<object, Schema.Codec<unknown, unknown>>()
+const codecs = new WeakMap<object, Schema.Codec<unknown, unknown>>()
+
+/** Original transport identity, including transformations, belongs to issued models only. */
+export const hasSameCodec = (left: SchemaModel, right: SchemaModel): boolean => {
+  const a = codecs.get(left), b = codecs.get(right)
+  return a !== undefined && b !== undefined && a.ast === b.ast
+}
+
+export class InvalidModelValue extends Schema.TaggedError<InvalidModelValue>()("InvalidModelValue", {
+  reason: Schema.Literals(["unissued-model", "schema"])
+}) {}
+
+/** Validates through the actual codec, including non-JSON decoded values. */
+export const decodeModelValue = (model: SchemaModel, encoded: Schema.Json): Result.Result<unknown, InvalidModelValue> => {
+  const codec = codecs.get(model)
+  if (codec === undefined) return Result.fail(new InvalidModelValue({ reason: "unissued-model" }))
+  try {
+    const result = Schema.decodeUnknownResult(codec, { onExcessProperty: "error" })(ownJson(encoded))
+    return Result.isFailure(result) ? Result.fail(new InvalidModelValue({ reason: "schema" })) : Result.succeed(result.success)
+  } catch { return Result.fail(new InvalidModelValue({ reason: "schema" })) }
+}
+
+/** Materializes an opaque value for the same trusted codec, preserving exact JSON. */
+export const encodeModelValue = (model: SchemaModel, decoded: unknown): Result.Result<Schema.Json, InvalidModelValue> => {
+  const codec = codecs.get(model)
+  if (codec === undefined) return Result.fail(new InvalidModelValue({ reason: "unissued-model" }))
+  try {
+    const result = Schema.encodeUnknownResult(codec, { onExcessProperty: "error" })(decoded)
+    return Result.isFailure(result) ? Result.fail(new InvalidModelValue({ reason: "schema" }))
+      : Result.succeed(ownJson(Schema.decodeUnknownSync(Schema.Json)(result.success)))
+  } catch { return Result.fail(new InvalidModelValue({ reason: "schema" })) }
+}
 
 /** Exact trusted schema identity can survive a different model path; structural copies cannot. */
 export const hasSameSchema = (left: SchemaModel, right: SchemaModel): boolean => {
@@ -51,9 +84,13 @@ export const modelSchema = (schema: Schema.Codec<unknown, unknown>, options: {
     const register = (model: SchemaModel): SchemaModel => {
       Object.freeze(model)
       validators.set(model, options.side === "encoded" ? codec : Schema.toType(codec))
+      codecs.set(model, codec)
       return model
     }
     if (depth > 32 || active.has(original)) return register({ kind: "nominal", identity })
+    if (options.side === "decoded" && original.encoding !== undefined && SchemaAST.isObjects(ast)) {
+      return register({ kind: "nominal", identity })
+    }
     if (!ignoreRequirement && ((original.checks?.length ?? 0) > 0 || (options.side === "encoded" && original.encoding !== undefined))) {
       const base = build(original, identity, depth, true)
       return register({ kind: "nominal", identity, base })

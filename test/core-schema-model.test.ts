@@ -1,8 +1,37 @@
 import { describe, expect, it } from "vitest"
-import { Schema } from "effect"
-import { acceptsLiteral, hasSameSchema, modelSchema } from "../src/core/contract/SchemaModel.ts"
+import { DateTime, Result, Schema } from "effect"
+import { acceptsLiteral, decodeModelValue, encodeModelValue, hasSameCodec, hasSameSchema, modelSchema } from "../src/core/contract/SchemaModel.ts"
 
 describe("core: closed schema model", () => {
+  it("preserves original codec identity and validates opaque values without exposing schema errors or accepting copies", () => {
+    const output = modelSchema(Schema.DateTimeUtcFromString, { identity: "date.result", side: "decoded" })
+    const input = modelSchema(Schema.DateTimeUtcFromString, { identity: "date.input", side: "encoded" })
+    expect(hasSameCodec(output, input)).toBe(true)
+    expect(hasSameSchema(output, input)).toBe(false)
+    expect(hasSameCodec({ ...output }, input)).toBe(false)
+    const wire = "2026-10-09T00:00:00.000Z"
+    const decoded = Result.getOrThrow(decodeModelValue(output, wire))
+    expect(DateTime.formatIso(decoded as DateTime.Utc)).toBe(wire)
+    expect(Result.getOrThrow(encodeModelValue(input, decoded))).toBe(wire)
+    expect(decodeModelValue({ ...output }, wire)).toMatchObject({ _tag: "Failure", failure: { reason: "unissued-model" } })
+    for (const invalid of [decodeModelValue(output, "private-invalid-canary"), encodeModelValue(input, wire)]) {
+      expect(invalid).toMatchObject({ _tag: "Failure", failure: { reason: "schema" } })
+      expect(JSON.stringify(invalid)).not.toContain("private-invalid-canary")
+    }
+    const checked = modelSchema(Schema.DateTimeUtcFromString.check(Schema.makeFilter(() => true)), { identity: "checked", side: "encoded" })
+    expect(hasSameCodec(output, checked)).toBe(false)
+  })
+
+  it("owns encoded opaque graphs and preserves negative zero and prototype-name fields", () => {
+    const schema = Schema.Struct(Object.fromEntries([["__proto__", Schema.Number]]))
+    const model = modelSchema(schema, { identity: "owned", side: "encoded" })
+    const value = Object.fromEntries([["__proto__", -0]])
+    const encoded = Result.getOrThrow(encodeModelValue(model, value)) as Schema.JsonObject
+    value["__proto__"] = 1
+    expect(Object.hasOwn(encoded, "__proto__")).toBe(true)
+    expect(Object.is(encoded["__proto__"], -0)).toBe(true)
+    expect(Object.isFrozen(encoded)).toBe(true)
+  })
   it("models null and nullable unions without erasing optional-key absence", () => {
     for (const side of ["encoded", "decoded"] as const) {
       const literal = modelSchema(Schema.Null, { identity: "null", side })

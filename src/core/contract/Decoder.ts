@@ -61,7 +61,7 @@ const cloneJson = (value: Schema.Json): Schema.Json => {
     : Object.fromEntries(Object.entries(value).map(([key, child]) => [key, cloneJson(child)]))
 }
 
-const ownJson = <Value extends Schema.Json>(value: Value): Value =>
+export const ownJson = <Value extends Schema.Json>(value: Value): Value =>
   // A JSON text round trip would change -0 to +0 and invalidate refinements.
   freezeJson(cloneJson(json(value)) as Value)
 
