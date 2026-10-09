@@ -1,4 +1,4 @@
-import { Effect } from "effect"
+import { Clock, Effect } from "effect"
 import * as nodePath from "node:path"
 import { type Refused, refused } from "../core/airlock/Implement.ts"
 import type { ToolContract } from "../core/contract/ToolContract.ts"
@@ -71,7 +71,7 @@ export const processRun = (services: {
     if (context.confined && cwd !== nodePath.resolve(services.workspace)) {
       return refused("process.run did not start: a confined process works in the workspace root")
     }
-    if (context.validUntil !== undefined && Date.now() >= context.validUntil) {
+    if (context.validUntil !== undefined && (yield* Clock.currentTimeMillis) >= context.validUntil) {
       return refused("process.run did not start: the grant expired")
     }
     if (context.confined && context.held === undefined) {

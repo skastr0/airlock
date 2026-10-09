@@ -1,4 +1,4 @@
-import { Context, Effect, Layer, Path, Schema } from "effect"
+import { Clock, Context, Effect, Layer, Path, Schema } from "effect"
 import { createHash } from "node:crypto"
 import { mkdir, open, readFile, readdir } from "node:fs/promises"
 import { AirlockHome } from "../AirlockHome.ts"
@@ -360,8 +360,8 @@ const make = (config: HeldCallsConfig) =>
             Effect.provideService(HeldCall, {
               // A claim that fails stops the act before it renames anything.
               claim: (id) =>
-                Effect.suspend(() => {
-                  if (options?.validUntil !== undefined && Date.now() >= options.validUntil) {
+                Effect.flatMap(Clock.currentTimeMillis, (now) => {
+                  if (options?.validUntil !== undefined && now >= options.validUntil) {
                     expired = true
                     return Effect.fail(new HoldFilesystemError({ operation: "claim", target: id, reason: "grant expired" }))
                   }

@@ -177,7 +177,8 @@ describe("local tools", () => {
     world(({ fs, at, host, tools, context, unconfinedRuns }) =>
       Effect.gen(function* () {
         yield* fs.writeFileString(at("note.txt"), "before")
-        const past = DateTime.makeUnsafe(Date.now() - 1_000)
+        // The test clock starts at zero, so the epoch itself has already passed.
+        const past = DateTime.makeUnsafe(0)
         const bound = yield* path(host, "path", "note.txt", ["write"])
         const write = yield* tools["file.write"]({ path: "note.txt", content: "after" }, yield* context([bound], { claim: "expired-write", validUntil: past }))
         expect(write).toBeInstanceOf(Refused)

@@ -1,4 +1,4 @@
-import { DateTime, Effect } from "effect"
+import { Clock, DateTime, Effect } from "effect"
 import { type Refused, refused } from "../core/airlock/Implement.ts"
 import type { BoundResource, HeldReference, HostParameters } from "../core/contract/ToolHost.ts"
 import type { WireToken } from "../core/outbox/Outbox.ts"
@@ -93,12 +93,13 @@ export const localTools = (services: Services) => {
     tool: string,
     act: (input: Input, context: LocalCallContext) => Effect.Effect<Output, unknown>
   ) =>
-  (input: Input, context: LocalCallContext): Effect.Effect<Output | Refused, unknown> => {
-    const until = deadline(context)
-    return until !== undefined && Date.now() >= until
-      ? Effect.succeed(refused(`${tool} sent nothing: the grant expired`))
-      : act(input, context)
-  }
+  (input: Input, context: LocalCallContext): Effect.Effect<Output | Refused, unknown> =>
+    Effect.flatMap(Clock.currentTimeMillis, (now): Effect.Effect<Output | Refused, unknown> => {
+      const until = deadline(context)
+      return until !== undefined && now >= until
+        ? Effect.succeed(refused(`${tool} sent nothing: the grant expired`))
+        : act(input, context)
+    })
 
   return {
     "file.inspect": onPath("file.inspect", "path", captures["file.inspect"]),

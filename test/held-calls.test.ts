@@ -1,6 +1,7 @@
 import { Effect, FileSystem, Layer, Path } from "effect"
 import { BunServices } from "@effect/platform-bun"
 import { describe, expect, it } from "@effect/vitest"
+import { TestClock } from "effect/testing"
 import * as AirlockHome from "../src/AirlockHome.ts"
 import { Hold, HoldLayer } from "../src/Hold.ts"
 import { FileLedgerLive } from "../src/host/FileLedger.ts"
@@ -255,39 +256,34 @@ describe("HeldCalls", () => {
       Effect.gen(function* () {
         yield* fs.writeFileString(at("one.txt"), "one before")
         yield* fs.writeFileString(at("two.txt"), "two before")
-        const realNow = Date.now
-        const validUntil = realNow() + 60_000
-        try {
-          // Already expired: nothing starts.
-          const late = yield* calls.prepare(claim("call-late"))
-          expect(yield* calls.run(late, native.writeText("one.txt", "late"), { validUntil: realNow() - 1 }))
-            .toEqual({ _tag: "refused", reason: "nothing-applied", expired: true })
-          expect(yield* fs.readFileString(at("one.txt"))).toBe("one before")
+        // The same clock the kernel reads; the test clock starts at zero.
+        const validUntil = 60_000
+        // Already expired: nothing starts.
+        const late = yield* calls.prepare(claim("call-late"))
+        expect(yield* calls.run(late, native.writeText("one.txt", "late"), { validUntil: 0 }))
+          .toEqual({ _tag: "refused", reason: "nothing-applied", expired: true })
+        expect(yield* fs.readFileString(at("one.txt"))).toBe("one before")
 
-          // It runs out between two acts: the second never starts and the first goes back.
-          const between = yield* calls.prepare(claim("call-between"))
-          const outcome = yield* calls.run(
-            between,
-            native.writeText("one.txt", "one after").pipe(
-              Effect.tap(() => Effect.sync(() => { Date.now = () => validUntil + 1 })),
-              Effect.andThen(native.writeText("two.txt", "two after"))
-            ),
-            { validUntil }
-          )
-          expect(outcome).toEqual({ _tag: "refused", reason: "partial-application-restored", expired: true })
-          expect(yield* fs.readFileString(at("one.txt"))).toBe("one before")
-          expect(yield* fs.readFileString(at("two.txt"))).toBe("two before")
+        // It runs out between two acts: the second never starts and the first goes back.
+        const between = yield* calls.prepare(claim("call-between"))
+        const outcome = yield* calls.run(
+          between,
+          native.writeText("one.txt", "one after").pipe(
+            Effect.tap(() => TestClock.setTime(validUntil)),
+            Effect.andThen(native.writeText("two.txt", "two after"))
+          ),
+          { validUntil }
+        )
+        expect(outcome).toEqual({ _tag: "refused", reason: "partial-application-restored", expired: true })
+        expect(yield* fs.readFileString(at("one.txt"))).toBe("one before")
+        expect(yield* fs.readFileString(at("two.txt"))).toBe("two before")
 
-          // A call that finished in time can be put back long after the grant ran out.
-          Date.now = realNow
-          const done = yield* calls.prepare(claim("call-in-time"))
-          yield* calls.run(done, native.writeText("one.txt", "in time"), { validUntil })
-          Date.now = () => validUntil + 3_600_000
-          expect((yield* calls.restore(done)).state).toBe("restored")
-          expect(yield* fs.readFileString(at("one.txt"))).toBe("one before")
-        } finally {
-          Date.now = realNow
-        }
+        // A call that finished in time can be put back long after the grant ran out.
+        const done = yield* calls.prepare(claim("call-in-time"))
+        yield* calls.run(done, native.writeText("one.txt", "in time"), { validUntil: validUntil + 60_000 })
+        yield* TestClock.setTime(validUntil + 3_600_000)
+        expect((yield* calls.restore(done)).state).toBe("restored")
+        expect(yield* fs.readFileString(at("one.txt"))).toBe("one before")
       })
     )
   )
