@@ -64,6 +64,7 @@ export const GuestFailureReason = Schema.Literals([
   "tool_input_invalid",
   "tool_result_limit",
   "tool_failed",
+  "grant_expired",
   "output_limit",
   "loop_limit",
   "step_limit",
@@ -100,8 +101,9 @@ export type GuestFault = typeof GuestFault.Type
  * A tool call that ended the run. A call Airlock refuses does not: the program
  * gets a receipt whose state is `refused` and decides what to do. What ends a
  * run is a fault, where the call may have acted or the host could not answer:
- * an uncertain result, an expired grant, an unavailable host. The message is
- * Airlock's own sentence.
+ * an uncertain result, an unavailable host. The message is Airlock's own
+ * sentence. A grant that ran out has its own reason, `grant_expired`: nothing
+ * is wrong with the call, and only a new grant will let it run.
  */
 export const GuestToolFailure = Schema.Struct({
   tool: Schema.String,

@@ -43,7 +43,8 @@ const start = (storage = persist) => {
       ALARMED: { className: "AlarmedAirlock", useSQLite: true },
       QUEUED: { className: "QueuedAirlock", useSQLite: true },
       SOLO: { className: "SoloAirlock", useSQLite: true },
-      HELD: { className: "HeldAirlock", useSQLite: true }
+      HELD: { className: "HeldAirlock", useSQLite: true },
+      EXPIRED: { className: "ExpiredAirlock", useSQLite: true }
     },
     // No Worker Loader and no nodejs_compat: a program is evaluated in the object itself.
     bindings: { MAIL_TOKEN: "token-canary" },
@@ -326,6 +327,27 @@ describe("cloud: one program at a time", () => {
       "slow started", "slow", "slow started", "slow"
     ])
   }, 30_000)
+})
+
+describe("cloud: a grant that has run out", () => {
+  type Outcome = { readonly ok: boolean; readonly reason?: string; readonly toolCalls: number; readonly result?: unknown }
+  const remote = () => call<ReadonlyArray<{ tool: string; detail: string }>>(workerd, "/airlock/remote")
+
+  it("ends the run with its own reason for a read and for a write, and nothing is run, staged or branched on", async () => {
+    const before = (await remote()).length
+    for (const [runId, first] of [
+      ["read", `mail.list({ mailbox: "inbox", query: "q" })`],
+      ["write", `mail.send({ to: "ada@example.com", subject: "s", body: "b" })`]
+    ] as const) {
+      const outcome = await call<Outcome>(workerd, "/expired/run?object=expired", {
+        runId,
+        source: `let receipt = ${first}\nif receipt.state == "refused" { return "branched" }\nreturn receipt.state`
+      })
+      expect([runId, outcome]).toEqual([runId, { ok: false, reason: "grant_expired", toolCalls: 1 }])
+    }
+    expect((await remote()).length).toBe(before)
+    expect(await call<ReadonlyArray<unknown>>(workerd, "/expired/pending?object=expired")).toEqual([])
+  })
 })
 
 describe("cloud: putting a held call back", () => {

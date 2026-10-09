@@ -134,6 +134,8 @@ const runProgram = ({ source, surface, bindings: bound, limits: overrides, signa
             const fault: AirlockFailure = ended.failure
             // A spent session budget is the host's limit, not the tool's answer.
             if (fault.code === "budget-exceeded") return yield* stop("tool_call_limit")
+            // Time ran out on the grant. The program cannot answer that, so it is not handed a receipt.
+            if (fault.code === "expired") return yield* stop("grant_expired")
             return yield* stop("tool_failed", {
               tool: action.slice(0, MAX_NAME),
               code: fault.code,

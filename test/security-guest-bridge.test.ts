@@ -52,6 +52,20 @@ describe("security: the program runner enforces the host boundary", () => {
     })
   })
 
+  it("ends the run when a grant has run out, with its own fixed reason and nothing after it", async () => {
+    let calls = 0
+    const outcome = await run(`
+      let first = security.read({})
+      if first.state == "refused" { return "branched" }
+      security.read({})
+      return "continued"`, () => {
+        calls += 1
+        return Effect.fail(new AirlockFailure({ code: "expired", message: "security.read was not run: its grant has expired" }))
+      })
+    expect(outcome).toEqual({ ok: false, reason: "grant_expired", toolCalls: 1 })
+    expect(calls).toBe(1)
+  })
+
   it("hands a refusal to the program as a receipt, and lets no host object ride along on it", async () => {
     const refused = { state: "refused" as const, refusal: { code: "not-allowed", message: "This call is refused." } }
     const outcome = await run(`let receipt = security.read({})\nreturn [receipt.state, receipt.refusal.code, "continued"]`,

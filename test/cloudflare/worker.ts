@@ -61,6 +61,7 @@ interface Env {
   readonly QUEUED: Namespace
   readonly SOLO: Namespace
   readonly HELD: Namespace
+  readonly EXPIRED: Namespace
   readonly MAIL_TOKEN: string
 }
 
@@ -260,6 +261,28 @@ const userAirlock = defineAirlock({
 
 export const ExampleAirlock = airlockDurableObject(userAirlock)
 
+/** The same tools under grants whose time has already run out. */
+export const ExpiredAirlock = airlockDurableObject(defineAirlock({
+  contracts: [MailList, MailSend],
+  implement: {
+    "mail.list": ({ mailbox }) => {
+      remote.push({ tool: "mail.list", detail: `expired ${mailbox}` })
+      return { ids: [] }
+    },
+    "mail.send": () => {
+      remote.push({ tool: "mail.send", detail: "expired" })
+      return { messageId: "never" }
+    }
+  },
+  policy: toolPolicy({
+    budget: { maxCalls: 8, maxInputBytes: 4_096 },
+    toolGrants: [
+      Admission.toolGrant(MailList, { id: "read-once", when: "now", validUntil: DateTime.makeUnsafe("2020-01-01T00:00:00Z") }),
+      Admission.toolGrant(MailSend, { id: "send-once", when: "approved", validUntil: DateTime.makeUnsafe("2020-01-01T00:00:00Z") })
+    ]
+  })
+}))
+
 /** The same Airlock with room for one program to wait behind the one running. */
 export const QueuedAirlock = airlockDurableObject(userAirlock, { maxWaitingPrograms: 1 })
 
@@ -376,6 +399,11 @@ export default {
       const rewritten = new URL(request.url)
       rewritten.pathname = rewritten.pathname.replace("/solo/", "/airlock/")
       return trusted(new Request(rewritten.toString(), request), { ...env, AIRLOCK: env.SOLO })
+    }
+    if (url.pathname.startsWith("/expired/")) {
+      const rewritten = new URL(request.url)
+      rewritten.pathname = rewritten.pathname.replace("/expired/", "/airlock/")
+      return trusted(new Request(rewritten.toString(), request), { ...env, AIRLOCK: env.EXPIRED })
     }
     if (url.pathname === "/held/alarm") {
       return env.HELD.get(env.HELD.idFromName(url.searchParams.get("object") ?? "default")).fetch(request)
