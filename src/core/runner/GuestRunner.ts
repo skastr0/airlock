@@ -26,6 +26,12 @@ export const GuestLimits = Schema.Struct({
   maxNodes: Schema.Int,
   /** Loop iterations across the whole run; the language has no other way to repeat. */
   maxLoopIterations: Schema.Int,
+  /** Statements and expressions evaluated across the whole run: the bound on computing, whatever the clock does. */
+  maxSteps: Schema.Int,
+  /** Nodes of everything the program holds in names at one time. */
+  maxTotalNodes: Schema.Int,
+  /** String units of everything the program holds in names at one time. */
+  maxTotalStringUnits: Schema.Int,
   /** Wall-clock milliseconds before the run is stopped and can call nothing more. */
   wallTimeMs: Schema.Int
 })
@@ -40,6 +46,9 @@ export const defaultGuestLimits: GuestLimits = {
   maxDepth: 16,
   maxNodes: 2_048,
   maxLoopIterations: 1_000,
+  maxSteps: 100_000,
+  maxTotalNodes: 16_384,
+  maxTotalStringUnits: 262_144,
   wallTimeMs: 30_000
 }
 
@@ -57,6 +66,7 @@ export const GuestFailureReason = Schema.Literals([
   "tool_refused",
   "output_limit",
   "loop_limit",
+  "step_limit",
   "value_limit",
   "assert_failed",
   "timeout",

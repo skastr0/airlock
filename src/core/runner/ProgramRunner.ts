@@ -57,6 +57,7 @@ const faults: { readonly [Tag in EvaluationError["_tag"]]?: GuestFault } = {
 const reasons: { readonly [Tag in EvaluationError["_tag"]]?: GuestFailureReason } = {
   AssertionFailed: "assert_failed",
   LoopLimitExceeded: "loop_limit",
+  StepLimitExceeded: "step_limit",
   ValueLimitExceeded: "value_limit"
 }
 
@@ -66,12 +67,13 @@ const reasons: { readonly [Tag in EvaluationError["_tag"]]?: GuestFailureReason 
  * What bounds a run, since it executes in the host's own process:
  * - the language has no loop but `for`, and every iteration of every loop is
  *   charged to one budget, so a program cannot run forever;
- * - no string and no list or record may grow past a limit, so a short program
- *   cannot describe a value too large to hold or to walk;
+ * - every statement and expression evaluated is charged to one step budget,
+ *   so how much a program computes is bounded by a number and not by a clock;
+ * - no string and no list or record may grow past a limit, and neither may
+ *   everything the program holds in names at once, so a short program cannot
+ *   describe more than the host agreed to hold;
  * - the wall-clock deadline stops the run between steps and nothing is called
- *   after it.
- * Neither is a CPU quota. A program can still spend its whole loop budget on
- * arithmetic; the deadline is what ends that.
+ *   after it. It is what ends a run that is waiting on a tool.
  */
 const runProgram = ({ source, surface, bindings: bound, limits: overrides, signal }: GuestRun): Effect.Effect<GuestOutcome> =>
   Effect.suspend(() => {
@@ -155,6 +157,9 @@ const runProgram = ({ source, surface, bindings: bound, limits: overrides, signa
                 maxLoopIterations: limits.maxLoopIterations,
                 maxStringLength: Math.max(limits.maxToolInputBytes, limits.maxOutputBytes),
                 maxValueNodes: limits.maxNodes,
+                maxSteps: limits.maxSteps,
+                maxTotalNodes: limits.maxTotalNodes,
+                maxTotalStringUnits: limits.maxTotalStringUnits,
                 bindings: names
               })))),
       Effect.flatMap((evaluation) =>

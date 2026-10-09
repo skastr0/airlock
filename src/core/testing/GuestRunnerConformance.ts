@@ -314,6 +314,57 @@ export const guestRunnerConformance = (
         holds(deep.ok ? deep.result === 1 : deep.reason === "invalid_code" || deep.reason === "execution_failed", "deep nesting ends in an outcome")
       }))
 
+    test("stops at the step budget, with no clock involved", () =>
+      Effect.gen(function* () {
+        const current = yield* world
+        const env = fresh()
+        // Loops allowed to run far longer than the steps they would take.
+        const computing = yield* run(current, env, `
+          for outer in 0..300 {
+            for inner in 0..300 { let product = outer * inner }
+          }
+          return ${list}`, { limits: { maxLoopIterations: 100_000_000 } })
+        same(reasonOf(computing), "step_limit")
+        // No loop at all: a long enough straight line is charged the same way.
+        const line = Array.from({ length: 40 }, (_, index) => `let name${index} = ${index} + 1`).join("\n")
+        same([
+          yield* run(current, env, `${line}\nreturn ${list}`, { limits: { maxSteps: 60 } }),
+          yield* run(current, env, `${line}\nreturn name39`)
+        ].map(reasonOf), ["step_limit", "ok"])
+        same(env.dispatched, [], "a program past its step budget calls nothing")
+      }))
+
+    test("bounds what a program holds in all its names together, not only in each", () =>
+      Effect.gen(function* () {
+        const current = yield* world
+        const env = fresh()
+        const text = "x".repeat(40)
+        const strings = `let a = "${text}"\nlet b = "${text}"\nlet c = "${text}"\nreturn 1`
+        const lists = `let a = [1, 2, 3, 4]\nlet b = [1, 2, 3, 4]\nlet c = [1, 2, 3, 4]\nreturn 1`
+        same([
+          yield* run(current, env, strings, { limits: { maxTotalStringUnits: 100 } }),
+          yield* run(current, env, strings),
+          yield* run(current, env, lists, { limits: { maxTotalNodes: 12 } }),
+          yield* run(current, env, lists),
+          // What the host binds is held too.
+          yield* run(current, env, `let a = "${text}"\nreturn 1`, { bindings: { given: text }, limits: { maxTotalStringUnits: 60 } })
+        ].map(reasonOf), ["value_limit", "ok", "value_limit", "ok", "value_limit"])
+      }))
+
+    test("refuses syntax nested deeper than the parser will follow", () =>
+      Effect.gen(function* () {
+        const current = yield* world
+        const env = fresh()
+        same([
+          yield* run(current, env, `return ${"!".repeat(15_000)}true`),
+          yield* run(current, env, `return ${"(".repeat(200)}1${")".repeat(200)}`),
+          yield* run(current, env, `return ${"[".repeat(200)}1${"]".repeat(200)}`),
+          yield* run(current, env, `return ${"(".repeat(20)}1${")".repeat(20)}`)
+        ].map((outcome) => outcome.ok ? "ok" : `${outcome.reason}/${outcome.toolCalls}`), [
+          "invalid_code/0", "invalid_code/0", "invalid_code/0", "ok"
+        ])
+      }))
+
     test("stops at the deadline, whether the program is computing or waiting on a tool", () =>
       Effect.gen(function* () {
         const current = yield* world
@@ -321,7 +372,7 @@ export const guestRunnerConformance = (
         const started = Date.now()
         const computing = yield* run(current, env, `
           for index in 0..100000000 { let twice = index * 2 }
-          return ${list}`, { limits: { wallTimeMs: 150, maxLoopIterations: 100_000_000 } })
+          return ${list}`, { limits: { wallTimeMs: 150, maxLoopIterations: 100_000_000, maxSteps: 10_000_000_000 } })
         same(computing, { ok: false, reason: "timeout", toolCalls: 0 })
         const waiting = yield* run(current, env, `
           mail.list({ mailbox: "slow", query: "q" })
@@ -337,7 +388,7 @@ export const guestRunnerConformance = (
         const current = yield* world
         const env = fresh()
         const source = `for index in 0..100000000 { let twice = index * 2 }\nreturn ${list}`
-        const limits = { maxLoopIterations: 100_000_000 }
+        const limits = { maxLoopIterations: 100_000_000, maxSteps: 10_000_000_000 }
         const running = yield* Effect.forkChild(run(current, env, source, { limits }))
         yield* Effect.promise(() => new Promise((resolve) => setTimeout(resolve, 100)))
         yield* Fiber.interrupt(running)

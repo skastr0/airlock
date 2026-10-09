@@ -39,7 +39,8 @@ const script = (await build({
               const runner = yield* GuestRunner;
               return yield* runner.run({ source, surface, limits: {
                 wallTimeMs: freezeClock ? 30 : 2000,
-                maxLoopIterations: freezeClock ? 1000000 : 1000
+                maxLoopIterations: freezeClock ? 1000000 : 1000,
+                maxSteps: freezeClock ? 1000000000 : 100000
               } });
             }).pipe(Effect.provide(programRunner)));
             return Response.json({
