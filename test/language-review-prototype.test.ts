@@ -2,13 +2,23 @@ import { describe, expect, it } from "@effect/vitest"
 import { Effect, Schema } from "effect"
 import { defineToolContract } from "../src/core/contract/ToolContract.ts"
 import { defineDecoder } from "../src/core/contract/Decoder.ts"
-import { decoderIdentity, reviewPrototype, ReviewError } from "./support/air-review.ts"
-import { runReviewedPrototype, type PrototypeHost } from "./support/air-review-evaluator.ts"
+import { decoderIdentity, reviewPrototype, ReviewError, type Review } from "./support/air-review.ts"
+import { runReviewedPrototype, type CallObservation, type PrototypeHost } from "./support/air-review-evaluator.ts"
 import { environment, triage } from "./support/air-review-fixtures.ts"
 import { runnerExamples } from "./support/hostile-air-corpus.ts"
 
 const done = (result: Schema.Json): Schema.Json => ({ state: "done", id: "receipt-1", result })
 const unreachable: PrototypeHost = { resolve: () => Effect.die("no host call expected") }
+const assertObservedDependencies = (review: Review) => (observed: CallObservation): void => {
+  const call = review.calls.find((call) => call.tool === observed.tool && call.span.start === observed.span.start)!
+  expect(call).toBeDefined()
+  for (const origin of observed.argument.provenance) expect(call.arguments.origins, `whole argument ${observed.tool}: ${origin}`).toContain(origin)
+  for (const origin of observed.control.provenance) expect(call.control, `control ${observed.tool}: ${origin}`).toContain(origin)
+  if (call.arguments.type.kind === "record") for (const [field, label] of Object.entries(observed.fields)) {
+    const staticOrigins = call.arguments.type.fields.get(field)?.origins ?? []
+    for (const origin of label.provenance) expect(staticOrigins, `${observed.tool}.${field}: ${origin}`).toContain(origin)
+  }
+}
 
 describe("current-syntax type checker prototype", () => {
   for (const source of [
@@ -183,7 +193,8 @@ describe("generated type-safety evidence (not a proof)", () => {
     const env = { ...environment, tools: { "security.echo": { contract: echo } }, granted: new Set(["security.echo"]) }
     for (const example of runnerExamples(0x518adc, 1000)) {
       let calls = 0
-      const result = yield* runReviewedPrototype(yield* reviewPrototype(example.source, env), { resolve: () => Effect.sync(() => { calls++; return done(true) }) })
+      const review = yield* reviewPrototype(example.source, env)
+      const result = yield* runReviewedPrototype(review, { observe: assertObservedDependencies(review), resolve: () => Effect.sync(() => { calls++; return done(true) }) })
       expect(result).toEqual(example.value)
       expect(calls).toBe(example.calls)
     }
@@ -197,7 +208,7 @@ describe("generated type-safety evidence (not a proof)", () => {
       const use = operation === 0 ? 'let title = "Subject: " + r.result.subject' : operation === 1 ? 'let checked = decode(schema.companyRecipient,r.result.from); if checked.state == "ok" { mail.send({to:checked.value,subject:r.result.subject,body:r.result.body}) }' : 'let selected = at([r.result.body],2); if selected != null { let found = selected }'
       const source = `for id in ${JSON.stringify(ids)} { let r = mail.read({id:id}); if r.state == "done" { ${use} } else { if r.state == "staged" { let pending = r.id } else { let denied = r.refusal.message } } }; return true`
       const review = yield* reviewPrototype(source, environment)
-      const host: PrototypeHost = { resolve: (name) => Effect.sync(() => {
+      const host: PrototypeHost = { observe: assertObservedDependencies(review), resolve: (name) => Effect.sync(() => {
         const state = random(3)
         if (state === 0) return { state: "refused", refusal: { code: "policy", message: "Denied" } }
         if (state === 1) return { state: "staged", id: `pending-${sample}` }
@@ -206,6 +217,22 @@ describe("generated type-safety evidence (not a proof)", () => {
       const outcome = yield* runReviewedPrototype(review, host).pipe(Effect.result)
       if (outcome._tag === "Failure") throw new Error(`checker regression seed=${seed} sample=${sample} source=${source} stop=${outcome.failure.reason}`)
       expect(outcome.success).toBe(true)
+    }
+  }), { timeout: 60_000 })
+
+  it.effect("covers every observed field/control origin across 1000 generated nested selections", () => Effect.gen(function* () {
+    const choice = defineToolContract({ name: "choice.read", version: "1", effect: "capture", input: Schema.Struct({ id: Schema.String }), output: Schema.Struct({ index: Schema.Number, ignored: Schema.String }) })
+    const env = { ...environment, tools: { ...environment.tools, "choice.read": { contract: choice } }, granted: new Set([...environment.granted, "choice.read"]) }
+    for (let sample = 0; sample < 1000; sample++) {
+      const nested = sample % 2 === 0, safe = sample % 3 === 0
+      const candidates = nested ? '[{nested:{url:"https://example.com/a",ignored:choice.result.ignored}},{nested:{url:"https://example.com/b",ignored:choice.result.ignored}}]' : '[{url:"https://example.com/a",ignored:choice.result.ignored},{url:"https://example.com/b",ignored:choice.result.ignored}]'
+      const pick = safe ? 'at(candidates,choice.result.index)' : 'candidates[choice.result.index]'
+      const use = `let alias = selected; http.get({url:alias.${nested ? "nested.url" : "url"}})`
+      const source = `let choice = choice.read({id:"one"}); if choice.state == "done" { let candidates = ${candidates}; let selected = ${pick}; ${safe ? `if selected != null { ${use} }` : use} }; return true`
+      const review = yield* reviewPrototype(source, env)
+      const get = review.calls.find((call) => call.tool === "http.get")!
+      expect(get.arguments.origins.some((origin) => origin.endsWith(".ignored"))).toBe(false)
+      expect(yield* runReviewedPrototype(review, { observe: assertObservedDependencies(review), resolve: (name) => Effect.succeed(name === "choice.read" ? done({ index: sample % 2, ignored: "private unrelated data" }) : done({ text: "ok" })) })).toBe(true)
     }
   }), { timeout: 60_000 })
 
