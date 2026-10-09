@@ -277,5 +277,5 @@ const check = (program: Program, environment: ReviewEnvironment): Review => {
   return { program, environment, tools: [...tools].sort(), maximumCalls: result.counts, calls, iterations: result.iterations, expressionFacts }
 }
 
-export const decoderIdentity = (decoder: TrustedDecoder.Any): string => `${decoder.name}@${decoder.version}`
+export const decoderIdentity = (decoder: { readonly name: string; readonly version: string }): string => JSON.stringify([decoder.name, decoder.version])
 const primitiveKind = (value: string | number | boolean): Kind => typeof value === "string" ? "string" : typeof value === "number" ? "number" : "boolean"

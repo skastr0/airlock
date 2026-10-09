@@ -2,7 +2,7 @@ import { describe, expect, it } from "@effect/vitest"
 import { Effect, Schema } from "effect"
 import { defineToolContract } from "../src/core/contract/ToolContract.ts"
 import { defineDecoder } from "../src/core/contract/Decoder.ts"
-import { reviewPrototype, ReviewError } from "./support/air-review.ts"
+import { decoderIdentity, reviewPrototype, ReviewError } from "./support/air-review.ts"
 import { runReviewedPrototype, type PrototypeHost } from "./support/air-review-evaluator.ts"
 import { environment, triage } from "./support/air-review-fixtures.ts"
 
@@ -38,7 +38,7 @@ describe("current-syntax type checker prototype", () => {
     expect(send.control.some((source) => source.endsWith(".unread"))).toBe(true)
     expect(send.arguments.type.kind).toBe("record")
     if (send.arguments.type.kind === "record") {
-      expect(send.arguments.type.fields.get("to")!.refinements).toContain("companyRecipient@1")
+      expect(send.arguments.type.fields.get("to")!.refinements).toContain(JSON.stringify(["companyRecipient", "1"]))
       expect(send.arguments.type.fields.get("to")!.origins.some((source) => source.endsWith(".from"))).toBe(true)
     }
     expect(review.expressionFacts.size).toBeGreaterThan(20)
@@ -104,6 +104,10 @@ describe("current-syntax type checker prototype", () => {
     const env = { ...environment, decoders: { ...environment.decoders, anyText: other } }
     const source = 'let trusted = decode(schema.companyRecipient,"a@example.com"); let unchecked = decode(schema.anyText,"a@outside.test"); for item in [trusted,unchecked] { if item.state == "ok" { mail.send({to:item.value,subject:"Hi",body:"Hello"}) } }; return true'
     expect(yield* reviewPrototype(source, env).pipe(Effect.flip)).toBeInstanceOf(ReviewError)
+  }))
+
+  it.effect("keeps decoder identities injective when names and versions contain separators", () => Effect.sync(() => {
+    expect(decoderIdentity({ name: "a@b", version: "c" })).not.toBe(decoderIdentity({ name: "a", version: "b@c" }))
   }))
 })
 

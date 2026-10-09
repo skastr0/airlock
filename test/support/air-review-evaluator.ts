@@ -3,7 +3,7 @@ import { decodeValue, deriveValue, hasRefinement, labeledValue, projectValue, ty
 import { combine, InformationLabel } from "../../src/core/labels/Labels.ts"
 import type { Expression, Span, Statement } from "../../src/core/language/ast.ts"
 import { SpanSchema } from "../../src/core/language/ast.ts"
-import { staticPath, type Review } from "./air-review.ts"
+import { decoderIdentity, staticPath, type Review } from "./air-review.ts"
 
 export class PrototypeStop extends Schema.TaggedError<PrototypeStop>()("PrototypeStop", {
   reason: Schema.Literals(["dynamic-type-error", "host-result", "budget", "out-of-plan", "refinement", "value-limit"]), span: SpanSchema
@@ -119,7 +119,7 @@ export const runReviewedPrototype = <E, R>(review: Review, host: PrototypeHost<E
           callCounts.set(name, count)
           if (Result.isFailure(Schema.decodeUnknownResult(tool.contract.input, { onExcessProperty: "error" })(argument.tracked.value))) stop("dynamic-type-error", expression.span)
           for (const [field, identity] of Object.entries(tool.requires ?? {})) {
-            const decoder = Object.values(review.environment.decoders).find((decoder) => `${decoder.name}@${decoder.version}` === identity), input = argument.children.get(field)
+            const decoder = Object.values(review.environment.decoders).find((decoder) => decoderIdentity(decoder) === identity), input = argument.children.get(field)
             if (decoder === undefined || input === undefined || !hasRefinement(input.tracked, decoder)) stop("refinement", expression.span)
           }
           return { name, tool }
