@@ -33,6 +33,9 @@ Executed on macOS (Darwin 25.5.0), Bun 1.3.14, on 2026-08-02.
 26 passed, 0 failed
 ```
 
+Five of those rows exercised JSON tool definitions, which have since been
+removed; the script now runs the 21 rows below.
+
 | Proof | What the run observed |
 | --- | --- |
 | `positive/committed` | a `read`-class `commit: "auto"` grant turns a staged GET into `committed` inside the run |
@@ -47,10 +50,7 @@ Executed on macOS (Darwin 25.5.0), Bun 1.3.14, on 2026-08-02.
 | `unclassified/*` (3) | a grant with neither class nor commit leaves the intent `staged`, durably retained, with zero provider requests |
 | `ungranted/*` (2) | an endpoint fitting no grant is `AdmissionDenied` before staging; zero provider requests |
 | `program-class/typed refusal` | a program naming `class` in `http.stage` is a `ProgramActionDecodeFailed` |
-| `definition-class/typed refusal` | a v2 definition naming `commit` is a `ToolGrantAssertionRejected` |
 | `mutate-grant/*` (2) | a `mutate`-classed grant leaves a POST `staged`; zero provider requests |
-| `declared-mutate/*` (2) | a definition declaring `emissionEffect: "mutate"` stays `staged` under a `read`/`commit: "auto"` grant on the same endpoint |
-| `declared-read/*` (2) | the same definition's `read` action auto-commits through that same grant — so the row above is a narrowing, not a dead path |
 | `auto-on-mutate/policy refused` | a policy declaring `commit: "auto"` on `class: "mutate"` is `AdmissionContractInvalid` |
 | `oversized/*` (3) | a 200,000-byte response commits, retains exactly 65,536 bytes, and reports `truncated: true` |
 

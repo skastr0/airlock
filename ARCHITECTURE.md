@@ -52,8 +52,7 @@ It contains:
 
 - **The pure modules**: `domain`, `plan`, `labels`, `language` (the `.air`
   parser and evaluator), `admission` (policy, grants, dispatch classes),
-  `actions` (the native action catalog) and `tools` (tool definitions and
-  their lowering to Plans).
+  `actions` (the native action catalog).
 - **`Canonical`**: canonical JSON and SHA-256 digests over `effect/Crypto`.
   Identity and digests are computed here once, so every host derives the same
   value for the same content.

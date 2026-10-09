@@ -70,7 +70,7 @@ airlock-agent actions
 
 Until then, **a checkout is the only way to get Airlock**, and the only way to
 get the surfaces documented in [`usage.md`](usage.md): admission-policy v2 with
-dispatch-class endpoint grants, tool-definition v2, the external-read slice, and
+dispatch-class endpoint grants, the external-read slice, and
 the corpus harness. Do not read the npm block above as an available path.
 
 ## Install from a checkout
@@ -223,8 +223,7 @@ distinguishes *enforced* from merely *available*:
 }
 ```
 
-`airlock-agent actions` returns the twelve built-in actions plus any discovered
-tool definitions (`"definitions": []` on a clean install). Both commands emit
+`airlock-agent actions` returns the twelve built-in actions. Both commands emit
 JSON only.
 
 ### Uninstall
@@ -297,8 +296,8 @@ airlock-agent rejects --profile; the supervisor pins the execution profile
 Three environment variables are the whole supervisor-side configuration
 surface.
 
-**`AIRLOCK_HOME`** — the state directory: Hold store, Outbox, run journals,
-locks, and installed tool definitions. Defaults to `~/.airlock`. Give each
+**`AIRLOCK_HOME`** — the state directory: Hold store, Outbox, run journals
+and locks. Defaults to `~/.airlock`. Give each
 isolated realm its own home; every command in these docs ran with an explicit
 `AIRLOCK_HOME` under a scratch root.
 

@@ -34,7 +34,7 @@ bun scripts/seal-box.ts local \
 literal, headed copy-paste recipe to stderr; the same text is retained in the
 JSON `recipe` field. Paths are physical paths (on macOS, `/tmp` normally
 resolves to `/private/tmp`). `SEALED` is created with exclusive create only
-after the binary, signed seal, exact catalog, state roots, and complete bundle
+after the binary, signed seal, state roots, and complete bundle
 verification succeed. It is the final publication mutation for a default box.
 A partial failure before that point has no `SEALED` marker; the fresh path is
 preserved for inspection and a retry refuses to replace it.
@@ -63,8 +63,7 @@ operation. Therefore no daemon is started or required by default. Direct
 # resultSchema describes `bytes`; it does not invent a `size` alias.
 ```
 
-A custom `--admission ABSOLUTE_JSON` and repeated `--definition ABSOLUTE_JSON`
-inputs may be supplied. A compatibility admission is refused unless the same
+A custom `--admission ABSOLUTE_JSON` may be supplied. A compatibility admission is refused unless the same
 command also spells `--allow-sealed-compatibility`.
 
 ## Same-user commit daemon
@@ -94,8 +93,8 @@ there is no local commit fallback.
 ## Tamper and lifecycle boundary
 
 Startup rechecks the compiled binary digest, embedded operator-key anchor,
-signature, exact catalog, and compile-bound local readiness marker. A changed
-grant, extra `*.airlock-tool.json`, wrong binary, root-tenant readiness marker,
+signature, and compile-bound local readiness marker. A changed
+grant, wrong binary, root-tenant readiness marker,
 or missing readiness marker exits 78 before Airlock state is constructed.
 Running `bun run src/cli.ts` with `AIRLOCK_SEAL` set remains rejected as
 `source-mode`; source loading is not a sealed identity.

@@ -53,8 +53,7 @@ Untrusted inputs include:
 
 - agent program source and bindings;
 - project files and instructions;
-- paths, arguments, URLs, downloaded artifacts, and process output;
-- tool-definition documents before decoding and admission; and
+- paths, arguments, URLs, downloaded artifacts, and process output; and
 - existing executables and every loader/helper/configuration path not bound by
   the current contract.
 
@@ -210,8 +209,8 @@ external effect.
 
 A v2 supervisor policy may pre-authorize the commit for endpoint grants it
 classed `read` (`commit: "auto"`). That auto-commit is a caller of the same
-`Outbox.commit` after durable staging — no second wire site, and no program or
-definition can select a class. It is implemented with local fixture evidence
+`Outbox.commit` after durable staging — no second wire site, and no program
+can select a class. It is implemented with local fixture evidence
 ([`evidence/external-read-slice.md`](evidence/external-read-slice.md)), which
 is not vendor or brokerage evidence.
 
@@ -328,31 +327,13 @@ that asks for a weaker profile receives a failed `RuntimeCapabilityDenied`
 receipt without performing the effect. It does not prove the external harness
 withheld every alternate machine-effect tool.
 
-### Inert tool definitions
+### No tool definitions
 
-Tool definitions are decoded from JSON into a finite Schema:
-
-- no code executes while loading;
-- an `invoke` action runs one declared absolute executable;
-- an `enqueue` action lowers onto the staged
-  `RequestExternal`/`http.stage` seam, must declare an `emissionEffect` that
-  can only narrow a grant's supervisor-side dispatch class, and are refused
-  with a typed `ToolGrantAssertionRejected` if any definition text names
-  grant-side class or commit vocabulary;
-- argument/environment/resource templates and result decoders are
-  declarative;
-- unsupported artifact/secret template forms are rejected rather than
-  partially interpreted;
-- executable constraints match explicit absolute identities;
-- definitions request requirements but do not grant them; and
-- every accepted action lowers totally to the existing Plan constructors — a
-  structured Invoke action for `invoke`, a staged `http.stage` intent for
-  `enqueue` — or returns a typed error.
-
-Accepted definitions execute end to end through the same program, Admission,
-ExecutionAuthority, Runtime, and output Schema validation as native actions.
-Their digests are bound into the request and Plan. They cannot add an effect
-class, dispatch, or mint authority.
+A program can call only the actions the host declares. Nothing an agent or a
+workspace can write — a JSON document, a file in `.airlock/tools`, an entry in
+a sealed directory — names a new action or binds an executable to one. A
+sealed box pins its grant: the admission policy, the verbs and the native
+actions, under one signature.
 
 Definition signing, provenance strength, distribution locking, richer
 execution-closure contracts, and whether future versions need compositions of
@@ -438,7 +419,7 @@ low-authority work writes hook/config/executable
   → persisted untrusted bytes exercise new authority
 ```
 
-Relevant resources include executable/search paths, definitions, policies,
+Relevant resources include executable/search paths, policies,
 hooks, plugins, build/package scripts, SCM/tool configuration, credential
 helpers, launch agents, trust stores, and grant sources.
 

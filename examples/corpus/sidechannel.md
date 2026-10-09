@@ -72,8 +72,7 @@ The complete verb surface. Nothing else is callable.
       "node": "RequestExternal",
       "summary": "Stage an HTTP intent; it cannot dispatch from this lowering."
     }
-  ],
-  "definitions": []
+  ]
 }
 ```
 

@@ -14,7 +14,7 @@
 1. [First program: the `.air` language in 10 minutes](#1-first-program-the-air-language-in-10-minutes)
 2. [The action vocabulary](#2-the-action-vocabulary)
 3. [Profiles and policy](#3-profiles-and-policy)
-4. [Dispatch classes and tool definitions](#4-dispatch-classes-and-tool-definitions)
+4. [Dispatch classes](#4-dispatch-classes)
 5. [Hold and Outbox operations](#5-hold-and-outbox-operations-supervisor)
 6. [Agent-harness integration](#6-agent-harness-integration)
 7. [Corpus harness](#7-corpus-harness-for-evaluating-agents)
@@ -311,8 +311,7 @@ airlock-agent schema plan
     { "name": "file.mkdir",   "node": "Apply",           "summary": "Apply managed directory creation." },
     { "name": "process.run",  "node": "Invoke",          "summary": "Invoke one structured executable + args contract inside a Cell." },
     { "name": "http.stage",   "node": "RequestExternal", "summary": "Stage an HTTP intent; it cannot dispatch from this lowering." }
-  ],
-  "definitions": []
+  ]
 }
 ```
 
@@ -693,7 +692,7 @@ Full envelope: [`macos-v1.md`](macos-v1.md),
 
 ---
 
-## 4. Dispatch classes and tool definitions
+## 4. Dispatch classes
 
 **Status: implemented candidate seam with a stated boundary.** Design source:
 [`rfc/dispatch-classes-and-provider-contract.md`](rfc/dispatch-classes-and-provider-contract.md).
@@ -711,7 +710,7 @@ grant, per endpoint, that a staged read may be committed immediately.
 ### Classes are grant-side facts, and only grant-side
 
 The vocabulary lives in `src/core/admission/DispatchPolicy.ts` and nowhere else. No
-Plan node, program text, tool definition, or third-party annotation carries it
+Plan node, program text, or third-party annotation carries it
 or can widen it.
 
 | class | supervisor's assertion |
@@ -721,7 +720,7 @@ or can widen it.
 | `irreversible-send` | the default and the floor |
 
 Ordering is `read < mutate < irreversible-send`, and the **stricter side always
-wins** when a grant and a declaration disagree.
+wins** when more than one grant fits.
 
 | commit mode | effect |
 | --- | --- |
@@ -784,19 +783,14 @@ ok    unclassified/intent is durably retained for a supervisor — outbox=["stag
 ok    ungranted/refused before staging — …"causeTag":"AdmissionDenied"…
 ok    ungranted/never reached the provider — provider saw 0 request(s)
 ok    program-class/typed refusal — …"causeTag":"ProgramActionDecodeFailed"…
-ok    definition-class/typed refusal — refusal=ToolGrantAssertionRejected
 ok    mutate-grant/stays staged — state=staged
 ok    mutate-grant/never reached the provider — provider saw 0 request(s)
-ok    declared-mutate/narrows a read grant to staged — state=staged
-ok    declared-mutate/never reached the provider — provider saw 0 request(s)
-ok    declared-read/auto-commits through the same grant — state=committed
-ok    declared-read/reached the provider — provider saw 1 request(s)
 ok    auto-on-mutate/policy refused as an invalid contract — …"causeTag":"AdmissionContractInvalid"…
 ok    oversized/committed and reached the provider — state=committed
 ok    oversized/capture stops at the bound — bytes=65536 of 200000 truncated=true
 ok    oversized/artifact carries only the bounded bytes — artifact bytes=65536
 
-26 passed, 0 failed (fixture provider at http://127.0.0.1:61137)
+21 passed, 0 failed (fixture provider at http://127.0.0.1:61137)
 ```
 
 The proof starts a local fixture provider on an ephemeral `127.0.0.1` port,
@@ -831,17 +825,10 @@ Read the rows as five things:
    provider requests. An endpoint fitting no grant is `AdmissionDenied` *before*
    staging. A `mutate`-classed grant never auto-commits. A policy declaring
    `commit: "auto"` on `class: "mutate"` is `AdmissionContractInvalid`. A program
-   naming `class` inside `http.stage` is a `ProgramActionDecodeFailed`. A
-   definition naming `commit` is a `ToolGrantAssertionRejected`. **Fail-closed by
+   naming `class` inside `http.stage` is a `ProgramActionDecodeFailed`. **Fail-closed by
    absence**: the runtime is handed a list of authorizations, never a policy, and
    an empty list — the default — means
    every staged intent waits for an explicit supervisor commit.
-
-The narrowing row is worth naming: a definition declaring
-`emissionEffect: "mutate"` stays `staged` under a `read`/`commit: "auto"` grant
-on the same endpoint, while that same definition's `read` action auto-commits
-through that same grant. So the stricter-side-wins rule is a real narrowing, not
-a dead path.
 
 **Boundary.** One host, one realm, and the counterparty is a **fixture** — a
 local test HTTP server that exists so a proof has something behind an endpoint.
@@ -851,166 +838,23 @@ Airlock does not verify that a granted endpoint is idempotent, only that the
 class the supervisor wrote is the class that governed the dispatch. No retry
 semantics were added; `uncertain` is preserved exactly as before.
 
-### Tool definitions: typed ergonomics, never authority
-
-A tool definition is **inert JSON** in a discovered directory. It executes
-through ordinary action lowering, Admission, Plans, Runtime, and Schema-decoded
-results. It adds no Plan constructor, no profile, no verb, and no authority.
-
-Definitions are read from four fixed, immediate, optional directories — never
-recursively, and only `*.airlock-tool.json` regular files:
-
-| precedence | directory |
-| --- | --- |
-| builtin | `<install>/tool-definitions` |
-| installed | `$AIRLOCK_HOME/tools` |
-| user | `~/.config/airlock/tools` |
-| project | `<workspace>/.airlock/tools` |
-
-The reader opens each file with `O_NOFOLLOW` and caps it at 256 KiB, so a raced
-symlink replacement fails rather than being read through.
-
-**`invoke` lowering.**
-[`examples/tools/printf-json.airlock-tool.json`](../examples/tools/printf-json.airlock-tool.json):
-
-```json
-{
-  "schemaVersion": "airlock/tool-definition/v2",
-  "id": "printf_json",
-  "version": "1.0.0",
-  "executables": [ { "realm": "local", "selector": "/usr/bin/printf" } ],
-  "actions": [
-    {
-      "name": "decode",
-      "inputSchema": { "type": "object", "properties": { "cwd": { "type": "string" }, "json": { "type": "string" } }, "required": ["cwd", "json"], "additionalProperties": false },
-      "outputSchema": { "type": "object", "properties": { "ok": { "type": "boolean" } }, "required": ["ok"], "additionalProperties": false },
-      "args": [ { "_tag": "Input", "path": ["json"] } ],
-      "cwd": { "_tag": "Input", "path": ["cwd"] },
-      "resources": [ { "kind": "path", "realm": "local", "selector": { "_tag": "Input", "path": ["cwd"] }, "rights": ["read"] } ],
-      "lowering": "invoke",
-      "effectFootprint": ["invoke"],
-      "resultDecoder": "json-stdout"
-    }
-  ]
-}
-```
-
-**`enqueue` lowering with a declared emission effect.**
-[`examples/tools/fixture-status.airlock-tool.json`](../examples/tools/fixture-status.airlock-tool.json):
-
-```json
-{
-  "schemaVersion": "airlock/tool-definition/v2",
-  "id": "fixture_status",
-  "version": "1.0.0",
-  "executables": [],
-  "actions": [
-    {
-      "name": "read",
-      "inputSchema": { "type": "object", "properties": { "endpoint": { "type": "string" } }, "required": ["endpoint"], "additionalProperties": false },
-      "lowering": "enqueue",
-      "effectFootprint": ["enqueue"],
-      "emissionEffect": "read",
-      "request": {
-        "method": "GET",
-        "endpoint": { "_tag": "Input", "path": ["endpoint"] },
-        "headers": { "accept": { "_tag": "Literal", "value": "application/json" } },
-        "holdMillis": 0
-      },
-      "resultDecoder": "none"
-    },
-    { "name": "reconcile", "…": "identical request, emissionEffect: \"mutate\"" }
-  ]
-}
-```
-
-`emissionEffect` is the *definition author's declaration*, and it can only ever
-**narrow**. It cannot select a class, cannot set a commit mode, and cannot widen
-a grant. A definition that names `class` or `commit` is a
-`ToolGrantAssertionRejected`. MCP annotations (`readOnlyHint`,
-`destructiveHint`, `idempotentHint`) are third-party unauthenticated hints; a
-converter may copy them into `emissionEffect` as a *starting suggestion for the
-supervisor* and nothing more.
-
-Both definitions discovered and executed:
-
-```sh
-cp examples/tools/printf-json.airlock-tool.json \
-   examples/tools/fixture-status.airlock-tool.json \
-   "$WORKSPACE/.airlock/tools/"
-
-airlock-agent actions --workspace "$WORKSPACE"
-```
-
-```json
-"definitions": [
-  { "name": "fixture_status.read",      "definitionId": "fixture_status", "version": "1.0.0", "executable": [],                  "resultDecoder": "none" },
-  { "name": "fixture_status.reconcile", "definitionId": "fixture_status", "version": "1.0.0", "executable": [],                  "resultDecoder": "none" },
-  { "name": "printf_json.decode",       "definitionId": "printf_json",    "version": "1.0.0", "executable": ["/usr/bin/printf"], "resultDecoder": "json-stdout" }
-]
-```
-
-```sh
-cat > "$WORKSPACE/tool.air" <<AIR
-let decoded = printf_json.decode({ cwd: "$WORKSPACE", json: "{\\"ok\\":true}" })
-assert decoded.ok, "decoder should report ok"
-return decoded
-AIR
-
-airlock-agent run "$WORKSPACE/tool.air" --workspace "$WORKSPACE" --compact
-```
-
-```json
-"state": "succeeded",
-"result": { "ok": true },
-"plans": [ { "actionReference": "printf_json.decode@sha256:…", "nodeCount": 1 } ]
-```
-
-And the authority point, executed: the `read` action under the CLI's default
-compatibility policy — which has **no** endpoint grants — lowers to `http.stage`
-and stays `staged`. The fixture provider log shows it never received the request.
-
-```sh
-cat > "$WORKSPACE/read.air" <<'AIR'
-return fixture_status.read({ endpoint: "http://127.0.0.1:PORT/v1/status" })
-AIR
-
-airlock-agent run "$WORKSPACE/read.air" --workspace "$WORKSPACE" --compact
-```
-
-```json
-"state": "succeeded",
-"result": {
-  "state": "staged",
-  "action": "http.stage",
-  "emission_id": "emi_2f48bb44-95a7",
-  "method": "GET",
-  "endpoint": "http://127.0.0.1:PORT/v1/status",
-  "hold_millis": 0
-}
-```
-
-A definition changed the *ergonomics* — one typed call instead of a hand-written
-`http.stage` record — and changed the authority by exactly nothing.
-
 ### No vendor tools ship in-tree
 
-Airlock is provider-neutral. **No vendor tool definitions and no provider
-adapters live in this repository**; the only provider in-tree is the local
-fixture used by proofs. Adopters generate their own definition suites
-out-of-tree.
+Airlock is provider-neutral. **No vendor tools and no provider adapters live
+in this repository**; the only provider in-tree is the local fixture used by
+proofs.
 
 ```text
 EndpointProvider owns:                Airlock owns:
   transport to the vendor API           admission and dispatch classes
   credential custody and refresh        staging (Outbox) and the single wire site
-  vendor catalog -> definitions         commit / cancel / uncertain physics
+  vendor catalog and semantics          commit / cancel / uncertain physics
   vendor-side semantics and errors      receipts and redaction
 ```
 
 The provider is a **counterparty behind the endpoint**, not a component inside
 the trust base. Airlock's entire view of it: the endpoint selectors the
-supervisor grants, the inert definitions the supervisor installs, and the HTTP
+supervisor grants and the HTTP
 dispatches `Outbox.commit` performs. Aggregators appear in the RFC only as
 example out-of-tree adopters with no privileged position.
 
@@ -1182,7 +1026,7 @@ airlock commit emi_7574766855075ce23f49adf8c9ae902e
 
 The fixture server's own log confirmed receipt of exactly
 `POST /hook {"operation":"snapshot-ready"}`. `committedBy: "supervisor"` is the
-human path; `policy-auto` is the [dispatch-class](#4-dispatch-classes-and-tool-definitions)
+human path; `policy-auto` is the [dispatch-class](#4-dispatch-classes)
 path. `capture` describes the bounded response that was retained; the bytes
 themselves are private. Committing the same id again fails with
 `EmissionNotPending`, and a dispatch whose result is unknown ends as
@@ -1460,8 +1304,7 @@ so a campaign can be summarized without reading every attempt.
 
 Every attempt gets a **fresh temporary root** holding both a clean `workspace`
 built from the spec's `workspaceFixture` and a **private `AIRLOCK_HOME`**. Two
-attempts therefore share no Hold store, no Outbox, no run journal, and no tool
-definitions. The harness spawns the real `airlock-agent` entrypoint as a
+attempts therefore share no Hold store, no Outbox and no run journal. The harness spawns the real `airlock-agent` entrypoint as a
 subprocess with `--compact`, `--workspace`, and `--bindings` (always injecting
 `workspace`), so what is measured is the shipped surface, not an in-process
 shortcut.
@@ -1722,7 +1565,7 @@ Not reproduced here; from `src/runtime/Runtime.ts`:
 
 ```sh
 airlock doctor                      # is the mechanism you assumed actually "enforced"?
-airlock-agent actions --workspace . # is the tool definition being discovered?
+airlock-agent actions               # is the action you want on this surface?
 airlock-agent schema file.copy      # what are the real input field names?
 airlock-agent runs --limit 5        # what did the last runs actually record?
 airlock held                        # is there something to undo?
