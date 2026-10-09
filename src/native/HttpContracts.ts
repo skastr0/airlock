@@ -1,4 +1,5 @@
-import { Effect, Schema } from "effect"
+import { Effect, Result, Schema } from "effect"
+import { HttpIntent } from "../core/outbox/HttpIntent.ts"
 import { defineToolContract } from "../core/contract/ToolContract.ts"
 
 /**
@@ -71,10 +72,19 @@ export const HttpStage = defineToolContract({
       Schema.withDecodingDefaultKey(Effect.succeed(30_000))
     )
   }).pipe(
-    Schema.check(Schema.makeFilter((input) =>
-      input.body === undefined || input.bodyArtifact === undefined ||
-      "provide at most one of body and bodyArtifact"
-    ))
+    Schema.check(
+      Schema.makeFilter((input) =>
+        input.body === undefined || input.bodyArtifact === undefined ||
+        "provide at most one of body and bodyArtifact"
+      ),
+      // A staged call is stored as it will be sent, so the rule every stored
+      // request obeys applies here: http or https, and no credential in it.
+      // The check also runs before the header default is filled in.
+      Schema.makeFilter((input) => {
+        const stored = HttpIntent.summarize({ url: input.endpoint, method: input.method, headers: input.headers ?? {} })
+        return Result.isSuccess(stored) || `${stored.failure.field}: ${stored.failure.reason}`
+      })
+    )
   ),
   /** What came back once the request was committed and sent. */
   output: Schema.Struct({

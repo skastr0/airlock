@@ -10,6 +10,7 @@ import {
   type HttpOutcome,
   isLivePermit
 } from "../core/index.ts"
+import { consumeWireToken, type WireToken } from "../core/outbox/Outbox.ts"
 
 /**
  * Reads at most `limit` bytes of a response and then cancels it. The body is
@@ -53,8 +54,8 @@ const readBounded = async (
 }
 
 /**
- * The wire: this host's handler for the `http` intent kind, and the only
- * place in Airlock that calls the network.
+ * This file is the only place in Airlock that calls the network. This is the
+ * handler for the `http` intent kind.
  *
  * It acts only on a permit the kernel minted after the emission durably
  * became `committing` and has not yet settled; a forged, replayed or settled
@@ -82,8 +83,34 @@ export const dispatchHttp = Effect.fn("HttpDispatcher.dispatch")(function* (
   if (!consumePermit(request.permit, "http", canonical)) {
     return yield* new DispatchRefused({ reason: "dispatch permit does not authorize this request" })
   }
-  const { responseLimitBytes } = request
-  return yield* Effect.tryPromise({
+  return yield* onWire(dispatch, request.responseLimitBytes)
+})
+
+/**
+ * The wire for a tool implementation. The kernel mints a wire token when it
+ * hands an admitted call to its implementation; the token is good for one
+ * request and only while that call is live. Without it nothing is sent.
+ */
+export const sendHttp = Effect.fn("HttpDispatcher.send")(function* (
+  token: WireToken,
+  dispatch: HttpDispatch,
+  responseLimitBytes: number
+): Effect.fn.Return<Delivery<HttpOutcome>, DispatchFailed | DispatchRefused> {
+  if (!consumeWireToken(token)) {
+    return yield* new DispatchRefused({ reason: "wire token is not live" })
+  }
+  return yield* onWire(dispatch, responseLimitBytes)
+})
+
+/**
+ * Not exported, and reached only from the two functions above, each after
+ * its authority check. Redirects are never followed.
+ */
+const onWire = (
+  dispatch: HttpDispatch,
+  responseLimitBytes: number
+): Effect.Effect<Delivery<HttpOutcome>, DispatchFailed> =>
+  Effect.tryPromise({
     try: async (signal) => {
       const response = await fetch(dispatch.url, {
         method: dispatch.method,
@@ -109,4 +136,3 @@ export const dispatchHttp = Effect.fn("HttpDispatcher.dispatch")(function* (
         reason: cause instanceof Error ? cause.name : "transport-failed"
       })
   })
-})

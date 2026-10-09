@@ -82,7 +82,7 @@ describe("http contracts", () => {
     const summary = Result.getOrThrow(HttpStage.summarize({
       endpoint: "https://example.test/send",
       method: "POST",
-      headers: { authorization: "Bearer hidden" },
+      headers: { "x-note": "hidden" },
       body: "the payload",
       holdMillis: 0
     }))
@@ -92,5 +92,15 @@ describe("http contracts", () => {
     expect(accepts(HttpStage.input, {
       endpoint: "https://example.test/send", method: "POST", body: "a", bodyArtifact: "artifact-1"
     })).toBe(false)
+  })
+
+  it("refuse to stage a request that carries a credential or is not http", () => {
+    const stage = (input: Record<string, unknown>) => accepts(HttpStage.input, { method: "POST", ...input })
+    expect(stage({ endpoint: "https://example.test/send", headers: { "content-type": "text/plain" } })).toBe(true)
+    expect(stage({ endpoint: "https://example.test/send", headers: { authorization: "Bearer x" } })).toBe(false)
+    expect(stage({ endpoint: "https://example.test/send?api_key=x" })).toBe(false)
+    expect(stage({ endpoint: "https://user:pw@example.test/send" })).toBe(false)
+    expect(stage({ endpoint: "file:///etc/passwd" })).toBe(false)
+    expect(stage({ endpoint: "/send" })).toBe(false)
   })
 })

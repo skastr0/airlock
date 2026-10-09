@@ -23,6 +23,22 @@ describe("terminal authority construction sites", () => {
     expect(handler).toBeGreaterThan(-1)
     expect(permitCheck).toBeGreaterThan(handler)
     expect(wire[0]!.index).toBeGreaterThan(permitCheck)
+    // A tool implementation's entry refuses a wire token that is not live
+    // and unused, also before the request.
+    const toolEntry = source.indexOf('Effect.fn("HttpDispatcher.send")')
+    const tokenCheck = source.indexOf("consumeWireToken(token)")
+    expect(toolEntry).toBeGreaterThan(-1)
+    expect(tokenCheck).toBeGreaterThan(toolEntry)
+    expect(wire[0]!.index).toBeGreaterThan(tokenCheck)
+    // The function that holds the request is private to the file and is
+    // reached from those two entries only, each after its check.
+    expect(source).not.toMatch(/export\s+(?:const|function)\s+onWire\b/)
+    const reached = [...source.matchAll(/\bonWire\(/g)].map((match) => match.index)
+    expect(reached).toHaveLength(2)
+    expect(reached[0]).toBeGreaterThan(permitCheck)
+    expect(reached[0]).toBeLessThan(toolEntry)
+    expect(reached[1]).toBeGreaterThan(tokenCheck)
+    expect(reached[1]).toBeLessThan(wire[0]!.index)
   })
 
   it("keeps the kernel free of any wire call", () => {
