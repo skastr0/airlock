@@ -7,7 +7,7 @@ import {
   type ExecutionAuthority,
   supervisorAutoCommits
 } from "../core/admission/index.ts"
-import { parse, type Program, type Statement, type Expression } from "../core/language/index.ts"
+import { parse, type Program, resolveDottedActions, type Statement, type Expression } from "../core/language/index.ts"
 import { LanguageDiagnostic } from "../core/language/lexer.ts"
 import {
   type ActionResolver,
@@ -1958,62 +1958,11 @@ export const ProgramExecutionWithToolsLive = (
   ).pipe(Layer.provide(executor))
 }
 
-const dottedName = (expression: Expression): string | undefined => {
-  if (expression.kind === "IdentifierExpression") return expression.name
-  if (expression.kind !== "FieldExpression") return undefined
-  const prefix = dottedName(expression.object)
-  return prefix === undefined ? undefined : `${prefix}.${expression.field}`
-}
-
-const normalizeExpression = (expression: Expression, actionNames: ReadonlySet<string>): Expression => {
-  switch (expression.kind) {
-    case "CallExpression": {
-      const dotted = dottedName(expression.callee)
-      const callee = dotted !== undefined && actionNames.has(dotted)
-        ? { kind: "IdentifierExpression" as const, name: dotted, span: expression.callee.span }
-        : normalizeExpression(expression.callee, actionNames)
-      return { ...expression, callee, arguments: expression.arguments.map((item) => normalizeExpression(item, actionNames)) }
-    }
-    case "ListExpression": return { ...expression, items: expression.items.map((item) => normalizeExpression(item, actionNames)) }
-    case "RecordExpression": return { ...expression, entries: expression.entries.map((entry) => ({ ...entry, value: normalizeExpression(entry.value, actionNames) })) }
-    case "UnaryExpression": return { ...expression, operand: normalizeExpression(expression.operand, actionNames) }
-    case "BinaryExpression": return { ...expression, left: normalizeExpression(expression.left, actionNames), right: normalizeExpression(expression.right, actionNames) }
-    case "FieldExpression": return { ...expression, object: normalizeExpression(expression.object, actionNames) }
-    case "IndexExpression": return { ...expression, object: normalizeExpression(expression.object, actionNames), index: normalizeExpression(expression.index, actionNames) }
-    default: return expression
-  }
-}
-
-const normalizeStatement = (statement: Statement, actionNames: ReadonlySet<string>): Statement => {
-  switch (statement.kind) {
-    case "LetStatement": return { ...statement, value: normalizeExpression(statement.value, actionNames) }
-    case "ExpressionStatement": return { ...statement, expression: normalizeExpression(statement.expression, actionNames) }
-    case "ReturnStatement": return { ...statement, ...(statement.value === undefined ? {} : { value: normalizeExpression(statement.value, actionNames) }) }
-    case "AssertStatement": return { ...statement, test: normalizeExpression(statement.test, actionNames), ...(statement.message === undefined ? {} : { message: normalizeExpression(statement.message, actionNames) }) }
-    case "IfStatement": return { ...statement, test: normalizeExpression(statement.test, actionNames), consequent: statement.consequent.map((item) => normalizeStatement(item, actionNames)), ...(statement.alternate === undefined ? {} : { alternate: statement.alternate.map((item) => normalizeStatement(item, actionNames)) }) }
-    case "ForStatement": {
-      const body = statement.body.map((item) =>
-        normalizeStatement(item, actionNames)
-      )
-      return statement.iteration === "list"
-        ? {
-            ...statement,
-            source: normalizeExpression(statement.source, actionNames),
-            body
-          }
-        : {
-            ...statement,
-            from: normalizeExpression(statement.from, actionNames),
-            to: normalizeExpression(statement.to, actionNames),
-            body
-          }
-    }
-  }
-}
-
 /** Supports dotted native verbs without giving the language a reflective call surface. */
-export const normalizeProgramActions = (program: Program, extraActions: ReadonlySet<string> = new Set()): Program =>
-  ({ ...program, body: program.body.map((statement) => normalizeStatement(statement, new Set([...nativeNames, ...extraActions]))) })
+export const normalizeProgramActions = (program: Program, extraActions: ReadonlySet<string> = new Set()): Program => {
+  const actionNames = new Set<string>([...nativeNames, ...extraActions])
+  return resolveDottedActions(program, (name) => actionNames.has(name))
+}
 
 const runProgram = (executor: {
   readonly execute: (request: ProgramActionRequest) => Effect.Effect<ProgramActionResult, ProgramActionExecutionFailed>

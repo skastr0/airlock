@@ -1,5 +1,6 @@
 import { describe, expect, it } from "@effect/vitest"
 import { Effect } from "effect"
+import { resolveDottedActions } from "../src/core/language/actions.ts"
 import { parseSync } from "../src/core/language/parser.ts"
 import {
   AssertionFailed,
@@ -7,6 +8,7 @@ import {
   InvalidLanguageOperation,
   LoopLimitExceeded,
   UnboundIdentifier,
+  ValueLimitExceeded,
   evaluate,
   type ActionResolver,
   type LanguageValue
@@ -259,6 +261,60 @@ return 0
         operation: "for",
         detail: "bounds must evaluate to safe integers"
       })
+    })
+  )
+
+  it.effect("stops at the string and node limits a host sets, and has none by default", () =>
+    Effect.gen(function* () {
+      const doubling = `let s0 = "ab"\n` +
+        Array.from({ length: 6 }, (_, index) => `let s${index + 1} = s${index} + s${index}`).join("\n") +
+        "\nreturn s6"
+      expect((yield* evaluate(parseSync(doubling), resolver)).value).toBe("ab".repeat(64))
+      expect((yield* evaluate(parseSync(doubling), resolver, { maxStringLength: 128 })).value).toBe("ab".repeat(64))
+      const long = yield* evaluate(parseSync(doubling), resolver, { maxStringLength: 127 }).pipe(Effect.flip)
+      expect(long).toBeInstanceOf(ValueLimitExceeded)
+      expect(long).toMatchObject({ limit: 127, measure: "string-length", span: { line: 7 } })
+
+      // Each line names the previous value eight times: forty lines name 8^40 nodes in a few kilobytes.
+      const shared = "let v0 = 1\n" +
+        Array.from({ length: 40 }, (_, index) =>
+          `let v${index + 1} = [${Array.from({ length: 8 }, () => `v${index}`).join(", ")}]`).join("\n") +
+        "\nreturn v40 == v40"
+      const wide = yield* evaluate(parseSync(shared), resolver, { maxValueNodes: 100 }).pipe(Effect.flip)
+      expect(wide).toMatchObject({ _tag: "ValueLimitExceeded", limit: 100, measure: "nodes", span: { line: 4 } })
+      const fits = yield* evaluate(parseSync("return { a: [1, 2], b: { c: 3 } }"), resolver, { maxValueNodes: 6 })
+      expect(fits.value).toEqual({ a: [1, 2], b: { c: 3 } })
+      expect(yield* evaluate(parseSync("return { a: [1, 2], b: { c: 3 } }"), resolver, { maxValueNodes: 5 }).pipe(Effect.flip))
+        .toBeInstanceOf(ValueLimitExceeded)
+
+      // What an action returns and what a host binds are held to the same limit.
+      expect(yield* evaluate(parseSync("return echo(seed)"), resolver, {
+        maxValueNodes: 3,
+        bindings: { seed: [1, 2, 3] }
+      }).pipe(Effect.flip)).toBeInstanceOf(ValueLimitExceeded)
+      const invalid = yield* evaluate(parseSync("return 1"), resolver, { maxValueNodes: -1 }).pipe(Effect.flip)
+      expect(invalid).toMatchObject({ _tag: "InvalidLanguageOperation", operation: "maxValueNodes" })
+    })
+  )
+
+  it.effect("calls a dotted action only where the host says the name is one", () =>
+    Effect.gen(function* () {
+      const called: Array<string> = []
+      const named: ActionResolver = {
+        resolve: (action, args) => Effect.sync(() => {
+          called.push(action)
+          return args[0] ?? null
+        })
+      }
+      const source = `let record = { field: 1 }\nreturn [mail.send({ to: "a" }), record.field, deep.er.name(2)]`
+      const all = yield* evaluate(resolveDottedActions(parseSync(source), () => true), named)
+      expect(all.value).toEqual([{ to: "a" }, 1, 2])
+      expect(called).toEqual(["mail.send", "deep.er.name"])
+      const some = yield* evaluate(
+        resolveDottedActions(parseSync(source), (name) => name === "mail.send"),
+        named
+      ).pipe(Effect.flip)
+      expect(some).toBeInstanceOf(InvalidCallTarget)
     })
   )
 })
