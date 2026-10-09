@@ -1,5 +1,4 @@
 import { Result, Schema } from "effect"
-import { canonicalJson } from "../Canonical.ts"
 import { combine, InformationLabel } from "../labels/Labels.ts"
 
 export const DecoderIdentity = Schema.Struct({ name: Schema.String, version: Schema.String })
@@ -51,8 +50,16 @@ const freezeJson = <Value extends Schema.Json>(value: Value): Value => {
   return value
 }
 
+const cloneJson = (value: Schema.Json): Schema.Json => {
+  if (value === null || typeof value !== "object") return value
+  return Array.isArray(value)
+    ? value.map(cloneJson)
+    : Object.fromEntries(Object.entries(value).map(([key, child]) => [key, cloneJson(child)]))
+}
+
 const ownJson = <Value extends Schema.Json>(value: Value): Value =>
-  freezeJson(JSON.parse(canonicalJson(json(value))) as Value)
+  // A JSON text round trip would change -0 to +0 and invalidate refinements.
+  freezeJson(cloneJson(json(value)) as Value)
 
 const ownLabel = (label: InformationLabel): InformationLabel => {
   const decoded = Schema.decodeUnknownSync(InformationLabel, { onExcessProperty: "error" })(label)
@@ -130,7 +137,10 @@ export const decodeValue = <Decoder extends TrustedDecoder.Any>(
     const decoded = Schema.decodeUnknownResult(decoder.schema, { onExcessProperty: "error" })(source.value)
     if (Result.isFailure(decoded)) return reject("schema")
     // Own a transform's output before issuing proof: it may be a shared graph.
-    return Result.succeed(track(decoded.success, source.label, new Set([decoder])))
+    const value = ownJson(decoded.success)
+    const verified = Schema.decodeUnknownResult(Schema.toType(decoder.schema), { onExcessProperty: "error" })(value)
+    if (Result.isFailure(verified)) return reject("schema")
+    return Result.succeed(track(value, source.label, new Set([decoder])))
   } catch {
     return reject("non-json-result")
   }
