@@ -15,9 +15,7 @@ describe("process.run contract", () => {
       descendantExecutables: {
         kind: "executable", role: "descendant", parent: "executable", rights: ["execute"], collection: "each"
       },
-      cwd: { kind: "path", rights: ["read", "write"] },
-      readable: { kind: "path", rights: ["read"], collection: "each" },
-      writable: { kind: "path", rights: ["write"], collection: "each" }
+      cwd: { kind: "path", rights: ["read", "write"] }
     })
   })
 

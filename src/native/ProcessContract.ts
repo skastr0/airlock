@@ -39,10 +39,6 @@ export const ProcessRun = defineToolContract({
     env: Schema.Record(Schema.String, Schema.String).pipe(
       Schema.withDecodingDefaultKey(Effect.succeed({}))
     ),
-    /** Paths the process may read, beyond its working directory. */
-    readable: strings,
-    /** Paths the process may change, beyond its working directory. */
-    writable: strings,
     timeoutMs: Schema.optionalKey(Schema.Finite.check(Schema.isGreaterThan(0))),
     /** Text for standard input. Without it, or an artifact, there is none. */
     stdin: Schema.optionalKey(Schema.String),
@@ -71,12 +67,19 @@ export const ProcessRun = defineToolContract({
     stderr: Schema.NullOr(Schema.String),
     stdout_artifact: Artifact,
     stderr_artifact: Artifact,
-    /** What a confined process changed, before it is merged back through Hold. */
-    delta_artifact: Artifact
+    /**
+     * What a confined process changed, now in the working directory through
+     * Hold. Empty when it changed nothing or did not exit cleanly, in which
+     * case its changes were discarded. Null when the process ran unconfined:
+     * what it changed is then unknown and cannot be put back.
+     */
+    merged: Schema.NullOr(Schema.Array(Schema.Struct({
+      path: Schema.String,
+      kind: Schema.Literals(["created", "modified", "deleted"])
+    })))
   }),
   public: [
-    "executable", "args", "descendantExecutables", "cwd", "env", "readable",
-    "writable", "timeoutMs", "stdinArtifact", "stdout", "stderr", "outputLimitBytes"
+    "executable", "args", "descendantExecutables", "cwd", "env", "timeoutMs", "stdinArtifact", "stdout", "stderr", "outputLimitBytes"
   ],
   resources: {
     executable: { kind: "executable", role: "root", rights: ["invoke"] },
@@ -87,8 +90,6 @@ export const ProcessRun = defineToolContract({
       rights: ["execute"],
       collection: "each"
     },
-    cwd: { kind: "path", rights: ["read", "write"] },
-    readable: { kind: "path", rights: ["read"], collection: "each" },
-    writable: { kind: "path", rights: ["write"], collection: "each" }
+    cwd: { kind: "path", rights: ["read", "write"] }
   }
 })

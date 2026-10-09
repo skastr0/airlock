@@ -105,6 +105,29 @@ if (!existsSync("/usr/bin/sandbox-exec")) {
   )
 }
 
+// The process.run tool on the real Cell: a confined run merged through Hold
+// and put back, an escape attempt, a failed run, and drift while it ran.
+{
+  const expectedProcessRunTests = 6
+  const reportFile = join(mkdtempSync(join(tmpdir(), "airlock-process-run-")), "report.json")
+  const result = run([
+    "--bun", "vitest", "run", "test/native-process-run.test.ts",
+    "--reporter=json", `--outputFile=${reportFile}`
+  ])
+  const report = Schema.decodeUnknownSync(Schema.fromJsonString(Schema.Struct({
+    success: Schema.Boolean,
+    numPassedTests: Schema.Number,
+    numFailedTests: Schema.Number
+  })))(readFileSync(reportFile, "utf8"))
+  if (!report.success || report.numFailedTests !== 0 || report.numPassedTests !== expectedProcessRunTests) {
+    throw new Error(
+      `process.run evidence was incomplete; expected exactly ${expectedProcessRunTests} passing tests, ` +
+      `saw ${report.numPassedTests} passed and ${report.numFailedTests} failed.\n${result.stdout}\n${result.stderr}`
+    )
+  }
+  console.log(JSON.stringify({ gate: "process-run-tool", status: "passed", tests: expectedProcessRunTests }))
+}
+
 const CellProof = Schema.Struct({
   proof: Schema.Literal("airlock-cell-native-contained-v1"),
   ok: Schema.Literal(true),
