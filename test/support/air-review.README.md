@@ -30,10 +30,13 @@ opaque schemas permit whole-value transport without invented field operations.
 Call facts cover all branches and bound per-tool and per-site occurrences.
 Capture fields and receipt states retain argument and control dependencies
 transitively, including completed branches and prior loop iterations. A runtime
-observer tests static per-field/PC dependency supersets on every generated call.
-Receipt ids, state and refusal fields have distinct origins. These origins
-conservatively overlap data/control roles; they do
-not yet provide the final runtime per-field author-policy bridge.
+observer tests static per-field data/control and PC dependency supersets on every
+generated call. Receipt ids, state and refusal fields have distinct origins.
+Facts and observer values require separate data/control roles: selection adds
+control to every descendant, decoder reconstruction preserves both roles, and
+capture results retain input data and input/PC control separately. The aggregate
+origins field is diagnostic only; policy consumers must use the explicit roles.
+Argument-local control is combined with the call PC for outbound policy checking.
 
 Typed host bindings decode before execution, contract flow.provides validates
 unchanged decoded values, and nominal checks follow exact trusted Schema identity

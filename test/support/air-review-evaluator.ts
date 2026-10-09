@@ -11,18 +11,19 @@ import { HeldReference } from "../../src/core/contract/ToolHost.ts"
 export class PrototypeStop extends Schema.TaggedError<PrototypeStop>()("PrototypeStop", {
   reason: Schema.Literals(["dynamic-type-error", "host-result", "budget", "out-of-plan", "refinement", "value-limit", "arithmetic_failure", "index_out_of_range", "range_bound", "assert_failed"]), span: SpanSchema
 }) {}
+export interface ObservedRoles { readonly data: InformationLabel; readonly control: InformationLabel }
 export interface CallObservation {
   readonly tool: string
   readonly span: Span
-  readonly fields: Readonly<Record<string, InformationLabel>>
-  readonly argument: InformationLabel
+  readonly fields: Readonly<Record<string, ObservedRoles>>
+  readonly argument: ObservedRoles
   readonly control: InformationLabel
 }
 export interface PrototypeHost<E = never, R = never> {
   readonly observe?: (call: CallObservation) => void
   readonly resolve: (tool: string, input: Schema.Json, control: InformationLabel) => Effect.Effect<Schema.Json, E, R>
 }
-interface Box { readonly tracked: TrackedValue; readonly children: ReadonlyMap<string | number, Box>; readonly duration?: boolean; readonly influence?: InformationLabel; readonly constructed?: boolean; readonly selectionLabel?: InformationLabel; readonly opaque?: SchemaModel }
+interface Box { readonly tracked: TrackedValue; readonly data: InformationLabel; readonly control: InformationLabel; readonly children: ReadonlyMap<string | number, Box>; readonly duration?: boolean; readonly constructed?: boolean; readonly selectionLabel?: InformationLabel; readonly opaque?: SchemaModel }
 type Scope = ReadonlyMap<string, Box>
 const literalLabel = new InformationLabel({ confidentiality: "public", integrity: "runtime", provenance: [] })
 const durationModel = modelSchema(DurationSchema, { identity: "language.Duration", side: "decoded" })
@@ -34,13 +35,13 @@ export const runReviewedPrototype = <E, R>(review: Review, host: PrototypeHost<E
   const callCounts = new Map<string, number>()
   let iterations = 0, fuel = 20_000
   const effect = <A>(body: () => A, span: Span): Effect.Effect<A, PrototypeStop> => Effect.try({ try: body, catch: (error) => error instanceof PrototypeStop ? error : new PrototypeStop({ reason: "dynamic-type-error", span }) })
-  const labelOf = (box: Box): InformationLabel => combine(box.tracked.label, box.influence ?? literalLabel)
+  const labelOf = (box: Box): InformationLabel => combine(box.data, box.control)
   // Selection changes influence, not the selected JSON or its exact-value proof.
   const influenced = (box: Box, ...parents: readonly Box[]): Box => {
-    const influence = combine(labelOf(box), ...parents.map(labelOf))
-    return { ...box, influence, ...(box.selectionLabel === undefined ? {} : { selectionLabel: combine(box.selectionLabel, ...parents.map(labelOf)) }), children: new Map([...box.children].map(([key, child]) => [key, influenced(child, ...parents)])) }
+    const control = combine(box.control, ...parents.map(labelOf))
+    return { ...box, control, ...(box.selectionLabel === undefined ? {} : { selectionLabel: combine(box.selectionLabel, ...parents.map(labelOf)) }), children: new Map([...box.children].map(([key, child]) => [key, influenced(child, ...parents)])) }
   }
-  const primitive = (value: Schema.Json, parents: readonly Box[] = []): Box => ({ tracked: parents.length === 0 ? labeledValue(value, literalLabel) : deriveValue(value, parents[0]!.tracked, ...parents.slice(1).map((parent) => parent.tracked), ...parents.map((parent) => labeledValue(false, labelOf(parent)))), children: new Map() })
+  const primitive = (value: Schema.Json, parents: readonly Box[] = []): Box => ({ tracked: parents.length === 0 ? labeledValue(value, literalLabel) : deriveValue(value, parents[0]!.tracked, ...parents.slice(1).map((parent) => parent.tracked), ...parents.map((parent) => labeledValue(false, labelOf(parent)))), data: combine(literalLabel, ...parents.map((parent) => parent.data)), control: combine(literalLabel, ...parents.map((parent) => parent.control)), children: new Map() })
   const record = (children: ReadonlyMap<string | number, Box>): Box => {
     const raw: Record<string, Schema.Json> = {}
     for (const [name, child] of children) Object.defineProperty(raw, name, { value: child.tracked.value, enumerable: true })
@@ -48,18 +49,18 @@ export const runReviewedPrototype = <E, R>(review: Review, host: PrototypeHost<E
   }
   const list = (items: readonly Box[]): Box => ({ ...primitive(items.map((item) => item.tracked.value), items), children: new Map(items.map((item, index) => [index, item])), selectionLabel: literalLabel })
   const variant = (state: string, fields: ReadonlyArray<readonly [string, Box]> = [], parents: readonly Box[] = []): Box => record(new Map([["state", primitive(state, parents)], ...fields]))
-  const tracked = (value: TrackedValue): Box => ({ tracked: value, children: new Map() })
-  interface Origin { readonly path: string; readonly field: string; readonly flow: ToolFlow; readonly dependencies: InformationLabel }
+  const tracked = (value: TrackedValue, roles: ObservedRoles = { data: value.label, control: literalLabel }): Box => ({ tracked: value, ...roles, children: new Map() })
+  interface Origin { readonly path: string; readonly field: string; readonly flow: ToolFlow; readonly data: InformationLabel; readonly control: InformationLabel }
   const sourceLabel = (origin: Origin) => combine(
     origin.flow.sources[origin.field] ?? origin.flow.sources["$"] ?? new InformationLabel({ confidentiality: "private", integrity: "untrusted", provenance: [] }),
-    origin.dependencies,
+    origin.data,
     new InformationLabel({ confidentiality: "public", integrity: "runtime", provenance: [origin.path] })
   )
-  const boundary = (source: TrackedValue, model: SchemaModel, span: Span, origin?: Origin): Box => {
-    if (origin !== undefined) source = labeledValue(source.value, sourceLabel(origin))
+  const boundary = (source: TrackedValue, model: SchemaModel, span: Span, origin?: Origin, roles: ObservedRoles = { data: source.label, control: literalLabel }): Box => {
+    if (origin !== undefined) { roles = { data: sourceLabel(origin), control: origin.control }; source = labeledValue(source.value, combine(roles.data, roles.control)) }
     const value = source.value
-    if (hasSameSchema(model, durationModel)) return { ...tracked(source), duration: true }
-    if (model.kind === "nominal") return model.base === undefined ? { ...tracked(source), opaque: model } : boundary(source, model.base, span, origin)
+    if (hasSameSchema(model, durationModel)) return { ...tracked(source, roles), duration: true }
+    if (model.kind === "nominal") return model.base === undefined ? { ...tracked(source, roles), opaque: model } : boundary(source, model.base, span, origin, roles)
     if (model.kind === "record") {
       if (value === null || typeof value !== "object" || Array.isArray(value)) stop("host-result", span)
       const children = new Map<string | number, Box>()
@@ -67,23 +68,24 @@ export const runReviewedPrototype = <E, R>(review: Review, host: PrototypeHost<E
         const present = Object.hasOwn(value, name)
         if (!present && !field.optional) stop("host-result", span)
         const childOrigin = origin === undefined ? undefined : { ...origin, path: `${origin.path}.${name}`, field: origin.field === "$" ? name : origin.field }
-        children.set(name, present ? boundary(projectValue(source, name), field.type, span, childOrigin) : tracked(labeledValue(null, childOrigin === undefined ? source.label : sourceLabel(childOrigin))))
+        const missingRoles = childOrigin === undefined ? roles : { data: sourceLabel(childOrigin), control: childOrigin.control }
+        children.set(name, present ? boundary(projectValue(source, name), field.type, span, childOrigin, roles) : tracked(labeledValue(null, combine(missingRoles.data, missingRoles.control)), missingRoles))
       }
-      return { tracked: origin === undefined ? source : labeledValue(source.value, combine(source.label, ...[...children.values()].map(labelOf))), children }
+      return { tracked: origin === undefined ? source : labeledValue(source.value, combine(source.label, ...[...children.values()].map(labelOf))), data: combine(roles.data, ...[...children.values()].map((child) => child.data)), control: combine(roles.control, ...[...children.values()].map((child) => child.control)), children }
     }
     if (model.kind === "list") {
       if (!Array.isArray(value) || value.length > review.environment.maxListItems) stop("value-limit", span)
-      const children = new Map(value.map((_, index) => [index, boundary(projectValue(source, index), model.item, span, origin === undefined ? undefined : { ...origin, path: `${origin.path}[]` })]))
-      return { tracked: origin === undefined ? source : labeledValue(source.value, combine(source.label, ...[...children.values()].map(labelOf))), children, selectionLabel: source.label }
+      const children = new Map(value.map((_, index) => [index, boundary(projectValue(source, index), model.item, span, origin === undefined ? undefined : { ...origin, path: `${origin.path}[]` }, roles)]))
+      return { tracked: origin === undefined ? source : labeledValue(source.value, combine(source.label, ...[...children.values()].map(labelOf))), data: combine(roles.data, ...[...children.values()].map((child) => child.data)), control: combine(roles.control, ...[...children.values()].map((child) => child.control)), children, selectionLabel: combine(roles.data, roles.control) }
     }
     if (model.kind === "union") {
       const matching = model.members.find((member) => acceptsLiteral(member, value) || Result.isSuccess(decodeModelValue(member, value)))
       if (matching === undefined) stop("host-result", span)
-      return boundary(source, matching, span, origin)
+      return boundary(source, matching, span, origin, roles)
     }
-    if (value === null && model.kind === "literal" && model.value === null) return tracked(source)
+    if (value === null && model.kind === "literal" && model.value === null) return tracked(source, roles)
     if (value === null || typeof value === "object" || (typeof value === "number" && !Number.isFinite(value))) stop("host-result", span)
-    return tracked(source)
+    return tracked(source, roles)
   }
   const materialize = (model: SchemaModel, decoded: unknown, span: Span, encoded?: Schema.Json): Schema.Json => {
     if (model.kind === "nominal") {
@@ -239,7 +241,7 @@ export const runReviewedPrototype = <E, R>(review: Review, host: PrototypeHost<E
           return yield* effect(() => {
             if (!Array.isArray(object.tracked.value) || typeof index.tracked.value !== "number") stop("dynamic-type-error", expression.span)
             const selected = Number.isSafeInteger(index.tracked.value) ? object.children.get(index.tracked.value) : undefined
-            return selected === undefined ? primitive(null, [index, tracked(labeledValue(false, object.selectionLabel ?? literalLabel))]) : influenced(selected, index, tracked(labeledValue(false, object.selectionLabel ?? literalLabel)))
+            return influenced(selected ?? primitive(null), index, tracked(labeledValue(false, object.selectionLabel ?? literalLabel)))
           }, expression.span)
         }
         if (name === "decode") {
@@ -248,7 +250,7 @@ export const runReviewedPrototype = <E, R>(review: Review, host: PrototypeHost<E
           return yield* effect(() => {
             if (decoder === undefined) stop("out-of-plan", expression.span)
             const result = decodeValue(decoder, source.tracked)
-            return Result.isFailure(result) ? variant("err", [["error", primitive(result.failure.reason, [source])]], [source]) : variant("ok", [["value", influenced(boundary(result.success, modelSchema(decoder.schema, { identity: decoderIdentity(decoder), side: "decoded" }), expression.span), source)]], [source])
+            return Result.isFailure(result) ? variant("err", [["error", primitive(result.failure.reason, [source])]], [source]) : variant("ok", [["value", boundary(result.success, modelSchema(decoder.schema, { identity: decoderIdentity(decoder), side: "decoded" }), expression.span, undefined, { data: source.data, control: source.control })]], [source])
           }, expression.span)
         }
         const argument = yield* evaluate(expression.arguments[0]!, scope, pc)
@@ -273,8 +275,8 @@ export const runReviewedPrototype = <E, R>(review: Review, host: PrototypeHost<E
           return { name, tool, input }
         }, expression.span)
         yield* effect(() => host.observe?.({
-          tool: selected.name, span: expression.span, argument: labelOf(argument), control: pc.label,
-          fields: Object.fromEntries([...argument.children].filter(([field]) => typeof field === "string" && selected.input !== null && typeof selected.input === "object" && Object.hasOwn(selected.input, field)).map(([field, child]) => [field, labelOf(child)]))
+          tool: selected.name, span: expression.span, argument: { data: argument.data, control: argument.control }, control: pc.label,
+          fields: Object.fromEntries([...argument.children].filter(([field]) => typeof field === "string" && selected.input !== null && typeof selected.input === "object" && Object.hasOwn(selected.input, field)).map(([field, child]) => [field, { data: child.data, control: child.control }]))
         }), expression.span)
         const response = yield* host.resolve(selected.name, selected.input, combine(pc.label, labelOf(argument))).pipe(Effect.catchCause(() => Effect.fail(new PrototypeStop({ reason: "host-result", span: expression.span }))))
         return yield* effect(() => {
@@ -282,15 +284,20 @@ export const runReviewedPrototype = <E, R>(review: Review, host: PrototypeHost<E
           if (Result.isFailure(receipt)) stop("host-result", expression.span)
           const wire = Schema.decodeUnknownResult(Schema.toEncoded(Receipt), { onExcessProperty: "error" })(response)
           if (Result.isFailure(wire)) stop("host-result", expression.span)
-          const label = combine(new InformationLabel({ confidentiality: "private", integrity: "untrusted", provenance: [`${selected.name}@${expression.span.start}.state`] }), pc.label, labelOf(argument))
-          const receiptField = (field: string, value: Schema.Json) => tracked(labeledValue(value, combine(new InformationLabel({ confidentiality: "private", integrity: "untrusted", provenance: [`${selected.name}@${expression.span.start}.${field}`] }), pc.label, labelOf(argument))))
+          const control = combine(pc.label, argument.control)
+          const receiptField = (field: string, value: Schema.Json) => {
+            const data = combine(new InformationLabel({ confidentiality: "private", integrity: "untrusted", provenance: [`${selected.name}@${expression.span.start}.${field}`] }), argument.data)
+            return tracked(labeledValue(value, combine(data, control)), { data, control })
+          }
+          const state = receiptField("state", false)
+          const label = labelOf(state)
           const received = receipt.success
           if (received.state === "done") {
             const decoded = Schema.decodeUnknownResult(selected.tool.contract.outcome, { onExcessProperty: "error" })(received.result)
             if (Result.isFailure(decoded)) stop("host-result", expression.span)
             const raw = materialize(selected.tool.contract.model.output, decoded.success, expression.span, received.result)
             const owned = labeledValue(raw, combine(label, pc.label, labelOf(argument)))
-            let result = boundary(owned, selected.tool.contract.model.output, expression.span, { path: `${selected.name}@${expression.span.start}.result`, field: "$", flow: selected.tool.contract.flow, dependencies: combine(pc.label, labelOf(argument)) })
+            let result = boundary(owned, selected.tool.contract.model.output, expression.span, { path: `${selected.name}@${expression.span.start}.result`, field: "$", flow: selected.tool.contract.flow, data: argument.data, control })
             const provides: ToolFlow["provides"] = selected.tool.contract.flow.provides
             for (const [field, identities] of Object.entries(provides)) {
               if (field !== "$" && (result.tracked.value === null || typeof result.tracked.value !== "object" || !Object.hasOwn(result.tracked.value, field))) continue
@@ -306,13 +313,14 @@ export const runReviewedPrototype = <E, R>(review: Review, host: PrototypeHost<E
               if (field === "$") result = value
               else { const children = new Map(result.children); children.set(field, value); result = { ...result, children } }
             }
-            const wayBackLabel = combine(new InformationLabel({ confidentiality: "private", integrity: "runtime", provenance: [`${selected.name}@${expression.span.start}.wayBack`] }), pc.label, labelOf(argument))
+            const wayBackData = combine(new InformationLabel({ confidentiality: "private", integrity: "runtime", provenance: [`${selected.name}@${expression.span.start}.wayBack`] }), argument.data)
+            const wayBackLabel = combine(wayBackData, control)
             const held = wire.success.state === "done" ? wire.success.wayBack : undefined
-            const wayBack = held === undefined ? tracked(labeledValue(null, wayBackLabel)) : boundary(labeledValue(held, wayBackLabel), modelSchema(HeldReference, { identity: "receipt.wayBack", side: "encoded" }), expression.span, { path: `${selected.name}@${expression.span.start}.wayBack`, field: "$", flow: { sources: { "$": new InformationLabel({ confidentiality: "private", integrity: "runtime", provenance: [] }) }, sinks: [], requires: {}, provides: {} }, dependencies: combine(pc.label, labelOf(argument)) })
-            return variant("done", [["id", receiptField("id", received.id)], ["result", result], ["wayBack", wayBack]], [tracked(labeledValue(false, label))])
+            const wayBack = held === undefined ? tracked(labeledValue(null, wayBackLabel), { data: wayBackData, control }) : boundary(labeledValue(held, wayBackLabel), modelSchema(HeldReference, { identity: "receipt.wayBack", side: "encoded" }), expression.span, { path: `${selected.name}@${expression.span.start}.wayBack`, field: "$", flow: { sources: { "$": new InformationLabel({ confidentiality: "private", integrity: "runtime", provenance: [] }) }, sinks: [], requires: {}, provides: {} }, data: argument.data, control })
+            return variant("done", [["id", receiptField("id", received.id)], ["result", result], ["wayBack", wayBack]], [state])
           }
-          if (received.state === "staged") return variant("staged", [["id", receiptField("id", received.id)]], [tracked(labeledValue(false, label))])
-          return variant("refused", [["refusal", record(new Map([["code", receiptField("refusal.code", received.refusal.code)], ["message", receiptField("refusal.message", received.refusal.message)]]))]], [tracked(labeledValue(false, label))])
+          if (received.state === "staged") return variant("staged", [["id", receiptField("id", received.id)]], [state])
+          return variant("refused", [["refusal", record(new Map([["code", receiptField("refusal.code", received.refusal.code)], ["message", receiptField("refusal.message", received.refusal.message)]]))]], [state])
         }, expression.span)
       }
     }
@@ -383,7 +391,7 @@ export const runReviewedPrototype = <E, R>(review: Review, host: PrototypeHost<E
       const model = modelSchema(binding.schema, { identity: JSON.stringify(["binding", name]), side: "decoded" })
       const owned = labeledValue(materialize(model, decoded.success, review.program.span, binding.value), binding.label)
       scope.set(name, boundary(owned, model, review.program.span, {
-        path: `binding.${name}`, field: "$", flow: { sources: { "$": binding.label }, sinks: [], requires: {}, provides: {} }, dependencies: literalLabel
+        path: `binding.${name}`, field: "$", flow: { sources: { "$": binding.label }, sinks: [], requires: {}, provides: {} }, data: literalLabel, control: literalLabel
       }))
     }
     return scope

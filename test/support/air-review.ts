@@ -37,6 +37,9 @@ export type Type =
   | { readonly kind: "opaque"; readonly identity: string }
 export interface Fact {
   readonly type: Type
+  readonly dataOrigins: readonly string[]
+  readonly controlOrigins: readonly string[]
+  /** Aggregate for diagnostics and PC computation; never policy authority. */
   readonly origins: readonly string[]
   readonly refinements: readonly string[]
   readonly constant?: Schema.Json
@@ -61,16 +64,18 @@ export interface Review {
 type Counts = Record<string, number>
 type Scope = ReadonlyMap<string, Fact>
 const unique = (...sets: readonly (readonly string[])[]) => [...new Set(sets.flat())]
-const fact = (type: Type, origins: readonly string[] = [], refinements: readonly string[] = [], constant?: Schema.Json): Fact => ({ type, origins, refinements, ...(constant === undefined ? {} : { constant }) })
+const fact = (type: Type, dataOrigins: readonly string[] = [], refinements: readonly string[] = [], constant?: Schema.Json, controlOrigins: readonly string[] = []): Fact => ({ type, dataOrigins, controlOrigins, origins: unique(dataOrigins, controlOrigins), refinements, ...(constant === undefined ? {} : { constant }) })
+const roles = (value: Fact, dataOrigins: readonly string[], controlOrigins: readonly string[]): Fact => ({ ...value, dataOrigins, controlOrigins, origins: unique(dataOrigins, controlOrigins) })
+const derivedFact = (value: Fact, parents: readonly Fact[]): Fact => roles(value, unique(...parents.map((parent) => parent.dataOrigins)), unique(...parents.map((parent) => parent.controlOrigins)))
 const scalar = (kind: Kind) => fact({ kind })
-const record = (fields: ReadonlyMap<string, Fact>, origins: readonly string[] = []) => fact({ kind: "record", fields }, unique(origins, ...[...fields.values()].map((child) => child.origins)))
-const union = (cases: ReadonlyMap<string, Fact>, origins: readonly string[] = []) => fact({ kind: "union", cases }, unique(origins, ...[...cases.values()].map((child) => child.origins)))
-const nullable = (value: Fact): Fact => value.type.kind === "nullable" || value.type.kind === "null" ? value : fact({ kind: "nullable", value }, value.origins)
+const record = (fields: ReadonlyMap<string, Fact>, dataOrigins: readonly string[] = []) => fact({ kind: "record", fields }, unique(dataOrigins, ...[...fields.values()].map((child) => child.dataOrigins)), [], undefined, unique(...[...fields.values()].map((child) => child.controlOrigins)))
+const union = (cases: ReadonlyMap<string, Fact>, dataOrigins: readonly string[] = []) => fact({ kind: "union", cases }, unique(dataOrigins, ...[...cases.values()].map((child) => child.dataOrigins)), [], undefined, unique(...[...cases.values()].map((child) => child.controlOrigins)))
+const nullable = (value: Fact): Fact => value.type.kind === "nullable" || value.type.kind === "null" ? value : fact({ kind: "nullable", value }, value.dataOrigins, [], undefined, value.controlOrigins)
 /** Influence follows selected values through every later projection. */
-const influencedFact = (value: Fact, dependencies: readonly string[]): Fact => {
-  const map = (fields: ReadonlyMap<string, Fact>) => new Map([...fields].map(([key, child]) => [key, influencedFact(child, dependencies)]))
+const influencedFact = (value: Fact, dependencies: readonly string[], dataDependencies: readonly string[] = []): Fact => {
+  const map = (fields: ReadonlyMap<string, Fact>) => new Map([...fields].map(([key, child]) => [key, influencedFact(child, dependencies, dataDependencies)]))
   const type = value.type
-  return { ...value, origins: unique(value.origins, dependencies), type: type.kind === "record" ? { ...type, fields: map(type.fields), ...(type.rawFields === undefined ? {} : { rawFields: map(type.rawFields) }) } : type.kind === "list" ? { ...type, item: influencedFact(type.item, dependencies), selectionOrigins: unique(type.selectionOrigins ?? value.origins, dependencies) } : type.kind === "nullable" ? { ...type, value: influencedFact(type.value, dependencies) } : type.kind === "choices" ? { ...type, members: type.members.map((member) => influencedFact(member, dependencies)) } : type.kind === "union" ? { ...type, cases: map(type.cases) } : type }
+  return { ...roles(value, unique(value.dataOrigins, dataDependencies), unique(value.controlOrigins, dependencies)), type: type.kind === "record" ? { ...type, fields: map(type.fields), ...(type.rawFields === undefined ? {} : { rawFields: map(type.rawFields) }) } : type.kind === "list" ? { ...type, item: influencedFact(type.item, dependencies, dataDependencies), selectionOrigins: unique(type.selectionOrigins ?? value.origins, dependencies, dataDependencies) } : type.kind === "nullable" ? { ...type, value: influencedFact(type.value, dependencies, dataDependencies) } : type.kind === "choices" ? { ...type, members: type.members.map((member) => influencedFact(member, dependencies, dataDependencies)) } : type.kind === "union" ? { ...type, cases: map(type.cases) } : type }
 }
 export const staticPath = (expr: Expression): string | undefined => expr.kind === "IdentifierExpression" ? expr.name : expr.kind === "FieldExpression" ? (() => { const path = staticPath(expr.object); return path === undefined ? undefined : `${path}.${expr.field}` })() : undefined
 const add = (left: Counts, right: Counts): Counts => Object.fromEntries(unique(Object.keys(left), Object.keys(right)).map((key) => [key, (left[key] ?? 0) + (right[key] ?? 0)]))
@@ -122,8 +127,8 @@ const check = (program: Program, environment: ReviewEnvironment): Review => {
     if (model.kind === "union") {
       const members = model.members.map((member) => fromModel(member, origin, input))
       const nonnull = members.filter((member) => member.type.kind !== "null")
-      if (nonnull.length !== members.length && nonnull.length > 0) return nullable(nonnull.length === 1 ? nonnull[0]! : fact({ kind: "choices", members: nonnull }, origins))
-      return members.length === 1 ? members[0]! : fact({ kind: "choices", members }, origins)
+      if (nonnull.length !== members.length && nonnull.length > 0) return nullable(nonnull.length === 1 ? nonnull[0]! : derivedFact(fact({ kind: "choices", members: nonnull }), nonnull))
+      return members.length === 1 ? members[0]! : derivedFact(fact({ kind: "choices", members }), members)
     }
     return fail(`unsupported schema ${model.kind}`)
   }
@@ -168,7 +173,7 @@ const check = (program: Program, environment: ReviewEnvironment): Review => {
     if (right.type.kind === "never") return left
     const value = join(left, right, span)
     const schemaProofs = (left.schemaProofs ?? []).filter((model) => (right.schemaProofs ?? []).some((other) => hasSameSchema(model, other)))
-    return { ...value, schemaProofs }
+    return { ...derivedFact(value, [left, right]), schemaProofs }
   }
   const join = (left: Fact, right: Fact, span: Span): Fact => {
     if (left.type.kind === "never") return right
@@ -226,7 +231,7 @@ const check = (program: Program, environment: ReviewEnvironment): Review => {
       const parts = selectedPath.split("."), root = scope.get(parts[0]!)
       const equal = test.operator === "==" ? truth : !truth
       const refine = (current: Fact, depth: number): Fact => {
-        if (depth === parts.length) return equal ? fact({ kind: "null" }, current.origins, [], null) : current.type.kind === "nullable" ? current.type.value : current
+        if (depth === parts.length) return equal ? derivedFact(fact({ kind: "null" }, [], [], null), [current]) : current.type.kind === "nullable" ? current.type.value : current
         if (current.type.kind !== "record") return current
         const child = current.type.fields.get(parts[depth]!)
         if (child === undefined) return current
@@ -261,7 +266,7 @@ const check = (program: Program, environment: ReviewEnvironment): Review => {
     const equal = test.operator === "==" ? truth : !truth
     const selected = [...current.type.cases].filter(([name]) => (name === tag.value) === equal)
     const next = new Map(scope)
-    next.set(selector.object.name, selected.length === 1 ? selected[0]![1] : union(new Map(selected), current.origins))
+    next.set(selector.object.name, selected.length === 1 ? selected[0]![1] : union(new Map(selected), current.dataOrigins))
     return next
   }
   const expr = (expression: Expression, scope: Scope, control: readonly string[]): { value: Fact; counts: Counts } => {
@@ -283,18 +288,18 @@ const check = (program: Program, environment: ReviewEnvironment): Review => {
         let item = scalar("never"), counts: Counts = {}; const values: Schema.Json[] = []; let known = true
         for (const element of expression.items) { const result = expr(element, scope, control); item = merge(item, result.value, element.span); counts = add(counts, result.counts); if (result.value.constant === undefined) known = false; else values.push(result.value.constant) }
         if (expression.items.length > environment.maxListItems) fail("list bound exceeded", expression.span)
-        return { value: fact({ kind: "list", item, bound: expression.items.length, selectionOrigins: [] }, item.origins, [], known ? values : undefined), counts }
+        return { value: fact({ kind: "list", item, bound: expression.items.length, selectionOrigins: [] }, item.dataOrigins, [], known ? values : undefined, item.controlOrigins), counts }
       }
       case "RecordExpression": {
         const fields = new Map<string, Fact>(); let counts: Counts = {}; const value: Record<string, Schema.Json> = {}; let known = true
         for (const entry of expression.entries) { if (fields.has(entry.key)) fail("duplicate record field", entry.span); const result = expr(entry.value, scope, control); fields.set(entry.key, result.value); counts = add(counts, result.counts); if (result.value.constant === undefined) known = false; else Object.defineProperty(value, entry.key, { value: result.value.constant, enumerable: true }) }
-        return { value: fact({ kind: "record", fields }, unique(...[...fields.values()].map((field) => field.origins)), [], known ? value : undefined), counts }
+        return { value: { ...record(fields), ...(known ? { constant: value } : {}) }, counts }
       }
       case "FieldExpression": {
         const object = expr(expression.object, scope, control)
         const project = (value: Fact): Fact => {
           if (value.type.kind === "never") return value
-          if (value.type.kind === "union" && expression.field === "state") return fact({ kind: "string" }, unique(...[...value.type.cases.values()].map((arm) => arm.type.kind === "record" ? arm.type.fields.get("state")?.origins ?? arm.origins : arm.origins)))
+          if (value.type.kind === "union" && expression.field === "state") return derivedFact(scalar("string"), [...value.type.cases.values()].map((arm) => arm.type.kind === "record" ? arm.type.fields.get("state") ?? arm : arm))
           if (value.type.kind === "choices") return value.type.members.map(project).reduce((a, b) => merge(a, b, expression.span))
           if (value.type.kind !== "record") fail("field access requires a narrowed record", expression.span)
           const child = value.type.fields.get(expression.field)
@@ -311,28 +316,29 @@ const check = (program: Program, environment: ReviewEnvironment): Review => {
       case "UnaryExpression": {
         const operand = expr(expression.operand, scope, control)
         compatible(operand.value, scalar(expression.operator === "!" ? "boolean" : "number"), expression.span)
-        return { ...operand, value: fact({ kind: expression.operator === "!" ? "boolean" : "number" }, operand.value.origins) }
+        return { ...operand, value: derivedFact(scalar(expression.operator === "!" ? "boolean" : "number"), [operand.value]) }
       }
       case "BinaryExpression": {
         const left = expr(expression.left, scope, control), right = expr(expression.right, ["&&", "||"].includes(expression.operator) ? narrow(expression.left, scope, expression.operator === "&&") : scope, unique(control, left.value.origins))
-        const origins = unique(left.value.origins, right.value.origins), counts = add(left.counts, right.counts)
-        if (["&&", "||"].includes(expression.operator)) { compatible(left.value, scalar("boolean"), expression.span); compatible(right.value, scalar("boolean"), expression.span); return { value: fact({ kind: "boolean" }, origins), counts } }
+        const counts = add(left.counts, right.counts)
+        const computed = (value: Fact) => derivedFact(value, [left.value, right.value])
+        if (["&&", "||"].includes(expression.operator)) { compatible(left.value, scalar("boolean"), expression.span); compatible(right.value, scalar("boolean"), expression.span); return { value: computed(scalar("boolean")), counts } }
         if (["==", "!=", "<", ">", "<=", ">="].includes(expression.operator)) {
-          if (["==", "!="].includes(expression.operator)) { equality(left.value, right.value, expression.span); return { value: fact({ kind: "boolean" }, origins), counts } }
+          if (["==", "!="].includes(expression.operator)) { equality(left.value, right.value, expression.span); return { value: computed(scalar("boolean")), counts } }
           if (!(["string", "number", "duration"] as const).some((kind) => allKind(left.value, kind) && allKind(right.value, kind))) fail("comparison shape mismatch", expression.span)
           if (!["==", "!="].includes(expression.operator) && left.value.type.kind === "boolean") fail("ordered comparison requires string/number", expression.span)
-          return { value: fact({ kind: "boolean" }, origins), counts }
+          return { value: computed(scalar("boolean")), counts }
         }
-        if (expression.operator === "+" && allKind(left.value, "string") && allKind(right.value, "string")) return { value: fact({ kind: "string" }, origins, [], typeof left.value.constant === "string" && typeof right.value.constant === "string" ? left.value.constant + right.value.constant : undefined), counts }
+        if (expression.operator === "+" && allKind(left.value, "string") && allKind(right.value, "string")) return { value: computed(fact({ kind: "string" }, [], [], typeof left.value.constant === "string" && typeof right.value.constant === "string" ? left.value.constant + right.value.constant : undefined)), counts }
         compatible(left.value, scalar("number"), expression.span); compatible(right.value, scalar("number"), expression.span)
         if (typeof left.value.constant === "number" && typeof right.value.constant === "number") {
           if (expression.operator === "/" && right.value.constant === 0) fail("certain arithmetic zero failure", expression.span)
           const a = left.value.constant, b = right.value.constant
           const constant = expression.operator === "+" ? a + b : expression.operator === "-" ? a - b : expression.operator === "*" ? a * b : a / b
           if (!Number.isFinite(constant) || (Number.isInteger(constant) && !Number.isSafeInteger(constant))) fail("certain arithmetic overflow failure", expression.span)
-          return { value: fact({ kind: "number" }, origins, [], constant), counts }
+          return { value: computed(fact({ kind: "number" }, [], [], constant)), counts }
         }
-        return { value: fact({ kind: "number" }, origins), counts }
+        return { value: computed(scalar("number")), counts }
       }
       case "CallExpression": {
         const name = staticPath(expression.callee)
@@ -352,11 +358,14 @@ const check = (program: Program, environment: ReviewEnvironment): Review => {
           if (decoder === undefined) fail("unknown decoder", expression.span)
           const source = expr(expression.arguments[1]!, scope, control)
           if (hasOpaque(source.value)) fail("opaque values cannot be decoded by a program", expression.span)
-          const carryOrigins = (value: Fact): Fact => ({ ...value, origins: source.value.origins, type: value.type.kind === "record" ? { ...value.type, fields: new Map([...value.type.fields].map(([key, field]) => [key, carryOrigins(field)])) } : value.type.kind === "list" ? { ...value.type, item: carryOrigins(value.type.item) } : value.type.kind === "nullable" ? { ...value.type, value: carryOrigins(value.type.value) } : value.type.kind === "choices" ? { ...value.type, members: value.type.members.map(carryOrigins) } : value.type })
+          const carryOrigins = (value: Fact): Fact => {
+            const map = (fields: ReadonlyMap<string, Fact>) => new Map([...fields].map(([key, child]) => [key, carryOrigins(child)]))
+            return { ...roles(value, source.value.dataOrigins, source.value.controlOrigins), type: value.type.kind === "record" ? { ...value.type, fields: map(value.type.fields), ...(value.type.rawFields === undefined ? {} : { rawFields: map(value.type.rawFields) }) } : value.type.kind === "list" ? { ...value.type, item: carryOrigins(value.type.item), selectionOrigins: source.value.origins } : value.type.kind === "nullable" ? { ...value.type, value: carryOrigins(value.type.value) } : value.type.kind === "choices" ? { ...value.type, members: value.type.members.map(carryOrigins) } : value.type.kind === "union" ? { ...value.type, cases: map(value.type.cases) } : value.type }
+          }
           const decoded = carryOrigins(fromModel(modelSchema(decoder.schema, { identity: decoderIdentity(decoder), side: "decoded" }), ""))
           const folded = source.value.constant === undefined ? undefined : decodeValue(decoder, labeledValue(source.value.constant, new InformationLabel({ confidentiality: "public", integrity: "runtime", provenance: [] })))
           const value = { ...decoded, refinements: unique(decoded.refinements, [decoderIdentity(decoder)]), ...(folded !== undefined && Result.isSuccess(folded) ? { constant: folded.success.value } : {}) }
-          return { value: union(new Map([["ok", record(new Map([["state", fact({ kind: "string" }, source.value.origins, [], "ok")], ["value", value]]), source.value.origins)], ["err", record(new Map([["state", fact({ kind: "string" }, source.value.origins, [], "err")], ["error", fact({ kind: "string" }, source.value.origins)]]), source.value.origins)]]), source.value.origins), counts: source.counts }
+          return { value: carryOrigins(union(new Map([["ok", record(new Map([["state", fact({ kind: "string" }, [], [], "ok")], ["value", value]]))], ["err", record(new Map([["state", fact({ kind: "string" }, [], [], "err")], ["error", scalar("string")]]))]]))), counts: source.counts }
         }
         const tool = environment.tools[name]
         if (tool === undefined || !environment.granted.has(name)) fail(`ungranted tool ${name}`, expression.span)
@@ -376,8 +385,8 @@ const check = (program: Program, environment: ReviewEnvironment): Review => {
           if (required.some((identity) => !inputFields.get(field)?.refinements.includes(decoderIdentity(identity)))) fail(`missing required refinement on ${field}`, expression.span)
         }
         calls.push({ tool: name, span: expression.span, arguments: argument.value, control, maximumOccurrences: occurrences })
-        const dependencies = unique(control, argument.value.origins)
-        const influenced = (value: Fact): Fact => influencedFact(value, dependencies)
+        const dependencies = unique(control, argument.value.controlOrigins)
+        const influenced = (value: Fact): Fact => influencedFact(value, dependencies, argument.value.dataOrigins)
         let result = influenced(fromModel(tool.contract.model.output, `${name}@${expression.span.start}.result`))
         const provides: ToolFlow["provides"] = tool.contract.flow.provides
         for (const [field, identities] of Object.entries(provides)) {
@@ -398,10 +407,10 @@ const check = (program: Program, environment: ReviewEnvironment): Review => {
             result = decorate(result)
           }
         }
-        const receiptOrigins = unique([`${name}@${expression.span.start}.state`], dependencies)
+        const receiptOrigins = [`${name}@${expression.span.start}.state`]
         const receiptField = (field: string) => fact({ kind: "string" }, [`${name}@${expression.span.start}.${field}`])
-        const state = (tag: string, fields: ReadonlyArray<readonly [string, Fact]>) => influenced(record(new Map([["state", fact({ kind: "string" }, receiptOrigins, [], tag)], ...fields]), receiptOrigins))
-        return { value: union(new Map([["done", state("done", [["id", receiptField("id")], ["result", result], ["wayBack", nullable(fromModel(wayBackModel, `${name}@${expression.span.start}.wayBack`))]])], ["staged", state("staged", [["id", receiptField("id")]])], ["refused", state("refused", [["refusal", record(new Map([["code", receiptField("refusal.code")], ["message", receiptField("refusal.message")]]), receiptOrigins)]])]]), receiptOrigins), counts: add(argument.counts, { [name]: 1 }) }
+        const state = (tag: string, fields: ReadonlyArray<readonly [string, Fact]>) => record(new Map([["state", influenced(fact({ kind: "string" }, receiptOrigins, [], tag))], ...fields.map(([name, value]) => [name, influenced(value)] as const)]))
+        return { value: union(new Map([["done", state("done", [["id", receiptField("id")], ["result", result], ["wayBack", nullable(fromModel(wayBackModel, `${name}@${expression.span.start}.wayBack`))]])], ["staged", state("staged", [["id", receiptField("id")]])], ["refused", state("refused", [["refusal", record(new Map([["code", receiptField("refusal.code")], ["message", receiptField("refusal.message")]]))]])]])), counts: add(argument.counts, { [name]: 1 }) }
       }
     }
   }
@@ -436,7 +445,7 @@ const check = (program: Program, environment: ReviewEnvironment): Review => {
             for (const endpoint of [from.value.constant, to.value.constant]) if (endpoint !== undefined && (typeof endpoint !== "number" || !Number.isSafeInteger(endpoint))) fail("certain invalid range bound", statement.span)
             const bound = typeof from.value.constant === "number" && typeof to.value.constant === "number" ? Math.max(0, to.value.constant - from.value.constant) : environment.maxIterations
             const loopPc = unique(pc, from.value.origins, to.value.origins), inner = new Map(scope)
-            inner.set(statement.variable, fact({ kind: "number" }, loopPc))
+            inner.set(statement.variable, derivedFact(scalar("number"), [from.value, to.value]))
             const previousOccurrences = occurrences; occurrences *= bound
             const child = loopBody(statement.body, inner, loopPc, bound); occurrences = previousOccurrences
             counts = add(counts, add(add(from.counts, to.counts), scale(child.counts, bound))); iterations += bound * (1 + child.iterations); pc = unique(loopPc, child.control)

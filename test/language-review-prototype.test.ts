@@ -14,11 +14,13 @@ const unreachable: PrototypeHost = { resolve: () => Effect.die("no host call exp
 const assertObservedDependencies = (review: Review) => (observed: CallObservation): void => {
   const call = review.calls.find((call) => call.tool === observed.tool && call.span.start === observed.span.start)!
   expect(call).toBeDefined()
-  for (const origin of observed.argument.provenance) expect(call.arguments.origins, `whole argument ${observed.tool}: ${origin}`).toContain(origin)
+  for (const origin of observed.argument.data.provenance) expect(call.arguments.dataOrigins, `whole argument data ${observed.tool}: ${origin}`).toContain(origin)
+  for (const origin of observed.argument.control.provenance) expect(call.arguments.controlOrigins, `whole argument control ${observed.tool}: ${origin}`).toContain(origin)
   for (const origin of observed.control.provenance) expect(call.control, `control ${observed.tool}: ${origin}`).toContain(origin)
-  if (call.arguments.type.kind === "record") for (const [field, label] of Object.entries(observed.fields)) {
-    const staticOrigins = call.arguments.type.fields.get(field)?.origins ?? []
-    for (const origin of label.provenance) expect(staticOrigins, `${observed.tool}.${field}: ${origin}`).toContain(origin)
+  if (call.arguments.type.kind === "record") for (const [field, roles] of Object.entries(observed.fields)) {
+    const value = call.arguments.type.fields.get(field)!
+    for (const origin of roles.data.provenance) expect(value.dataOrigins, `${observed.tool}.${field} data: ${origin}`).toContain(origin)
+    for (const origin of roles.control.provenance) expect(value.controlOrigins, `${observed.tool}.${field} control: ${origin}`).toContain(origin)
   }
 }
 
@@ -290,6 +292,57 @@ describe("current-syntax type checker prototype", () => {
     }
     const malformed = yield* runReviewedPrototype(review, { resolve: () => Effect.succeed(done({ date: "bad date", dates: [] })) }).pipe(Effect.flip)
     expect(malformed.reason).toBe("host-result")
+  }))
+
+  it.effect("keeps selected payload, decoder control and call PC in distinct roles", () => Effect.gen(function* () {
+    const choice = defineToolContract({ name: "choice.read", version: "1", effect: "capture", input: Schema.Struct({ id: Schema.String }), output: Schema.Struct({ index: Schema.Number, ignored: Schema.String }) })
+    const env = { ...environment, tools: { ...environment.tools, "choice.read": { contract: choice } }, granted: new Set([...environment.granted, "choice.read"]) }
+    const source = 'let choice = choice.read({id:"one"}); if choice.state == "done" { let candidates = [{to:"a@example.com"},{to:"b@example.com"}]; let selected = candidates[choice.result.index]; let decoded = decode(schema.companyRecipient,selected.to); if decoded.state == "ok" { mail.send({to:decoded.value,subject:"hello",body:choice.result.ignored}) } }; return true'
+    const review = yield* reviewPrototype(source, env)
+    const call = review.calls.find((call) => call.tool === "mail.send")!
+    expect(call.arguments.type.kind).toBe("record")
+    if (call.arguments.type.kind !== "record") throw new Error("record expected")
+    const to = call.arguments.type.fields.get("to")!, body = call.arguments.type.fields.get("body")!
+    expect(to.dataOrigins).toEqual([])
+    expect(to.controlOrigins.some((origin) => origin.endsWith(".result.index"))).toBe(true)
+    expect(body.dataOrigins.some((origin) => origin.endsWith(".result.ignored"))).toBe(true)
+    expect(body.controlOrigins.some((origin) => origin.endsWith(".result.index"))).toBe(false)
+    expect(call.control.some((origin) => origin.endsWith(".result.index"))).toBe(true)
+    const seen: CallObservation[] = []
+    expect(yield* runReviewedPrototype(review, { observe: (call) => { assertObservedDependencies(review)(call); seen.push(call) }, resolve: (name) => Effect.succeed(name === "choice.read" ? done({ index: 1, ignored: "payload" }) : done({ messageId: "sent" })) })).toBe(true)
+    const send = seen.find((call) => call.tool === "mail.send")!
+    expect(send.fields.to!.data.confidentiality).toBe("public")
+    expect(send.fields.to!.control.confidentiality).toBe("private")
+    expect(send.fields.body!.data.provenance.some((origin) => origin.endsWith(".result.ignored"))).toBe(true)
+    expect(send.fields.body!.control.provenance.some((origin) => origin.endsWith(".result.index"))).toBe(false)
+  }))
+
+  it.effect("retains argument-local control through a capture result and later projection", () => Effect.gen(function* () {
+    const choice = defineToolContract({ name: "choice.read", version: "1", effect: "capture", input: Schema.Struct({ id: Schema.String }), output: Schema.Struct({ index: Schema.Number }) })
+    const env = { ...environment, tools: { ...environment.tools, "choice.read": { contract: choice } }, granted: new Set([...environment.granted, "choice.read"]) }
+    const source = 'let choice = choice.read({id:"one"}); if choice.state == "done" { let selected = [{url:"https://example.com/a"},{url:"https://example.com/b"}][choice.result.index]; let fetched = http.get({url:selected.url}); if fetched.state == "done" { http.get({url:fetched.result.text}) } }; return true'
+    const review = yield* reviewPrototype(source, env)
+    const second = review.calls.filter((call) => call.tool === "http.get")[1]!
+    if (second.arguments.type.kind !== "record") throw new Error("record expected")
+    const url = second.arguments.type.fields.get("url")!
+    expect(url.controlOrigins.some((origin) => origin.endsWith(".result.index"))).toBe(true)
+    expect(url.dataOrigins.some((origin) => origin.endsWith(".result.index"))).toBe(false)
+    expect(url.dataOrigins.some((origin) => origin.endsWith(".result.text"))).toBe(true)
+    expect(yield* runReviewedPrototype(review, { observe: assertObservedDependencies(review), resolve: (name) => Effect.succeed(name === "choice.read" ? done({ index: 0 }) : done({ text: "https://example.com/final" })) })).toBe(true)
+  }))
+
+  it.effect("summarizes every tagged-record variant when a whole alias is passed", () => Effect.gen(function* () {
+    const payload = Schema.Union([Schema.Struct({ tag: Schema.Literal("a"), value: Schema.String }), Schema.Struct({ tag: Schema.Literal("b"), other: Schema.String })])
+    const read = defineToolContract({ name: "variant.read", version: "1", effect: "capture", input: Schema.Struct({ id: Schema.String }), output: payload })
+    const use = defineToolContract({ name: "variant.use", version: "1", effect: "capture", input: payload, output: Schema.Boolean })
+    const env = { ...environment, tools: { "variant.read": { contract: read }, "variant.use": { contract: use } }, granted: new Set(["variant.read", "variant.use"]) }
+    const source = 'let r = variant.read({id:"one"}); if r.state == "done" { let alias = r.result; variant.use(alias) }; return true'
+    const review = yield* reviewPrototype(source, env)
+    const call = review.calls.find((call) => call.tool === "variant.use")!
+    expect(call.arguments.dataOrigins.some((origin) => origin.endsWith(".result.value"))).toBe(true)
+    expect(call.arguments.dataOrigins.some((origin) => origin.endsWith(".result.other"))).toBe(true)
+    const variants: readonly Schema.Json[] = [{ tag: "a", value: "first" }, { tag: "b", other: "second" }]
+    for (const value of variants) expect(yield* runReviewedPrototype(review, { observe: assertObservedDependencies(review), resolve: (name) => Effect.succeed(name === "variant.read" ? done(value) : done(true)) })).toBe(true)
   }))
 })
 
