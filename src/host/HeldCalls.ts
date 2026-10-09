@@ -4,7 +4,7 @@ import { mkdir, open, readFile, readdir } from "node:fs/promises"
 import { AirlockHome } from "../AirlockHome.ts"
 import { ActId } from "../core/domain.ts"
 import { reasonOf } from "../FailureText.ts"
-import { HeldCall, Hold } from "../Hold.ts"
+import { HeldCall, Hold, HoldFilesystemError } from "../Hold.ts"
 import { makeExclusiveFileLock } from "../platform/ExclusiveFileLock.ts"
 
 /**
@@ -106,7 +106,12 @@ export class HeldCallFailed extends Schema.TaggedError<HeldCallFailed>()("HeldCa
 /** How forward work ended when it did not fail the call into uncertainty. */
 export type HeldCallOutcome<A> =
   | { readonly _tag: "done"; readonly value: A }
-  | { readonly _tag: "refused"; readonly reason: "nothing-applied" | "partial-application-restored" }
+  | {
+    readonly _tag: "refused"
+    readonly reason: "nothing-applied" | "partial-application-restored"
+    /** The grant ran out before an act, which is why the work stopped. */
+    readonly expired: boolean
+  }
 
 export class HeldCalls extends Context.Service<
   HeldCalls,
@@ -119,10 +124,15 @@ export class HeldCalls extends Context.Service<
      * Runs the call's forward work once, with every Hold act inside it claimed
      * for the call. If the work fails, the acts that happened are reversed and
      * the call is refused; if that cannot be proven, the call is uncertain.
+     *
+     * `validUntil` (epoch milliseconds) is checked before every act, not once:
+     * an act that would start after it is stopped before its first rename.
+     * It bounds forward work only. Reversal never consults it.
      */
     readonly run: <A, E, R>(
       reference: HeldCallReference,
-      forward: Effect.Effect<A, E, R>
+      forward: Effect.Effect<A, E, R>,
+      options?: { readonly validUntil?: number }
     ) => Effect.Effect<HeldCallOutcome<A>, HeldCallNotFresh | HeldCallUncertain | HeldCallFailed, R>
     /** Says where a call stands. An interrupted call is settled first, by reversing it, never by continuing it. */
     readonly inspect: (reference: HeldCallReference) => Effect.Effect<HeldCallState, HeldCallFailed>
@@ -338,25 +348,28 @@ const make = (config: HeldCallsConfig) =>
           return reference
         })),
 
-      run: (reference, forward) =>
+      run: (reference, forward, options) =>
         lock.withLock(Effect.gen(function* () {
           const state = yield* inspect(reference)
           if (state.state !== "prepared") {
             return yield* new HeldCallNotFresh({ callId: reference.callId, state: state.state })
           }
           const acts: Array<ActId> = []
+          let expired = false
           const result = yield* forward.pipe(
             Effect.provideService(HeldCall, {
+              // A claim that fails stops the act before it renames anything.
               claim: (id) =>
-                Effect.tryPromise({
-                  try: () => create(path.join(directory(reference), "acts", `${order(acts.length)}.${id}`), ""),
-                  catch: (cause) => cause
-                }).pipe(
-                  // Hold's own error type is not constructible here; a claim
-                  // that cannot be recorded must stop the act before it renames.
-                  Effect.orDie,
-                  Effect.tap(() => Effect.sync(() => acts.push(id)))
-                )
+                Effect.suspend(() => {
+                  if (options?.validUntil !== undefined && Date.now() >= options.validUntil) {
+                    expired = true
+                    return Effect.fail(new HoldFilesystemError({ operation: "claim", target: id, reason: "grant expired" }))
+                  }
+                  return Effect.tryPromise({
+                    try: () => create(path.join(directory(reference), "acts", `${order(acts.length)}.${id}`), ""),
+                    catch: (cause) => new HoldFilesystemError({ operation: "claim", target: id, reason: reasonOf(cause) })
+                  }).pipe(Effect.tap(() => Effect.sync(() => acts.push(id))))
+                })
             }),
             Effect.result
           )
@@ -371,7 +384,8 @@ const make = (config: HeldCallsConfig) =>
           }
           return {
             _tag: "refused",
-            reason: acts.length === 0 ? "nothing-applied" : "partial-application-restored"
+            reason: acts.length === 0 ? "nothing-applied" : "partial-application-restored",
+            expired
           } satisfies HeldCallOutcome<never>
         })),
 

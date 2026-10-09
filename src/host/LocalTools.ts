@@ -1,4 +1,4 @@
-import { Effect } from "effect"
+import { DateTime, Effect } from "effect"
 import { type Refused, refused } from "../core/airlock/Implement.ts"
 import type { BoundResource, HeldReference, HostParameters } from "../core/contract/ToolHost.ts"
 import type { WireToken } from "../core/outbox/Outbox.ts"
@@ -27,6 +27,8 @@ export interface LocalCallContext {
   readonly host: HostParameters
   /** The call's resources as admission bound them, in declaration order. */
   readonly resources: ReadonlyArray<BoundResource>
+  /** When the grant runs out. Bounds forward work only; putting a call back ignores it. */
+  readonly validUntil?: DateTime.Utc
 }
 
 type Services =
@@ -42,6 +44,9 @@ const each = (context: LocalCallContext, field: string) =>
     .filter((resource) => resource.binding.field === field)
     .sort((a, b) => (a.binding.index ?? 0) - (b.binding.index ?? 0))
     .map((resource) => resource.binding.selector)
+
+const deadline = (context: LocalCallContext) =>
+  context.validUntil === undefined ? undefined : DateTime.toEpochMillis(context.validUntil)
 
 const unbound = (tool: string, field: string) =>
   Effect.succeed(refused(`${tool} did nothing: the call has no admitted ${field}`))
@@ -78,10 +83,22 @@ export const localTools = (services: Services) => {
   }
   const held = <Input, Output>(
     tool: string,
-    act: (input: Input, reference: ReturnType<typeof heldCallReference>) => Effect.Effect<Output, unknown>
+    act: (input: Input, reference: ReturnType<typeof heldCallReference>, validUntil?: number) => Effect.Effect<Output, unknown>
   ) =>
   (input: Input, context: LocalCallContext): Effect.Effect<Output, unknown> =>
-    context.held === undefined ? unclaimed(tool) : act(input, heldCallReference(context.held))
+    context.held === undefined ? unclaimed(tool) : act(input, heldCallReference(context.held), deadline(context))
+
+  /** The one request of an HTTP call is its forward act. */
+  const live = <Input, Output>(
+    tool: string,
+    act: (input: Input, context: LocalCallContext) => Effect.Effect<Output, unknown>
+  ) =>
+  (input: Input, context: LocalCallContext): Effect.Effect<Output | Refused, unknown> => {
+    const until = deadline(context)
+    return until !== undefined && Date.now() >= until
+      ? Effect.succeed(refused(`${tool} sent nothing: the grant expired`))
+      : act(input, context)
+  }
 
   return {
     "file.inspect": onPath("file.inspect", "path", captures["file.inspect"]),
@@ -106,11 +123,12 @@ export const localTools = (services: Services) => {
           // Unconfined unless the grant names a profile this machine provides.
           confined: services.confiningProfiles.some((confining) => confining === profile),
           signal: context.signal,
+          ...(context.validUntil === undefined ? {} : { validUntil: deadline(context)! }),
           ...(context.held === undefined ? {} : { held: heldCallReference(context.held) })
         }
       )
     },
-    "http.get": http["http.get"],
-    "http.stage": http["http.stage"]
+    "http.get": live("http.get", http["http.get"]),
+    "http.stage": live("http.stage", http["http.stage"])
   }
 }

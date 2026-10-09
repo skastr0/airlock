@@ -26,7 +26,9 @@ type Applies = {
 export type FileApplies = {
   readonly [Name in keyof Applies]: (
     input: ToolContract.ShapeOf<Applies[Name]>["input"],
-    held: HeldCallReference
+    held: HeldCallReference,
+    /** Epoch milliseconds after which no further act of this call may start. */
+    validUntil?: number
   ) => Effect.Effect<ToolContract.OutputOf<Applies[Name]> | Refused, unknown>
 }
 
@@ -40,17 +42,21 @@ export const fileApplies = (services: {
   const held = <A, B>(
     tool: string,
     reference: HeldCallReference,
+    validUntil: number | undefined,
     work: Effect.Effect<A, unknown>,
     output: (applied: A) => B
   ): Effect.Effect<B | Refused, unknown> =>
-    Effect.map(calls.run(reference, work), (outcome) =>
-      outcome._tag === "done" ? output(outcome.value) : refused(`${tool} changed nothing: ${outcome.reason}`))
+    Effect.map(calls.run(reference, work, validUntil === undefined ? {} : { validUntil }), (outcome) =>
+      outcome._tag === "done"
+        ? output(outcome.value)
+        : refused(`${tool} changed nothing: ${outcome.expired ? "the grant expired" : "it could not be carried out"} (${outcome.reason})`))
 
   return {
-    "file.write": (input, reference) =>
+    "file.write": (input, reference, validUntil) =>
       held(
         "file.write",
         reference,
+        validUntil,
         input.content !== undefined
           ? files.writeText(input.path, input.content)
           : Effect.flatMap(services.artifact(input.sourceArtifact!), (bytes) => files.writeBytes(input.path, bytes)),
@@ -61,29 +67,29 @@ export const fileApplies = (services: {
           bytes: written.bytes
         })
       ),
-    "file.remove": (input, reference) =>
-      held("file.remove", reference, files.remove(input.path), (removed) => ({
+    "file.remove": (input, reference, validUntil) =>
+      held("file.remove", reference, validUntil, files.remove(input.path), (removed) => ({
         act_id: removed.id,
         target: removed.target,
         kind: removed.kind
       })),
-    "file.copy": (input, reference) =>
-      held("file.copy", reference, files.copy(input.source, input.destination), (copied) => ({
+    "file.copy": (input, reference, validUntil) =>
+      held("file.copy", reference, validUntil, files.copy(input.source, input.destination), (copied) => ({
         act_id: ActId.make(copied.receipt.id),
         source: copied.receipt.source,
         target: copied.receipt.target,
         previous_held: copied.receipt.previousHeld,
         bytes: copied.bytes
       })),
-    "file.move": (input, reference) =>
-      held("file.move", reference, files.move(input.source, input.destination), (moved) => ({
+    "file.move": (input, reference, validUntil) =>
+      held("file.move", reference, validUntil, files.move(input.source, input.destination), (moved) => ({
         install_act_id: ActId.make(moved.install.receipt.id),
         remove_act_id: ActId.make(moved.sourceRemoval.id),
         source: moved.sourceRemoval.target,
         target: moved.install.receipt.target
       })),
-    "file.mkdir": (input, reference) =>
-      held("file.mkdir", reference, files.mkdir(input.path, { parents: input.parents }), (made) => ({
+    "file.mkdir": (input, reference, validUntil) =>
+      held("file.mkdir", reference, validUntil, files.mkdir(input.path, { parents: input.parents }), (made) => ({
         path: made.path,
         act_ids: made.installs.map((install) => ActId.make(install.receipt.id))
       }))

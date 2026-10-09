@@ -40,6 +40,8 @@ export interface ProcessRunContext {
   /** The call's claim in Hold. Required to merge a confined run. */
   readonly held?: HeldCallReference
   readonly signal?: AbortSignal
+  /** Epoch milliseconds after which the process may not start and nothing may be merged. */
+  readonly validUntil?: number
 }
 
 const text = (bytes: Uint8Array) => {
@@ -68,6 +70,9 @@ export const processRun = (services: {
     const cwd = nodePath.resolve(services.workspace, input.cwd)
     if (context.confined && cwd !== nodePath.resolve(services.workspace)) {
       return refused("process.run did not start: a confined process works in the workspace root")
+    }
+    if (context.validUntil !== undefined && Date.now() >= context.validUntil) {
+      return refused("process.run did not start: the grant expired")
     }
     if (context.confined && context.held === undefined) {
       return yield* Effect.fail("a confined process.run needs the call's claim in Hold")
@@ -166,10 +171,12 @@ export const processRun = (services: {
               : services.hold.replaceFrom(entry.target, entry.source!)
           }
           return entries.map((entry) => ({ path: entry.candidate.path, kind: entry.candidate.kind }))
-        })
+        }),
+        // The process may have run for a long time: checked again before each act.
+        context.validUntil === undefined ? {} : { validUntil: context.validUntil }
       )
       if (merged._tag === "refused") {
-        return refused(`process.run changed nothing: ${why} (${merged.reason})`)
+        return refused(`process.run changed nothing: ${merged.expired ? "the grant expired before the merge" : why} (${merged.reason})`)
       }
       return yield* report("exited", receipt.processReceipt, merged.value)
     }).pipe(Effect.ensuring(retire))

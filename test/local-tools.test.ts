@@ -1,4 +1,4 @@
-import { Effect, FileSystem, Layer, Path, Schema } from "effect"
+import { DateTime, Effect, FileSystem, Layer, Path, Schema } from "effect"
 import { BunServices } from "@effect/platform-bun"
 import { describe, expect, it } from "@effect/vitest"
 import * as AirlockHome from "../src/AirlockHome.ts"
@@ -33,7 +33,7 @@ const world = <A, E>(body: (args: {
   /** The context the kernel builds for one call. */
   readonly context: (
     resources: ReadonlyArray<BoundResource>,
-    options?: { readonly claim?: string; readonly host?: Record<string, string> }
+    options?: { readonly claim?: string; readonly host?: Record<string, string>; readonly validUntil?: DateTime.Utc }
   ) => Effect.Effect<Omit<LocalCallContext, "held"> & { readonly held: HeldReference | undefined }>
   /** Requests that reached the plain, unconfined process runner. */
   readonly unconfinedRuns: Array<string>
@@ -100,6 +100,7 @@ const world = <A, E>(body: (args: {
               wireToken: unused<LocalCallContext["wireToken"]>("the wire token"),
               host: options.host ?? {},
               resources,
+              ...(options.validUntil === undefined ? {} : { validUntil: options.validUntil }),
               held
             }
           }).pipe(Effect.orDie)
@@ -168,6 +169,38 @@ describe("local tools", () => {
         expect((yield* recovery.restore(call.held!)).state).toBe("restored")
         expect(yield* fs.readFileString(at("a.txt"))).toBe("source")
         expect(yield* fs.readFileString(at("b.txt"))).toBe("destination before")
+      })
+    )
+  )
+
+  it.effect("do no forward work under a grant that has run out", () =>
+    world(({ fs, at, host, tools, context, unconfinedRuns }) =>
+      Effect.gen(function* () {
+        yield* fs.writeFileString(at("note.txt"), "before")
+        const past = DateTime.makeUnsafe(Date.now() - 1_000)
+        const bound = yield* path(host, "path", "note.txt", ["write"])
+        const write = yield* tools["file.write"]({ path: "note.txt", content: "after" }, yield* context([bound], { claim: "expired-write", validUntil: past }))
+        expect(write).toBeInstanceOf(Refused)
+        expect((write as Refused).reason).toContain("grant expired")
+        expect(yield* fs.readFileString(at("note.txt"))).toBe("before")
+
+        const endpoint = yield* host.resources.bind({
+          kind: "endpoint", selector: "https://example.test/send", rights: ["emit"], field: "endpoint"
+        }).pipe(Effect.orDie)
+        // The wire token here throws if touched: an expired call never reaches for it.
+        const sent = yield* tools["http.stage"](
+          { endpoint: "https://example.test/send", method: "POST", headers: {}, holdMillis: 0 },
+          yield* context([endpoint], { validUntil: past })
+        )
+        expect(sent).toBeInstanceOf(Refused)
+
+        const input = Schema.decodeUnknownSync(ProcessRun.input)({ executable: "/bin/bash", args: ["-c", "true"], cwd: "." })
+        const ran = yield* tools["process.run"](input, yield* context([
+          yield* host.resources.bind({ kind: "executable", selector: "/bin/bash", rights: ["invoke"], field: "executable" }).pipe(Effect.orDie),
+          yield* path(host, "cwd", ".", ["read", "write"])
+        ], { validUntil: past }))
+        expect(ran).toBeInstanceOf(Refused)
+        expect(unconfinedRuns).toEqual([])
       })
     )
   )

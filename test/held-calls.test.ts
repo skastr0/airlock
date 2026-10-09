@@ -120,7 +120,7 @@ describe("HeldCalls", () => {
       Effect.gen(function* () {
         const nothing = yield* calls.prepare(claim("call-nothing"))
         const refused = yield* calls.run(nothing, native.remove("absent.txt"))
-        expect(refused).toEqual({ _tag: "refused", reason: "nothing-applied" })
+        expect(refused).toEqual({ _tag: "refused", reason: "nothing-applied", expired: false })
 
         yield* fs.writeFileString(at("kept.txt"), "before")
         const partial = yield* calls.prepare(claim("call-partial"))
@@ -128,7 +128,7 @@ describe("HeldCalls", () => {
           partial,
           Effect.andThen(native.writeText("kept.txt", "after"), native.remove("absent.txt"))
         )
-        expect(outcome).toEqual({ _tag: "refused", reason: "partial-application-restored" })
+        expect(outcome).toEqual({ _tag: "refused", reason: "partial-application-restored", expired: false })
         expect(yield* fs.readFileString(at("kept.txt"))).toBe("before")
         const state = yield* calls.inspect(partial)
         expect(state).toMatchObject({ state: "refused", reason: "partial-application-restored" })
@@ -246,6 +246,48 @@ describe("HeldCalls", () => {
         expect(restored.acts.map((act) => act.status)).toEqual(["conflict", "restored"])
         expect(yield* fs.readFileString(at("one.txt"))).toBe("edited since, longer than before")
         expect((yield* calls.inspect(reference)).state).toBe("done")
+      })
+    )
+  )
+
+  it.effect("stops forward work when the grant runs out, before the next act, and still puts calls back", () =>
+    world(({ fs, at, native, calls }) =>
+      Effect.gen(function* () {
+        yield* fs.writeFileString(at("one.txt"), "one before")
+        yield* fs.writeFileString(at("two.txt"), "two before")
+        const realNow = Date.now
+        const validUntil = realNow() + 60_000
+        try {
+          // Already expired: nothing starts.
+          const late = yield* calls.prepare(claim("call-late"))
+          expect(yield* calls.run(late, native.writeText("one.txt", "late"), { validUntil: realNow() - 1 }))
+            .toEqual({ _tag: "refused", reason: "nothing-applied", expired: true })
+          expect(yield* fs.readFileString(at("one.txt"))).toBe("one before")
+
+          // It runs out between two acts: the second never starts and the first goes back.
+          const between = yield* calls.prepare(claim("call-between"))
+          const outcome = yield* calls.run(
+            between,
+            native.writeText("one.txt", "one after").pipe(
+              Effect.tap(() => Effect.sync(() => { Date.now = () => validUntil + 1 })),
+              Effect.andThen(native.writeText("two.txt", "two after"))
+            ),
+            { validUntil }
+          )
+          expect(outcome).toEqual({ _tag: "refused", reason: "partial-application-restored", expired: true })
+          expect(yield* fs.readFileString(at("one.txt"))).toBe("one before")
+          expect(yield* fs.readFileString(at("two.txt"))).toBe("two before")
+
+          // A call that finished in time can be put back long after the grant ran out.
+          Date.now = realNow
+          const done = yield* calls.prepare(claim("call-in-time"))
+          yield* calls.run(done, native.writeText("one.txt", "in time"), { validUntil })
+          Date.now = () => validUntil + 3_600_000
+          expect((yield* calls.restore(done)).state).toBe("restored")
+          expect(yield* fs.readFileString(at("one.txt"))).toBe("one before")
+        } finally {
+          Date.now = realNow
+        }
       })
     )
   )
