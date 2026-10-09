@@ -1,5 +1,5 @@
 import { describe, expect, it } from "@effect/vitest"
-import { Effect, Schema } from "effect"
+import { Effect, Result, Schema } from "effect"
 import { DurationSchema } from "../src/core/language/ast.ts"
 import { InformationLabel } from "../src/core/labels/Labels.ts"
 import { defineToolContract } from "../src/core/contract/ToolContract.ts"
@@ -386,6 +386,32 @@ describe("current-syntax type checker prototype", () => {
     const invalid = yield* runReviewedPrototype(review, { roleIssuer: copied, resolve }).pipe(Effect.flip)
     expect(invalid.reason).toBe("out-of-plan")
     expect(handled).toBe(0)
+  }))
+
+  it.effect("reviews negated literal arguments with their exact negative-zero value", () => Effect.gen(function* () {
+    const zero = defineToolContract({ name: "negative.zero", version: "1", effect: "capture", input: Schema.Struct({ value: Schema.Number.check(Schema.makeFilter((value) => Object.is(value, -0))) }), output: Schema.Boolean })
+    const env = { ...environment, tools: { "negative.zero": { contract: zero } }, granted: new Set(["negative.zero"]) }
+    const review = yield* reviewPrototype('let zero = -0; negative.zero({value:zero}); return zero != 0', env)
+    const call = review.calls[0]!
+    expect(call.arguments.constant).toBeDefined()
+    expect(Object.is(Reflect.get(call.arguments.constant as object, "value"), -0)).toBe(true)
+    let handled = 0
+    expect(yield* runReviewedPrototype(review, { observe: assertObservedDependencies(review), resolve: (_, input) => Effect.sync(() => { handled++; expect(Object.is(Reflect.get(input as object, "value"), -0)).toBe(true); return done(true) }) })).toBe(true)
+    expect(handled).toBe(1)
+    expect(yield* reviewPrototype('negative.zero({value:0}); return true', env).pipe(Effect.flip)).toBeInstanceOf(ReviewError)
+    const not = yield* reviewPrototype('return !false', environment)
+    expect([...not.expressionFacts.values()].some((fact) => fact.constant === true)).toBe(true)
+  }))
+
+  it.effect("does not claim a schema zero literal proves one exact zero sign", () => Effect.gen(function* () {
+    expect(Object.is(Schema.decodeUnknownSync(Schema.Literal(-0))(0), 0)).toBe(true)
+    const read = defineToolContract({ name: "zero.read", version: "1", effect: "capture", input: Schema.Struct({}), output: Schema.Struct({ value: Schema.Literal(-0) }) })
+    const use = defineToolContract({ name: "zero.use", version: "1", effect: "capture", input: Schema.Struct({ value: Schema.Number.check(Schema.makeFilter((value) => Object.is(value, -0))) }), output: Schema.Boolean })
+    const env = { ...environment, tools: { "zero.read": { contract: read }, "zero.use": { contract: use } }, granted: new Set(["zero.read", "zero.use"]) }
+    const unsafe = yield* reviewPrototype('let r = zero.read({}); if r.state == "done" { zero.use({value:r.result.value}) }; return true', env).pipe(Effect.result)
+    expect(Result.isFailure(unsafe)).toBe(true)
+    const review = yield* reviewPrototype('let r = zero.read({}); if r.state == "done" { if r.result.value == 0 { return true } else { return false } }; return null', env)
+    for (const value of [0, -0]) expect(yield* runReviewedPrototype(review, { observe: assertObservedDependencies(review), resolve: () => Effect.succeed(done({ value })) })).toBe(Object.is(value, 0))
   }))
 })
 

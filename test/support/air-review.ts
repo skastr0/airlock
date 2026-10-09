@@ -104,7 +104,12 @@ const check = (program: Program, environment: ReviewEnvironment): Review => {
     const origins = origin === "" ? [] : [origin]
     if (hasSameSchema(model, durationModel)) return { ...fact({ kind: "duration" }, origins), schemaProofs: [model] }
     if (model.kind === "string" || model.kind === "number" || model.kind === "boolean" || model.kind === "never") return fact({ kind: model.kind }, origins)
-    if (model.kind === "literal") return fact({ kind: model.value === null ? "null" : primitiveKind(model.value) }, origins, [], model.value)
+    if (model.kind === "literal") {
+      // Effect zero literals accept and preserve either sign; the language's
+      // equality and exact-value refinements distinguish them.
+      if (typeof model.value === "number" && model.value === 0) return fact({ kind: "choices", members: [fact({ kind: "number" }, origins, [], 0), fact({ kind: "number" }, origins, [], -0)] }, origins)
+      return fact({ kind: model.value === null ? "null" : primitiveKind(model.value) }, origins, [], model.value)
+    }
     if (model.kind === "nominal") {
       if (model.base === undefined) return { ...fact({ kind: "opaque", identity: model.identity }, origins, [model.identity]), schemaProofs: [model] }
       const base = fromModel(model.base, origin, input)
@@ -316,7 +321,10 @@ const check = (program: Program, environment: ReviewEnvironment): Review => {
       case "UnaryExpression": {
         const operand = expr(expression.operand, scope, control)
         compatible(operand.value, scalar(expression.operator === "!" ? "boolean" : "number"), expression.span)
-        return { ...operand, value: derivedFact(scalar(expression.operator === "!" ? "boolean" : "number"), [operand.value]) }
+        const constant = expression.operator === "!" && typeof operand.value.constant === "boolean" ? !operand.value.constant
+          : expression.operator === "-" && typeof operand.value.constant === "number" ? -operand.value.constant : undefined
+        if (typeof constant === "number" && (!Number.isFinite(constant) || (Number.isInteger(constant) && !Number.isSafeInteger(constant)))) fail("certain arithmetic overflow failure", expression.span)
+        return { ...operand, value: derivedFact(fact({ kind: expression.operator === "!" ? "boolean" : "number" }, [], [], constant), [operand.value]) }
       }
       case "BinaryExpression": {
         const left = expr(expression.left, scope, control), right = expr(expression.right, ["&&", "||"].includes(expression.operator) ? narrow(expression.left, scope, expression.operator === "&&") : scope, unique(control, left.value.origins))
