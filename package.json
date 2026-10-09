@@ -20,6 +20,7 @@
     "./core": "./src/core/index.ts",
     "./core/testing": "./src/core/testing/index.ts",
     "./cloudflare": "./src/cloudflare/index.ts",
+    "./alchemy": "./src/alchemy/index.ts",
     "./package.json": "./package.json"
   },
   "files": [
@@ -74,9 +75,19 @@
     "@effect/platform-bun": "4.0.0-rc.115",
     "effect": "4.0.0-rc.115"
   },
+  "peerDependencies": {
+    "alchemy": ">=2.0.0-beta.79"
+  },
+  "peerDependenciesMeta": {
+    "alchemy": {
+      "optional": true
+    }
+  },
   "devDependencies": {
+    "@effect/platform-node": "4.0.0-rc.115",
     "@effect/vitest": "4.0.0-rc.115",
     "@types/bun": "^1.4.2",
+    "alchemy": "2.0.0-beta.79",
     "esbuild": "0.25.12",
     "miniflare": "4.20260708.1",
     "typescript": "^6.0.3",
