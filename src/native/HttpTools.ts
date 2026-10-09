@@ -4,6 +4,7 @@ import type { ToolContract } from "../core/contract/ToolContract.ts"
 import type { BoundResource } from "../core/contract/ToolHost.ts"
 import type { WireToken } from "../core/outbox/Outbox.ts"
 import { sendHttp } from "../host/HttpDispatcher.ts"
+import { type ArtifactStore, artifactsOf } from "./Artifacts.ts"
 import type { HttpGet, HttpStage } from "./HttpContracts.ts"
 
 /**
@@ -22,8 +23,6 @@ export interface HttpToolContext {
 const endpointOf = (context: HttpToolContext) =>
   context.resources.find((resource) => resource.binding.field === "endpoint")
 
-type Kept = { readonly id: string }
-
 const text = (bytes: Uint8Array) => {
   try {
     return new TextDecoder("utf-8", { fatal: true }).decode(bytes)
@@ -35,10 +34,10 @@ const text = (bytes: Uint8Array) => {
 export const httpTools = (services: {
   /** Response bytes kept beyond this are dropped and reported as truncated. */
   readonly responseLimitBytes: number
-  readonly artifact: (id: string) => Effect.Effect<Uint8Array, unknown>
-  /** Keeps bytes as an artifact of this run. */
-  readonly keep: (bytes: Uint8Array, mediaType: string) => Effect.Effect<Kept, unknown>
-}) => ({
+  readonly artifacts: ArtifactStore
+}) => {
+  const artifacts = artifactsOf(services.artifacts)
+  return {
   "http.get": (
     input: ToolContract.ShapeOf<typeof HttpGet>["input"],
     context: HttpToolContext
@@ -64,7 +63,7 @@ export const httpTools = (services: {
       if (endpoint === undefined) return refused("http.stage sent nothing: the call has no admitted endpoint")
       let body = input.body
       if (input.bodyArtifact !== undefined) {
-        const decoded = text(yield* services.artifact(input.bodyArtifact))
+        const decoded = text(yield* artifacts.read(input.bodyArtifact))
         // Refused before the token is used: nothing was sent.
         if (decoded === null) return refused("http.stage sent nothing: the body artifact is not text")
         body = decoded
@@ -77,7 +76,7 @@ export const httpTools = (services: {
       )
       const kept = delivery.response.byteLength === 0
         ? null
-        : yield* services.keep(delivery.response, delivery.outcome.contentType ?? "application/octet-stream")
+        : yield* artifacts.keep(delivery.response, delivery.outcome.contentType ?? "application/octet-stream")
       return {
         status: delivery.outcome.status,
         content_type: delivery.outcome.contentType ?? null,
@@ -86,4 +85,5 @@ export const httpTools = (services: {
         response_artifact: kept?.id ?? null
       }
     })
-})
+  }
+}

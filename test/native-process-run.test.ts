@@ -10,6 +10,8 @@ import { HeldCalls, HeldCallsConfig, HeldCallsLive } from "../src/host/HeldCalls
 import { ProcessRun } from "../src/native/index.ts"
 import { processRun } from "../src/native/ProcessRun.ts"
 import { ProcessRunner, ProcessRunnerLive } from "../src/process/Process.ts"
+import { artifactIdOf } from "../src/native/Artifacts.ts"
+import { memoryArtifacts } from "./support/MemoryArtifacts.ts"
 import { ExclusiveRenameTestLive } from "./support/ExclusiveRenameTestLive.ts"
 import { nativeContainmentSupported } from "./support/NativeContainmentTest.ts"
 
@@ -29,7 +31,7 @@ const world = <A, E>(body: (args: {
   readonly hold: typeof Hold.Service
   readonly run: Run
   readonly call: (name: string) => Effect.Effect<Parameters<typeof HeldCalls.Service["run"]>[0]>
-  readonly kept: Array<Uint8Array>
+  readonly artifacts: ReturnType<typeof memoryArtifacts>
 }) => Effect.Effect<A, E>) =>
   Effect.scoped(
     Effect.gen(function* () {
@@ -51,25 +53,19 @@ const world = <A, E>(body: (args: {
           Layer.provideMerge(BunServices.layer)
         )
       ))
-      const kept: Array<Uint8Array> = []
+      const artifacts = memoryArtifacts()
       return yield* body({
         fs,
         at: (name) => path.join(workspace, name),
         outside,
         calls: services.calls,
         hold: services.hold,
-        kept,
+        artifacts,
         run: processRun({
           ...services,
           workspace,
           environment: { PATH: "/usr/bin:/bin" },
-          artifact: (id) =>
-            id === "artifact-1" ? Effect.succeed(new TextEncoder().encode("from artifact")) : Effect.fail("unknown artifact"),
-          keep: (bytes, mediaType) =>
-            Effect.sync(() => {
-              kept.push(bytes)
-              return { id: `kept-${kept.length}`, digest: "sha256:test", media_type: mediaType, byte_length: bytes.byteLength }
-            })
+          artifacts: artifacts.store
         }),
         call: (name) =>
           services.calls.prepare({
@@ -88,15 +84,18 @@ const done = (value: Output | Refused): Output => {
 // ProcessRunner is Bun-backed; scripts/verify-bun-integrations.ts runs this file under Bun.
 describe.skipIf(typeof Bun === "undefined")("process.run, unconfined", () => {
   it.effect("reports what the process did and does not claim to know what it changed", () =>
-    world(({ fs, at, run, kept }) =>
+    world(({ fs, at, run, artifacts }) =>
       Effect.gen(function* () {
         const ok = done(yield* run(input("cat; printf err >&2; printf x > made.txt", { stdin: "hello" }), { confined: false }))
         expect(ok).toMatchObject({ outcome: "exited", exit_code: 0, stdout: "hello", stderr: "err", merged: null })
-        expect(ok.stdout_artifact).toMatchObject({ byte_length: 5 })
-        expect(kept).toHaveLength(2)
+        // Output is kept under the name of its content.
+        expect(ok.stdout_artifact).toEqual({
+          id: artifactIdOf(new TextEncoder().encode("hello")), media_type: "application/octet-stream", byte_length: 5
+        })
+        expect(artifacts.held.size).toBe(2)
         expect(yield* fs.readFileString(at("made.txt"))).toBe("x")
 
-        const fromArtifact = done(yield* run(input("cat", { stdinArtifact: "artifact-1", stderr: "discard" }), { confined: false }))
+        const fromArtifact = done(yield* run(input("cat", { stdinArtifact: artifacts.put("from artifact"), stderr: "discard" }), { confined: false }))
         expect(fromArtifact).toMatchObject({ stdout: "from artifact", stderr: null, stderr_artifact: null })
 
         // A nonzero exit and a timeout are results, not failures of the call.

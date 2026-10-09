@@ -1,5 +1,6 @@
 import { Effect, Schema } from "effect"
 import { defineToolContract } from "../core/contract/ToolContract.ts"
+import { ArtifactId } from "./Artifacts.ts"
 
 /**
  * One process, as a tool contract. The call names an executable and its
@@ -15,8 +16,7 @@ import { defineToolContract } from "../core/contract/ToolContract.ts"
 const Output = Schema.Literals(["capture", "discard"])
 
 const Artifact = Schema.NullOr(Schema.Struct({
-  id: Schema.String,
-  digest: Schema.String,
+  id: ArtifactId,
   media_type: Schema.String,
   byte_length: Schema.Finite
 }))
@@ -43,7 +43,7 @@ export const ProcessRun = defineToolContract({
     /** Text for standard input. Without it, or an artifact, there is none. */
     stdin: Schema.optionalKey(Schema.String),
     /** An artifact of this run for standard input. */
-    stdinArtifact: Schema.optionalKey(Schema.String),
+    stdinArtifact: Schema.optionalKey(ArtifactId),
     stdout: Output.pipe(Schema.withDecodingDefaultKey(Effect.succeed("capture" as const))),
     stderr: Output.pipe(Schema.withDecodingDefaultKey(Effect.succeed("capture" as const))),
     outputLimitBytes: Schema.Finite.check(Schema.isGreaterThan(0)).pipe(

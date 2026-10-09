@@ -7,6 +7,7 @@ const accepts = <A, I>(schema: Schema.Codec<A, I>, input: unknown) =>
 
 describe("process.run contract", () => {
   const call = { executable: "/usr/bin/true", args: [], cwd: "/work" }
+  const artifact = `sha256:${"a".repeat(64)}`
 
   it("is an invoke whose every authority-bearing operand is a declared resource", () => {
     expect(ProcessRun.effect).toBe("invoke")
@@ -41,8 +42,10 @@ describe("process.run contract", () => {
 
   it("takes standard input from text or an artifact, never both, and never the terminal", () => {
     expect(accepts(ProcessRun.input, { ...call, stdin: "x" })).toBe(true)
-    expect(accepts(ProcessRun.input, { ...call, stdinArtifact: "artifact-1" })).toBe(true)
-    expect(accepts(ProcessRun.input, { ...call, stdin: "x", stdinArtifact: "artifact-1" })).toBe(false)
+    expect(accepts(ProcessRun.input, { ...call, stdinArtifact: artifact })).toBe(true)
+    expect(accepts(ProcessRun.input, { ...call, stdin: "x", stdinArtifact: artifact })).toBe(false)
+    // An artifact is named by its content, so the call names exact bytes.
+    expect(accepts(ProcessRun.input, { ...call, stdinArtifact: "artifact-1" })).toBe(false)
     expect(accepts(ProcessRun.input, { ...call, stdout: "inherit" })).toBe(false)
     expect(accepts(ProcessRun.input, { ...call, timeoutMs: 0 })).toBe(false)
   })
@@ -90,7 +93,7 @@ describe("http contracts", () => {
     expect(JSON.stringify(summary)).not.toContain("hidden")
     expect(JSON.stringify(summary)).not.toContain("the payload")
     expect(accepts(HttpStage.input, {
-      endpoint: "https://example.test/send", method: "POST", body: "a", bodyArtifact: "artifact-1"
+      endpoint: "https://example.test/send", method: "POST", body: "a", bodyArtifact: `sha256:${"a".repeat(64)}`
     })).toBe(false)
   })
 

@@ -69,9 +69,11 @@ describe("native file contracts", () => {
 
   it("accept exactly one content source for a write", () => {
     expect(Result.isSuccess(decode(FileWrite.input, { path: "/w/a", content: "x" }))).toBe(true)
-    expect(Result.isSuccess(decode(FileWrite.input, { path: "/w/a", sourceArtifact: "artifact-1" }))).toBe(true)
+    expect(Result.isSuccess(decode(FileWrite.input, { path: "/w/a", sourceArtifact: `sha256:${"a".repeat(64)}` }))).toBe(true)
     expect(Result.isFailure(decode(FileWrite.input, { path: "/w/a" }))).toBe(true)
-    expect(Result.isFailure(decode(FileWrite.input, { path: "/w/a", content: "x", sourceArtifact: "artifact-1" }))).toBe(true)
+    // An artifact is named by the digest of its content.
+    expect(Result.isFailure(decode(FileWrite.input, { path: "/w/a", sourceArtifact: "artifact-1" }))).toBe(true)
+    expect(Result.isFailure(decode(FileWrite.input, { path: "/w/a", content: "x", sourceArtifact: `sha256:${"a".repeat(64)}` }))).toBe(true)
   })
 
   it("default a read to text and a mkdir to no parents", () => {

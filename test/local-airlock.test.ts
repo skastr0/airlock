@@ -15,6 +15,7 @@ import { localAirlock } from "../src/host/LocalAirlock.ts"
 import { localRecovery } from "../src/host/LocalRecovery.ts"
 import { localToolHost } from "../src/host/LocalToolHost.ts"
 import { FileMove, FileRead, FileRemove, FileWrite, NativeFileSystem, NativeFileSystemLive, NativeFilesystemConfig } from "../src/native/index.ts"
+import { memoryArtifacts } from "./support/MemoryArtifacts.ts"
 import { ExclusiveRenameTestLive } from "./support/ExclusiveRenameTestLive.ts"
 
 /**
@@ -81,8 +82,7 @@ const world = <A, E>(body: (args: {
                 environment: {},
                 confiningProfiles: [],
                 responseLimitBytes: 1_024,
-                artifact: () => Effect.fail("no artifacts"),
-                keep: () => Effect.fail("no artifacts")
+                artifacts: memoryArtifacts().store
               },
               host,
               policy: policy(workspace)

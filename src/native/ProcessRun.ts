@@ -16,6 +16,7 @@ import {
   type ProcessRunner,
   ProcessTimedOut
 } from "../process/Process.ts"
+import { type ArtifactStore, artifactsOf } from "./Artifacts.ts"
 import type { ProcessRun } from "./ProcessContract.ts"
 
 /**
@@ -32,7 +33,6 @@ import type { ProcessRun } from "./ProcessContract.ts"
 
 type Input = ToolContract.ShapeOf<typeof ProcessRun>["input"]
 type Output = ToolContract.OutputOf<typeof ProcessRun>
-type Kept = NonNullable<Output["stdout_artifact"]>
 
 export interface ProcessRunContext {
   /** From the grant, never from the call. Absent means unconfined. */
@@ -61,12 +61,11 @@ export const processRun = (services: {
   readonly workspace: string
   /** The environment every process starts from; the call's entries are added to it. */
   readonly environment: Readonly<Record<string, string>>
-  readonly artifact: (id: string) => Effect.Effect<Uint8Array, unknown>
-  /** Keeps bytes as an artifact of this run. */
-  readonly keep: (bytes: Uint8Array, mediaType: string) => Effect.Effect<Kept, unknown>
+  readonly artifacts: ArtifactStore
 }) =>
 (input: Input, context: ProcessRunContext): Effect.Effect<Output | Refused, unknown> =>
   Effect.gen(function* () {
+    const artifacts = artifactsOf(services.artifacts)
     const cwd = nodePath.resolve(services.workspace, input.cwd)
     if (context.confined && cwd !== nodePath.resolve(services.workspace)) {
       return refused("process.run did not start: a confined process works in the workspace root")
@@ -80,7 +79,7 @@ export const processRun = (services: {
     const stdin = input.stdin !== undefined
       ? new ProcessInputText({ _tag: "text", text: input.stdin })
       : input.stdinArtifact !== undefined
-        ? new ProcessInputBytes({ _tag: "bytes", bytes: yield* services.artifact(input.stdinArtifact) })
+        ? new ProcessInputBytes({ _tag: "bytes", bytes: yield* artifacts.read(input.stdinArtifact) })
         : "discard" as const
     const request = new ProcessRequest({
       executable: input.executable,
@@ -102,7 +101,7 @@ export const processRun = (services: {
     ): Effect.Effect<Output, unknown> =>
       Effect.gen(function* () {
         const kept = (stream: "capture" | "discard", bytes: Uint8Array) =>
-          stream === "capture" ? services.keep(bytes, "application/octet-stream") : Effect.succeed(null)
+          stream === "capture" ? artifacts.keep(bytes, "application/octet-stream") : Effect.succeed(null)
         return {
           outcome,
           exit_code: receipt.exitCode,

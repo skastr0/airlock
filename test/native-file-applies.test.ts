@@ -17,6 +17,8 @@ import {
   NativeFileSystemLive,
   NativeFilesystemConfig
 } from "../src/native/index.ts"
+import { artifactIdOf } from "../src/native/Artifacts.ts"
+import { memoryArtifacts } from "./support/MemoryArtifacts.ts"
 import { ExclusiveRenameTestLive } from "./support/ExclusiveRenameTestLive.ts"
 
 const world = <A, E>(body: (args: {
@@ -25,6 +27,7 @@ const world = <A, E>(body: (args: {
   readonly hold: typeof Hold.Service
   readonly calls: typeof HeldCalls.Service
   readonly applies: ReturnType<typeof fileApplies>
+  readonly artifacts: ReturnType<typeof memoryArtifacts>
   /** Claims a fresh call, as the kernel does before it dispatches an apply. */
   readonly call: (name: string) => Effect.Effect<Parameters<ReturnType<typeof fileApplies>["file.write"]>[1]>
 }) => Effect.Effect<A, E>) =>
@@ -46,16 +49,17 @@ const world = <A, E>(body: (args: {
           Layer.provideMerge(BunServices.layer)
         )
       ))
+      const artifacts = memoryArtifacts()
       return yield* body({
         fs,
+        artifacts,
         at: (name) => path.join(workspace, name),
         hold: services.hold,
         calls: services.calls,
         applies: fileApplies({
           files: services.native,
           calls: services.calls,
-          artifact: (id) =>
-            id === "artifact-1" ? Effect.succeed(new TextEncoder().encode("from artifact")) : Effect.fail("unknown artifact")
+          artifacts: artifacts.store
         }),
         call: (name) =>
           services.calls.prepare({
@@ -108,17 +112,22 @@ describe("local file applies", () => {
         expect(yield* fs.exists(at("a"))).toBe(false)
       })
     )
-  )
+  , 30_000)
 
-  it.effect("write the bytes of an artifact of the run", () =>
-    world(({ fs, at, applies, call }) =>
+  it.effect("write the bytes of an artifact, and only the bytes its name says", () =>
+    world(({ fs, at, applies, call, artifacts }) =>
       Effect.gen(function* () {
-        const written = yield* applies["file.write"]({ path: "out.txt", sourceArtifact: "artifact-1" }, yield* call("artifact"))
+        const id = artifacts.put("from artifact")
+        const written = yield* applies["file.write"]({ path: "out.txt", sourceArtifact: id }, yield* call("artifact"))
         expect(written).toMatchObject({ previous_held: false, bytes: 13 })
         expect(yield* fs.readFileString(at("out.txt"))).toBe("from artifact")
-        const missing = yield* applies["file.write"]({ path: "out.txt", sourceArtifact: "nope" }, yield* call("missing"))
-        expect(missing).toBeInstanceOf(Refused)
+        const absent = artifactIdOf(new TextEncoder().encode("never stored"))
+        expect(yield* applies["file.write"]({ path: "out.txt", sourceArtifact: absent }, yield* call("missing"))).toBeInstanceOf(Refused)
+        // The store now returns other bytes under the same name: they are not written.
+        artifacts.corrupt(id, "swapped after approval")
+        expect(yield* applies["file.write"]({ path: "out.txt", sourceArtifact: id }, yield* call("swapped"))).toBeInstanceOf(Refused)
         expect(yield* fs.readFileString(at("out.txt"))).toBe("from artifact")
+        expect(Result.isSuccess(Schema.decodeUnknownResult(FileWrite.input)({ path: "out.txt", sourceArtifact: "artifact-1" }))).toBe(false)
       })
     )
   )

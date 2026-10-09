@@ -1,6 +1,7 @@
 import { Effect, Result, Schema } from "effect"
 import { HttpIntent } from "../core/outbox/HttpIntent.ts"
 import { defineToolContract } from "../core/contract/ToolContract.ts"
+import { ArtifactId } from "./Artifacts.ts"
 
 /**
  * HTTP as two tool contracts with two different meanings.
@@ -66,7 +67,7 @@ export const HttpStage = defineToolContract({
     ),
     body: Schema.optionalKey(Schema.String),
     /** An artifact of this run to send as the body. */
-    bodyArtifact: Schema.optionalKey(Schema.String),
+    bodyArtifact: Schema.optionalKey(ArtifactId),
     /** How long a commit waits before the request is sent, so it can be cancelled. */
     holdMillis: Schema.Finite.check(Schema.isGreaterThanOrEqualTo(0)).pipe(
       Schema.withDecodingDefaultKey(Effect.succeed(30_000))
@@ -89,7 +90,7 @@ export const HttpStage = defineToolContract({
   /** What came back once the request was committed and sent. */
   output: Schema.Struct({
     ...Response,
-    response_artifact: Schema.NullOr(Schema.String)
+    response_artifact: Schema.NullOr(ArtifactId)
   }),
   public: ["endpoint", "method", "bodyArtifact", "holdMillis"],
   resources: { endpoint: { kind: "endpoint", rights: ["emit"] } }

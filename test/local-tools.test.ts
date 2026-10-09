@@ -13,6 +13,7 @@ import { localToolHost } from "../src/host/LocalToolHost.ts"
 import { type LocalCallContext, localTools } from "../src/host/LocalTools.ts"
 import { NativeFileSystem, NativeFileSystemLive, NativeFilesystemConfig, ProcessRun } from "../src/native/index.ts"
 import { ProcessSpawnFailed } from "../src/process/Process.ts"
+import { memoryArtifacts } from "./support/MemoryArtifacts.ts"
 import { ExclusiveRenameTestLive } from "./support/ExclusiveRenameTestLive.ts"
 
 /**
@@ -74,8 +75,7 @@ const world = <A, E>(body: (args: {
         environment: {},
         confiningProfiles: ["native-contained"],
         responseLimitBytes: 1_024,
-        artifact: () => Effect.fail("no artifacts"),
-        keep: () => Effect.fail("no artifacts")
+        artifacts: memoryArtifacts().store
       })
       return yield* body({
         fs,

@@ -1,5 +1,6 @@
 import { Effect, Schema } from "effect"
 import { defineToolContract } from "../core/contract/ToolContract.ts"
+import { ArtifactId } from "./Artifacts.ts"
 import { ActId } from "../core/domain.ts"
 import { NativeEntryKind } from "./NativeFileSystem.ts"
 
@@ -98,7 +99,7 @@ export const FileWrite = defineToolContract({
   input: Schema.Struct({
     path: Schema.String,
     content: Schema.optionalKey(Schema.String),
-    sourceArtifact: Schema.optionalKey(Schema.String)
+    sourceArtifact: Schema.optionalKey(ArtifactId)
   }).pipe(
     Schema.check(Schema.makeFilter((input) =>
       (input.content === undefined) !== (input.sourceArtifact === undefined) ||

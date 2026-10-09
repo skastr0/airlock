@@ -3,6 +3,7 @@ import { type Refused, refused } from "../core/airlock/Implement.ts"
 import type { ToolContract } from "../core/contract/ToolContract.ts"
 import { ActId } from "../core/domain.ts"
 import type { HeldCallReference, HeldCalls } from "../host/HeldCalls.ts"
+import { type ArtifactStore, artifactsOf } from "./Artifacts.ts"
 import type { FileCopy, FileMkdir, FileMove, FileRemove, FileWrite } from "./FileContracts.ts"
 import type { NativeFileSystem } from "./NativeFileSystem.ts"
 
@@ -35,9 +36,9 @@ export type FileApplies = {
 export const fileApplies = (services: {
   readonly files: NativeFileSystem["Service"]
   readonly calls: HeldCalls["Service"]
-  /** The bytes of an artifact of this run. Artifacts are host state. */
-  readonly artifact: (id: string) => Effect.Effect<Uint8Array, unknown>
+  readonly artifacts: ArtifactStore
 }): FileApplies => {
+  const artifacts = artifactsOf(services.artifacts)
   const { files, calls } = services
   const held = <A, B>(
     tool: string,
@@ -59,7 +60,7 @@ export const fileApplies = (services: {
         validUntil,
         input.content !== undefined
           ? files.writeText(input.path, input.content)
-          : Effect.flatMap(services.artifact(input.sourceArtifact!), (bytes) => files.writeBytes(input.path, bytes)),
+          : Effect.flatMap(artifacts.read(input.sourceArtifact!), (bytes) => files.writeBytes(input.path, bytes)),
         (written) => ({
           act_id: ActId.make(written.receipt.id),
           target: written.receipt.target,
