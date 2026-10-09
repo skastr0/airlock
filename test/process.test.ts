@@ -32,6 +32,21 @@ const fail = (command: ProcessRequest, options?: { readonly signal?: AbortSignal
 
 const delay = (milliseconds: number) => new Promise((resolve) => setTimeout(resolve, milliseconds))
 
+/**
+ * Waits, bounded, until a killed process is no longer there. A signalled
+ * process exists until the kernel reaps it, which a loaded machine delays;
+ * the assertion that follows is unchanged and still fails if it survives.
+ */
+const reaped = async (pid: number) => {
+  for (const deadline = Date.now() + 10_000; Date.now() < deadline; await delay(5)) {
+    try {
+      process.kill(pid, 0)
+    } catch {
+      return
+    }
+  }
+}
+
 const controllers: AbortController[] = []
 afterEach(() => controllers.splice(0).forEach((controller) => controller.abort()))
 
@@ -138,18 +153,23 @@ describeOnBun("process runner", () => {
         }),
         { signal: controller.signal }
       )
-      for (let tries = 0; tries < 20; tries++) {
-        try {
-          await stat(pidFile)
+      // Both waits are on the condition, bounded, never on a fixed time: a
+      // loaded machine may take long to write the pid or to reap the child.
+      let childPid = Number.NaN
+      for (const deadline = Date.now() + 10_000; Date.now() < deadline; await delay(5)) {
+        const written = await readFile(pidFile, "utf8").catch(() => "")
+        if (/^\d+$/.test(written)) {
+          childPid = Number(written)
           break
-        } catch {
-          await delay(5)
         }
       }
-      const childPid = Number(await readFile(pidFile, "utf8"))
+      expect(childPid).toBeGreaterThan(0)
+      // The descendant is alive before the cancellation, so its absence
+      // afterwards is the runner's doing.
+      expect(() => process.kill(childPid, 0)).not.toThrow()
       controller.abort()
       await running
-      await delay(25)
+      await reaped(childPid)
       expect(() => process.kill(childPid, 0)).toThrow()
     } finally {
       await rm(cwd, { recursive: true, force: true })
@@ -195,6 +215,7 @@ describeOnBun("process runner", () => {
 
       expect(error).toBeInstanceOf(ProcessTimedOut)
       expect(Date.now() - started).toBeLessThan(1_500)
+      await reaped(childPid)
       expect(() => process.kill(childPid, 0)).toThrow()
     } finally {
       await rm(cwd, { recursive: true, force: true })
