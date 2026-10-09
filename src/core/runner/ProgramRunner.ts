@@ -44,6 +44,9 @@ const cross = (
     }
   })
 
+const faultOf = (error: EvaluationError): GuestFault | undefined =>
+  error._tag === "ArithmeticFailure" ? error.fault : faults[error._tag]
+
 const faults: { readonly [Tag in EvaluationError["_tag"]]?: GuestFault } = {
   UnboundIdentifier: "unbound-name",
   InvalidLanguageOperation: "invalid-operation",
@@ -56,6 +59,9 @@ const faults: { readonly [Tag in EvaluationError["_tag"]]?: GuestFault } = {
 
 const reasons: { readonly [Tag in EvaluationError["_tag"]]?: GuestFailureReason } = {
   AssertionFailed: "assert_failed",
+  ArithmeticFailure: "arithmetic_failure",
+  IndexOutOfRange: "index_out_of_range",
+  RangeBound: "range_bound",
   LoopLimitExceeded: "loop_limit",
   StepLimitExceeded: "step_limit",
   ValueLimitExceeded: "value_limit"
@@ -174,7 +180,7 @@ const runProgram = ({ source, surface, bindings: bound, limits: overrides, signa
             ? failed(error.reason, error.refusal === undefined ? {} : { refusal: error.refusal })
             : failed(reasons[error._tag] ?? "execution_failed", {
                 at: { line: error.span.line, column: error.span.column },
-                ...(faults[error._tag] === undefined ? {} : { fault: faults[error._tag]! })
+                ...(faultOf(error) === undefined ? {} : { fault: faultOf(error)! })
               })
         )),
       // A defect is the host's: a tool that threw, a stack that ran out. None of its text leaves.

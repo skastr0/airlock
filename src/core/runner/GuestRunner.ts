@@ -69,13 +69,20 @@ export const GuestFailureReason = Schema.Literals([
   "step_limit",
   "value_limit",
   "assert_failed",
+  "arithmetic_failure",
+  "index_out_of_range",
+  "range_bound",
   "timeout",
   "aborted",
   "execution_failed"
 ])
 export type GuestFailureReason = typeof GuestFailureReason.Type
 
-/** What the program did wrong when the reason is `execution_failed`, as a fixed word. */
+/**
+ * What the program did wrong, as a fixed word: which mistake when the reason
+ * is `execution_failed`, and `zero` or `overflow` when it is
+ * `arithmetic_failure`.
+ */
 export const GuestFault = Schema.Literals([
   "unbound-name",
   "invalid-operation",
@@ -83,7 +90,9 @@ export const GuestFault = Schema.Literals([
   "missing-field",
   "invalid-index",
   "duplicate-field",
-  "duplicate-binding"
+  "duplicate-binding",
+  "zero",
+  "overflow"
 ])
 export type GuestFault = typeof GuestFault.Type
 
