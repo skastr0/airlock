@@ -136,7 +136,7 @@ export const defineToolContract = <
   const decoded = Schema.decodeUnknownResult(Schema.Record(Schema.String, ResourceField), { onExcessProperty: "error" })(declared)
   const invalid = (field: string, reason: string) => new InvalidToolContract({ tool: spec.name, field, reason })
   if (Result.isFailure(decoded)) throw invalid("resources", "must contain valid resource descriptors")
-  const resources: Record<string, ResourceField> = {}
+  const resources: Record<string, ResourceField> = Object.create(null)
   for (const [field, descriptor] of Object.entries(decoded.success)) {
     if (!publicFields.includes(field as Public)) throw invalid(`resources.${field}`, "must name a public encoded input field")
     if (!resourceFieldFits(spec.input, field, descriptor)) {
@@ -170,7 +170,7 @@ export const defineToolContract = <
         )
       }
       const supplied = encoded.success
-      const visible: { [field: string]: Schema.Json } = {}
+      const visible: { [field: string]: Schema.Json } = Object.create(null)
       for (const field of publicFields) {
         const value = supplied[field]
         if (Object.hasOwn(supplied, field) && value !== undefined) visible[field] = value
