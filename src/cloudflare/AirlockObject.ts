@@ -102,7 +102,8 @@ export const airlockDurableObject = <Contracts extends ToolContracts, Env>(
     #working = 0
     /** Settles when the program now running, and every one ahead in the line, has ended. */
     #lastProgram: Promise<unknown> = Promise.resolve()
-    #waitingPrograms = 0
+    /** The program running, if any, and those waiting behind it. */
+    #programs = 0
     /** Built on first use; building it runs the kernel's startup recovery. */
     readonly #runtime: ManagedRuntime.ManagedRuntime<Services, unknown>
 
@@ -162,17 +163,17 @@ export const airlockDurableObject = <Contracts extends ToolContracts, Env>(
      * operations do not wait in this line.
      */
     #inTurn<Value>(program: () => Promise<Reply<Value>>): Promise<Reply<Value>> {
-      if (this.#waitingPrograms >= (options.maxWaitingPrograms ?? MAX_WAITING_PROGRAMS)) {
+      // One may always run; the limit is on those behind it.
+      if (this.#programs > (options.maxWaitingPrograms ?? MAX_WAITING_PROGRAMS)) {
         return Promise.resolve({
           ok: false,
           code: "busy",
           message: "this Airlock is running as many programs as it holds; try again"
         })
       }
-      this.#waitingPrograms += 1
-      const turn = this.#lastProgram.then(() => {
-        this.#waitingPrograms -= 1
-        return program()
+      this.#programs += 1
+      const turn = this.#lastProgram.then(program).finally(() => {
+        this.#programs -= 1
       })
       // The line moves on however this program ends.
       this.#lastProgram = turn.catch(() => undefined)
@@ -184,8 +185,10 @@ export const airlockDurableObject = <Contracts extends ToolContracts, Env>(
       const runId = String(request.runId)
       const source = String(request.source)
       const env = this.#env
-      // Refused before it can wait: the line never holds a source larger than a program may be.
-      if (source.length > guestLimits(options.limits).maxCodeBytes) {
+      // Refused before it can wait: the line never holds a source larger than a
+      // program may be. Bytes are never fewer than the string's length.
+      const maxCodeBytes = guestLimits(options.limits).maxCodeBytes
+      if (source.length > maxCodeBytes || new TextEncoder().encode(source).length > maxCodeBytes) {
         return Promise.resolve({ ok: true, value: { ok: false, reason: "invalid_code", toolCalls: 0 } })
       }
       return this.#inTurn(() => this.#guarded(() => this.#reply(Effect.gen(function* () {

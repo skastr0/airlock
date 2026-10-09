@@ -56,6 +56,7 @@ interface Env {
   readonly AIRLOCK: Namespace
   readonly ALARMED: Namespace
   readonly QUEUED: Namespace
+  readonly SOLO: Namespace
   readonly MAIL_TOKEN: string
 }
 
@@ -256,6 +257,9 @@ export const ExampleAirlock = airlockDurableObject(userAirlock)
 /** The same Airlock with room for one program to wait behind the one running. */
 export const QueuedAirlock = airlockDurableObject(userAirlock, { maxWaitingPrograms: 1 })
 
+/** The same Airlock with no line at all: one program runs and nothing waits. */
+export const SoloAirlock = airlockDurableObject(userAirlock, { maxWaitingPrograms: 0 })
+
 /**
  * The same Airlock with a short recovery alarm, plus a way to look at the
  * stored states without opening the Airlock: opening it is itself recovery,
@@ -308,6 +312,11 @@ export default {
       const rewritten = new URL(request.url)
       rewritten.pathname = rewritten.pathname.replace("/queued/", "/airlock/")
       return trusted(new Request(rewritten.toString(), request), { ...env, AIRLOCK: env.QUEUED })
+    }
+    if (url.pathname.startsWith("/solo/")) {
+      const rewritten = new URL(request.url)
+      rewritten.pathname = rewritten.pathname.replace("/solo/", "/airlock/")
+      return trusted(new Request(rewritten.toString(), request), { ...env, AIRLOCK: env.SOLO })
     }
     if (url.pathname.startsWith("/alarmed/")) {
       if (url.pathname === "/alarmed/states") return env.ALARMED.get(env.ALARMED.idFromName("alarmed")).fetch(request)

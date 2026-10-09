@@ -41,7 +41,8 @@ const start = (storage = persist) => {
       CONFORMANCE: { className: "ConformanceObject", useSQLite: true },
       AIRLOCK: { className: "ExampleAirlock", useSQLite: true },
       ALARMED: { className: "AlarmedAirlock", useSQLite: true },
-      QUEUED: { className: "QueuedAirlock", useSQLite: true }
+      QUEUED: { className: "QueuedAirlock", useSQLite: true },
+      SOLO: { className: "SoloAirlock", useSQLite: true }
     },
     // No Worker Loader and no nodejs_compat: a program is evaluated in the object itself.
     bindings: { MAIL_TOKEN: "token-canary" },
@@ -262,6 +263,27 @@ describe("cloud: one program at a time", () => {
     const outcome = await call<Outcome>(workerd, "/queued/run?object=large", { runId: "big", source: "#".repeat(200_000) })
     expect(outcome).toEqual({ ok: false, reason: "invalid_code", toolCalls: 0 })
   })
+
+  it("with no line, still runs one program and refuses a second only while the first runs", async () => {
+    expect(await call<Outcome>(workerd, "/solo/run?object=solo", { runId: "first", source: "return 1" }))
+      .toMatchObject({ ok: true, result: 1 })
+    const outcomes = await Promise.all(["a", "b"].map((runId) =>
+      call<Outcome>(workerd, "/solo/run?object=solo", { runId, source: slow })))
+    expect(outcomes.map((outcome) => outcome.ok === true ? "ran" : outcome.code).sort()).toEqual(["busy", "ran"])
+    expect(await call<Outcome>(workerd, "/solo/run?object=solo", { runId: "after", source: "return 2" }))
+      .toMatchObject({ ok: true, result: 2 })
+  }, 30_000)
+
+  it("measures a source in bytes, so one too large in bytes never takes a place in the line", async () => {
+    // 10,003 UTF-16 units, 20,003 UTF-8 bytes: under the cap by length, over it by size.
+    const wide = `// ${"é".repeat(10_000)}`
+    const running = call<Outcome>(workerd, "/solo/run?object=bytes", { runId: "running", source: slow })
+    await new Promise((resolve) => setTimeout(resolve, 100))
+    // The object is full, yet this is refused for what it is, not told to wait its turn.
+    expect(await call<Outcome>(workerd, "/solo/run?object=bytes", { runId: "wide", source: wide }))
+      .toEqual({ ok: false, reason: "invalid_code", toolCalls: 0 })
+    expect(await running).toMatchObject({ ok: true })
+  }, 30_000)
 })
 
 describe("cloud: the recovery alarm", () => {
