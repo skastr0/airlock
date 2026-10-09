@@ -26,14 +26,29 @@ const script = (await build({
       };
       export default {
         async fetch(request, env) {
-          const { source } = await request.json();
+          if (request.method === "GET") return Response.json({ reached });
+          const { source, freezeClock } = await request.json();
           console.log("trusted-log-control");
           const before = reached;
-          const outcome = await Effect.runPromise(Effect.gen(function* () {
-            const runner = yield* GuestRunner;
-            return yield* runner.run({ source, surface, limits: { wallTimeMs: 2000 } });
-          }).pipe(Effect.provide(programRunner)));
-          return Response.json({ outcome, reached: reached - before, bound: typeof env.HOST_SECRET });
+          const realNow = Date.now;
+          const started = realNow();
+          // Deployed Workers freeze Date.now between I/O; local workerd does not.
+          if (freezeClock) Date.now = () => started;
+          try {
+            const outcome = await Effect.runPromise(Effect.gen(function* () {
+              const runner = yield* GuestRunner;
+              return yield* runner.run({ source, surface, limits: {
+                wallTimeMs: freezeClock ? 30 : 2000,
+                maxLoopIterations: freezeClock ? 1000000 : 1000
+              } });
+            }).pipe(Effect.provide(programRunner)));
+            return Response.json({
+              outcome, reached: reached - before, bound: typeof env.HOST_SECRET,
+              ...(freezeClock ? { frozen: Date.now() === started, elapsed: realNow() - started } : {})
+            });
+          } finally {
+            Date.now = realNow;
+          }
         }
       };`
   },
@@ -55,12 +70,35 @@ const workerd = new Miniflare({
   }
 })
 afterAll(() => workerd.dispose())
-type Reply = { readonly outcome: { readonly ok: boolean; readonly [field: string]: unknown }; readonly reached: number; readonly bound: string }
-const run = async (source: string): Promise<Reply> => (await (await workerd.dispatchFetch("http://security.test/run", {
-  method: "POST", body: JSON.stringify({ source })
+type Reply = {
+  readonly outcome: { readonly ok: boolean; readonly [field: string]: unknown }
+  readonly reached: number
+  readonly bound: string
+  readonly frozen?: boolean
+  readonly elapsed?: number
+}
+const run = async (source: string, freezeClock = false): Promise<Reply> => (await (await workerd.dispatchFetch("http://security.test/run", {
+  method: "POST", body: JSON.stringify({ source, freezeClock })
 })).json()) as Reply
+const calls = async (): Promise<number> =>
+  ((await (await workerd.dispatchFetch("http://security.test/calls")).json()) as { readonly reached: number }).reached
 
 describe("security: the program runner in real workerd", () => {
+  it("stops pure computation and its later tool call even when Date.now is frozen", async () => {
+    const before = await calls()
+    const reply = await run(`
+      for index in 0..1000000 { let twice = index * 2 }
+      return security.echo({ continued: true })`, true)
+    expect(reply.outcome).toEqual({ ok: false, reason: "timeout", toolCalls: 0 })
+    expect(reply.reached).toBe(0)
+    expect(reply.frozen).toBe(true)
+    expect(reply.elapsed).toBeLessThan(4_000)
+    // The stopped evaluation cannot resume into its tool call later.
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    expect(await calls()).toBe(before)
+    expect((await run("return 1")).outcome).toEqual({ ok: true, result: 1, toolCalls: 0 })
+  }, 20_000)
+
   it("redacts a host defect, and the program cannot continue past it", async () => {
     expect(await run(`security.throw({})\nreturn "continued"`)).toEqual({
       outcome: { ok: false, reason: "execution_failed", toolCalls: 1 },
