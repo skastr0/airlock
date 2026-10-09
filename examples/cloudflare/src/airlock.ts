@@ -56,15 +56,15 @@ export const airlock = defineAirlock({
     }
   },
 
-  // What a program may do: list the inbox and read its mail without asking,
-  // propose mail to the company's own addresses, propose labels. Nothing else
-  // exists for it.
+  // What a program may do. Reading is granted `now`. Mail and labels are
+  // granted `approved`: the program proposes them and a person decides.
+  // Nothing else exists for it.
   policy: toolPolicy({
     budget: { maxCalls: 8, maxInputBytes: 16_384 },
     toolGrants: [
       toolGrant(MailList, { id: "read-inbox", when: "now", where: { mailbox: { equals: "inbox" } } }),
       toolGrant(MailRead, { id: "read-mail", when: "now" }),
-      toolGrant(MailSend, { id: "company-mail", where: { to: { endsWith: "@example.com" } } }),
+      toolGrant(MailSend, { id: "company-mail", when: "approved", where: { to: { endsWith: "@example.com" } } }),
       toolGrant(LabelAdd, { id: "labels", when: "approved" })
     ]
   })

@@ -6,6 +6,11 @@ world: call the actions you grant it. Reads happen at once; writes are only
 recorded until a supervisor commits them. Everything is in a ledger, and a
 program that is run again gets its recorded results instead of acting twice.
 
+Nothing leaves the system without a person. Each grant says when its tool
+runs: `when: "now"` for reading, `when: "approved"` for everything that
+changes something outside. Airlock refuses a policy that grants a request
+`now`, so no policy, replay or timer can send mail or add a label by itself.
+
 The language has no network, no file system, no imports and no way to name a
 secret, so a program needs no sandbox: it is evaluated inside your Durable
 Object, next to the Outbox that holds what it stages.
@@ -14,7 +19,7 @@ You write four files:
 
 | File | What it is | Lines |
 | --- | --- | --- |
-| `src/contracts.ts` | What each tool takes and returns | 60 |
+| `src/contracts.ts` | What each tool takes and returns | 61 |
 | `src/airlock.ts` | What each tool does, and what a program may do | 71 |
 | `src/worker.ts` | The Durable Object export and your trusted routes | 44 |
 | `alchemy.run.ts` | The Worker and its binding on Cloudflare | 24 |
