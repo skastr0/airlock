@@ -110,6 +110,12 @@ bun --bun ../../node_modules/alchemy/bin/cli.js profile edit --profile default -
 MAIL_TOKEN=... bun --bun ../../node_modules/alchemy/bin/cli.js deploy
 ```
 
+The Cloudflare login is OAuth in the browser; no API token is needed. The
+repository's `mise.toml` sets `ALCHEMY_HOME` to `.alchemy-home` in the checkout,
+so the profile and its credentials stay with this repository instead of the
+`~/.alchemy` shared by other projects. Without mise, prefix each command with
+`ALCHEMY_HOME="$(git rev-parse --show-toplevel)/.alchemy-home"`.
+
 Alchemy needs a Cloudflare account for `deploy` and for its own `dev`
 command, which is why the local run above does not go through it. This
 repository has never deployed the example: the recipe is checked by loading

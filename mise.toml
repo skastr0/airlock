@@ -1,0 +1,4 @@
+# Keep Alchemy's profiles, credentials and logs inside this checkout so runs
+# here never read or write ~/.alchemy, which other projects share.
+[env]
+ALCHEMY_HOME = "{{config_root}}/.alchemy-home"
