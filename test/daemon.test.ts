@@ -153,6 +153,7 @@ const fakeOutbox = (options: FakeOutboxOptions = {}) => Outbox.of({
   inspect: () => Effect.die("unused inspect"),
   perform: () => Effect.die("unused perform"),
   capture: () => Effect.die("unused capture"),
+  expire: () => Effect.die("unused expire"),
   compensate: () => Effect.die("unused compensate"),
   commit: (id, provenance) => options.onCommit?.(id, provenance) ??
     Effect.die("unexpected commit"),

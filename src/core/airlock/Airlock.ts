@@ -147,7 +147,9 @@ const explain = (subject: string) => (tagged: Tagged): AirlockFailure => {
       return failure(error["code"] === "expired" ? "expired" : error["code"] === "result-changed" ? "conflict" : "unavailable",
         error["code"] === "result-changed" ? `${subject} changed since its recorded capture` : `${subject} read did not complete (${String(error["code"])})`)
     case "ToolGrantExpired":
-      return failure("expired", `${subject} was not run: its grant has expired`)
+      return failure("expired", typeof error["id"] === "string"
+        ? `${subject} was recorded as ${error["id"]}, but its grant expired before the result reached the program; the record is kept as it settled`
+        : `${subject} was not run: its grant has expired`)
     case "EmissionRefused":
       return failure("refused", `${subject} was refused and nothing was sent: ${text(error["reason"], "no reason given")}`)
     case "EmissionDispatchUncertain":

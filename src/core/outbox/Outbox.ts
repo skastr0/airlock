@@ -368,6 +368,13 @@ export interface OutboxService<Kinds extends IntentKinds> {
   readonly pendingAuthorized: (
     sealDigest: Sha256Digest
   ) => Effect.Effect<ReadonlyArray<Emission<Kinds, "staged">>, Unreadable>
+  /**
+   * Records that a run ended at this emission because the grant it was
+   * admitted under ran out before its receipt reached the run. The emission is
+   * left exactly as it settled. Refused unless the admitted deadline has
+   * passed; recording again is a no-op.
+   */
+  readonly expire: (id: EmissionId) => Effect.Effect<void, ReadError | InvalidDispatchAuthorization | OutboxRecoveryRequired>
   /** Commits, as the supervisor, every staged emission whose hold has run out by `now`. */
   readonly flush: Effect.Effect<
     {
@@ -1243,7 +1250,20 @@ export const defineOutbox = <const Kinds extends IntentKinds>(
       )
     })
 
-    return { stage, inspect, commit, cancel, perform, capture, compensate, response, pending, pendingAuthorized, flush }
+    const expire: OutboxService<Kinds>["expire"] = Effect.fn("Outbox.expire")(function* (id) {
+      const record = yield* existing(id)
+      const validUntil = record.admission?.execution?.validUntil
+      const at = yield* DateTime.now
+      if (validUntil === undefined || DateTime.toEpochMillis(validUntil) > DateTime.toEpochMillis(at)) {
+        return yield* new InvalidDispatchAuthorization({ field: "admission.execution.validUntil", reason: "grant has not expired" })
+      }
+      yield* ledger.record(new LedgerEntry({
+        at, effect: record.state === "captured" ? "observation" : "emission", act: "expire", ref: id, key: `${id}:expire`,
+        detail: `${record.kind} ${record.state}: the run ended because its grant expired`
+      })).pipe(Effect.mapError(recovery(record)))
+    })
+
+    return { stage, inspect, commit, cancel, perform, capture, compensate, response, pending, pendingAuthorized, flush, expire }
   })
 
   return { kinds, Outbox, Dispatcher, fromRecord: view, toRecord, layer: Layer.effect(Outbox, make) }

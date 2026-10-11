@@ -16,10 +16,11 @@ import { type ToolHost, ResourceRefused } from "../contract/ToolHost.ts"
 import { loadResourcePolicy } from "../admission/ResourcePolicy.ts"
 import { prepareWire } from "../contract/Wire.ts"
 import type { Done, Refused, Staged } from "../contract/Receipt.ts"
-import type { OutboxDefinition, OutboxOf, CaptureError, CaptureTag, PerformError, StageError } from "../outbox/Outbox.ts"
+import type { OutboxDefinition, OutboxOf, CaptureError, CaptureFailed, CaptureTag, PerformError, StageError } from "../outbox/Outbox.ts"
 import {
   DispatchProvenance,
   EmissionAdmission,
+  type EmissionId,
   IdempotencyKey
 } from "../outbox/Records.ts"
 import { ToolPolicy, toolPolicyDigest, type ToolPolicyFor } from "./ToolPolicy.ts"
@@ -69,8 +70,13 @@ export class SessionBudgetExceeded extends Schema.TaggedError<SessionBudgetExcee
   }
 ) {}
 
+/**
+ * The grant ran out, so the run ends here. With `id`, the call was recorded
+ * before the deadline passed and its record stays exactly as it settled.
+ */
 export class ToolGrantExpired extends Schema.TaggedError<ToolGrantExpired>()("ToolGrantExpired", {
-  tool: Schema.String
+  tool: Schema.String,
+  id: Schema.optionalKey(Schema.String)
 }) {}
 
 export type ToolCallError =
@@ -238,11 +244,31 @@ export const openToolSession = <Contracts extends ToolContracts, Granted extends
           } })
         }
 
+        // No receipt reaches the run after the admitted deadline: whatever the
+        // call settled as stays recorded, and the run ends as expired.
+        const lapsed = Effect.map(DateTime.now, (now) =>
+          decision.validUntil !== undefined && DateTime.toEpochMillis(decision.validUntil) <= DateTime.toEpochMillis(now))
+        const expired = (id?: EmissionId): Effect.Effect<never, ToolGrantExpired | StageError> => {
+          const ended = new ToolGrantExpired({ tool: contract.tag, ...(id === undefined ? {} : { id }) })
+          return id === undefined ? Effect.fail(ended) : service.expire(id).pipe(
+            Effect.catchTag("UnknownEmission", () => Effect.void),
+            Effect.andThen(Effect.fail(ended)))
+        }
+        const unlessLapsed = <E>(error: E, id?: EmissionId): Effect.Effect<never, E | ToolGrantExpired | StageError> =>
+          Effect.flatMap(lapsed, (over): Effect.Effect<never, E | ToolGrantExpired | StageError> => over ? expired(id) : Effect.fail(error))
+        const deliver = <A extends { readonly id: EmissionId }>(receipt: A): Effect.Effect<A, ToolGrantExpired | StageError> =>
+          Effect.flatMap(lapsed, (over) => over ? expired(receipt.id) : Effect.succeed(receipt))
+
         if (decision._tag === "Now" && contract.effect === "capture") {
           return yield* service.capture({ key, intent: request.intent as { kind: CaptureTag<Contracts>; dispatch: any }, admission: {
             policyDigest, grantIds, execution: { ...request.admission.execution!, effect: "capture", when: "now",
               retention: decision.retention ?? "digest" }
-          } })
+          } }).pipe(
+            Effect.catchTag("CaptureFailed", (error): Effect.Effect<never, CaptureFailed | ToolGrantExpired | StageError> =>
+              error.code === "expired" ? expired(error.id) : Effect.fail(error)),
+            Effect.flatMap((receipt: Done<unknown> | Refused): Effect.Effect<Done<unknown> | Refused, ToolGrantExpired | StageError> =>
+              receipt.state === "done" ? deliver(receipt) : Effect.succeed(receipt))
+          )
         }
         if (decision._tag === "Now") {
           const performed = yield* service.perform(
@@ -254,6 +280,10 @@ export const openToolSession = <Contracts extends ToolContracts, Granted extends
               dispatchClass: "read",
               target: summary.target
             })
+          ).pipe(
+            Effect.catchTag("EmissionRefused", (error) => unlessLapsed(error, error.id)),
+            Effect.catchTag("InvalidDispatchAuthorization", (error) => unlessLapsed(error)),
+            Effect.tap((performed) => deliver(performed.emission))
           )
           return {
             state: "done",
@@ -262,7 +292,7 @@ export const openToolSession = <Contracts extends ToolContracts, Granted extends
             ...(performed.emission.held === undefined ? {} : { wayBack: performed.emission.held })
           } satisfies Done<unknown>
         }
-        const staged = yield* service.stage(request)
+        const staged = yield* service.stage(request).pipe(Effect.flatMap(deliver))
         return { state: "staged", id: staged.id } satisfies Staged
       }).pipe(Effect.catchTags({
         InvalidToolInput: (error) => Effect.succeed({ state: "refused" as const, refusal: { code: "invalid-input", message: `${error.tool} was given an invalid input` } }),

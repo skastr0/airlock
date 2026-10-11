@@ -21,7 +21,8 @@ export class LedgerEntry extends Schema.Class<LedgerEntry>("LedgerEntry")({
     "commit",
     "cancel",
     "refuse",
-    "capture"
+    "capture",
+    "expire"
   ]),
   ref: Schema.String,
   detail: Schema.optionalKey(Schema.String),
