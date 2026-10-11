@@ -8,17 +8,17 @@ import type { BoundResource, HeldReference, ToolHost } from "../src/core/contrac
 import { Hold, HoldLayer } from "../src/Hold.ts"
 import { FileLedgerLive } from "../src/host/FileLedger.ts"
 import { HeldCalls, HeldCallsConfig, HeldCallsLive } from "../src/host/HeldCalls.ts"
-import { localRecovery } from "../src/host/LocalRecovery.ts"
-import { localToolHost } from "../src/host/LocalToolHost.ts"
-import { type LocalCallContext, localTools } from "../src/host/LocalTools.ts"
+import { filesystemRecovery } from "../src/host/FilesystemRecovery.ts"
+import { filesystemHost } from "../src/host/FilesystemHost.ts"
+import { type FilesystemCallContext, filesystemTools } from "../src/host/FilesystemTools.ts"
 import { NativeFileSystem, NativeFileSystemLive, NativeFilesystemConfig, ProcessRun } from "../src/native/index.ts"
 import { ProcessSpawnFailed } from "../src/process/Process.ts"
 import { memoryArtifacts } from "./support/MemoryArtifacts.ts"
 import { ExclusiveRenameTestLive } from "./support/ExclusiveRenameTestLive.ts"
 
 /**
- * The assembled local tools, given what the kernel will give them: resources
- * bound by the local host and a claim prepared through its recovery port.
+ * The assembled filesystem tools, given what the kernel will give them: resources
+ * bound by the filesystem host and a claim prepared through its recovery port.
  * The wire token is the kernel's alone to mint, so the HTTP tools are tested
  * through the kernel in native-http-tools.test.ts.
  */
@@ -30,12 +30,12 @@ const world = <A, E>(body: (args: {
   readonly at: (name: string) => string
   readonly outside: string
   readonly host: ToolHost
-  readonly tools: ReturnType<typeof localTools>
+  readonly tools: ReturnType<typeof filesystemTools>
   /** The context the kernel builds for one call. */
   readonly context: (
     resources: ReadonlyArray<BoundResource>,
     options?: { readonly claim?: string; readonly host?: Record<string, string>; readonly validUntil?: DateTime.Utc }
-  ) => Effect.Effect<Omit<LocalCallContext, "held"> & { readonly held: HeldReference | undefined }>
+  ) => Effect.Effect<Omit<FilesystemCallContext, "held"> & { readonly held: HeldReference | undefined }>
   /** Requests that reached the plain, unconfined process runner. */
   readonly unconfinedRuns: Array<string>
 }) => Effect.Effect<A, E>) =>
@@ -60,9 +60,9 @@ const world = <A, E>(body: (args: {
         )
       ))
       const unconfinedRuns: Array<string> = []
-      const recovery = localRecovery(services.calls)
-      const host = yield* localToolHost({ workspace, confiningProfiles: ["native-contained"], recovery })
-      const tools = localTools({
+      const recovery = filesystemRecovery(services.calls)
+      const host = yield* filesystemHost({ workspace, confiningProfiles: ["native-contained"], recovery })
+      const tools = filesystemTools({
         ...services,
         process: {
           run: (request) =>
@@ -97,7 +97,7 @@ const world = <A, E>(body: (args: {
             })
             return {
               signal: new AbortController().signal,
-              wireToken: unused<LocalCallContext["wireToken"]>("the wire token"),
+              wireToken: unused<FilesystemCallContext["wireToken"]>("the wire token"),
               host: options.host ?? {},
               resources,
               ...(options.validUntil === undefined ? {} : { validUntil: options.validUntil }),
@@ -111,7 +111,7 @@ const world = <A, E>(body: (args: {
 const path = (host: ToolHost, field: string, selector: string, rights: ReadonlyArray<"read" | "write">) =>
   host.resources.bind({ kind: "path", selector, rights: rights as ["read"], field }).pipe(Effect.orDie)
 
-describe("local tools", () => {
+describe("filesystem tools", () => {
   it.effect("act on the path admission bound, not on the string in the input", () =>
     world(({ fs, at, host, tools, context }) =>
       Effect.gen(function* () {

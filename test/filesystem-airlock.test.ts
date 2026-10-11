@@ -6,21 +6,22 @@ import type { AirlockFailure } from "../src/core/airlock/Airlock.ts"
 import type { GuestReceipt } from "../src/core/contract/Receipt.ts"
 import { toolGrant } from "../src/core/admission/ToolGrant.ts"
 import type { ToolHost } from "../src/core/contract/ToolHost.ts"
-import { toolPolicy } from "../src/core/session/ToolPolicy.ts"
+import { type ToolPolicy, toolPolicy } from "../src/core/session/ToolPolicy.ts"
 import { makeMemoryLedgerState, makeMemoryOutboxState, memoryLedger, memoryOutboxStore } from "../src/core/testing/index.ts"
 import * as WebCrypto from "../src/core/WebCrypto.ts"
 import { Hold, HoldLayer } from "../src/Hold.ts"
 import { FileLedgerLive } from "../src/host/FileLedger.ts"
 import { HeldCalls, HeldCallsConfig, HeldCallsLive } from "../src/host/HeldCalls.ts"
-import { localAirlock } from "../src/host/LocalAirlock.ts"
-import { localRecovery } from "../src/host/LocalRecovery.ts"
-import { localToolHost } from "../src/host/LocalToolHost.ts"
+import { defineAirlock } from "../src/core/airlock/Airlock.ts"
+import { FilesystemContracts, filesystemTools } from "../src/host/FilesystemTools.ts"
+import { filesystemRecovery } from "../src/host/FilesystemRecovery.ts"
+import { filesystemHost } from "../src/host/FilesystemHost.ts"
 import { FileMove, FileRead, FileRemove, FileWrite, NativeFileSystem, NativeFileSystemLive, NativeFilesystemConfig } from "../src/native/index.ts"
 import { memoryArtifacts } from "./support/MemoryArtifacts.ts"
 import { ExclusiveRenameTestLive } from "./support/ExclusiveRenameTestLive.ts"
 
 /**
- * The local machine driven the way every host is: a guest calls tools by
+ * This machine's filesystem tools, driven the way every host is: a guest calls tools by
  * name through the kernel, a supervisor commits what waits. The files are
  * real, Hold is real, and nothing here calls an implementation directly.
  */
@@ -35,7 +36,7 @@ const world = <A, E>(body: (args: {
   readonly host: ToolHost
   readonly hold: typeof Hold.Service
   /** Opens a guest and a supervisor for a policy over this machine. */
-  readonly open: (policy: (workspace: string) => Parameters<typeof localAirlock>[0]["policy"]) => Effect.Effect<{
+  readonly open: (policy: (workspace: string) => ToolPolicy) => Effect.Effect<{
     readonly call: (tool: string, input: unknown) => Effect.Effect<GuestReceipt, AirlockFailure>
     readonly commit: (id: string) => Effect.Effect<unknown, AirlockFailure>
     readonly restore: (id: string) => Effect.Effect<unknown, AirlockFailure>
@@ -63,7 +64,7 @@ const world = <A, E>(body: (args: {
           Layer.provideMerge(BunServices.layer)
         )
       ))
-      const host = yield* localToolHost({ workspace, confiningProfiles: [], recovery: localRecovery(services.calls) })
+      const host = yield* filesystemHost({ workspace, confiningProfiles: [], recovery: filesystemRecovery(services.calls) })
       let runs = 0
       return yield* body({
         fs,
@@ -75,8 +76,9 @@ const world = <A, E>(body: (args: {
         hold: services.hold,
         open: (policy) =>
           Effect.gen(function* () {
-            const airlock = localAirlock({
-              services: {
+            const airlock = defineAirlock({
+              contracts: FilesystemContracts,
+              implement: filesystemTools({
                 ...services,
                 process: unused("the process runner"),
                 cell: unused("the Cell"),
@@ -85,7 +87,7 @@ const world = <A, E>(body: (args: {
                 confiningProfiles: [],
                 responseLimitBytes: 1_024,
                 artifacts: memoryArtifacts().store
-              },
+              }),
               host,
               policy: policy(workspace)
             })
@@ -108,7 +110,7 @@ const world = <A, E>(body: (args: {
 
 const budget = { maxCalls: 50, maxInputBytes: 1_000_000 }
 
-describe("the local machine as an Airlock", () => {
+describe("an Airlock over the filesystem tools", () => {
   it.effect("reads at once, changes files at once through Hold, and the change can be put back", () =>
     world(({ fs, at, hold, open }) =>
       Effect.gen(function* () {

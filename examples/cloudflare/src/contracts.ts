@@ -1,5 +1,11 @@
 import { defineToolContract, Schema } from "@skastr0/airlock/cloudflare"
 
+/*
+ * Virtual tools: no filesystem behind them, only the implementations in
+ * `airlock.ts`. A machine's Airlock has filesystem tools instead; the Airlock
+ * around them is the same.
+ */
+
 const Summary = Schema.Struct({
   id: Schema.String,
   from: Schema.String,

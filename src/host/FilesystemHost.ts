@@ -17,7 +17,7 @@ import {
 import { bindPhysicalPathSelector } from "../native/PhysicalPathSelector.ts"
 
 /**
- * The local machine as a tool host.
+ * The host for the filesystem tools: this machine.
  *
  * A path or an executable a call names is bound to the physical object it
  * means before any grant is matched: symlinked ancestors are resolved, a
@@ -33,11 +33,11 @@ import { bindPhysicalPathSelector } from "../native/PhysicalPathSelector.ts"
  */
 
 /** How a process is confined. `compatibility` does not confine. */
-export const LocalProfile = Schema.Literals(["compatibility", "native-contained", "vm-enclosed"])
-export type LocalProfile = typeof LocalProfile.Type
+export const FilesystemProfile = Schema.Literals(["compatibility", "native-contained", "vm-enclosed"])
+export type FilesystemProfile = typeof FilesystemProfile.Type
 
 /** The only host parameters a grant may carry, and only for a tool that starts a process. */
-const InvokeParameters = Schema.Struct({ profile: Schema.optionalKey(LocalProfile) })
+const InvokeParameters = Schema.Struct({ profile: Schema.optionalKey(FilesystemProfile) })
 
 type PathCapability = { readonly kind: "path"; readonly physical: string }
 type ExecutableCapability = { readonly kind: "executable"; readonly physical: string }
@@ -68,16 +68,16 @@ const identityOf = (physical: string) =>
     catch: () => "unreadable" as const
   })
 
-export interface LocalToolHostOptions {
+export interface FilesystemHostOptions {
   /** Relative path selectors resolve against this directory. Host state, never a call's. */
   readonly workspace: string
   /** The confining profiles this machine can actually provide. */
-  readonly confiningProfiles: ReadonlyArray<Exclude<LocalProfile, "compatibility">>
+  readonly confiningProfiles: ReadonlyArray<Exclude<FilesystemProfile, "compatibility">>
   readonly recovery: HostRecovery
 }
 
-export const localToolHost = (
-  options: LocalToolHostOptions
+export const filesystemHost = (
+  options: FilesystemHostOptions
 ): Effect.Effect<ToolHost, never, FileSystem.FileSystem> =>
   Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem

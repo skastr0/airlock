@@ -11,7 +11,7 @@ import {
   HeldCallsConfig,
   HeldCallsLive
 } from "../src/host/HeldCalls.ts"
-import { localRecovery } from "../src/host/LocalRecovery.ts"
+import { filesystemRecovery } from "../src/host/FilesystemRecovery.ts"
 import { Sha256Digest } from "../src/core/Canonical.ts"
 import { NativeFileSystem, NativeFileSystemLive, NativeFilesystemConfig } from "../src/native/index.ts"
 import { ExclusiveRenameTestLive } from "./support/ExclusiveRenameTestLive.ts"
@@ -304,11 +304,11 @@ describe("HeldCalls", () => {
   )
 })
 
-describe("localRecovery", () => {
+describe("filesystemRecovery", () => {
   it.effect("answers the kernel's recovery port from Hold", () =>
     world(({ fs, at, native, hold, calls }) =>
       Effect.gen(function* () {
-        const recovery = localRecovery(calls)
+        const recovery = filesystemRecovery(calls)
         const call = {
           callId: "session:1:run:0:file.write:abc",
           runId: "run",

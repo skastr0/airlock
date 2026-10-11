@@ -22,7 +22,7 @@ export const heldCallReference = (reference: HeldReference): HeldCallReference =
 const perAct = (acts: ReadonlyArray<HeldActReport>) =>
   acts.map((act, index) => `${index}:${act.status}`).join(",")
 
-export const localRecovery = (calls: HeldCalls["Service"]): HostRecovery => {
+export const filesystemRecovery = (calls: HeldCalls["Service"]): HostRecovery => {
   const failed = (callId: string) => (error: { readonly _tag: string }) =>
     new RecoveryFailed({ callId, reason: error._tag })
   return {

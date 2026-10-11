@@ -2,7 +2,7 @@ import { Effect, FileSystem, Path, Result } from "effect"
 import { BunServices } from "@effect/platform-bun"
 import { describe, expect, it } from "@effect/vitest"
 import type { BoundResource, ToolHost } from "../src/core/contract/ToolHost.ts"
-import { localToolHost } from "../src/host/LocalToolHost.ts"
+import { filesystemHost } from "../src/host/FilesystemHost.ts"
 import { FileRead, FileWrite, HttpGet, HttpStage, ProcessRun } from "../src/native/index.ts"
 
 const neverRecovers = {
@@ -29,12 +29,12 @@ const world = <A, E>(body: (args: {
       const outside = path.join(root, "outside")
       yield* fs.makeDirectory(workspace)
       yield* fs.makeDirectory(outside)
-      const host = yield* localToolHost({ workspace, confiningProfiles: ["native-contained"], recovery: neverRecovers })
+      const host = yield* filesystemHost({ workspace, confiningProfiles: ["native-contained"], recovery: neverRecovers })
       return yield* body({ fs, path, workspace, outside, host })
     })
   ).pipe(Effect.provide(BunServices.layer))
 
-describe("local tool host — paths", () => {
+describe("filesystem host — paths", () => {
   it.effect("binds a path to the physical object, whatever spelling named it", () =>
     world(({ fs, path, workspace, host }) =>
       Effect.gen(function* () {
@@ -138,7 +138,7 @@ describe("local tool host — paths", () => {
   )
 })
 
-describe("local tool host — executables", () => {
+describe("filesystem host — executables", () => {
   it.effect("binds an executable to the file that will run, and a descendant to its root", () =>
     world(({ fs, path, workspace, host }) =>
       Effect.gen(function* () {
@@ -185,7 +185,7 @@ describe("local tool host — executables", () => {
   )
 })
 
-describe("local tool host — what may run without approval", () => {
+describe("filesystem host — what may run without approval", () => {
   it.effect("is reads, held file changes, and a process this machine can confine", () =>
     world(({ host }) =>
       Effect.sync(() => {

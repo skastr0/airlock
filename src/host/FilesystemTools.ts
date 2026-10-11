@@ -6,19 +6,23 @@ import { fileApplies } from "../native/FileApplies.ts"
 import { fileCaptures } from "../native/FileCaptures.ts"
 import { httpTools } from "../native/HttpTools.ts"
 import { processRun } from "../native/ProcessRun.ts"
-import { heldCallReference } from "./LocalRecovery.ts"
-import type { LocalProfile } from "./LocalToolHost.ts"
+import { FileContracts, HttpGet, HttpStage, ProcessRun } from "../native/index.ts"
+import { heldCallReference } from "./FilesystemRecovery.ts"
+import type { FilesystemProfile } from "./FilesystemHost.ts"
+
+/** The filesystem tools: files, commands and web requests on this machine. Which of them a session may call is the policy's business. */
+export const FilesystemContracts = [...FileContracts, ProcessRun, HttpGet, HttpStage] as const
 
 /**
- * Every local tool, as the record of implementations the kernel calls.
+ * Every filesystem tool, as the record of implementations the kernel calls.
  * Plain glue: each entry takes what admission established for the call and
  * hands it to the implementation. A path, an executable or an endpoint is
  * never read from the call's input here; it is the resource admission bound
  * for that field. A call that arrives without one is refused.
  */
 
-/** What the kernel hands an implementation, as far as the local tools use it. */
-export interface LocalCallContext {
+/** What the kernel hands an implementation, as far as the filesystem tools use it. */
+export interface FilesystemCallContext {
   readonly signal: AbortSignal
   readonly wireToken: WireToken
   /** The call's claim in Hold, prepared by the kernel before an apply or an invoke. */
@@ -35,17 +39,17 @@ type Services =
   & Parameters<typeof fileApplies>[0]
   & Parameters<typeof processRun>[0]
   & Parameters<typeof httpTools>[0]
-  & { readonly confiningProfiles: ReadonlyArray<Exclude<LocalProfile, "compatibility">> }
+  & { readonly confiningProfiles: ReadonlyArray<Exclude<FilesystemProfile, "compatibility">> }
 
-const one = (context: LocalCallContext, field: string) =>
+const one = (context: FilesystemCallContext, field: string) =>
   context.resources.find((resource) => resource.binding.field === field)?.binding.selector
-const each = (context: LocalCallContext, field: string) =>
+const each = (context: FilesystemCallContext, field: string) =>
   context.resources
     .filter((resource) => resource.binding.field === field)
     .sort((a, b) => (a.binding.index ?? 0) - (b.binding.index ?? 0))
     .map((resource) => resource.binding.selector)
 
-const deadline = (context: LocalCallContext) =>
+const deadline = (context: FilesystemCallContext) =>
   context.validUntil === undefined ? undefined : DateTime.toEpochMillis(context.validUntil)
 
 const unbound = (tool: string, field: string) =>
@@ -53,7 +57,7 @@ const unbound = (tool: string, field: string) =>
 const unclaimed = (tool: string) =>
   Effect.fail(`${tool} was dispatched without a claim in Hold`)
 
-export const localTools = (services: Services) => {
+export const filesystemTools = (services: Services) => {
   const captures = fileCaptures(services.files)
   const applies = fileApplies(services)
   const run = processRun(services)
@@ -63,18 +67,18 @@ export const localTools = (services: Services) => {
   const onPath = <Input, Output>(
     tool: string,
     field: keyof Input & string,
-    act: (input: Input, context: LocalCallContext) => Effect.Effect<Output, unknown>
+    act: (input: Input, context: FilesystemCallContext) => Effect.Effect<Output, unknown>
   ) =>
-  (input: Input, context: LocalCallContext): Effect.Effect<Output | Refused, unknown> => {
+  (input: Input, context: FilesystemCallContext): Effect.Effect<Output | Refused, unknown> => {
     const path = one(context, field)
     return path === undefined ? unbound(tool, field) : act({ ...input, [field]: path }, context)
   }
   /** An apply on a bound source and a bound destination. */
   const onTwoPaths = <Input extends { readonly source: string; readonly destination: string }, Output>(
     tool: string,
-    act: (input: Input, context: LocalCallContext) => Effect.Effect<Output, unknown>
+    act: (input: Input, context: FilesystemCallContext) => Effect.Effect<Output, unknown>
   ) =>
-  (input: Input, context: LocalCallContext): Effect.Effect<Output | Refused, unknown> => {
+  (input: Input, context: FilesystemCallContext): Effect.Effect<Output | Refused, unknown> => {
     const source = one(context, "source")
     const destination = one(context, "destination")
     if (source === undefined) return unbound(tool, "source")
@@ -85,15 +89,15 @@ export const localTools = (services: Services) => {
     tool: string,
     act: (input: Input, reference: ReturnType<typeof heldCallReference>, validUntil?: number) => Effect.Effect<Output, unknown>
   ) =>
-  (input: Input, context: LocalCallContext): Effect.Effect<Output, unknown> =>
+  (input: Input, context: FilesystemCallContext): Effect.Effect<Output, unknown> =>
     context.held === undefined ? unclaimed(tool) : act(input, heldCallReference(context.held), deadline(context))
 
   /** The one request of an HTTP call is its forward act. */
   const live = <Input, Output>(
     tool: string,
-    act: (input: Input, context: LocalCallContext) => Effect.Effect<Output, unknown>
+    act: (input: Input, context: FilesystemCallContext) => Effect.Effect<Output, unknown>
   ) =>
-  (input: Input, context: LocalCallContext): Effect.Effect<Output | Refused, unknown> =>
+  (input: Input, context: FilesystemCallContext): Effect.Effect<Output | Refused, unknown> =>
     Effect.flatMap(Clock.currentTimeMillis, (now): Effect.Effect<Output | Refused, unknown> => {
       const until = deadline(context)
       return until !== undefined && now >= until
@@ -112,7 +116,7 @@ export const localTools = (services: Services) => {
     "file.mkdir": onPath("file.mkdir", "path", held("file.mkdir", applies["file.mkdir"])),
     "file.copy": onTwoPaths("file.copy", held("file.copy", applies["file.copy"])),
     "file.move": onTwoPaths("file.move", held("file.move", applies["file.move"])),
-    "process.run": (input: Parameters<typeof run>[0], context: LocalCallContext) => {
+    "process.run": (input: Parameters<typeof run>[0], context: FilesystemCallContext) => {
       const executable = one(context, "executable")
       const cwd = one(context, "cwd")
       if (executable === undefined) return unbound("process.run", "executable")

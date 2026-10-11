@@ -31,9 +31,10 @@ import { FileArtifacts, FileArtifactsLive } from "../src/host/FileArtifacts.ts"
 import { FileLedgerLive, ledgerLayer } from "../src/host/FileLedger.ts"
 import * as FileOutboxStore from "../src/host/FileOutboxStore.ts"
 import { HeldCalls, HeldCallsConfig, HeldCallsLive } from "../src/host/HeldCalls.ts"
-import { localAirlock } from "../src/host/LocalAirlock.ts"
-import { localRecovery } from "../src/host/LocalRecovery.ts"
-import { localToolHost } from "../src/host/LocalToolHost.ts"
+import { defineAirlock } from "../src/core/airlock/Airlock.ts"
+import { FilesystemContracts, filesystemTools } from "../src/host/FilesystemTools.ts"
+import { filesystemRecovery } from "../src/host/FilesystemRecovery.ts"
+import { filesystemHost } from "../src/host/FilesystemHost.ts"
 import { FileRead, NativeFileSystem, NativeFileSystemLive, NativeFilesystemConfig } from "../src/native/index.ts"
 
 const count = Number(process.argv[2] ?? 300)
@@ -86,12 +87,13 @@ const wholeRead = (workspace: string) =>
     yield* fs.writeFileString(path.join(workspace, "note.txt"), "a small file\n")
     const services = { calls: yield* HeldCalls, hold: yield* Hold, files: yield* NativeFileSystem, artifacts: yield* FileArtifacts }
     const unused = <A>(what: string) => new Proxy({}, { get: () => { throw new Error(`${what} is not used here`) } }) as A
-    const airlock = localAirlock({
-      services: {
+    const airlock = defineAirlock({
+      contracts: FilesystemContracts,
+      implement: filesystemTools({
         ...services, process: unused("the process runner"), cell: unused("the Cell"),
         workspace, environment: {}, confiningProfiles: [], responseLimitBytes: 65_536
-      },
-      host: yield* localToolHost({ workspace, confiningProfiles: [], recovery: localRecovery(services.calls) }),
+      }),
+      host: yield* filesystemHost({ workspace, confiningProfiles: [], recovery: filesystemRecovery(services.calls) }),
       policy: toolPolicy({
         toolGrants: [toolGrant(FileRead, { id: "read", when: "now" })],
         resources: { path: [workspace] },

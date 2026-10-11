@@ -3,7 +3,7 @@ import { describe, expect, it } from "@effect/vitest"
 import { Effect, FileSystem, Result } from "effect"
 import { join } from "node:path"
 import type { ToolHost } from "../src/core/contract/ToolHost.ts"
-import { localToolHost } from "../src/host/LocalToolHost.ts"
+import { filesystemHost } from "../src/host/FilesystemHost.ts"
 
 const recovery = {
   prepare: () => Effect.die("unused"),
@@ -15,7 +15,7 @@ const withHost = <Value, Error>(body: (host: ToolHost, fs: FileSystem.FileSystem
   Effect.scoped(Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem
     const workspace = yield* fs.realPath(yield* fs.makeTempDirectoryScoped())
-    const host = yield* localToolHost({ workspace, confiningProfiles: [], recovery })
+    const host = yield* filesystemHost({ workspace, confiningProfiles: [], recovery })
     return yield* body(host, fs, workspace)
   })).pipe(Effect.provide(BunServices.layer))
 
