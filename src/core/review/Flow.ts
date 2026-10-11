@@ -1,7 +1,7 @@
 import { Effect, Result, Schema } from "effect"
-import { type FlowRule, FlowRule as FlowRuleSchema, FlowSource } from "../../src/core/contract/FlowRules.ts"
-import { combine, checkSink, InformationLabel, type SinkPolicy } from "../../src/core/labels/Labels.ts"
-import { decoderIdentity, type CallFact, type Fact, type Review } from "./air-review.ts"
+import { type FlowRule, FlowRule as FlowRuleSchema, FlowSource } from "../contract/FlowRules.ts"
+import { combine, checkSink, InformationLabel, type SinkPolicy } from "../labels/Labels.ts"
+import { decoderIdentity, type CallFact, type Fact, type CheckedProgram } from "../language/check.ts"
 
 /** Each release remains visible on the exact data or occurrence/control edge. */
 export const FlowObligation = Schema.Struct({
@@ -20,7 +20,7 @@ export const FlowExplanation = Schema.Struct({
 export type FlowExplanation = typeof FlowExplanation.Type
 
 const literal = new InformationLabel({ confidentiality: "public", integrity: "runtime", provenance: [] })
-const sourceOf = (origin: string, review: Review): typeof FlowSource.Type | undefined => {
+const sourceOf = (origin: string, review: CheckedProgram): typeof FlowSource.Type | undefined => {
   for (const call of review.calls) {
     const root = `${call.tool}@${call.span.start}.`
     if (origin === `${root}state`) return { tool: call.tool, part: "receipt", field: "state" }
@@ -58,7 +58,7 @@ export const dischargeFlow = (
 }
 
 export const reviewArgumentFlows = (
-  nodeId: string, call: CallFact, field: string, review: Review,
+  nodeId: string, call: CallFact, field: string, review: CheckedProgram,
   sources: Readonly<Record<string, InformationLabel>>, sink: SinkPolicy | undefined,
   rules: readonly FlowRule[]
 ) => Effect.gen(function* () {

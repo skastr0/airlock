@@ -1,15 +1,15 @@
 import { Effect, Result, Schema } from "effect"
-import { addInfluence, attestValue, decodeValue, deriveValue, hasRefinement, labeledValue, projectValue, type TrackedValue } from "../../src/core/contract/Decoder.ts"
-import { createRoleWitnessIssuer, isRoleWitnessIssuer, type RoleWitness, type RoleWitnessIssuer } from "../../src/core/contract/RoleWitness.ts"
-import { combine, InformationLabel } from "../../src/core/labels/Labels.ts"
-import type { Expression, Span, Statement } from "../../src/core/language/ast.ts"
-import { DurationSchema, SpanSchema } from "../../src/core/language/ast.ts"
-import { decoderIdentity, encodeConstructedInput, staticPath, type Review } from "./air-review.ts"
-import { acceptsLiteral, decodeModelValue, encodeModelValue, hasSameCodec, hasSameSchema, modelSchema, type SchemaModel } from "../../src/core/contract/SchemaModel.ts"
-import type { ToolFlow } from "../../src/core/contract/Flow.ts"
-import { HeldReference } from "../../src/core/contract/ToolHost.ts"
+import { addInfluence, attestValue, decodeValue, deriveValue, hasRefinement, labeledValue, projectValue, type TrackedValue } from "../contract/Decoder.ts"
+import { createRoleWitnessIssuer, isRoleWitnessIssuer, type RoleWitness, type RoleWitnessIssuer } from "../contract/RoleWitness.ts"
+import { combine, InformationLabel } from "../labels/Labels.ts"
+import type { Expression, Span, Statement } from "./ast.ts"
+import { DurationSchema, SpanSchema } from "./ast.ts"
+import { decoderIdentity, encodeConstructedInput, staticPath, type CheckedProgram } from "./check.ts"
+import { acceptsLiteral, decodeModelValue, encodeModelValue, hasSameCodec, hasSameSchema, modelSchema, type SchemaModel } from "../contract/SchemaModel.ts"
+import type { ToolFlow } from "../contract/Flow.ts"
+import { HeldReference } from "../contract/ToolHost.ts"
 
-export class PrototypeStop extends Schema.TaggedError<PrototypeStop>()("PrototypeStop", {
+export class RunStop extends Schema.TaggedError<RunStop>()("RunStop", {
   reason: Schema.Literals(["dynamic-type-error", "host-result", "budget", "out-of-plan", "refinement", "value-limit", "arithmetic_failure", "index_out_of_range", "range_bound", "assert_failed"]), span: SpanSchema
 }) {}
 export interface ObservedRoles { readonly data: InformationLabel; readonly control: InformationLabel }
@@ -22,7 +22,7 @@ export interface CallObservation {
   readonly control: InformationLabel
   readonly pc: TrackedValue
 }
-export interface PrototypeHost<E = never, R = never> {
+export interface RunHost<E = never, R = never> {
   readonly roleIssuer?: RoleWitnessIssuer
   readonly beforeCall?: (call: CallObservation) => Effect.Effect<unknown, E, R>
   readonly observe?: (call: CallObservation) => void
@@ -34,15 +34,15 @@ const literalLabel = new InformationLabel({ confidentiality: "public", integrity
 const durationModel = modelSchema(DurationSchema, { identity: "language.Duration", side: "decoded" })
 const empty = () => labeledValue(false, literalLabel)
 const usedRoleIssuers = new WeakSet<RoleWitnessIssuer>()
-const stop: (reason: PrototypeStop["reason"], span: Span) => never = (reason, span) => { throw new PrototypeStop({ reason, span }) }
+const stop: (reason: RunStop["reason"], span: Span) => never = (reason, span) => { throw new RunStop({ reason, span }) }
 
 /** Dynamic checks are deliberately retained, even after successful review. */
-export const runReviewedPrototype = <E, R>(review: Review, host: PrototypeHost<E, R>): Effect.Effect<Schema.Json, PrototypeStop, R> => Effect.gen(function* () {
+export const runChecked = <E, R>(review: CheckedProgram, host: RunHost<E, R>): Effect.Effect<Schema.Json, RunStop, R> => Effect.gen(function* () {
   const callCounts = new Map<string, number>()
   let iterations = 0, fuel = 20_000
-  const effect = <A>(body: () => A, span: Span): Effect.Effect<A, PrototypeStop> => Effect.try({ try: body, catch: (error) => error instanceof PrototypeStop ? error : new PrototypeStop({ reason: "dynamic-type-error", span }) })
+  const effect = <A>(body: () => A, span: Span): Effect.Effect<A, RunStop> => Effect.try({ try: body, catch: (error) => error instanceof RunStop ? error : new RunStop({ reason: "dynamic-type-error", span }) })
   const roleIssuer = yield* effect(() => {
-    const issuer = host.roleIssuer ?? createRoleWitnessIssuer("prototype")
+    const issuer = host.roleIssuer ?? createRoleWitnessIssuer("run")
     if (!isRoleWitnessIssuer(issuer) || usedRoleIssuers.has(issuer)) stop("out-of-plan", review.program.span)
     usedRoleIssuers.add(issuer)
     return issuer
@@ -186,8 +186,8 @@ export const runReviewedPrototype = <E, R>(review: Review, host: PrototypeHost<E
       return x === undefined || y === undefined ? equal(Reflect.get(left, key), Reflect.get(right, key)) : equalBoxes(x, y, span)
     })
   }
-  const evaluate = (expression: Expression, scope: Scope, pc: TrackedValue): Effect.Effect<Box, PrototypeStop, R> => Effect.gen(function* () {
-    if (--fuel < 0) return yield* Effect.fail(new PrototypeStop({ reason: "budget", span: expression.span }))
+  const evaluate = (expression: Expression, scope: Scope, pc: TrackedValue): Effect.Effect<Box, RunStop, R> => Effect.gen(function* () {
+    if (--fuel < 0) return yield* Effect.fail(new RunStop({ reason: "budget", span: expression.span }))
     switch (expression.kind) {
       case "LiteralExpression": return yield* effect(() => { if (typeof expression.value === "object" && expression.value !== null) { const value = { ...primitive({ kind: "Duration", value: expression.value.value, unit: expression.value.unit }), duration: true }; millis(value, expression.span); return value }; return primitive(expression.value) }, expression.span)
       case "IdentifierExpression": return yield* effect(() => { const value = scope.get(expression.name); if (value === undefined) stop("dynamic-type-error", expression.span); return value }, expression.span)
@@ -300,8 +300,8 @@ export const runReviewedPrototype = <E, R>(review: Review, host: PrototypeHost<E
           fields: Object.freeze(Object.fromEntries([...argument.children].filter(([field]) => typeof field === "string" && selected.input !== null && typeof selected.input === "object" && Object.hasOwn(selected.input, field)).map(([field, child]) => [field, observed(child, expression.span)])))
         }), expression.span)
         yield* effect(() => host.observe?.(observation), expression.span)
-        if (host.beforeCall !== undefined) yield* Effect.suspend(() => host.beforeCall!(observation)).pipe(Effect.catchCause(() => Effect.fail(new PrototypeStop({ reason: "out-of-plan", span: expression.span }))))
-        const response = yield* host.resolve(selected.name, selected.input, combine(pc.label, labelOf(argument))).pipe(Effect.catchCause(() => Effect.fail(new PrototypeStop({ reason: "host-result", span: expression.span }))))
+        if (host.beforeCall !== undefined) yield* Effect.suspend(() => host.beforeCall!(observation)).pipe(Effect.catchCause(() => Effect.fail(new RunStop({ reason: "out-of-plan", span: expression.span }))))
+        const response = yield* host.resolve(selected.name, selected.input, combine(pc.label, labelOf(argument))).pipe(Effect.catchCause(() => Effect.fail(new RunStop({ reason: "host-result", span: expression.span }))))
         return yield* effect(() => {
           const receipt = Schema.decodeUnknownResult(Receipt, { onExcessProperty: "error" })(response)
           if (Result.isFailure(receipt)) stop("host-result", expression.span)
@@ -348,7 +348,7 @@ export const runReviewedPrototype = <E, R>(review: Review, host: PrototypeHost<E
       }
     }
   })
-  const statements = (body: readonly Statement[], outer: Scope, control: TrackedValue): Effect.Effect<{ returned: boolean; value: Box; control: TrackedValue }, PrototypeStop, R> => Effect.gen(function* () {
+  const statements = (body: readonly Statement[], outer: Scope, control: TrackedValue): Effect.Effect<{ returned: boolean; value: Box; control: TrackedValue }, RunStop, R> => Effect.gen(function* () {
     const scope = new Map(outer); let pc = control
     for (const statement of body) {
       switch (statement.kind) {
@@ -360,7 +360,7 @@ export const runReviewedPrototype = <E, R>(review: Review, host: PrototypeHost<E
           const passed = yield* effect(() => boolean(condition, statement.span), statement.span)
           if (!passed) {
             if (statement.message !== undefined) yield* evaluate(statement.message, scope, pc)
-            return yield* Effect.fail(new PrototypeStop({ reason: "assert_failed", span: statement.span }))
+            return yield* Effect.fail(new RunStop({ reason: "assert_failed", span: statement.span }))
           }
           pc = labeledValue(false, combine(pc.label, labelOf(condition)))
           break
@@ -384,17 +384,17 @@ export const runReviewedPrototype = <E, R>(review: Review, host: PrototypeHost<E
             }, statement.span)
             pc = labeledValue(false, combine(pc.label, labelOf(from), labelOf(to)))
             for (let index = endpoints.from; index < endpoints.to; index++) {
-              if (++iterations > review.environment.maxIterations) return yield* Effect.fail(new PrototypeStop({ reason: "budget", span: statement.span }))
+              if (++iterations > review.environment.maxIterations) return yield* Effect.fail(new RunStop({ reason: "budget", span: statement.span }))
               const inner = new Map(scope); inner.set(statement.variable, primitive(index, [from, to]))
               const child = yield* statements(statement.body, inner, pc); if (child.returned) return child; pc = child.control
             }
             break
           }
           const source = yield* evaluate(statement.source, scope, pc)
-          if (!Array.isArray(source.tracked.value)) return yield* Effect.fail(new PrototypeStop({ reason: "dynamic-type-error", span: statement.span }))
+          if (!Array.isArray(source.tracked.value)) return yield* Effect.fail(new RunStop({ reason: "dynamic-type-error", span: statement.span }))
           pc = labeledValue(false, combine(pc.label, labelOf(source)))
           for (let index = 0; index < source.tracked.value.length; index++) {
-            if (++iterations > review.environment.maxIterations) return yield* Effect.fail(new PrototypeStop({ reason: "budget", span: statement.span }))
+            if (++iterations > review.environment.maxIterations) return yield* Effect.fail(new RunStop({ reason: "budget", span: statement.span }))
             const scopeForItem = new Map(scope); scopeForItem.set(statement.variable, source.children.get(index)!)
             const child = yield* statements(statement.body, scopeForItem, pc)
             if (child.returned) return child

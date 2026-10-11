@@ -8,8 +8,8 @@ import { InvalidFlowRule, releaseRule, type FlowRule } from "../src/core/contrac
 import { defineToolContract } from "../src/core/contract/ToolContract.ts"
 import { InformationLabel, SinkPolicy } from "../src/core/labels/Labels.ts"
 import { run } from "./support/CoreTest.ts"
-import { lowerReviewPrototype, prototypeInstances } from "./support/air-plan-review.ts"
-import { reviewPrototype } from "./support/air-review.ts"
+import { reviewProgram, planGuard } from "../src/core/review/Review.ts"
+import { checkSource } from "../src/core/language/check.ts"
 import { CompanyRecipient, environment, Read, Send } from "./support/air-review-fixtures.ts"
 
 const ApprovedSubject = defineDecoder({ name: "approvedSubject", version: "1", schema: Schema.Literal("Forward") })
@@ -29,7 +29,7 @@ if reading.state == "done" {
 }
 return true`
 const prepare = async (text = source("reading.result.body"), rules: readonly FlowRule[] = [bodyRule]) => {
-  const review = await run(reviewPrototype(text, env))
+  const review = await run(checkSource(text, env))
   const read = review.calls.find((call) => call.tool === "mail.read")!
   const prefix = `mail.read@${read.span.start}`
   const policy = {
@@ -41,7 +41,7 @@ const prepare = async (text = source("reading.result.body"), rules: readonly Flo
         new SinkPolicy({ id: `send.${field}`, confidentialityCeiling: "public", minimumIntegrity: "untrusted" })])) },
     registryDigest: await run(sha256Canonical("conditional-flow-security-v1")), bindings: {}, maxPlanBytes: 65_536, rules
   }
-  return { review, policy, prefix, issuer: createRoleWitnessIssuer("security-flow-run"), report: await run(lowerReviewPrototype(text, review, policy)) }
+  return { review, policy, prefix, issuer: createRoleWitnessIssuer("security-flow-run"), report: await run(reviewProgram(text, review, policy)) }
 }
 const proof = (decoder: typeof CompanyRecipient | typeof ApprovedSubject, value: string) => Result.getOrThrow(decodeValue(decoder, labeledValue(value, publicLabel)))
 const direct = (value: TrackedValue) => ({ value })
@@ -82,10 +82,10 @@ describe("security: trusted flow rules grant only their written scope", () => {
     const input = { to: direct(proof(CompanyRecipient, "sink@example.com")), subject: direct(proof(ApprovedSubject, "Forward")),
       body: direct(labeledValue("private body", privateLabel(["mailbox", `${prefix}.result.body`]))) }
     const control = labeledValue(false, publicLabel)
-    expect(await run(prototypeInstances(report, review, policy, issuer)(instance, input, control))).toMatchObject({ approval: "exact-batch", when: "staged" })
+    expect(await run(planGuard(report, review, policy, issuer)(instance, input, control))).toMatchObject({ approval: "exact-batch", when: "staged" })
     const Twin = defineDecoder({ name: ApprovedSubject.name, version: ApprovedSubject.version, schema: Schema.Literal("Forward") })
     for (const subject of [labeledValue("Forward", publicLabel), deriveValue(input.subject.value.value, input.subject.value), proof(Twin, "Forward")]) {
-      const result = await run(prototypeInstances(report, review, policy, issuer)(instance, { ...input, subject: direct(subject) }, control).pipe(Effect.result))
+      const result = await run(planGuard(report, review, policy, issuer)(instance, { ...input, subject: direct(subject) }, control).pipe(Effect.result))
       expect(Result.isFailure(result) && result.failure.reason).toBe("label")
     }
   })
@@ -95,7 +95,7 @@ describe("security: trusted flow rules grant only their written scope", () => {
     const send = report.plan.nodes.find((node) => node.tool === "mail.send")!
     const input = { to: direct(proof(CompanyRecipient, "sink@example.com")), subject: direct(proof(ApprovedSubject, "Forward")),
       body: direct(labeledValue("mixed", privateLabel(["mailbox", `${prefix}.result.body`, `${prefix}.result.subject`]))) }
-    const result = await run(prototypeInstances(report, review, policy, issuer)({ planId: report.plan.id, nodeId: send.id, occurrence: 1, tool: send.tool },
+    const result = await run(planGuard(report, review, policy, issuer)({ planId: report.plan.id, nodeId: send.id, occurrence: 1, tool: send.tool },
       input, labeledValue(false, publicLabel)).pipe(Effect.result))
     expect(Result.isFailure(result) && result.failure.reason).toBe("label")
   })
@@ -108,7 +108,7 @@ describe("security: trusted flow rules grant only their written scope", () => {
     const witness = Result.getOrThrow(issuer.issue(value, { data: publicLabel, selection, control: publicLabel }))
     const input = { to: direct(proof(CompanyRecipient, "sink@example.com")), subject: direct(proof(ApprovedSubject, "Forward")),
       body: { value, witness } }
-    const result = await run(prototypeInstances(report, review, policy, issuer)({ planId: report.plan.id, nodeId: send.id, occurrence: 1, tool: send.tool },
+    const result = await run(planGuard(report, review, policy, issuer)({ planId: report.plan.id, nodeId: send.id, occurrence: 1, tool: send.tool },
       input, labeledValue(false, publicLabel)).pipe(Effect.result))
     expect(Result.isFailure(result) && result.failure.reason).toBe("label")
   })

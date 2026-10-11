@@ -5,8 +5,8 @@ import { ToolGrantPolicy } from "../src/core/admission/ToolGrant.ts"
 import { defineToolContract } from "../src/core/contract/ToolContract.ts"
 import { InformationLabel, SinkPolicy } from "../src/core/labels/Labels.ts"
 import { run } from "./support/CoreTest.ts"
-import { lowerReviewPrototype } from "./support/air-plan-review.ts"
-import { reviewPrototype } from "./support/air-review.ts"
+import { reviewProgram } from "../src/core/review/Review.ts"
+import { checkSource } from "../src/core/language/check.ts"
 import { environment } from "./support/air-review-fixtures.ts"
 
 const Choice = defineToolContract({ name: "choice.read", version: "1", effect: "capture",
@@ -27,10 +27,10 @@ if choice.state == "done" {
   http.get({url:${projected}})
 }
 return true`
-    const review = await run(reviewPrototype(source, env))
+    const review = await run(checkSource(source, env))
     const pick = review.calls.find((call) => call.tool === "choice.read")!
     const origin = `choice.read@${pick.span.start}.result.index`
-    const report = await run(lowerReviewPrototype(source, review, {
+    const report = await run(reviewProgram(source, review, {
       grants: Object.keys(env.tools).map((tool) => new ToolGrantPolicy({ id: tool, tool })),
       sources: { [`choice.read@${pick.span.start}.state`]: label("public"), [origin]: label("private") },
       sinks: { "http.get": { url: new SinkPolicy({ id: "http.url", confidentialityCeiling: "public", minimumIntegrity: "untrusted" }) } },

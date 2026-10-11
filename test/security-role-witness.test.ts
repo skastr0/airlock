@@ -7,9 +7,9 @@ import { defineToolContract } from "../src/core/contract/ToolContract.ts"
 import { InformationLabel, SinkPolicy } from "../src/core/labels/Labels.ts"
 import { run } from "./support/CoreTest.ts"
 import { environment } from "./support/air-review-fixtures.ts"
-import { lowerReviewPrototype, prototypeInstances, type ReviewSurface } from "./support/air-plan-review.ts"
-import { reviewPrototype } from "./support/air-review.ts"
-import { runReviewedPrototype, type PrototypeHost } from "./support/air-review-evaluator.ts"
+import { type InstanceArgument, reviewProgram, planGuard, type ReviewSurface } from "../src/core/review/Review.ts"
+import { checkSource } from "../src/core/language/check.ts"
+import { runChecked, type RunHost } from "../src/core/language/run.ts"
 
 const Get = defineToolContract({ name: "http.get", version: "1", effect: "capture",
   input: Schema.Struct({ url: Schema.String }), output: Schema.Struct({ text: Schema.String }), flow: { sinks: ["url"] } })
@@ -30,11 +30,12 @@ if choice.state == "done" {
 }
 return true`
 
-type Fields = Parameters<NonNullable<PrototypeHost["beforeCall"]>>[0]["fields"]
-type Rewrite = (nodeId: string, fields: Fields, issuer: RoleWitnessIssuer) => Fields
+type Observed = Parameters<NonNullable<RunHost["beforeCall"]>>[0]["fields"]
+type Fields = Readonly<Record<string, InstanceArgument>>
+type Rewrite = (nodeId: string, fields: Observed, issuer: RoleWitnessIssuer) => Fields
 
 const reviewed = async () => {
-  const review = await run(reviewPrototype(source, env))
+  const review = await run(checkSource(source, env))
   const root = `choice.read@${review.calls[0]!.span.start}`
   const sink = new SinkPolicy({ id: "http.url", confidentialityCeiling: "private", minimumIntegrity: "untrusted" })
   const surface: ReviewSurface = {
@@ -44,7 +45,7 @@ const reviewed = async () => {
     sinks: { "http.get": { url: sink } },
     registryDigest: await run(sha256Canonical("security-role-witness-v1")), bindings: {}, maxPlanBytes: 65_536
   }
-  const report = await run(lowerReviewPrototype(source, review, surface))
+  const report = await run(reviewProgram(source, review, surface))
   expect(report.refusals).toEqual([])
   return { review, surface, report }
 }
@@ -52,10 +53,10 @@ const reviewed = async () => {
 /** One execution under a fresh issuer; `rewrite` stands in for anything between the evaluator and the guard. */
 const execute = async (context: Awaited<ReturnType<typeof reviewed>>, issuer: RoleWitnessIssuer, rewrite?: Rewrite) => {
   const { review, surface, report } = context
-  const guard = prototypeInstances(report, review, surface, issuer)
+  const guard = planGuard(report, review, surface, issuer)
   const resolved: Array<string> = []
-  const seen = new Map<string, Fields>()
-  const outcome = await run(runReviewedPrototype(review, {
+  const seen = new Map<string, Observed>()
+  const outcome = await run(runChecked(review, {
     roleIssuer: issuer,
     beforeCall: (call) => {
       const node = report.plan.nodes.find((candidate) => candidate.sourceOffset === call.span.start)!

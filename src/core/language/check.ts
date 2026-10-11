@@ -1,23 +1,23 @@
 import { Effect, Result, Schema } from "effect"
-import type { ToolContract } from "../../src/core/contract/ToolContract.ts"
-import { HeldReference } from "../../src/core/contract/ToolHost.ts"
-import { decodeValue, labeledValue, type TrustedDecoder } from "../../src/core/contract/Decoder.ts"
-import { InformationLabel } from "../../src/core/labels/Labels.ts"
-import { acceptsLiteral, encodeModelValue, hasSameCodec, hasSameSchema, modelSchema, type SchemaModel } from "../../src/core/contract/SchemaModel.ts"
-import type { ToolFlow } from "../../src/core/contract/Flow.ts"
-import { validateFlowDecoders } from "../../src/core/contract/Flow.ts"
-import { validateBindings } from "../../src/core/language/bindings.ts"
-import type { Expression, Program, Span, Statement } from "../../src/core/language/ast.ts"
-import { DurationSchema, SpanSchema } from "../../src/core/language/ast.ts"
-import { parse } from "../../src/core/language/parser.ts"
+import type { ToolContract } from "../contract/ToolContract.ts"
+import { HeldReference } from "../contract/ToolHost.ts"
+import { decodeValue, labeledValue, type TrustedDecoder } from "../contract/Decoder.ts"
+import { InformationLabel } from "../labels/Labels.ts"
+import { acceptsLiteral, encodeModelValue, hasSameCodec, hasSameSchema, modelSchema, type SchemaModel } from "../contract/SchemaModel.ts"
+import type { ToolFlow } from "../contract/Flow.ts"
+import { validateFlowDecoders } from "../contract/Flow.ts"
+import { validateBindings } from "./bindings.ts"
+import type { Expression, Program, Span, Statement } from "./ast.ts"
+import { DurationSchema, SpanSchema } from "./ast.ts"
+import { parse } from "./parser.ts"
 
-/** Test-only checker over the current parser. No runner imports this prototype. */
-export class ReviewError extends Schema.TaggedError<ReviewError>()("ReviewError", { detail: Schema.String, span: SpanSchema }) {}
-export interface PrototypeTool {
+/** Types a parsed program against the granted contracts and bounds every call it can make. */
+export class CheckError extends Schema.TaggedError<CheckError>()("CheckError", { detail: Schema.String, span: SpanSchema }) {}
+export interface CheckedTool {
   readonly contract: ToolContract.Any
 }
-export interface ReviewEnvironment {
-  readonly tools: Readonly<Record<string, PrototypeTool>>
+export interface CheckEnvironment {
+  readonly tools: Readonly<Record<string, CheckedTool>>
   readonly decoders: Readonly<Record<string, TrustedDecoder.Any>>
   readonly granted: ReadonlySet<string>
   readonly maxListItems: number
@@ -52,9 +52,9 @@ export interface CallFact {
   readonly control: readonly string[]
   readonly maximumOccurrences: number
 }
-export interface Review {
+export interface CheckedProgram {
   readonly program: Program
-  readonly environment: ReviewEnvironment
+  readonly environment: CheckEnvironment
   readonly tools: readonly string[]
   readonly maximumCalls: Readonly<Record<string, number>>
   readonly calls: readonly CallFact[]
@@ -84,14 +84,14 @@ const scale = (counts: Counts, count: number): Counts => Object.fromEntries(Obje
 const durationModel = modelSchema(DurationSchema, { identity: "language.Duration", side: "decoded" })
 const wayBackModel = modelSchema(HeldReference, { identity: "receipt.wayBack", side: "encoded" })
 
-export const reviewPrototype = (source: string, environment: ReviewEnvironment): Effect.Effect<Review, ReviewError | import("../../src/core/language/bindings.ts").DuplicateBinding | import("../../src/core/language/lexer.ts").LanguageDiagnostic> => Effect.gen(function* () {
+export const checkSource = (source: string, environment: CheckEnvironment): Effect.Effect<CheckedProgram, CheckError | import("./bindings.ts").DuplicateBinding | import("./lexer.ts").LanguageDiagnostic> => Effect.gen(function* () {
   const parsed = yield* parse(source)
   yield* validateBindings(parsed, ["schema", ...Object.keys(environment.bindings ?? {})])
-  return yield* Effect.try({ try: () => check(parsed, environment), catch: (error) => error instanceof ReviewError ? error : new ReviewError({ detail: "unsupported contract or program", span: parsed.span }) })
+  return yield* Effect.try({ try: () => check(parsed, environment), catch: (error) => error instanceof CheckError ? error : new CheckError({ detail: "unsupported contract or program", span: parsed.span }) })
 })
 
-const check = (program: Program, environment: ReviewEnvironment): Review => {
-  const fail: (detail: string, span?: Span) => never = (detail, span = program.span) => { throw new ReviewError({ detail, span }) }
+const check = (program: Program, environment: CheckEnvironment): CheckedProgram => {
+  const fail: (detail: string, span?: Span) => never = (detail, span = program.span) => { throw new CheckError({ detail, span }) }
   for (const limit of [environment.maxCalls, environment.maxIterations, environment.maxListItems]) if (!Number.isSafeInteger(limit) || limit < 0) fail("invalid review limit")
   const calls: CallFact[] = [], tools = new Set<string>()
   const expressionFacts = new Map<Expression, Fact>()
@@ -99,7 +99,7 @@ const check = (program: Program, environment: ReviewEnvironment): Review => {
   let fuel = 20_000
   const consume = (span: Span) => { if (--fuel < 0) fail("review complexity limit", span) }
   // Unsupported schemas fail closed. The production contract lane owns the
-  // eventual closed representation; this prototype never invents an any type.
+  // eventual closed representation; the checker never invents an any type.
   const fromModel = (model: SchemaModel, origin: string, input = false): Fact => {
     const origins = origin === "" ? [] : [origin]
     if (hasSameSchema(model, durationModel)) return { ...fact({ kind: "duration" }, origins), schemaProofs: [model] }
@@ -147,7 +147,7 @@ const check = (program: Program, environment: ReviewEnvironment): Review => {
     })) fail("missing schema refinement", span)
     if (value.type.kind === "choices") { for (const member of value.type.members) compatible(member, expected, span); return }
     if (expected.type.kind === "choices") {
-      if (!expected.type.members.some((member) => { try { compatible(value, member, span); return true } catch (error) { if (error instanceof ReviewError) return false; throw error } })) fail("union type mismatch", span)
+      if (!expected.type.members.some((member) => { try { compatible(value, member, span); return true } catch (error) { if (error instanceof CheckError) return false; throw error } })) fail("union type mismatch", span)
       return
     }
     if (expected.type.kind === "nullable") { if (value.type.kind === "null") return; compatible(value.type.kind === "nullable" ? value.type.value : value, expected.type.value, span); return }

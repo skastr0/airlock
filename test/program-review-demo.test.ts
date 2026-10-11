@@ -8,10 +8,10 @@ import { composeFlowRules, releaseRule } from "../src/core/contract/FlowRules.ts
 import { defineToolContract } from "../src/core/contract/ToolContract.ts"
 import { InformationLabel, SinkPolicy } from "../src/core/labels/Labels.ts"
 import { run } from "./support/CoreTest.ts"
-import { decoderIdentity, reviewPrototype, type Review } from "./support/air-review.ts"
+import { decoderIdentity, checkSource, type CheckedProgram } from "../src/core/language/check.ts"
 import { CompanyRecipient, dataFlowPrograms, environment, Read } from "./support/air-review-fixtures.ts"
-import { lowerReviewPrototype, prototypeInstances, type ReviewSurface } from "./support/air-plan-review.ts"
-import { runReviewedPrototype } from "./support/air-review-evaluator.ts"
+import { reviewProgram, planGuard, type ReviewSurface } from "../src/core/review/Review.ts"
+import { runChecked } from "../src/core/language/run.ts"
 
 const Send = defineToolContract({ name: "mail.send", version: "1", effect: "request",
   input: Schema.Struct({ to: Schema.String, subject: Schema.String, body: Schema.String }),
@@ -21,13 +21,13 @@ const env = { ...environment, tools: { ...environment.tools, "mail.send": { ...e
 const mailbox = new InformationLabel({ confidentiality: "private", integrity: "untrusted", provenance: ["mailbox"] })
 const literal = new InformationLabel({ confidentiality: "public", integrity: "runtime", provenance: [] })
 const argument = (value: TrackedValue) => ({ value })
-const tagged = (review: Review, field: string) => new InformationLabel({ ...mailbox,
+const tagged = (review: CheckedProgram, field: string) => new InformationLabel({ ...mailbox,
   provenance: ["mailbox", `mail.read@${review.calls[0]!.span.start}.result.${field}`] })
-const forwardControl = (review: Review) => labeledValue(false, new InformationLabel({ ...mailbox,
+const forwardControl = (review: CheckedProgram) => labeledValue(false, new InformationLabel({ ...mailbox,
   provenance: ["mailbox", `mail.read@${review.calls[0]!.span.start}.state`, `mail.read@${review.calls[0]!.span.start}.result.from`] }))
 const sink = (id: string, confidentialityCeiling: SinkPolicy["confidentialityCeiling"] = "public", minimumIntegrity: SinkPolicy["minimumIntegrity"] = "untrusted") =>
   new SinkPolicy({ id, confidentialityCeiling, minimumIntegrity })
-const surface = (review: Review, allowPrivateMail = false): Effect.Effect<ReviewSurface, unknown, import("effect").Crypto.Crypto> => Effect.gen(function* () {
+const surface = (review: CheckedProgram, allowPrivateMail = false): Effect.Effect<ReviewSurface, unknown, import("effect").Crypto.Crypto> => Effect.gen(function* () {
   const sources: Record<string, InformationLabel> = {}
   // Known receipt/result fields are registered by the trusted fixture. Unknown
   // origins are deliberately omitted, rather than labeled from their spelling.
@@ -41,9 +41,9 @@ const surface = (review: Review, allowPrivateMail = false): Effect.Effect<Review
     bindings: {}, maxPlanBytes: 65_536 }
 })
 const prepare = (source: string, allowPrivateMail = false) => Effect.gen(function* () {
-  const review = yield* reviewPrototype(source, env)
+  const review = yield* checkSource(source, env)
   const policy = yield* surface(review, allowPrivateMail)
-  return { review, policy, report: yield* lowerReviewPrototype(source, review, policy) }
+  return { review, policy, report: yield* reviewProgram(source, review, policy) }
 })
 const reason = <A>(effect: Effect.Effect<A, { readonly reason: string }>) => Effect.map(Effect.result(effect), (result) => Result.isFailure(result) ? result.failure.reason : "accepted")
 const companyCondition = [{ field: "to" as const, decoder: CompanyRecipient }]
@@ -67,9 +67,9 @@ describe("test-only: whole-program Plan review demonstration", () => {
   ] as const)("runs the fixture through its reviewed Plan and authenticated witness guard (%s, private=%s)", async (source, privateMail, approval) => {
     const { report, review, policy } = await run(prepare(source, privateMail))
     const issuer = createRoleWitnessIssuer("demonstration")
-    const guard = prototypeInstances(report, review, policy, issuer)
+    const guard = planGuard(report, review, policy, issuer)
     const resolved: string[] = []
-    const outcome = await run(runReviewedPrototype(review, {
+    const outcome = await run(runChecked(review, {
       roleIssuer: issuer,
       beforeCall: (call) => {
         const node = report.plan.nodes.find((node) => node.sourceOffset === call.span.start)!
@@ -141,20 +141,20 @@ describe("test-only: whole-program Plan review demonstration", () => {
 
   it("refuses missing labels and missing sink policy, rather than treating them as public", async () => {
     const { review, policy } = await run(prepare(dataFlowPrograms.forward))
-    const unknown = await run(lowerReviewPrototype(dataFlowPrograms.forward, review, { ...policy, sources: {} }))
+    const unknown = await run(reviewProgram(dataFlowPrograms.forward, review, { ...policy, sources: {} }))
     expect(unknown.refusals.filter((item) => item.reason === "unknown-label")).toHaveLength(3)
-    const missing = await run(lowerReviewPrototype(dataFlowPrograms.forward, review, { ...policy, sinks: {} }))
+    const missing = await run(reviewProgram(dataFlowPrograms.forward, review, { ...policy, sinks: {} }))
     expect(missing.refusals.some((item) => item.reason === "missing-sink")).toBe(true)
   })
 
   it("checks every branch and every fixed grant constraint before any host call", async () => {
     const source = `if false { mail.read({id:"hidden"}) }; return true`
-    const checked = await run(reviewPrototype(source, { ...env, granted: new Set() }).pipe(Effect.result))
+    const checked = await run(checkSource(source, { ...env, granted: new Set() }).pipe(Effect.result))
     expect(Result.isFailure(checked)).toBe(true)
     const fixed = `let checked = decode(schema.companyRecipient,"sink@example.com"); if checked.state == "ok" { mail.send({to:checked.value,subject:"wrong",body:"fixed"}) }; return true`
     const { review, policy } = await run(prepare(fixed))
     const grants = [toolGrant(Send, { id: "fixed", where: { to: { equals: "sink@example.com" }, subject: { equals: "right" } } })]
-    const report = await run(lowerReviewPrototype(fixed, review, { ...policy, grants }))
+    const report = await run(reviewProgram(fixed, review, { ...policy, grants }))
     expect(report.refusals).toEqual([{ nodeId: "call:1", field: "$", reason: "grant" }])
   })
 
@@ -163,7 +163,7 @@ describe("test-only: whole-program Plan review demonstration", () => {
     const { review, policy } = await run(prepare(source))
     const grants = [toolGrant(Send, { id: "a", where: { to: { equals: "sink@example.com" }, subject: { equals: "other" } } }),
       toolGrant(Send, { id: "b", where: { to: { equals: "other@example.com" }, subject: { equals: "actual" } } })]
-    const report = await run(lowerReviewPrototype(source, review, { ...policy, grants }))
+    const report = await run(reviewProgram(source, review, { ...policy, grants }))
     expect(report.refusals.some((item) => item.reason === "grant")).toBe(true)
   })
 
@@ -175,9 +175,9 @@ describe("test-only: whole-program Plan review demonstration", () => {
       [source, { ...policy, registryDigest: await run(sha256Canonical("different contract")) }],
       [source, { ...policy, grants: [] }], [source, { ...policy, maxPlanBytes: 60_000 }]
     ] as const) {
-      expect((await run(lowerReviewPrototype(text, review, changed))).plan.id).not.toBe(report.plan.id)
+      expect((await run(reviewProgram(text, review, changed))).plan.id).not.toBe(report.plan.id)
     }
-    expect((await run(lowerReviewPrototype(source, review, policy))).plan.id).toBe(report.plan.id)
+    expect((await run(reviewProgram(source, review, policy))).plan.id).toBe(report.plan.id)
   })
 
   it("checks exact-value decoder proofs, fixed values, and bounded node instances at run time", async () => {
@@ -187,50 +187,50 @@ describe("test-only: whole-program Plan review demonstration", () => {
     const recipient = Result.getOrThrow(decodeValue(CompanyRecipient, labeledValue("alice@example.com", tagged(review, "from"))))
     const input = { to: argument(recipient), subject: argument(labeledValue("Forward", literal)), body: argument(labeledValue("new content unknown at review", tagged(review, "body"))) }
     const instance = { planId: report.plan.id, nodeId: send.id, occurrence: 1, tool: send.tool }
-    const guard = prototypeInstances(report, review, policy, createRoleWitnessIssuer("demo-run"))
+    const guard = planGuard(report, review, policy, createRoleWitnessIssuer("demo-run"))
     expect((await run(guard(instance, input, pc))).approval).toBe("exact-batch")
     expect(await run(reason(guard({ ...instance, occurrence: 2 }, input, pc)))).toBe("bound")
     expect(await run(reason(guard(instance, input, pc)))).toBe("ended")
-    expect(await run(reason(prototypeInstances(report, review, policy, createRoleWitnessIssuer("demo-run"))(instance, { ...input, to: argument(deriveValue(recipient.value, recipient)) }, pc)))).toBe("proof")
-    expect(await run(reason(prototypeInstances(report, review, policy, createRoleWitnessIssuer("demo-run"))(instance, { ...input, subject: argument(labeledValue("changed", literal)) }, pc)))).toBe("argument")
-    expect(await run(reason(prototypeInstances(report, review, policy, createRoleWitnessIssuer("demo-run"))({ ...instance, nodeId: "absent" }, input, pc)))).toBe("plan-mismatch")
-    expect(await run(reason(prototypeInstances(report, review, { ...policy, bindings: { changed: true } }, createRoleWitnessIssuer("demo-run"))(instance, input, pc)))).toBe("plan-mismatch")
-    expect(await run(reason(prototypeInstances({ ...report }, review, policy, createRoleWitnessIssuer("demo-run"))(instance, input, pc)))).toBe("plan-mismatch")
-    expect(await run(reason(prototypeInstances(report, review, policy, createRoleWitnessIssuer("demo-run"))(instance, { ...input, body: { ...input.body, value: { ...input.body.value } } }, pc)))).toBe("label")
-    expect(await run(reason(prototypeInstances(report, review, policy, createRoleWitnessIssuer("demo-run"))(instance, input, { ...pc })))).toBe("label")
+    expect(await run(reason(planGuard(report, review, policy, createRoleWitnessIssuer("demo-run"))(instance, { ...input, to: argument(deriveValue(recipient.value, recipient)) }, pc)))).toBe("proof")
+    expect(await run(reason(planGuard(report, review, policy, createRoleWitnessIssuer("demo-run"))(instance, { ...input, subject: argument(labeledValue("changed", literal)) }, pc)))).toBe("argument")
+    expect(await run(reason(planGuard(report, review, policy, createRoleWitnessIssuer("demo-run"))({ ...instance, nodeId: "absent" }, input, pc)))).toBe("plan-mismatch")
+    expect(await run(reason(planGuard(report, review, { ...policy, bindings: { changed: true } }, createRoleWitnessIssuer("demo-run"))(instance, input, pc)))).toBe("plan-mismatch")
+    expect(await run(reason(planGuard({ ...report }, review, policy, createRoleWitnessIssuer("demo-run"))(instance, input, pc)))).toBe("plan-mismatch")
+    expect(await run(reason(planGuard(report, review, policy, createRoleWitnessIssuer("demo-run"))(instance, { ...input, body: { ...input.body, value: { ...input.body.value } } }, pc)))).toBe("label")
+    expect(await run(reason(planGuard(report, review, policy, createRoleWitnessIssuer("demo-run"))(instance, input, { ...pc })))).toBe("label")
   })
 
   it("preserves runtime dynamic grant, label and occurrence checks after static acceptance", async () => {
     const { report, review, policy } = await run(prepare(dataFlowPrograms.forward, true))
     const grant = toolGrant(Send, { id: "recipient", where: { to: { equals: "allowed@example.com" } } })
     const narrowed = { ...policy, grants: [...policy.grants.filter((item) => item.tool !== "mail.send"), grant] }
-    const reviewed = await run(lowerReviewPrototype(dataFlowPrograms.forward, review, narrowed))
+    const reviewed = await run(reviewProgram(dataFlowPrograms.forward, review, narrowed))
     expect(reviewed.refusals).toEqual([])
     const send = report.plan.nodes[1]!
     const pc = forwardControl(review)
     const input = { to: argument(Result.getOrThrow(decodeValue(CompanyRecipient, labeledValue("other@example.com", tagged(review, "from"))))), subject: argument(labeledValue("Forward", literal)), body: argument(labeledValue("body", tagged(review, "body"))) }
-    expect(await run(reason(prototypeInstances(reviewed, review, narrowed, createRoleWitnessIssuer("demo-run"))({ planId: reviewed.plan.id, nodeId: send.id, occurrence: 1, tool: send.tool }, input, pc)))).toBe("grant")
+    expect(await run(reason(planGuard(reviewed, review, narrowed, createRoleWitnessIssuer("demo-run"))({ planId: reviewed.plan.id, nodeId: send.id, occurrence: 1, tool: send.tool }, input, pc)))).toBe("grant")
     const secret = new InformationLabel({ confidentiality: "secret", integrity: "untrusted", provenance: ["other-source"] })
-    expect(await run(reason(prototypeInstances(report, review, policy, createRoleWitnessIssuer("demo-run"))({ planId: report.plan.id, nodeId: send.id, occurrence: 1, tool: send.tool }, { ...input, body: argument(labeledValue("secret", secret)) }, pc)))).toBe("label")
+    expect(await run(reason(planGuard(report, review, policy, createRoleWitnessIssuer("demo-run"))({ planId: report.plan.id, nodeId: send.id, occurrence: 1, tool: send.tool }, { ...input, body: argument(labeledValue("secret", secret)) }, pc)))).toBe("label")
     const unrelated = new InformationLabel({ ...mailbox, provenance: ["unreviewed-mailbox"] })
-    expect(await run(reason(prototypeInstances(report, review, policy, createRoleWitnessIssuer("demo-run"))({ planId: report.plan.id, nodeId: send.id, occurrence: 1, tool: send.tool }, { ...input, body: argument(labeledValue("other private data", unrelated)) }, pc)))).toBe("label")
+    expect(await run(reason(planGuard(report, review, policy, createRoleWitnessIssuer("demo-run"))({ planId: report.plan.id, nodeId: send.id, occurrence: 1, tool: send.tool }, { ...input, body: argument(labeledValue("other private data", unrelated)) }, pc)))).toBe("label")
   })
 
   it("ends if the trusted contract registry drifts after review, even with unchanged names and versions", async () => {
     const source = dataFlowPrograms.forward
     const mutable = { ...env, tools: { ...env.tools }, granted: new Set(env.granted) }
-    const review = await run(reviewPrototype(source, mutable))
+    const review = await run(checkSource(source, mutable))
     const policy = await run(surface(review, true))
-    const report = await run(lowerReviewPrototype(source, review, policy))
+    const report = await run(reviewProgram(source, review, policy))
     const send = report.plan.nodes[1]!
     const instance = { planId: report.plan.id, nodeId: send.id, occurrence: 1, tool: send.tool }
     const pc = forwardControl(review)
     const input = { to: argument(Result.getOrThrow(decodeValue(CompanyRecipient, labeledValue("alice@example.com", tagged(review, "from"))))), subject: argument(labeledValue("Forward", literal)), body: argument(labeledValue("body", tagged(review, "body"))) }
     mutable.tools["mail.send"] = { ...mutable.tools["mail.send"], contract: { ...Send } }
-    expect(await run(reason(prototypeInstances(report, review, policy, createRoleWitnessIssuer("demo-run"))(instance, input, pc)))).toBe("plan-mismatch")
+    expect(await run(reason(planGuard(report, review, policy, createRoleWitnessIssuer("demo-run"))(instance, input, pc)))).toBe("plan-mismatch")
     mutable.tools["mail.send"] = { ...env.tools["mail.send"] }
     mutable.granted.delete("mail.send")
-    expect(await run(reason(prototypeInstances(report, review, policy, createRoleWitnessIssuer("demo-run"))(instance, input, pc)))).toBe("plan-mismatch")
+    expect(await run(reason(planGuard(report, review, policy, createRoleWitnessIssuer("demo-run"))(instance, input, pc)))).toBe("plan-mismatch")
   })
 
   it("explains the exact refused edge and the smallest conditional author rule that releases it", async () => {
@@ -240,7 +240,7 @@ describe("test-only: whole-program Plan review demonstration", () => {
       allowWith: { operation: "release", source: { tool: "mail.read", part: "result", field: "body" }, sink: { tool: "mail.send", field: "body" },
         mode: "data", from: "private", to: "public", when: [{ field: "to", decoder: { name: CompanyRecipient.name, version: "1" } }] } })
     const { review, policy } = await run(prepare(dataFlowPrograms.forward))
-    const partial = await run(lowerReviewPrototype(dataFlowPrograms.forward, review, { ...policy, rules: [bodyRelease] }))
+    const partial = await run(reviewProgram(dataFlowPrograms.forward, review, { ...policy, rules: [bodyRelease] }))
     expect(partial.explanations.some((flow) => flow.field === "body" && flow.mode === "data")).toBe(false)
     expect(partial.explanations.some((flow) => flow.field === "body" && flow.mode === "control")).toBe(true)
     expect(partial.refusals.map((flow) => flow.field)).toEqual(["to", "subject", "body"])
@@ -249,7 +249,7 @@ describe("test-only: whole-program Plan review demonstration", () => {
   it("opens forwarding through an explicit reusable rule set, preserving dynamic batch approval", async () => {
     const { review, policy, report: denied } = await run(prepare(dataFlowPrograms.forward))
     const authored = { ...policy, rules: companyForward }
-    const accepted = await run(lowerReviewPrototype(dataFlowPrograms.forward, review, authored))
+    const accepted = await run(reviewProgram(dataFlowPrograms.forward, review, authored))
     expect(accepted.refusals).toEqual([])
     expect(accepted.explanations).toEqual([])
     expect(accepted.plan.id).not.toBe(denied.plan.id)
@@ -263,16 +263,16 @@ describe("test-only: whole-program Plan review demonstration", () => {
       subject: argument(labeledValue("Forward", literal)), body: argument(labeledValue("private body", tagged("body"))) }
     const control = labeledValue(false, new InformationLabel({ ...mailbox, provenance: ["mailbox", `${prefix}.state`, `${prefix}.result.from`] }))
     const instance = { planId: accepted.plan.id, nodeId: send.id, occurrence: 1, tool: send.tool }
-    expect((await run(prototypeInstances(accepted, review, authored, createRoleWitnessIssuer("demo-run"))(instance, input, control))).approval).toBe("exact-batch")
-    expect(await run(reason(prototypeInstances(accepted, review, authored, createRoleWitnessIssuer("demo-run"))(instance, { ...input, body: argument(labeledValue("wrong field", tagged("from"))) }, control)))).toBe("label")
-    expect(await run(reason(prototypeInstances(accepted, review, authored, createRoleWitnessIssuer("demo-run"))(instance, { ...input, body: argument(labeledValue("unscoped", mailbox)) }, control)))).toBe("label")
-    expect(await run(reason(prototypeInstances(accepted, review, authored, createRoleWitnessIssuer("demo-run"))(instance, { ...input, to: argument(deriveValue(input.to.value.value, input.to.value)) }, control)))).toBe("proof")
+    expect((await run(planGuard(accepted, review, authored, createRoleWitnessIssuer("demo-run"))(instance, input, control))).approval).toBe("exact-batch")
+    expect(await run(reason(planGuard(accepted, review, authored, createRoleWitnessIssuer("demo-run"))(instance, { ...input, body: argument(labeledValue("wrong field", tagged("from"))) }, control)))).toBe("label")
+    expect(await run(reason(planGuard(accepted, review, authored, createRoleWitnessIssuer("demo-run"))(instance, { ...input, body: argument(labeledValue("unscoped", mailbox)) }, control)))).toBe("label")
+    expect(await run(reason(planGuard(accepted, review, authored, createRoleWitnessIssuer("demo-run"))(instance, { ...input, to: argument(deriveValue(input.to.value.value, input.to.value)) }, control)))).toBe("proof")
   })
 
   it("a forwarding rule set does not release HTTP or body-dependent fixed branch selection", async () => {
     for (const source of [dataFlowPrograms.captureLeak, dataFlowPrograms.controlLeak]) {
       const { review, policy } = await run(prepare(source))
-      const report = await run(lowerReviewPrototype(source, review, { ...policy, rules: companyForward }))
+      const report = await run(reviewProgram(source, review, { ...policy, rules: companyForward }))
       expect(report.refusals.length).toBeGreaterThan(0)
       expect(report.explanations.some((flow) => flow.origin.endsWith("result.body"))).toBe(true)
     }

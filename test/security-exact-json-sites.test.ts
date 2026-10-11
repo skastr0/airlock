@@ -28,6 +28,11 @@ const allowed = new Map<string, number>([
   [site("core/contract/FlowRules.ts", "JSON.stringify([rule.operation, rule.source.tool, rule.source.part, rule.source.field, rule.sink.tool, rule.sink.field, rule.mode, rule.from])"), 1],
   [site("core/contract/FlowRules.ts", "JSON.stringify([field, decoder.name, decoder.version])"), 1],
   [site("core/contract/FlowRules.ts", "JSON.stringify([...decoded.success].sort((a, b) => a.id.localeCompare(b.id)))"), 1],
+  // Checked bindings and refinements are keyed by binding names and decoder identities.
+  [site("core/language/check.ts", 'JSON.stringify(["binding", name])'), 1],
+  [site("core/language/check.ts", "JSON.stringify([decoder.name, decoder.version])"), 1],
+  [site("core/language/run.ts", 'JSON.stringify(["binding", name])'), 1],
+  [site("core/review/Review.ts", 'JSON.stringify(["binding", name])'), 2],
   // Witness equality compares sets of provenance identifiers, all strings.
   [site("core/contract/RoleWitness.ts", "JSON.stringify([...new Set(left.provenance)].sort())"), 1],
   [site("core/contract/RoleWitness.ts", "JSON.stringify([...new Set(right.provenance)].sort())"), 1],

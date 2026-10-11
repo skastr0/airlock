@@ -1,16 +1,16 @@
 import { Effect, Result, Schema } from "effect"
-import { canonicalJson, sha256Canonical, type Sha256Digest } from "../../src/core/Canonical.ts"
-import { fittingToolGrants, ToolGrantPolicy, validateToolGrants } from "../../src/core/admission/ToolGrant.ts"
-import { hasRefinement, isTrackedValue, type TrackedValue } from "../../src/core/contract/Decoder.ts"
-import { isRoleWitnessIssuer, type RoleWitnessIssuer } from "../../src/core/contract/RoleWitness.ts"
-import { FlowRule, validateFlowRules } from "../../src/core/contract/FlowRules.ts"
-import { modelSchema } from "../../src/core/contract/SchemaModel.ts"
-import { combine, checkSink, InformationLabel, SinkPolicy } from "../../src/core/labels/Labels.ts"
-import { PlanEffect } from "../../src/core/plan/Plan.ts"
-import { decoderIdentity, type Fact, type Review } from "./air-review.ts"
-import { dischargeFlow, FlowObligation, type FlowExplanation, reviewArgumentFlows } from "./air-flow-review.ts"
+import { canonicalJson, sha256Canonical, type Sha256Digest } from "../Canonical.ts"
+import { fittingToolGrants, ToolGrantPolicy, validateToolGrants } from "../admission/ToolGrant.ts"
+import { hasRefinement, isTrackedValue, type TrackedValue } from "../contract/Decoder.ts"
+import { isRoleWitnessIssuer, type RoleWitnessIssuer } from "../contract/RoleWitness.ts"
+import { FlowRule, validateFlowRules } from "../contract/FlowRules.ts"
+import { modelSchema } from "../contract/SchemaModel.ts"
+import { combine, checkSink, InformationLabel, SinkPolicy } from "../labels/Labels.ts"
+import { PlanEffect } from "../plan/Plan.ts"
+import { decoderIdentity, type Fact, type CheckedProgram } from "../language/check.ts"
+import { dischargeFlow, FlowObligation, type FlowExplanation, reviewArgumentFlows } from "./Flow.ts"
 
-/** Test-only lowering of language-owned typed facts. No host imports this. */
+/** Lowers checked facts into the Plan a supervisor reviews and a run is held to. */
 export const ArgumentEnvelope = Schema.Struct({
   field: Schema.String,
   fixed: Schema.optionalKey(Schema.Json),
@@ -28,7 +28,7 @@ export const CallEnvelope = Schema.Struct({
   approval: Schema.Literals(["program", "exact-batch"]),
   when: Schema.Literals(["reviewed", "staged"])
 })
-export const PrototypePlan = Schema.Struct({
+export const ReviewedPlan = Schema.Struct({
   schemaVersion: Schema.Literal("airlock/review-demo/v3"),
   id: Schema.String,
   nodes: Schema.Array(CallEnvelope),
@@ -37,7 +37,7 @@ export const PrototypePlan = Schema.Struct({
   contextDigest: Schema.String,
   rules: Schema.Array(FlowRule)
 })
-export type PrototypePlan = typeof PrototypePlan.Type
+export type ReviewedPlan = typeof ReviewedPlan.Type
 export interface ReviewSurface {
   readonly grants: readonly ToolGrantPolicy[]
   /** Trusted result labels keyed by exact checker origins, including state. */
@@ -54,27 +54,27 @@ export const ReviewRefusal = Schema.Struct({
   reason: Schema.Literals(["grant", "rules", "unknown-label", "confidentiality", "integrity", "missing-sink", "plan-size", "argument-shape"])
 })
 export type ReviewRefusal = typeof ReviewRefusal.Type
-export interface DemonstrationReview {
-  readonly plan: PrototypePlan
+export interface ReviewReport {
+  readonly plan: ReviewedPlan
   readonly refusals: readonly ReviewRefusal[]
   readonly explanations: readonly FlowExplanation[]
 }
 interface ContextWitness {
-  readonly review: Review
+  readonly review: CheckedProgram
   readonly surface: string
   readonly environment: string
   readonly program: string
-  readonly definitions: readonly { readonly name: string; readonly contract: import("../../src/core/contract/ToolContract.ts").ToolContract.Any; readonly input: unknown; readonly outcome: unknown; readonly summarize: unknown; readonly target: unknown }[]
-  readonly decoders: readonly { readonly name: string; readonly decoder: import("../../src/core/contract/Decoder.ts").TrustedDecoder.Any }[]
+  readonly definitions: readonly { readonly name: string; readonly contract: import("../contract/ToolContract.ts").ToolContract.Any; readonly input: unknown; readonly outcome: unknown; readonly summarize: unknown; readonly target: unknown }[]
+  readonly decoders: readonly { readonly name: string; readonly decoder: import("../contract/Decoder.ts").TrustedDecoder.Any }[]
   readonly bindings: readonly { readonly name: string; readonly schema: unknown; readonly ast: unknown }[]
 }
-const contexts = new WeakMap<DemonstrationReview, ContextWitness>()
-const bindingDescription = (review: Review) => Object.entries(review.environment.bindings ?? {}).map(([name, binding]) => ({
+const contexts = new WeakMap<ReviewReport, ContextWitness>()
+const bindingDescription = (review: CheckedProgram) => Object.entries(review.environment.bindings ?? {}).map(([name, binding]) => ({
   name, value: binding.value, label: binding.label,
   encoded: modelSchema(binding.schema, { identity: JSON.stringify(["binding", name]), side: "encoded" }),
   decoded: modelSchema(binding.schema, { identity: JSON.stringify(["binding", name]), side: "decoded" })
 })).sort((a, b) => a.name < b.name ? -1 : a.name > b.name ? 1 : 0)
-const environmentDescription = (review: Review) => canonicalJson({
+const environmentDescription = (review: CheckedProgram) => canonicalJson({
   granted: [...review.environment.granted].sort(), maxCalls: review.environment.maxCalls,
   maxIterations: review.environment.maxIterations, maxListItems: review.environment.maxListItems,
   tools: Object.entries(review.environment.tools).map(([name, tool]) => ({ name, tag: tool.contract.tag,
@@ -83,7 +83,7 @@ const environmentDescription = (review: Review) => canonicalJson({
   decoders: Object.entries(review.environment.decoders).map(([name, decoder]) => ({ name, version: decoder.version })),
   bindings: bindingDescription(review)
 })
-const sameEnvironment = (review: Review, witness: ContextWitness) => {
+const sameEnvironment = (review: CheckedProgram, witness: ContextWitness) => {
   try { return environmentDescription(review) === witness.environment &&
   witness.definitions.every((definition) => {
     const contract = review.environment.tools[definition.name]?.contract
@@ -97,13 +97,13 @@ const sameEnvironment = (review: Review, witness: ContextWitness) => {
 }
 const literal = new InformationLabel({ confidentiality: "public", integrity: "runtime", provenance: [] })
 const fieldsOf = (value: Fact): readonly (readonly [string, Fact])[] => value.type.kind === "record" ? [...value.type.fields] : [["$", value]]
-const summary = (review: Review, tool: string, publicFields: Record<string, Schema.Json>) => {
+const summary = (review: CheckedProgram, tool: string, publicFields: Record<string, Schema.Json>) => {
   const contract = review.environment.tools[tool]!.contract
   return { tool, version: contract.version, effect: contract.effect, target: `tool:${tool}`, fields: Object.keys(publicFields), public: publicFields, inputBytes: 0 }
 }
 
 /** The candidate Plan remains inspectable on refusal; refusal grants no authority. */
-export const lowerReviewPrototype = (source: string, review: Review, surface: ReviewSurface) => Effect.gen(function* () {
+export const reviewProgram = (source: string, review: CheckedProgram, surface: ReviewSurface) => Effect.gen(function* () {
   const refusals: ReviewRefusal[] = []
   const contracts = Object.fromEntries(Object.entries(review.environment.tools).map(([name, tool]) => [name, tool.contract]))
   const invalid = validateToolGrants(surface.grants, contracts)
@@ -159,11 +159,11 @@ export const lowerReviewPrototype = (source: string, review: Review, surface: Re
   const body = { schemaVersion: "airlock/review-demo/v3" as const, nodes, maximumCalls: review.maximumCalls,
     iterations: review.iterations, contextDigest, rules: [...surface.rules ?? []] }
   const id = yield* sha256Canonical(body)
-  const plan = Schema.decodeUnknownSync(PrototypePlan)({ ...body, id })
+  const plan = Schema.decodeUnknownSync(ReviewedPlan)({ ...body, id })
   if (!Number.isSafeInteger(surface.maxPlanBytes) || surface.maxPlanBytes < 1 || new TextEncoder().encode(canonicalJson(plan)).length > surface.maxPlanBytes) {
     refusals.push({ nodeId: "$", field: "$", reason: "plan-size" })
   }
-  const report = freeze({ plan: freeze(plan), refusals: freeze(refusals), explanations: freeze(explanations) }) satisfies DemonstrationReview
+  const report = freeze({ plan: freeze(plan), refusals: freeze(refusals), explanations: freeze(explanations) }) satisfies ReviewReport
   contexts.set(report, { review, surface: canonicalJson(surface), environment: environmentDescription(review), program: canonicalJson(review.program),
     definitions: Object.entries(review.environment.tools).map(([name, { contract }]) => ({ name, contract, input: contract.input, outcome: contract.outcome, summarize: contract.summarize, target: contract.target })),
     decoders: Object.entries(review.environment.decoders).map(([name, decoder]) => ({ name, decoder })),
@@ -175,7 +175,7 @@ const freeze = <A>(value: A): A => {
   return value
 }
 
-export class InstanceRefused extends Schema.TaggedError<InstanceRefused>()("InstanceRefused", {
+export class PlanRefused extends Schema.TaggedError<PlanRefused>()("PlanRefused", {
   reason: Schema.Literals(["review-refused", "plan-mismatch", "argument", "proof", "grant", "label", "bound", "ended"])
 }) {}
 
@@ -185,13 +185,13 @@ export interface InstanceArgument {
   readonly witness?: unknown
 }
 
-/** Call-time guard demonstration, before any receipt or handler is invoked. */
-export const prototypeInstances = (report: DemonstrationReview, review: Review, surface: ReviewSurface, issuer: RoleWitnessIssuer) => {
+/** Holds each call to its reviewed node before any receipt or handler is invoked. */
+export const planGuard = (report: ReviewReport, review: CheckedProgram, surface: ReviewSurface, issuer: RoleWitnessIssuer) => {
   const counts = new Map<string, number>(), tools = new Map<string, number>()
   let ended = report.refusals.length > 0
   return (instance: { readonly planId: string; readonly nodeId: string; readonly occurrence: number; readonly tool: string },
     input: Readonly<Record<string, InstanceArgument>>, control: TrackedValue) => Effect.gen(function* () {
-    const fail = (reason: InstanceRefused["reason"]) => { ended = true; return Effect.fail(new InstanceRefused({ reason })) }
+    const fail = (reason: PlanRefused["reason"]) => { ended = true; return Effect.fail(new PlanRefused({ reason })) }
     if (ended) return yield* fail(report.refusals.length > 0 ? "review-refused" : "ended")
     const context = contexts.get(report)
     if (context?.review !== review || context.surface !== canonicalJson(surface) || context.program !== canonicalJson(review.program) || !sameEnvironment(review, context)) return yield* fail("plan-mismatch")

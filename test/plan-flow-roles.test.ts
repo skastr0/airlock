@@ -9,9 +9,9 @@ import { defineToolContract } from "../src/core/contract/ToolContract.ts"
 import { combine, InformationLabel, SinkPolicy } from "../src/core/labels/Labels.ts"
 import { run } from "./support/CoreTest.ts"
 import { CompanyRecipient, environment } from "./support/air-review-fixtures.ts"
-import { lowerReviewPrototype, prototypeInstances, type ReviewSurface } from "./support/air-plan-review.ts"
-import { reviewPrototype } from "./support/air-review.ts"
-import { runReviewedPrototype } from "./support/air-review-evaluator.ts"
+import { reviewProgram, planGuard, type ReviewSurface } from "../src/core/review/Review.ts"
+import { checkSource } from "../src/core/language/check.ts"
+import { runChecked } from "../src/core/language/run.ts"
 
 const Get = defineToolContract({ name: "http.get", version: "1", effect: "capture",
   input: Schema.Struct({ url: Schema.String }), output: Schema.Struct({ text: Schema.String }), flow: { sinks: ["url"] } })
@@ -29,7 +29,7 @@ if choice.state == "done" {
 }
 return true`
 const prepare = async (ceiling: "public" | "private") => {
-  const review = await run(reviewPrototype(source, env))
+  const review = await run(checkSource(source, env))
   const root = `choice.read@${review.calls[0]!.span.start}`
   const state = `${root}.state`, index = `${root}.result.index`, url = `${root}.result.url`
   const surface: ReviewSurface = {
@@ -56,7 +56,7 @@ describe("test-only: Plan enforces separate payload and selection roles", () => 
   it("requires a control release for private selection, while a data release stays scoped to payload", async () => {
     const issuer = createRoleWitnessIssuer("role-run")
     const { review, surface, index, url } = await prepare("public")
-    const wrong = await run(lowerReviewPrototype(source, review, { ...surface, rules: [rule("data", "url"), rule("data", "index")] }))
+    const wrong = await run(reviewProgram(source, review, { ...surface, rules: [rule("data", "url"), rule("data", "index")] }))
     const selected = wrong.plan.nodes[2]!
     expect(selected.arguments[0]!.dependencies).toEqual([])
     expect(selected.arguments[0]!.control).toContain(index)
@@ -65,32 +65,32 @@ describe("test-only: Plan enforces separate payload and selection roles", () => 
     expect(wrong.refusals).toEqual([{ nodeId: selected.id, field: "url", reason: "confidentiality" }])
 
     const authored = { ...surface, rules: [rule("data", "url"), rule("control", "index")] }
-    const accepted = await run(lowerReviewPrototype(source, review, authored))
+    const accepted = await run(reviewProgram(source, review, authored))
     expect(accepted.refusals).toEqual([])
     expect(accepted.plan.nodes[1]!.arguments[0]!.dependencies).toContain(url)
     const node = accepted.plan.nodes[2]!
     const selection = token(index)
     const input = { url: witnessed(issuer, labeledValue("https://example.com/a", literal), selection.label) }
     const instance = { planId: accepted.plan.id, nodeId: node.id, occurrence: 1, tool: node.tool }
-    expect(await run(failure(prototypeInstances(accepted, review, authored, issuer)(instance, input, labeledValue(false, literal))))).toBe("accepted")
+    expect(await run(failure(planGuard(accepted, review, authored, issuer)(instance, input, labeledValue(false, literal))))).toBe("accepted")
     expect(selection.label.confidentiality).toBe("private")
   })
 
   it("rejects wrong-role origins even when private sinks need no author release", async () => {
     const issuer = createRoleWitnessIssuer("role-run")
     const { review, surface, state, index, url } = await prepare("private")
-    const report = await run(lowerReviewPrototype(source, review, surface))
+    const report = await run(reviewProgram(source, review, surface))
     expect(report.refusals).toEqual([])
     const node = report.plan.nodes[2]!
     const instance = { planId: report.plan.id, nodeId: node.id, occurrence: 1, tool: node.tool }
     const pc = token(state, literal)
     const selected = witnessed(issuer, labeledValue("https://example.com/a", literal), token(index).label)
-    expect(await run(failure(prototypeInstances(report, review, surface, issuer)(instance, { url: selected }, pc)))).toBe("accepted")
+    expect(await run(failure(planGuard(report, review, surface, issuer)(instance, { url: selected }, pc)))).toBe("accepted")
     const wrongData = { ...selected, value: labeledValue("https://example.com/a", token(index).label) }
-    expect(await run(failure(prototypeInstances(report, review, surface, issuer)(instance, { url: wrongData }, pc)))).toBe("label")
-    expect(await run(failure(prototypeInstances(report, review, surface, issuer)(instance, { url: witnessed(issuer, labeledValue("https://example.com/a", literal), token(url).label) }, pc)))).toBe("label")
+    expect(await run(failure(planGuard(report, review, surface, issuer)(instance, { url: wrongData }, pc)))).toBe("label")
+    expect(await run(failure(planGuard(report, review, surface, issuer)(instance, { url: witnessed(issuer, labeledValue("https://example.com/a", literal), token(url).label) }, pc)))).toBe("label")
     const payload = report.plan.nodes[1]!
-    expect(await run(failure(prototypeInstances(report, review, surface, issuer)({ ...instance, nodeId: payload.id }, {
+    expect(await run(failure(planGuard(report, review, surface, issuer)({ ...instance, nodeId: payload.id }, {
       url: witnessed(issuer, labeledValue("https://example.com/a", literal), token(url).label)
     }, pc)))).toBe("label")
   })
@@ -98,7 +98,7 @@ describe("test-only: Plan enforces separate payload and selection roles", () => 
   it("falls back on missing, copied, stale and wrong-value witnesses and ends rejected runs", async () => {
     const issuer = createRoleWitnessIssuer("role-run")
     const { review, surface, index } = await prepare("private")
-    const report = await run(lowerReviewPrototype(source, review, surface))
+    const report = await run(reviewProgram(source, review, surface))
     const node = report.plan.nodes[2]!, pc = labeledValue(false, literal)
     const instance = { planId: report.plan.id, nodeId: node.id, occurrence: 1, tool: node.tool }
     const selected = witnessed(issuer, labeledValue("https://example.com/a", literal), token(index).label)
@@ -110,22 +110,22 @@ describe("test-only: Plan enforces separate payload and selection roles", () => 
       { ...selected, value: labeledValue(selected.value.value, selected.value.label) },
       { ...selected, value: { ...selected.value } }
     ]) {
-      const guard = prototypeInstances(report, review, surface, issuer)
+      const guard = planGuard(report, review, surface, issuer)
       expect(await run(failure(guard(instance, { url: attack }, pc)))).toBe("label")
       expect(await run(failure(guard(instance, { url: selected }, pc)))).toBe("ended")
     }
-    expect(await run(failure(prototypeInstances(report, review, surface, { ...issuer })(instance, { url: selected }, pc)))).toBe("label")
+    expect(await run(failure(planGuard(report, review, surface, { ...issuer })(instance, { url: selected }, pc)))).toBe("label")
   })
 
   it("conservatively refuses a selected value whose owned token already joins control", async () => {
     const issuer = createRoleWitnessIssuer("role-run")
     const { review, surface, index } = await prepare("private")
-    const report = await run(lowerReviewPrototype(source, review, surface))
+    const report = await run(reviewProgram(source, review, surface))
     const node = report.plan.nodes[2]!
     // Without a role witness, aggregate secrecy is checked as data, never
     // lowered by re-minting this exact value with the public payload label.
     const aggregate = labeledValue("https://example.com/a", token(index).label)
-    expect(await run(failure(prototypeInstances(report, review, surface, issuer)({ planId: report.plan.id, nodeId: node.id, occurrence: 1, tool: node.tool }, {
+    expect(await run(failure(planGuard(report, review, surface, issuer)({ planId: report.plan.id, nodeId: node.id, occurrence: 1, tool: node.tool }, {
       url: { value: aggregate }
     }, labeledValue(false, literal))))).toBe("label")
     expect(aggregate.label.confidentiality).toBe("private")
@@ -135,11 +135,11 @@ describe("test-only: Plan enforces separate payload and selection roles", () => 
     const issuer = createRoleWitnessIssuer("evaluator-run")
     const { review, surface, state } = await prepare("private")
     const policy = { ...surface, sources: { ...surface.sources, [state]: privateLabel } }
-    const report = await run(lowerReviewPrototype(source, review, policy))
+    const report = await run(reviewProgram(source, review, policy))
     expect(report.refusals).toEqual([])
-    const guard = prototypeInstances(report, review, policy, issuer)
+    const guard = planGuard(report, review, policy, issuer)
     const resolved: string[] = []
-    const outcome = await run(runReviewedPrototype(review, {
+    const outcome = await run(runChecked(review, {
       roleIssuer: issuer,
       beforeCall: (call) => {
         const node = report.plan.nodes.find((node) => node.sourceOffset === call.span.start)!
@@ -169,13 +169,13 @@ if choice.state == "done" {
   if recipient.state == "ok" { mail.send({to:recipient.value,subject:"Hi",body:"fixed"}) }
 }
 return true`
-    const review = await run(reviewPrototype(text, env))
+    const review = await run(checkSource(text, env))
     const root = `choice.read@${review.calls[0]!.span.start}`
     const sink = new SinkPolicy({ id: "private-mail", confidentialityCeiling: "private", minimumIntegrity: "untrusted" })
     const surface = { ...(await prepare("private")).surface,
       sources: { [`${root}.state`]: privateLabel, [`${root}.result.index`]: privateLabel },
       sinks: { "mail.send": { to: sink, subject: sink, body: sink } } }
-    const report = await run(lowerReviewPrototype(text, review, surface))
+    const report = await run(reviewProgram(text, review, surface))
     expect(report.refusals).toEqual([])
     const send = report.plan.nodes[1]!
     expect(send).toMatchObject({ effect: "request", approval: "exact-batch", when: "staged" })
@@ -183,9 +183,9 @@ return true`
       control: expect.arrayContaining([`${root}.result.index`]), proofs: [JSON.stringify(["companyRecipient", "1"])] })
     expect(send.arguments.every((argument) => argument.control.includes(`${root}.result.index`))).toBe(true)
     const issuer = createRoleWitnessIssuer("selected-request")
-    const guard = prototypeInstances(report, review, surface, issuer)
+    const guard = planGuard(report, review, surface, issuer)
     let sends = 0
-    const outcome = await run(runReviewedPrototype(review, {
+    const outcome = await run(runChecked(review, {
       roleIssuer: issuer,
       beforeCall: (call) => {
         const node = report.plan.nodes.find((node) => node.sourceOffset === call.span.start)!

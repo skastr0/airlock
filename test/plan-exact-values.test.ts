@@ -9,9 +9,9 @@ import { InformationLabel, SinkPolicy } from "../src/core/labels/Labels.ts"
 import { AuthorityAdmission, InvokeNode, NodeId, Plan, PlanDraft, PlanId, Receipt, ReceiptId,
   decodePlanDraftJson, decodePlanJson, decodeReceiptJson, encodePlanDraftJson, encodePlanJson, encodeReceiptJson } from "../src/core/plan/Plan.ts"
 import { run } from "./support/CoreTest.ts"
-import { lowerReviewPrototype, prototypeInstances, type ReviewSurface } from "./support/air-plan-review.ts"
+import { reviewProgram, planGuard, type ReviewSurface } from "../src/core/review/Review.ts"
 import { environment } from "./support/air-review-fixtures.ts"
-import { reviewPrototype } from "./support/air-review.ts"
+import { checkSource } from "../src/core/language/check.ts"
 
 const literal = new InformationLabel({ confidentiality: "public", integrity: "runtime", provenance: [] })
 const NumberTool = defineToolContract({ name: "number.echo", version: "1", effect: "capture",
@@ -55,31 +55,31 @@ describe("Plan boundaries preserve exact finite JSON numbers", () => {
   it("distinguishes signed zero in approval identity, including unused bindings", async () => {
     const surface = await policy(), negative = env(), positive = env()
     positive.bindings.zero.value = 0
-    const a = await run(lowerReviewPrototype(source, await run(reviewPrototype(source, negative)), surface))
-    const b = await run(lowerReviewPrototype(source, await run(reviewPrototype(source, positive)), surface))
+    const a = await run(reviewProgram(source, await run(checkSource(source, negative)), surface))
+    const b = await run(reviewProgram(source, await run(checkSource(source, positive)), surface))
     expect(a.refusals).toEqual([])
     expect(b.refusals).toEqual([])
     expect(Object.is(a.plan.nodes[0]!.arguments[0]!.fixed, -0)).toBe(true)
     expect(a.plan.contextDigest).not.toBe(b.plan.contextDigest)
     expect(a.plan.id).not.toBe(b.plan.id)
     const changed = source.replace('"-0"', '"0"')
-    const c = await run(lowerReviewPrototype(changed, await run(reviewPrototype(changed, negative)), {
+    const c = await run(reviewProgram(changed, await run(checkSource(changed, negative)), {
       ...surface, grants: [toolGrant(NumberTool, { id: "positive-zero", where: { n: { equals: 0 } } })]
     }))
     expect(c.plan.id).not.toBe(a.plan.id)
   })
 
   it("refuses positive zero for a fixed negative-zero grant and Plan argument", async () => {
-    const surface = await policy(), review = await run(reviewPrototype(source, env()))
-    const report = await run(lowerReviewPrototype(source, review, surface))
-    const wrongGrant = await run(lowerReviewPrototype(source, review, { ...surface,
+    const surface = await policy(), review = await run(checkSource(source, env()))
+    const report = await run(reviewProgram(source, review, surface))
+    const wrongGrant = await run(reviewProgram(source, review, { ...surface,
       grants: [toolGrant(NumberTool, { id: "positive-zero", where: { n: { equals: 0 } } })] }))
     expect(wrongGrant.refusals).toEqual([{ nodeId: "call:1", field: "$", reason: "grant" }])
     const node = report.plan.nodes[0]!, control = labeledValue(false, literal)
     const instance = { planId: report.plan.id, nodeId: node.id, occurrence: 1, tool: node.tool }
-    expect(await run(prototypeInstances(report, review, surface, createRoleWitnessIssuer("zero-run"))(
+    expect(await run(planGuard(report, review, surface, createRoleWitnessIssuer("zero-run"))(
       instance, { n: { value: labeledValue(-0, literal) } }, control))).toMatchObject(instance)
-    const guard = prototypeInstances(report, review, surface, createRoleWitnessIssuer("zero-run"))
+    const guard = planGuard(report, review, surface, createRoleWitnessIssuer("zero-run"))
     const result = await run(guard(instance, { n: { value: labeledValue(0, literal) } }, control).pipe(Effect.result))
     expect(Result.isFailure(result) && result.failure.reason).toBe("argument")
     const retry = await run(guard(instance, { n: { value: labeledValue(-0, literal) } }, control).pipe(Effect.result))
@@ -88,10 +88,10 @@ describe("Plan boundaries preserve exact finite JSON numbers", () => {
 
   it("ends an existing guard when an unused binding changes from negative to positive zero", async () => {
     const mutable = env(), surface = await policy()
-    const review = await run(reviewPrototype(source, mutable))
-    const report = await run(lowerReviewPrototype(source, review, surface))
+    const review = await run(checkSource(source, mutable))
+    const report = await run(reviewProgram(source, review, surface))
     const node = report.plan.nodes[0]!
-    const guard = prototypeInstances(report, review, surface, createRoleWitnessIssuer("zero-run"))
+    const guard = planGuard(report, review, surface, createRoleWitnessIssuer("zero-run"))
     mutable.bindings.zero.value = 0
     const result = await run(guard({ planId: report.plan.id, nodeId: node.id, occurrence: 1, tool: node.tool },
       { n: { value: labeledValue(-0, literal) } }, labeledValue(false, literal)).pipe(Effect.result))
