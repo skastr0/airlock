@@ -136,6 +136,14 @@ export const LANGUAGE_PRIMER = [
   "Every call returns a receipt. Check `receipt.state` before reading anything else:",
   "\"done\" has `receipt.result`; \"staged\" was recorded for a person to approve and has no result;",
   `"refused" did nothing and says why: ${REFUSED_RECEIPT_SHAPE}.`,
+  "`receipt.result` is readable only where the state is known to be \"done\":",
+  "inside `if receipt.state == \"done\" { ... }` or after `assert receipt.state == \"done\", \"...\"`.",
+  "The whole program is checked before anything runs: an unknown name, field or action, or a value of the",
+  "wrong type, is reported with its line and column, and nothing happens.",
+  "Every call the program could make is counted before it runs. A `for` over a list counts that list's",
+  "declared maximum length; a range counts its literal ends, or the whole loop budget if they are not literal.",
+  "A program that could exceed its call or loop budget is refused, as is one that would pass data to an",
+  "action that may not receive it; the refusal names the call and field.",
   "The program's result is what it returns."
 ].join("\n")
 
