@@ -61,12 +61,16 @@ describe("test-only: review binds expanded language boundaries", () => {
     expect(Result.isFailure(retry) && retry.failure.reason).toBe("ended")
   })
 
-  it("refuses a binding-dependent argument until the typed source bridge can represent it", async () => {
+  it("labels a binding-dependent argument with the binding's label, which no rule can release", async () => {
     const text = "http.get({url:config.token}); return true"
     const review = await run(checkSource(text, withBinding()))
-    const report = await run(reviewProgram(text, review, { ...await policy(), sources: { "binding.config.token": literal } }))
-    expect(report.refusals).toEqual([{ nodeId: report.plan.nodes[0]!.id, field: "url", reason: "unknown-label" }])
-    expect(report.explanations).toContainEqual(expect.objectContaining({ origin: "binding.config.token", reason: "unknown-label" }))
+    const accepted = await run(reviewProgram(text, review, { ...await policy(), sources: { "binding.config.token": literal } }))
+    expect(accepted.refusals).toEqual([])
+    const refused = await run(reviewProgram(text, review, { ...await policy(), sources: { "binding.config.token": privateLabel } }))
+    expect(refused.refusals).toEqual([{ nodeId: refused.plan.nodes[0]!.id, field: "url", reason: "confidentiality" }])
+    const explanation = refused.explanations.find((entry) => entry.origin === "binding.config.token")
+    expect(explanation).toMatchObject({ reason: "confidentiality" })
+    expect(explanation).not.toHaveProperty("allowWith")
   })
 
   it("reports opaque request input as dependent and refuses an unsupported instance shape", async () => {
@@ -119,15 +123,17 @@ describe("test-only: review binds expanded language boundaries", () => {
     const review = await run(checkSource(text, environment))
     const read = review.calls.find((call) => call.tool === "mail.read")!
     const root = `mail.read@${read.span.start}`
-    const surface = { ...await policy(), sources: { [`${root}.state`]: privateLabel, [`${root}.${suffix}`]: privateLabel },
+    const surface = { ...await policy(), sources: Object.fromEntries(review.calls.flatMap((call) => [...call.control, ...(call.arguments.type.kind === "record" ? [...call.arguments.type.fields.values()].flatMap((fact) => [...fact.dataOrigins, ...fact.controlOrigins]) : [])]).filter((origin) => origin.startsWith(`${root}.`)).map((origin) => [origin, privateLabel])),
       sinks: { "mail.read": { id: urlSink }, "http.get": { url: urlSink } },
       rules: (["data", "control"] as const).map((mode) => releaseRule(Read, Get, {
         id: `state.${mode}`, source: { part: "receipt", field: "state" }, sink: "url", mode, from: "private", to: "public"
       })) }
     const report = await run(reviewProgram(text, review, surface))
     const get = report.plan.nodes.find((node) => node.tool === "http.get")!
-    expect(report.refusals).toContainEqual({ nodeId: get.id, field: "url", reason: "unknown-label" })
+    expect(report.refusals).toContainEqual({ nodeId: get.id, field: "url", reason: "confidentiality" })
     expect(get.arguments[0]!.flows.find((flow) => flow.origin === `${root}.${suffix}`)).toMatchObject({ rules: [] })
-    expect(report.explanations).toContainEqual(expect.objectContaining({ origin: `${root}.${suffix}`, reason: "unknown-label" }))
+    const explanation = report.explanations.find((entry) => entry.origin === `${root}.${suffix}`)
+    expect(explanation).toMatchObject({ reason: "confidentiality" })
+    expect(explanation).not.toHaveProperty("allowWith")
   })
 })

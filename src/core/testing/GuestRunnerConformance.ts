@@ -1,6 +1,7 @@
-import { type Crypto, Effect, Fiber, Layer, type Scope } from "effect"
+import { type Crypto, Effect, Fiber, Layer, Schema, type Scope } from "effect"
 import { toolGrant } from "../admission/ToolGrant.ts"
 import { defineAirlock } from "../airlock/Airlock.ts"
+import { defineToolContract } from "../contract/ToolContract.ts"
 import type { Ledger } from "../ledger/Ledger.ts"
 import type { OutboxStore } from "../outbox/OutboxStore.ts"
 import { type GuestLimits, type GuestOutcome, GuestRunner } from "../runner/GuestRunner.ts"
@@ -20,9 +21,19 @@ interface Env {
   readonly dispatched: Array<string>
 }
 
+/** A read answering the number it is given, so a program can hold a number review cannot know. */
+const NumberEcho = defineToolContract({
+  name: "number.echo",
+  version: "1",
+  input: Schema.Struct({ value: Schema.Number }),
+  output: Schema.Struct({ value: Schema.Number }),
+  effect: "capture"
+})
+
 const airlock = defineAirlock({
-  contracts: [MailList, MailSend, LabelAdd, LabelRemove],
+  contracts: [MailList, MailSend, LabelAdd, LabelRemove, NumberEcho],
   implement: {
+    "number.echo": ({ value }) => ({ value }),
     "mail.list": async ({ mailbox }, { env }: { env: Env }) => {
       // A provider that takes far longer than any test's deadline.
       if (mailbox === "slow") await new Promise((resolve) => setTimeout(resolve, 5_000))
@@ -40,7 +51,8 @@ const airlock = defineAirlock({
     budget: { maxCalls: 64, maxInputBytes: 1_000_000 },
     toolGrants: [
       toolGrant(MailList, { id: "read", when: "now", retention: "keep" }),
-      toolGrant(MailSend, { id: "company", where: { to: { endsWith: "@example.com" } } })
+      toolGrant(MailSend, { id: "company", where: { to: { endsWith: "@example.com" } } }),
+      toolGrant(NumberEcho, { id: "numbers", when: "now" })
     ]
   })
 })
@@ -105,6 +117,7 @@ export const guestRunnerConformance = (
         const workspace = { root: "/work", writable: ["a", "b"] }
         const outcome = yield* run(current, env, `
           let inbox = mail.list({ mailbox: workspace.root, query: "q" })
+          assert inbox.state == "done"
           return { root: workspace.root, last: workspace.writable[1], enabled: enabled, inbox: inbox.result }`, {
           bindings: { workspace, enabled: true }
         })
@@ -114,8 +127,10 @@ export const guestRunnerConformance = (
           toolCalls: 1
         })
         // A bound name is a value, never a tool, and a name the host did not bind is still unbound.
-        same(yield* run(current, env, "return workspace({}).state", { bindings: { workspace } }), { ok: true, result: "refused", toolCalls: 1 })
-        same(reasonOf(yield* run(current, env, "return workspace.root")), "execution_failed")
+        same(yield* run(current, env, "return workspace({}).state", { bindings: { workspace } }),
+          { ok: false, reason: "invalid_code", toolCalls: 0, at: { line: 1, column: 8 }, fault: "invalid-call" })
+        same(yield* run(current, env, "return workspace.root"),
+          { ok: false, reason: "invalid_code", toolCalls: 0, at: { line: 1, column: 8 }, fault: "unbound-name" })
         const getter = Object.defineProperty({}, "secret", { enumerable: true, get: () => "leaked" })
         same([
           yield* run(current, env, "return 1", { bindings: { big: "x".repeat(200) }, limits: { maxToolResultBytes: 64 } }),
@@ -132,6 +147,7 @@ export const guestRunnerConformance = (
         const outcome = yield* run(current, env, `
           let listed = ${list}
           let sent = mail.send({ to: "ada@example.com", subject: "s", body: "b" })
+          assert listed.state == "done"
           return { read: listed.state, listed: listed.result, sent: sent }`)
         holds(outcome.ok, "the program ran")
         const result = (outcome.ok ? outcome.result : {}) as {
@@ -160,17 +176,37 @@ export const guestRunnerConformance = (
         same(env.dispatched.length, 4)
       }))
 
+    test("refuses before the run a call whose fixed arguments no grant accepts, and a read of a result it may not have", () =>
+      Effect.gen(function* () {
+        const current = yield* world
+        const env = fresh()
+        const outside = yield* run(current, env, `
+          let sent = mail.send({ to: "eve@elsewhere.test", subject: "s", body: "b" })
+          ${list}
+          return sent.state`)
+        same(outside, { ok: false, reason: "review_refused", toolCalls: 0, refusals: [{ nodeId: "call:1", field: "$", reason: "grant" }] })
+        // Reading the result of a call that may not be done is the program's mistake, with a fixed word.
+        const careless = yield* run(current, env, `
+          let sent = mail.send({ to: "ada@example.com", subject: "s", body: "b" })
+          return sent.result`, { runId: "careless" })
+        same(careless, { ok: false, reason: "invalid_code", toolCalls: 0, at: { line: 3, column: 18 }, fault: "missing-field" })
+        same(env.dispatched, [], "nothing of a refused program ran")
+      }))
+
     test("hands a refused call to the program as a receipt that says which tool and which grant", () =>
       Effect.gen(function* () {
         const current = yield* world
         const env = fresh()
+        // The address comes from a result, so only the call itself can refuse it.
         const outcome = yield* run(current, env, `
-          let sent = mail.send({ to: "eve@elsewhere.test", subject: "s", body: "b" })
+          let found = mail.list({ mailbox: "eve@elsewhere.test", query: "q" })
+          assert found.state == "done"
+          let sent = mail.send({ to: found.result.ids[0], subject: "s", body: "b" })
           if sent.state == "refused" {
             return { refused: sent, then: ${list}.state }
           }
           return "sent"`)
-        holds(outcome.ok && outcome.toolCalls === 2, "the program went on after the refusal")
+        holds(outcome.ok && outcome.toolCalls === 3, "the program went on after the refusal")
         const result = (outcome.ok ? outcome.result : {}) as {
           readonly refused: { readonly state: string; readonly refusal: { readonly code: string; readonly message: string } }
           readonly then: string
@@ -182,24 +218,15 @@ export const guestRunnerConformance = (
           result.refused.refusal.message.includes("mail.send is not allowed") && result.refused.refusal.message.includes("company"),
           "the program is told which tool and which grant"
         )
-        same(env.dispatched, ["mail.list"], "the refused send reached nothing")
-        // Reading the result of a call that was not done is the program's mistake, with a fixed word.
-        const careless = yield* run(current, env, `
-          let sent = mail.send({ to: "eve@elsewhere.test", subject: "s", body: "b" })
-          return sent.result`, { runId: "careless" })
-        same(careless, { ok: false, reason: "execution_failed", toolCalls: 1, at: { line: 3, column: 18 }, fault: "missing-field" })
+        same(env.dispatched, ["mail.list", "mail.list"], "the refused send reached nothing")
       }))
 
-    test("refuses a tool the session does not grant, and any name that is not a tool", () =>
+    test("refuses a tool the session does not grant, and any name that is not a tool, before anything runs", () =>
       Effect.gen(function* () {
         const current = yield* world
         const env = fresh()
         const ungranted = yield* run(current, env, `return label.add({ messageId: "m", label: "l" })`)
-        same(ungranted, {
-          ok: true,
-          result: { state: "refused", refusal: { code: "unknown-tool", message: "label.add is not a tool this session grants" } },
-          toolCalls: 1
-        })
+        same(ungranted, { ok: false, reason: "invalid_code", toolCalls: 0, at: { line: 1, column: 8 }, fault: "invalid-call" })
         // The words a program in another language would reach for are only names here.
         // Some are assembled, so that this file, which only quotes programs, names no host global or wire call itself.
         const [load, host, wire] = ["req" + "uire", "pro" + "cess", "fet" + "ch"]
@@ -213,11 +240,11 @@ export const guestRunnerConformance = (
           `__proto__({})`
         ]) {
           const outcome = yield* run(current, env, `return ${source}.refusal.code`)
-          same(outcome, { ok: true, result: "unknown-tool", toolCalls: 1 }, source)
+          same(outcome, { ok: false, reason: "invalid_code", toolCalls: 0, at: { line: 1, column: 8 }, fault: "invalid-call" }, source)
         }
         for (const source of [`return ${host}`, "return globalThis", "return env.MAIL_TOKEN", "return mail", "return this"]) {
           const outcome = yield* run(current, env, source)
-          same(outcome.ok ? "ok" : [outcome.reason, outcome.fault], ["execution_failed", "unbound-name"], source)
+          same(outcome.ok ? "ok" : [outcome.reason, outcome.toolCalls, outcome.fault], ["invalid_code", 0, "unbound-name"], source)
         }
         for (const source of ["import fs", "return `x`", "return $HOME", "let f = (x) => x", "return new Date()", "return a ? b : c"]) {
           same(reasonOf(yield* run(current, env, source)), "invalid_code", source)
@@ -225,20 +252,22 @@ export const guestRunnerConformance = (
         same(env.dispatched, [])
       }))
 
-    test("fails the run at the call limit and at the session's budget", () =>
+    test("refuses before the run a program that could pass the call limit, and fails the run at the session's budget", () =>
       Effect.gen(function* () {
         const current = yield* world
         const env = fresh()
         const limited = yield* run(current, env, `for index in 0..5 { ${list} }\nreturn "finished"`, {
           limits: { maxToolCalls: 2 }
         })
-        same(limited, { ok: false, reason: "tool_call_limit", toolCalls: 2 })
-        same(env.dispatched.length, 2, "nothing past the limit was dispatched")
-        const spent = yield* run(current, fresh(), `for index in 0..70 { ${list} }\nreturn "finished"`, {
+        same(limited, { ok: false, reason: "review_refused", toolCalls: 0, refusals: [{ nodeId: "$", field: "$", reason: "bound" }] })
+        same(env.dispatched.length, 0, "nothing of a program past the limit was dispatched")
+        const budget = fresh()
+        const spent = yield* run(current, budget, `for index in 0..70 { ${list} }\nreturn "finished"`, {
           runId: "budget",
           limits: { maxToolCalls: 100 }
         })
         same(reasonOf(spent), "tool_call_limit", "the policy's 64 calls are the session's limit")
+        same(budget.dispatched.length, 64, "nothing past the budget was dispatched")
       }))
 
     test("refuses an oversized, missing or surplus tool input before anything is dispatched", () =>
@@ -256,14 +285,14 @@ export const guestRunnerConformance = (
           limits: { maxDepth: 2 }
         })
         const wrong = yield* run(current, env, `return mail.list("inbox").refusal.code`)
-        same([large, missing, surplus, deep, wrong].map(reasonOf), [
-          "tool_input_limit",
-          "tool_input_invalid",
-          "tool_input_invalid",
-          "tool_input_limit",
-          "ok"
+        // Only the size of a built input is left for the call to find; the contract's shape is checked before the run.
+        same([large, missing, surplus, deep, wrong].map((outcome) => outcome.ok ? "ok" : `${outcome.reason}/${outcome.toolCalls}`), [
+          "tool_input_limit/1",
+          "invalid_code/0",
+          "invalid_code/0",
+          "invalid_code/0",
+          "invalid_code/0"
         ])
-        holds(wrong.ok && wrong.result === "invalid-input", "an input of the wrong shape is refused by the contract")
         same(env.dispatched, [])
       }))
 
@@ -275,10 +304,18 @@ export const guestRunnerConformance = (
           limits: { maxOutputBytes: 4_096, maxToolInputBytes: 16_384 }
         })
         same(output, { ok: false, reason: "output_limit", toolCalls: 0 })
-        // Forty doublings would be a terabyte. The run stops at the first string past the limit.
+        // Forty doublings would be a terabyte. Review folds no constant that long, and the run
+        // stops at the first string past the limit, whether it began as a constant or a result.
         const forty = Array.from({ length: 40 }, (_, index) => `let s${index + 1} = s${index} + s${index}`).join("\n")
-        const string = yield* run(current, fresh(), `let s0 = "xx"\n${forty}\nreturn 1`)
-        same(reasonOf(string), "value_limit")
+        const constant = yield* run(current, fresh(), `let s0 = "xx"\n${forty}\nreturn 1`)
+        same(constant.ok ? "ok" : `${constant.reason}/${constant.toolCalls}`, "value_limit/0")
+        const string = yield* run(current, fresh(), `
+          let found = ${list}
+          assert found.state == "done"
+          let s0 = found.result.ids[0]
+          ${forty}
+          return 1`)
+        same(string.ok ? "ok" : `${string.reason}/${string.toolCalls}`, "value_limit/1")
         // Shared structure: four short lines name a value of thousands of nodes, forty would name 8^40.
         const shared = Array.from({ length: 40 }, (_, index) => {
           const previous = `v${index}`
@@ -288,7 +325,7 @@ export const guestRunnerConformance = (
         same(nodes, { ok: false, reason: "value_limit", toolCalls: 0, at: { line: 5, column: 10 } })
       }))
 
-    test("stops a loop at the iteration budget, counted across every loop", () =>
+    test("refuses before the run a program whose loops could pass the iteration budget, counted across every loop", () =>
       Effect.gen(function* () {
         const current = yield* world
         const env = fresh()
@@ -299,26 +336,33 @@ export const guestRunnerConformance = (
           }
           return ${list}`)
         const within = yield* run(current, env, `for index in 0..900 { let twice = index * 2 }\nreturn "done"`)
-        same([long, nested, within].map(reasonOf), ["loop_limit", "loop_limit", "ok"])
-        same(env.dispatched, [], "a run over its budget calls nothing afterwards")
+        const bound = { ok: false, reason: "review_refused", toolCalls: 0, refusals: [{ nodeId: "$", field: "$", reason: "bound" }] }
+        same([long, nested, within], [bound, bound, { ok: true, result: "done", toolCalls: 0 }])
+        same(env.dispatched, [], "a program over its budget calls nothing")
       }))
 
     test("reduces a program's own failure to a fixed reason and a place, with none of its text", () =>
       Effect.gen(function* () {
         const current = yield* world
+        // A number only a result holds, so its mistakes can only be found while running.
+        const held = (value: number) => `let secret_detail = number.echo({ value: ${value} })\nassert secret_detail.state == "done"\n`
         const cases: ReadonlyArray<readonly [string, unknown]> = [
           [`assert 1 == 2, "secret detail"`, { ok: false, reason: "assert_failed", toolCalls: 0, at: { line: 1, column: 1 } }],
-          [`let ok = 1\nreturn secret_detail`, { ok: false, reason: "execution_failed", toolCalls: 0, at: { line: 2, column: 8 }, fault: "unbound-name" }],
-          [`let record = { a: 1 }\nreturn record.secret_detail`, { ok: false, reason: "execution_failed", toolCalls: 0, at: { line: 2, column: 8 }, fault: "missing-field" }],
-          [`return [1]["secret_detail"]`, { ok: false, reason: "execution_failed", toolCalls: 0, at: { line: 1, column: 8 }, fault: "invalid-index" }],
+          [`let ok = 1\nreturn secret_detail`, { ok: false, reason: "invalid_code", toolCalls: 0, at: { line: 2, column: 8 }, fault: "unbound-name" }],
+          [`let record = { a: 1 }\nreturn record.secret_detail`, { ok: false, reason: "invalid_code", toolCalls: 0, at: { line: 2, column: 8 }, fault: "missing-field" }],
+          [`return [1]["secret_detail"]`, { ok: false, reason: "invalid_code", toolCalls: 0, at: { line: 1, column: 8 }, fault: "invalid-index" }],
           [`return [1][3]`, { ok: false, reason: "index_out_of_range", toolCalls: 0, at: { line: 1, column: 8 } }],
-          [`return 1 / 0`, { ok: false, reason: "arithmetic_failure", toolCalls: 0, at: { line: 1, column: 8 }, fault: "zero" }],
-          [`let large = 9007199254740991\nreturn large * large`, { ok: false, reason: "arithmetic_failure", toolCalls: 0, at: { line: 2, column: 8 }, fault: "overflow" }],
-          [`let half = 1 / 2\nfor index in 0..half { let twice = index }`, { ok: false, reason: "range_bound", toolCalls: 0, at: { line: 2, column: 1 } }],
-          [`return "secret detail" + 1`, { ok: false, reason: "execution_failed", toolCalls: 0, at: { line: 1, column: 8 }, fault: "invalid-operation" }],
-          [`return { a: 1, a: 2 }`, { ok: false, reason: "execution_failed", toolCalls: 0, at: { line: 1, column: 16 }, fault: "duplicate-field" }],
-          [`let call = [1]\nreturn call[0]({})`, { ok: false, reason: "execution_failed", toolCalls: 0, at: { line: 2, column: 8 }, fault: "invalid-call" }],
-          [`let secret_detail = 1\nlet secret_detail = 2`, { ok: false, reason: "execution_failed", toolCalls: 0, at: { line: 2, column: 1 }, fault: "duplicate-binding" }],
+          [`${held(0.5)}return [1][secret_detail.result.value]`, { ok: false, reason: "index_out_of_range", toolCalls: 1, at: { line: 3, column: 8 } }],
+          [`return 1 / 0`, { ok: false, reason: "invalid_code", toolCalls: 0, at: { line: 1, column: 8 }, fault: "zero" }],
+          [`${held(0)}return 1 / secret_detail.result.value`, { ok: false, reason: "arithmetic_failure", toolCalls: 1, at: { line: 3, column: 8 }, fault: "zero" }],
+          [`let large = 9007199254740991\nreturn large * large`, { ok: false, reason: "invalid_code", toolCalls: 0, at: { line: 2, column: 8 }, fault: "overflow" }],
+          [`${held(9007199254740991)}return secret_detail.result.value * secret_detail.result.value`, { ok: false, reason: "arithmetic_failure", toolCalls: 1, at: { line: 3, column: 8 }, fault: "overflow" }],
+          [`let half = 1 / 2\nfor index in 0..half { let twice = index }`, { ok: false, reason: "invalid_code", toolCalls: 0, at: { line: 2, column: 1 } }],
+          [`${held(0.5)}for index in 0..secret_detail.result.value { let twice = index }`, { ok: false, reason: "range_bound", toolCalls: 1, at: { line: 3, column: 1 } }],
+          [`return "secret detail" + 1`, { ok: false, reason: "invalid_code", toolCalls: 0, at: { line: 1, column: 8 }, fault: "invalid-operation" }],
+          [`return { a: 1, a: 2 }`, { ok: false, reason: "invalid_code", toolCalls: 0, at: { line: 1, column: 16 }, fault: "duplicate-field" }],
+          [`let call = [1]\nreturn call[0]({})`, { ok: false, reason: "invalid_code", toolCalls: 0, at: { line: 2, column: 8 }, fault: "invalid-call" }],
+          [`let secret_detail = 1\nlet secret_detail = 2`, { ok: false, reason: "invalid_code", toolCalls: 0, at: { line: 2, column: 1 }, fault: "duplicate-binding" }],
           [`return (secret_detail;`, { ok: false, reason: "invalid_code", toolCalls: 0, at: { line: 1, column: 22 } }],
           ["", { ok: false, reason: "invalid_code", toolCalls: 0 }]
         ]

@@ -10,8 +10,22 @@ import type { ToolFlow } from "../contract/Flow.ts"
 import { HeldReference } from "../contract/ToolHost.ts"
 
 export class RunStop extends Schema.TaggedError<RunStop>()("RunStop", {
-  reason: Schema.Literals(["dynamic-type-error", "host-result", "budget", "out-of-plan", "refinement", "value-limit", "arithmetic_failure", "index_out_of_range", "range_bound", "assert_failed"]), span: SpanSchema
+  reason: Schema.Literals(["dynamic-type-error", "host-result", "step-limit", "loop-limit", "call-limit", "out-of-plan", "refinement", "value-limit", "arithmetic_failure", "index_out_of_range", "range_bound", "assert_failed"]), span: SpanSchema,
+  /** For `arithmetic_failure`: a division by zero, or a result past the safe integers. */
+  fault: Schema.optionalKey(Schema.Literals(["zero", "overflow"]))
 }) {}
+/** What one run may compute and hold. A checked program is still charged for every step. */
+export interface RunLimits {
+  readonly maxSteps: number
+  /** Longest string the program may build. */
+  readonly maxStringLength: number
+  /** Most JSON nodes in one list or record the program builds. */
+  readonly maxValueNodes: number
+  /** Most JSON nodes, and string code units, held in names at once. */
+  readonly maxTotalNodes: number
+  readonly maxTotalStringUnits: number
+}
+const unlimited: RunLimits = { maxSteps: 20_000, maxStringLength: Infinity, maxValueNodes: Infinity, maxTotalNodes: Infinity, maxTotalStringUnits: Infinity }
 export interface ObservedRoles { readonly data: InformationLabel; readonly control: InformationLabel }
 export interface ObservedArgument extends ObservedRoles { readonly value: TrackedValue; readonly witness: RoleWitness }
 export interface CallObservation {
@@ -23,6 +37,7 @@ export interface CallObservation {
   readonly pc: TrackedValue
 }
 export interface RunHost<E = never, R = never> {
+  readonly limits?: RunLimits
   readonly roleIssuer?: RoleWitnessIssuer
   readonly beforeCall?: (call: CallObservation) => Effect.Effect<unknown, E, R>
   readonly observe?: (call: CallObservation) => void
@@ -34,12 +49,41 @@ const literalLabel = new InformationLabel({ confidentiality: "public", integrity
 const durationModel = modelSchema(DurationSchema, { identity: "language.Duration", side: "decoded" })
 const empty = () => labeledValue(false, literalLabel)
 const usedRoleIssuers = new WeakSet<RoleWitnessIssuer>()
-const stop: (reason: RunStop["reason"], span: Span) => never = (reason, span) => { throw new RunStop({ reason, span }) }
+const stop: (reason: RunStop["reason"], span: Span, fault?: RunStop["fault"]) => never = (reason, span, fault) => {
+  throw new RunStop(fault === undefined ? { reason, span } : { reason, span, fault })
+}
 
 /** Dynamic checks are deliberately retained, even after successful review. */
 export const runChecked = <E, R>(review: CheckedProgram, host: RunHost<E, R>): Effect.Effect<Schema.Json, RunStop, R> => Effect.gen(function* () {
   const callCounts = new Map<string, number>()
-  let iterations = 0, fuel = 20_000
+  const limits = host.limits ?? unlimited
+  let iterations = 0, fuel = limits.maxSteps
+  const sizes = new WeakMap<Box, { readonly nodes: number; readonly strings: number }>()
+  const jsonSize = (value: Schema.Json): { nodes: number; strings: number } => {
+    if (typeof value === "string") return { nodes: 1, strings: value.length }
+    if (value === null || typeof value !== "object") return { nodes: 1, strings: 0 }
+    const entries = Array.isArray(value) ? value : Object.entries(value).flatMap(([key, item]) => [key, item])
+    return entries.reduce<{ nodes: number; strings: number }>((total, item) => {
+      const inner = jsonSize(item)
+      return { nodes: total.nodes + inner.nodes, strings: total.strings + inner.strings }
+    }, { nodes: 1, strings: 0 })
+  }
+  const sizeOf = (box: Box): { readonly nodes: number; readonly strings: number } => {
+    const known = sizes.get(box)
+    if (known !== undefined) return known
+    const measured = jsonSize(box.tracked.value)
+    sizes.set(box, measured)
+    return measured
+  }
+  const built = (box: Box, span: Span): Box => {
+    if (sizeOf(box).nodes > limits.maxValueNodes) stop("value-limit", span)
+    return box
+  }
+  const held = (scope: Scope, span: Span): void => {
+    let nodes = 0, strings = 0
+    for (const box of scope.values()) { const size = sizeOf(box); nodes += size.nodes; strings += size.strings }
+    if (nodes > limits.maxTotalNodes || strings > limits.maxTotalStringUnits) stop("value-limit", span)
+  }
   const effect = <A>(body: () => A, span: Span): Effect.Effect<A, RunStop> => Effect.try({ try: body, catch: (error) => error instanceof RunStop ? error : new RunStop({ reason: "dynamic-type-error", span }) })
   const roleIssuer = yield* effect(() => {
     const issuer = host.roleIssuer ?? createRoleWitnessIssuer("run")
@@ -165,7 +209,7 @@ export const runChecked = <E, R>(review: CheckedProgram, host: RunHost<E, R>): E
     const value = Schema.decodeUnknownSync(DurationSchema)(box.tracked.value)
     const factors = { ms: 1, s: 1000, m: 60_000, h: 3_600_000, d: 86_400_000 }
     const result = value.value * factors[value.unit]
-    if (!Number.isFinite(result) || (Number.isInteger(result) && !Number.isSafeInteger(result))) stop("arithmetic_failure", span)
+    if (!Number.isFinite(result) || (Number.isInteger(result) && !Number.isSafeInteger(result))) stop("arithmetic_failure", span, "overflow")
     return result
   }
   const equalBoxes = (a: Box, b: Box, span: Span): boolean => {
@@ -187,16 +231,19 @@ export const runChecked = <E, R>(review: CheckedProgram, host: RunHost<E, R>): E
     })
   }
   const evaluate = (expression: Expression, scope: Scope, pc: TrackedValue): Effect.Effect<Box, RunStop, R> => Effect.gen(function* () {
-    if (--fuel < 0) return yield* Effect.fail(new RunStop({ reason: "budget", span: expression.span }))
+    if (--fuel < 0) return yield* Effect.fail(new RunStop({ reason: "step-limit", span: expression.span }))
     switch (expression.kind) {
       case "LiteralExpression": return yield* effect(() => { if (typeof expression.value === "object" && expression.value !== null) { const value = { ...primitive({ kind: "Duration", value: expression.value.value, unit: expression.value.unit }), duration: true }; millis(value, expression.span); return value }; return primitive(expression.value) }, expression.span)
       case "IdentifierExpression": return yield* effect(() => { const value = scope.get(expression.name); if (value === undefined) stop("dynamic-type-error", expression.span); return value }, expression.span)
       case "RecordExpression": {
         const children = new Map<string | number, Box>()
         for (const entry of expression.entries) children.set(entry.key, yield* evaluate(entry.value, scope, pc))
-        return record(children)
+        return yield* effect(() => built(record(children), expression.span), expression.span)
       }
-      case "ListExpression": return list(yield* Effect.forEach(expression.items, (item) => evaluate(item, scope, pc)))
+      case "ListExpression": {
+        const items = yield* Effect.forEach(expression.items, (item) => evaluate(item, scope, pc))
+        return yield* effect(() => built(list(items), expression.span), expression.span)
+      }
       case "FieldExpression": {
         const object = yield* evaluate(expression.object, scope, pc)
         return yield* effect(() => { const value = object.children.get(expression.field); if (value === undefined) stop("dynamic-type-error", expression.span); return value }, expression.span)
@@ -216,7 +263,7 @@ export const runChecked = <E, R>(review: CheckedProgram, host: RunHost<E, R>): E
           if (expression.operator === "!") return primitive(!boolean(operand, expression.span), [operand])
           if (typeof operand.tracked.value !== "number") stop("dynamic-type-error", expression.span)
           const value = -operand.tracked.value
-          if (!Number.isFinite(value) || (Number.isInteger(value) && !Number.isSafeInteger(value))) stop("arithmetic_failure", expression.span)
+          if (!Number.isFinite(value) || (Number.isInteger(value) && !Number.isSafeInteger(value))) stop("arithmetic_failure", expression.span, "overflow")
           return primitive(value, [operand])
         }, expression.span)
       }
@@ -244,14 +291,18 @@ export const runChecked = <E, R>(review: CheckedProgram, host: RunHost<E, R>): E
             case "<=": return primitive(a <= b, [left, right])
             case ">": return primitive(a > b, [left, right])
             case ">=": return primitive(a >= b, [left, right])
-            case "+": if (typeof a === "string" && typeof b === "string") return primitive(a + b, [left, right]); break
+            case "+": if (typeof a === "string" && typeof b === "string") {
+              if (a.length + b.length > limits.maxStringLength) stop("value-limit", expression.span)
+              return primitive(a + b, [left, right])
+            }
+            break
             case "-": case "*": case "/": break
             default: return stop("dynamic-type-error", expression.span)
           }
           if (typeof a !== "number" || typeof b !== "number") stop("dynamic-type-error", expression.span)
-          if (expression.operator === "/" && b === 0) stop("arithmetic_failure", expression.span)
+          if (expression.operator === "/" && b === 0) stop("arithmetic_failure", expression.span, "zero")
           const value = expression.operator === "+" ? a + b : expression.operator === "-" ? a - b : expression.operator === "*" ? a * b : a / b
-          if (!Number.isFinite(value) || (Number.isInteger(value) && !Number.isSafeInteger(value))) stop("arithmetic_failure", expression.span)
+          if (!Number.isFinite(value) || (Number.isInteger(value) && !Number.isSafeInteger(value))) stop("arithmetic_failure", expression.span, "overflow")
           return primitive(value, [left, right])
         }, expression.span)
       }
@@ -280,7 +331,7 @@ export const runChecked = <E, R>(review: CheckedProgram, host: RunHost<E, R>): E
           const tool = review.environment.tools[name]
           if (tool === undefined || !review.environment.granted.has(name)) stop("out-of-plan", expression.span)
           const count = (callCounts.get(name) ?? 0) + 1
-          if (count > (review.maximumCalls[name] ?? 0)) stop("budget", expression.span)
+          if (count > (review.maximumCalls[name] ?? 0)) stop("call-limit", expression.span)
           callCounts.set(name, count)
           const input = argument.constructed ? encodeConstructedInput(argument.tracked.value, tool.contract.model.input) : argument.tracked.value
           if (Result.isFailure(Schema.decodeUnknownResult(tool.contract.input, { onExcessProperty: "error" })(input))) stop("dynamic-type-error", expression.span)
@@ -351,8 +402,13 @@ export const runChecked = <E, R>(review: CheckedProgram, host: RunHost<E, R>): E
   const statements = (body: readonly Statement[], outer: Scope, control: TrackedValue): Effect.Effect<{ returned: boolean; value: Box; control: TrackedValue }, RunStop, R> => Effect.gen(function* () {
     const scope = new Map(outer); let pc = control
     for (const statement of body) {
+      if (--fuel < 0) return yield* Effect.fail(new RunStop({ reason: "step-limit", span: statement.span }))
       switch (statement.kind) {
-        case "LetStatement": scope.set(statement.name, yield* evaluate(statement.value, scope, pc)); break
+        case "LetStatement": {
+          scope.set(statement.name, yield* evaluate(statement.value, scope, pc))
+          yield* effect(() => held(scope, statement.span), statement.span)
+          break
+        }
         case "ExpressionStatement": { const value = yield* evaluate(statement.expression, scope, pc); pc = labeledValue(false, combine(pc.label, labelOf(value))); break }
         case "ReturnStatement": return { returned: true, control: pc, value: statement.value === undefined ? primitive(null) : yield* evaluate(statement.value, scope, pc) }
         case "AssertStatement": {
@@ -384,7 +440,8 @@ export const runChecked = <E, R>(review: CheckedProgram, host: RunHost<E, R>): E
             }, statement.span)
             pc = labeledValue(false, combine(pc.label, labelOf(from), labelOf(to)))
             for (let index = endpoints.from; index < endpoints.to; index++) {
-              if (++iterations > review.environment.maxIterations) return yield* Effect.fail(new RunStop({ reason: "budget", span: statement.span }))
+              if (++iterations > review.environment.maxIterations) return yield* Effect.fail(new RunStop({ reason: "loop-limit", span: statement.span }))
+              if (--fuel < 0) return yield* Effect.fail(new RunStop({ reason: "step-limit", span: statement.span }))
               const inner = new Map(scope); inner.set(statement.variable, primitive(index, [from, to]))
               const child = yield* statements(statement.body, inner, pc); if (child.returned) return child; pc = child.control
             }
@@ -394,8 +451,10 @@ export const runChecked = <E, R>(review: CheckedProgram, host: RunHost<E, R>): E
           if (!Array.isArray(source.tracked.value)) return yield* Effect.fail(new RunStop({ reason: "dynamic-type-error", span: statement.span }))
           pc = labeledValue(false, combine(pc.label, labelOf(source)))
           for (let index = 0; index < source.tracked.value.length; index++) {
-            if (++iterations > review.environment.maxIterations) return yield* Effect.fail(new RunStop({ reason: "budget", span: statement.span }))
+            if (++iterations > review.environment.maxIterations) return yield* Effect.fail(new RunStop({ reason: "loop-limit", span: statement.span }))
+            if (--fuel < 0) return yield* Effect.fail(new RunStop({ reason: "step-limit", span: statement.span }))
             const scopeForItem = new Map(scope); scopeForItem.set(statement.variable, source.children.get(index)!)
+            yield* effect(() => held(scopeForItem, statement.span), statement.span)
             const child = yield* statements(statement.body, scopeForItem, pc)
             if (child.returned) return child
             pc = child.control

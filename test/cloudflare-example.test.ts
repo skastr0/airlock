@@ -120,26 +120,24 @@ describe("examples/cloudflare in workerd", () => {
     expect(await request("GET", "/pending")).toEqual([])
   })
 
-  it("hands the program a refusal for what the policy does not grant, in a sentence an agent can act on", async () => {
+  it("refuses before the run a program whose fixed call the policy does not grant, naming the call and why", async () => {
     const before = await did()
     const outcome = await run("other", "run-2", `
       let sent = mail.send({ to: "eve@elsewhere.test", subject: "s", body: "b" })
       if sent.state == "refused" { return sent.refusal }
       return "sent"`)
     expect(outcome).toEqual({
-      ok: true,
-      result: {
-        code: "not-allowed",
-        message: "mail.send is not allowed: `to` is not allowed by grant \"company-mail\""
-      },
-      toolCalls: 1
+      ok: false,
+      reason: "review_refused",
+      toolCalls: 0,
+      refusals: [{ nodeId: "call:1", field: "$", reason: "grant" }]
     })
     // Nothing was done and nothing waits for approval.
     expect(await did()).toEqual(before)
     expect(await request("GET", "/pending?session=other")).toEqual([])
   })
 
-  it("stops a program at the policy's call budget and at the loop budget", async () => {
+  it("stops a program at the policy's call budget, and refuses before the run one whose loops could pass the loop budget", async () => {
     const before = (await did()).length
     const calls = await run("budget", "run-3", `
       for index in 0..9 { mail.list({ mailbox: "inbox" }) }
@@ -149,7 +147,7 @@ describe("examples/cloudflare in workerd", () => {
     const loop = await run("budget", "run-4", `
       for index in 0..5000 { let twice = index * 2 }
       return mail.list({ mailbox: "inbox" })`)
-    expect(loop).toMatchObject({ ok: false, reason: "loop_limit", toolCalls: 0 })
+    expect(loop).toEqual({ ok: false, reason: "review_refused", toolCalls: 0, refusals: [{ nodeId: "$", field: "$", reason: "bound" }] })
     expect((await did()).length).toBe(before + 8)
   })
 })

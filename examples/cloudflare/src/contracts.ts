@@ -7,12 +7,16 @@ const Summary = Schema.Struct({
   unread: Schema.Boolean
 })
 
-/** Listing a mailbox: who wrote and about what, not the bodies. Which mailbox is public. */
+/**
+ * Listing a mailbox: who wrote and about what, not the bodies. Which mailbox
+ * is public. A page holds at most five messages, so review can bound what a
+ * program does for each one.
+ */
 export const MailList = defineToolContract({
   name: "mail.list",
   version: "1",
   input: Schema.Struct({ mailbox: Schema.String }),
-  output: Schema.Struct({ messages: Schema.Array(Summary) }),
+  output: Schema.Struct({ messages: Schema.Array(Summary).check(Schema.isMaxLength(5)) }),
   effect: "capture",
   public: ["mailbox"]
 })

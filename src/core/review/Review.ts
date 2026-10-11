@@ -1,5 +1,5 @@
 import { Effect, Result, Schema } from "effect"
-import { canonicalJson, sha256Canonical, type Sha256Digest } from "../Canonical.ts"
+import { canonicalJson, sha256Canonical, Sha256Digest } from "../Canonical.ts"
 import { fittingToolGrants, ToolGrantPolicy, validateToolGrants } from "../admission/ToolGrant.ts"
 import { hasRefinement, isTrackedValue, type TrackedValue } from "../contract/Decoder.ts"
 import { isRoleWitnessIssuer, type RoleWitnessIssuer } from "../contract/RoleWitness.ts"
@@ -7,6 +7,8 @@ import { FlowRule, validateFlowRules } from "../contract/FlowRules.ts"
 import { modelSchema } from "../contract/SchemaModel.ts"
 import { combine, checkSink, InformationLabel, SinkPolicy } from "../labels/Labels.ts"
 import { PlanEffect } from "../plan/Plan.ts"
+import { portableToolHost } from "../contract/PortableToolHost.ts"
+import type { ToolHost } from "../contract/ToolHost.ts"
 import { decoderIdentity, type Fact, type CheckedProgram } from "../language/check.ts"
 import { dischargeFlow, FlowObligation, type FlowExplanation, reviewArgumentFlows } from "./Flow.ts"
 
@@ -28,13 +30,20 @@ export const CallEnvelope = Schema.Struct({
   approval: Schema.Literals(["program", "exact-batch"]),
   when: Schema.Literals(["reviewed", "staged"])
 })
+/**
+ * Approving a program covers its captures and the requests whose content it
+ * fixes entirely. Any other call that needs approval is approved by a person
+ * as an exact batch, after the run has staged it.
+ */
+const approvalOf = (effect: typeof PlanEffect.Type, fixed: boolean): typeof CallEnvelope.Type["approval"] =>
+  effect === "capture" || (effect === "request" && fixed) ? "program" : "exact-batch"
 export const ReviewedPlan = Schema.Struct({
-  schemaVersion: Schema.Literal("airlock/review-demo/v3"),
-  id: Schema.String,
+  schemaVersion: Schema.Literal("airlock/plan/v1"),
+  id: Sha256Digest,
   nodes: Schema.Array(CallEnvelope),
   maximumCalls: Schema.Record(Schema.String, Schema.Int),
   iterations: Schema.Int,
-  contextDigest: Schema.String,
+  contextDigest: Sha256Digest,
   rules: Schema.Array(FlowRule)
 })
 export type ReviewedPlan = typeof ReviewedPlan.Type
@@ -51,7 +60,7 @@ export interface ReviewSurface {
 }
 export const ReviewRefusal = Schema.Struct({
   nodeId: Schema.String, field: Schema.String,
-  reason: Schema.Literals(["grant", "rules", "unknown-label", "confidentiality", "integrity", "missing-sink", "plan-size", "argument-shape"])
+  reason: Schema.Literals(["grant", "rules", "unknown-label", "confidentiality", "integrity", "missing-sink", "plan-size", "argument-shape", "bound"])
 })
 export type ReviewRefusal = typeof ReviewRefusal.Type
 export interface ReviewReport {
@@ -102,11 +111,15 @@ const summary = (review: CheckedProgram, tool: string, publicFields: Record<stri
   return { tool, version: contract.version, effect: contract.effect, target: `tool:${tool}`, fields: Object.keys(publicFields), public: publicFields, inputBytes: 0 }
 }
 
-/** The candidate Plan remains inspectable on refusal; refusal grants no authority. */
-export const reviewProgram = (source: string, review: CheckedProgram, surface: ReviewSurface) => Effect.gen(function* () {
+/**
+ * The candidate Plan remains inspectable on refusal; refusal grants no authority.
+ * `host` is the one the grants are validated for: a grant one host can honour
+ * (an immediate apply it can put back) another cannot.
+ */
+export const reviewProgram = (source: string, review: CheckedProgram, surface: ReviewSurface, host: ToolHost = portableToolHost) => Effect.gen(function* () {
   const refusals: ReviewRefusal[] = []
   const contracts = Object.fromEntries(Object.entries(review.environment.tools).map(([name, tool]) => [name, tool.contract]))
-  const invalid = validateToolGrants(surface.grants, contracts)
+  const invalid = validateToolGrants(surface.grants, contracts, host)
   const invalidRules = validateFlowRules(surface.rules ?? [], contracts, review.environment.decoders)
   const explanations: FlowExplanation[] = []
   const nodes: Array<typeof CallEnvelope.Type> = []
@@ -149,14 +162,18 @@ export const reviewProgram = (source: string, review: CheckedProgram, surface: R
     }
     nodes.push({ id, tool: call.tool, version: contract.version, effect: contract.effect,
       sourceOffset: call.span.start, maximumOccurrences: call.maximumOccurrences,
-      arguments: args, approval: contract.effect === "request" && (!modeledInput || args.some((arg) => arg.fixed === undefined)) ? "exact-batch" : "program", when: contract.effect === "request" ? "staged" : "reviewed" })
+      arguments: args, approval: approvalOf(contract.effect, modeledInput && args.every((arg) => arg.fixed !== undefined)),
+      when: contract.effect === "request" ? "staged" : "reviewed" })
   }
+  // Whatever path a run takes, it stays inside the calls and iterations it may spend.
+  const calls = Object.values(review.maximumCalls).reduce((sum, count) => sum + count, 0)
+  if (calls > review.environment.maxCalls || review.iterations > review.environment.maxIterations) refusals.push({ nodeId: "$", field: "$", reason: "bound" })
   const contextDigest = yield* sha256Canonical({ source, bindings: surface.bindings, checkedBindings: bindingDescription(review),
     registryDigest: surface.registryDigest, grants: surface.grants, sources: surface.sources, sinks: surface.sinks,
     limits: { maxCalls: review.environment.maxCalls, maxIterations: review.environment.maxIterations,
       maxListItems: review.environment.maxListItems, maxPlanBytes: surface.maxPlanBytes },
-    rules: surface.rules ?? [], semantics: "airlock/review-demo/v3" })
-  const body = { schemaVersion: "airlock/review-demo/v3" as const, nodes, maximumCalls: review.maximumCalls,
+    rules: surface.rules ?? [], semantics: "airlock/plan/v1" })
+  const body = { schemaVersion: "airlock/plan/v1" as const, nodes, maximumCalls: review.maximumCalls,
     iterations: review.iterations, contextDigest, rules: [...surface.rules ?? []] }
   const id = yield* sha256Canonical(body)
   const plan = Schema.decodeUnknownSync(ReviewedPlan)({ ...body, id })
@@ -176,7 +193,7 @@ const freeze = <A>(value: A): A => {
 }
 
 export class PlanRefused extends Schema.TaggedError<PlanRefused>()("PlanRefused", {
-  reason: Schema.Literals(["review-refused", "plan-mismatch", "argument", "proof", "grant", "label", "bound", "ended"])
+  reason: Schema.Literals(["review-refused", "plan-mismatch", "argument", "proof", "label", "bound", "ended"])
 }) {}
 
 /** Only the configured evaluator's exact-value witness can separate roles. */
@@ -250,9 +267,11 @@ export const planGuard = (report: ReviewReport, review: CheckedProgram, surface:
       const effective = combine(literal, ...released)
       if (Result.isFailure(yield* checkSink(effective, sink).pipe(Effect.result))) return yield* fail("label")
     }
+    // A value no grant accepts is the kernel's to refuse: the program gets a
+    // refused receipt, as it would for any call the policy does not allow.
     const described = contract.summarize(decoded.success)
-    if (Result.isFailure(described) || fittingToolGrants(surface.grants, described.success).length === 0) return yield* fail("grant")
+    const granted = Result.isSuccess(described) && fittingToolGrants(surface.grants, described.success).length > 0
     counts.set(node.id, occurrence); tools.set(node.tool, total)
-    return { ...instance, approval: node.approval, when: node.when }
+    return { ...instance, approval: node.approval, when: node.when, granted }
   })
 }

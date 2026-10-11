@@ -209,7 +209,8 @@ describe("test-only: whole-program Plan review demonstration", () => {
     const send = report.plan.nodes[1]!
     const pc = forwardControl(review)
     const input = { to: argument(Result.getOrThrow(decodeValue(CompanyRecipient, labeledValue("other@example.com", tagged(review, "from"))))), subject: argument(labeledValue("Forward", literal)), body: argument(labeledValue("body", tagged(review, "body"))) }
-    expect(await run(reason(planGuard(reviewed, review, narrowed, createRoleWitnessIssuer("demo-run"))({ planId: reviewed.plan.id, nodeId: send.id, occurrence: 1, tool: send.tool }, input, pc)))).toBe("grant")
+    const ungranted = await run(planGuard(reviewed, review, narrowed, createRoleWitnessIssuer("demo-run"))({ planId: reviewed.plan.id, nodeId: send.id, occurrence: 1, tool: send.tool }, input, pc))
+    expect(ungranted.granted).toBe(false)
     const secret = new InformationLabel({ confidentiality: "secret", integrity: "untrusted", provenance: ["other-source"] })
     expect(await run(reason(planGuard(report, review, policy, createRoleWitnessIssuer("demo-run"))({ planId: report.plan.id, nodeId: send.id, occurrence: 1, tool: send.tool }, { ...input, body: argument(labeledValue("secret", secret)) }, pc)))).toBe("label")
     const unrelated = new InformationLabel({ ...mailbox, provenance: ["unreviewed-mailbox"] })

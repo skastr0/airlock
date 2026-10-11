@@ -1,4 +1,4 @@
-import { Effect, Layer, ManagedRuntime } from "effect"
+import { Effect, Layer, ManagedRuntime, Schema } from "effect"
 import {
   type Airlock,
   AirlockFailure,
@@ -6,6 +6,7 @@ import {
   type GuestAction,
   type GuestLimits,
   type GuestOutcome,
+  GuestReview,
   guestLimits,
   GuestRunner,
   programRunner,
@@ -33,6 +34,19 @@ export interface GuestDescription {
   readonly description: string
 }
 
+export interface RunRequest {
+  readonly runId: string
+  readonly source: string
+  /** The id of an approved Plan the program must review to. */
+  readonly plan?: string
+}
+
+/** A review as plain data, and whether a supervisor has approved its Plan. */
+export interface ProgramReview {
+  readonly review: typeof GuestReview.Encoded
+  readonly approved: boolean
+}
+
 type Supervisor = Effect.Success<ReturnType<Airlock<ToolContracts, unknown>["supervisor"]>>
 /** What the host answered when asked to put a held call back. */
 export type Restoration = Effect.Success<ReturnType<Supervisor["restore"]>>
@@ -42,8 +56,14 @@ export interface AirlockObjectApi {
   /**
    * Runs an untrusted Airlock program (.air). Every action it calls is admitted,
    * recorded and staged by this object. Replaying a run id returns recorded results.
+   * Naming an approved Plan holds the run to it, and the calls it covers are
+   * committed without waiting; naming a Plan nobody approved is `not-allowed`.
    */
-  run(request: { readonly runId: string; readonly source: string }): Promise<Reply<GuestOutcome>>
+  run(request: RunRequest): Promise<Reply<GuestOutcome>>
+  /** Reviews a program without running it: the Plan a supervisor would approve, and whether one has. */
+  review(request: { readonly source: string }): Promise<Reply<ProgramReview>>
+  /** Approves a reviewed Plan by its id. A supervisor's operation. */
+  approvePlan(plan: string): Promise<Reply<{ readonly plan: string }>>
   describe(): Promise<Reply<GuestDescription>>
   pending(): Promise<Reply<ReadonlyArray<EmissionView>>>
   inspect(id: string): Promise<Reply<EmissionView>>
@@ -104,6 +124,12 @@ export const airlockDurableObject = <Contracts extends ToolContracts, Env>(
       programRunner
     )
   type Services = Layer.Success<ReturnType<typeof services>>
+  // Review and run share these, so a reviewed Plan is the Plan a run is held to.
+  const limits = options.limits === undefined ? {} : { limits: options.limits }
+  // Refused before it can wait: the line never holds a source larger than a
+  // program may be. Bytes are never fewer than the string's length.
+  const maxCodeBytes = guestLimits(options.limits).maxCodeBytes
+  const oversized = (source: string) => source.length > maxCodeBytes || new TextEncoder().encode(source).length > maxCodeBytes
 
   return class AirlockObject extends DurableObject implements AirlockObjectApi {
     readonly #env: Env
@@ -190,26 +216,39 @@ export const airlockDurableObject = <Contracts extends ToolContracts, Env>(
       return turn
     }
 
-    run(request: { readonly runId: string; readonly source: string }): Promise<Reply<GuestOutcome>> {
+    run(request: RunRequest): Promise<Reply<GuestOutcome>> {
       // Copied out of the RPC argument before anything is awaited.
       const runId = String(request.runId)
       const source = String(request.source)
+      const plan = request.plan === undefined ? undefined : String(request.plan)
       const env = this.#env
-      // Refused before it can wait: the line never holds a source larger than a
-      // program may be. Bytes are never fewer than the string's length.
-      const maxCodeBytes = guestLimits(options.limits).maxCodeBytes
-      if (source.length > maxCodeBytes || new TextEncoder().encode(source).length > maxCodeBytes) {
-        return Promise.resolve({ ok: true, value: { ok: false, reason: "invalid_code", toolCalls: 0 } })
-      }
+      if (oversized(source)) return Promise.resolve({ ok: true, value: { ok: false, reason: "invalid_code", toolCalls: 0 } })
       return this.#inTurn(() => this.#guarded(() => this.#reply(Effect.gen(function* () {
-        const surface = yield* airlock.guest({ runId, env })
+        const surface = yield* (plan === undefined ? airlock.guest({ runId, env }) : airlock.guest({ runId, env, plan }))
         const runner = yield* GuestRunner
-        return yield* runner.run({
-          source,
-          surface,
-          ...(options.limits === undefined ? {} : { limits: options.limits })
-        })
+        return yield* runner.run({ source, surface, ...limits })
       }))))
+    }
+
+    review(request: { readonly source: string }): Promise<Reply<ProgramReview>> {
+      const source = String(request.source)
+      const env = this.#env
+      if (oversized(source)) {
+        return Promise.resolve({ ok: true, value: { review: { ok: false, reason: "invalid_code" }, approved: false } })
+      }
+      return this.#inTurn(() => this.#reply(Effect.gen(function* () {
+        const surface = yield* airlock.guest({ runId: "review", env })
+        const runner = yield* GuestRunner
+        const review = yield* runner.review({ source, surface, ...limits })
+        const approved = review.ok ? yield* Effect.flatMap(airlock.supervisor(env), (supervisor) => supervisor.approved(review.plan.id)) : false
+        const encoded = yield* Schema.encodeEffect(GuestReview)(review).pipe(
+          Effect.mapError(() => new AirlockFailure({ code: "unavailable", message: "the review could not be encoded" })))
+        return { review: encoded, approved }
+      })))
+    }
+
+    approvePlan(plan: string): Promise<Reply<{ readonly plan: string }>> {
+      return this.#reply(Effect.flatMap(airlock.supervisor(this.#env), (supervisor) => supervisor.approvePlan(String(plan))))
     }
 
     describe(): Promise<Reply<GuestDescription>> {
@@ -280,7 +319,9 @@ export interface AirlockNamespace {
 export const airlockClient = (namespace: AirlockNamespace, name: string) => {
   const stub = namespace.get(namespace.idFromName(name)) as AirlockObjectApi
   return {
-    run: (request: { readonly runId: string; readonly source: string }) => unwrap(stub.run(request)),
+    run: (request: RunRequest) => unwrap(stub.run(request)),
+    review: (request: { readonly source: string }) => unwrap(stub.review(request)),
+    approvePlan: (plan: string) => unwrap(stub.approvePlan(plan)),
     describe: () => unwrap(stub.describe()),
     pending: () => unwrap(stub.pending()),
     inspect: (id: string) => unwrap(stub.inspect(id)),

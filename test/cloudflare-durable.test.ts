@@ -130,6 +130,8 @@ describe("cloud: a user's Airlock as a Durable Object", () => {
     assert inbox.state == "done", "the inbox was read"
     let sent = mail.send({ to: "ada@example.com", subject: "unread", body: "the first is " + inbox.result.ids[0] })
     let labelled = label.add({ messageId: inbox.result.ids[0], label: "triaged" })
+    assert sent.state == "staged", "the mail waits for a supervisor"
+    assert labelled.state == "staged", "the label waits for a supervisor"
     return { inbox: inbox.result, sent: sent.state, labelled: labelled.state, sendId: sent.id, labelId: labelled.id }`
 
   it("describes exactly the granted actions, their shapes and which are staged", async () => {
@@ -193,6 +195,33 @@ describe("cloud: a user's Airlock as a Durable Object", () => {
     expect((await remote()).length).toBe(before + 2)
   })
 
+  it("reviews a program, and under its approved Plan commits the request it fixes, and nothing else", async () => {
+    const object = "?object=approved"
+    type Reviewed = { readonly review: { readonly ok: boolean; readonly plan: { readonly id: string; readonly nodes: ReadonlyArray<{ readonly approval: string }> }; readonly refusals: ReadonlyArray<unknown> }; readonly approved: boolean }
+    const source = `let sent = mail.send({ to: "grace@example.com", subject: "approved", body: "fixed" })\nreturn sent`
+    const reviewed = await call<Reviewed>(workerd, `/airlock/review${object}`, { source })
+    expect(reviewed).toMatchObject({ review: { ok: true, refusals: [] }, approved: false })
+    expect(reviewed.review.plan.nodes.map((node) => node.approval)).toEqual(["program"])
+    const plan = reviewed.review.plan.id
+
+    expect(await call(workerd, `/airlock/run${object}`, { runId: "early", source, plan })).toMatchObject({ failed: true, code: "not-allowed" })
+    expect(await call(workerd, `/airlock/approve-plan${object}`, { plan })).toEqual({ plan })
+    expect(await call<Reviewed>(workerd, `/airlock/review${object}`, { source })).toMatchObject({ approved: true })
+
+    const remote = () => call<ReadonlyArray<{ tool: string; detail: string }>>(workerd, "/airlock/remote")
+    const before = (await remote()).length
+    const done = await call<Outcome>(workerd, `/airlock/run${object}`, { runId: "approved", source, plan })
+    expect(done).toMatchObject({ ok: true, result: { state: "done", result: { messageId: expect.stringMatching(/^sent-/) } }, toolCalls: 1 })
+    expect((await remote()).slice(before).map((entry) => entry.tool)).toEqual(["mail.send"])
+    const id = (done.result as { readonly id: string }).id
+    expect(await call<View>(workerd, `/airlock/inspect${object}`, { id })).toMatchObject({ state: "committed", provenance: { committedBy: "reviewed-plan", plan } })
+
+    const other = source.replace("approved", "changed")
+    expect(await call(workerd, `/airlock/run${object}`, { runId: "other", source: other, plan })).toEqual({ ok: false, reason: "plan_mismatch", toolCalls: 0 })
+    expect(await call<ReadonlyArray<View>>(workerd, `/airlock/pending${object}`)).toEqual([])
+    expect((await remote()).length).toBe(before + 1)
+  })
+
   it("keeps a program inside its grants, its budgets and the language", async () => {
     type Failed = Outcome & { readonly fault?: string }
     const run = (source: string) =>
@@ -200,28 +229,23 @@ describe("cloud: a user's Airlock as a Durable Object", () => {
     const remote = () => call<ReadonlyArray<unknown>>(workerd, "/airlock/remote")
     const before = (await remote()).length
 
-    // A call outside the grants is refused to the program, which can read why. Nothing is staged or sent.
+    // A fixed call outside the grants is refused before the program runs. Nothing is staged or sent.
     const outside = await run(`return mail.send({ to: "eve@elsewhere.test", subject: "s", body: "b" })`)
     expect(outside).toEqual({
-      ok: true,
-      result: {
-        state: "refused",
-        refusal: {
-          code: "not-allowed",
-          message: "mail.send is not allowed: `to` is not allowed by grant \"support-replies\""
-        }
-      },
-      toolCalls: 1
+      ok: false,
+      reason: "review_refused",
+      toolCalls: 0,
+      refusals: [{ nodeId: "call:1", field: "$", reason: "grant" }]
     })
     expect(await call<ReadonlyArray<unknown>>(workerd, "/airlock/pending?object=limits")).toEqual([])
     // A tool the policy does not grant, and the things another language would offer, are not there.
     expect(await run(`return label.remove({ messageId: "m", label: "l" })`)).toMatchObject({
-      ok: true, result: { state: "refused", refusal: { code: "unknown-tool" } }
+      ok: false, reason: "invalid_code", toolCalls: 0, fault: "invalid-call"
     })
     expect(await run(`return fetch("https://example.com/")`)).toMatchObject({
-      ok: true, result: { state: "refused", refusal: { code: "unknown-tool" } }
+      ok: false, reason: "invalid_code", toolCalls: 0, fault: "invalid-call"
     })
-    expect(await run("return env.MAIL_TOKEN")).toMatchObject({ reason: "execution_failed", fault: "unbound-name" })
+    expect(await run("return env.MAIL_TOKEN")).toMatchObject({ reason: "invalid_code", fault: "unbound-name" })
     expect(await run("return await fetch(1)")).toMatchObject({ reason: "invalid_code" })
     expect((await remote()).length).toBe(before)
 
@@ -230,7 +254,7 @@ describe("cloud: a user's Airlock as a Durable Object", () => {
       .toMatchObject({ ok: false, reason: "tool_call_limit" })
     expect((await remote()).length).toBe(before + 8)
     expect(await run(`for index in 0..5000 { let twice = index * 2 }\nreturn "finished"`))
-      .toMatchObject({ ok: false, reason: "loop_limit" })
+      .toEqual({ ok: false, reason: "review_refused", toolCalls: 0, refusals: [{ nodeId: "$", field: "$", reason: "bound" }] })
     expect(await run(`assert 1 == 2, "token-canary"`)).toEqual({
       ok: false,
       reason: "assert_failed",
@@ -369,11 +393,11 @@ describe("cloud: putting a held call back", () => {
     expect(await call<{ alarmed: boolean }>(workerd, "/held/alarm?object=held")).toEqual({ alarmed: true })
     expect((await call<Held>(workerd, "/held/held")).map((entry) => entry.did)).toEqual(["prepared", "written"])
 
-    // A program has no word for it.
+    // A program has no word for it: the call does not check, so the program never runs.
     const tried = await call<{ ok: boolean; reason?: string }>(workerd, "/held/run?object=held", {
       runId: "held-2", source: `return restore({ id: "${callId}" })`
     })
-    expect(tried).toMatchObject({ ok: true, result: { state: "refused", refusal: { code: "unknown-tool" } } })
+    expect(tried).toMatchObject({ ok: false, reason: "invalid_code", toolCalls: 0, fault: "invalid-call" })
     expect((await call<Held>(workerd, "/held/held")).map((entry) => entry.did)).toEqual(["prepared", "written"])
 
     const restored = await call<Answer>(workerd, "/held/restore?object=held", { id: callId })
@@ -404,7 +428,7 @@ describe("cloud: the recovery alarm", () => {
     const first = start(storage)
     const run = await call<{ result: { id: string } }>(first, "/alarmed/run?object=alarmed", {
       runId: "run-1",
-      source: `let sent = mail.send({ to: "hang@example.com", subject: "s", body: "b" })\nreturn { id: sent.id }`
+      source: `let sent = mail.send({ to: "hang@example.com", subject: "s", body: "b" })\nassert sent.state == "staged"\nreturn { id: sent.id }`
     })
     // The provider never answers: the commit is in flight when the process dies.
     void call(first, "/alarmed/commit?object=alarmed", { id: run.result.id }).catch(() => undefined)
@@ -423,7 +447,7 @@ describe("cloud: the recovery alarm", () => {
   it("commits nothing on a timer: a staged write is still staged after the alarm time", async () => {
     const run = await call<{ result: { id: string } }>(workerd, "/alarmed/run?object=alarmed", {
       runId: "run-quiet",
-      source: `let sent = mail.send({ to: "ada@example.com", subject: "s", body: "b" })\nreturn { id: sent.id }`
+      source: `let sent = mail.send({ to: "ada@example.com", subject: "s", body: "b" })\nassert sent.state == "staged"\nreturn { id: sent.id }`
     })
     await new Promise((resolve) => setTimeout(resolve, 2_500))
     const view = await call<{ state: string }>(workerd, "/alarmed/inspect?object=alarmed", { id: run.result.id })

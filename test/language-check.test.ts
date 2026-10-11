@@ -103,10 +103,11 @@ describe("current-syntax type checker prototype", () => {
     }
   }))
 
-  it.effect("rejects opaque schema inspection and statically excessive budgets", () => Effect.gen(function* () {
+  it.effect("rejects opaque schema inspection and counts calls past the budget for review to refuse", () => Effect.gen(function* () {
     const opaque = defineToolContract({ name: "opaque.read", version: "1", effect: "capture", input: Schema.Struct({ id: Schema.String }), output: Schema.Struct({}) })
     expect(yield* checkSource('let r = opaque.read({id:"one"}); if r.state == "done" { return r.result.missing }; return true', { ...environment, tools: { "opaque.read": { contract: opaque } }, granted: new Set(["opaque.read"]) }).pipe(Effect.flip)).toBeInstanceOf(CheckError)
-    expect(yield* checkSource(triage, { ...environment, maxCalls: 20 }).pipe(Effect.flip)).toBeInstanceOf(CheckError)
+    const counted = yield* checkSource(triage, { ...environment, maxCalls: 20 })
+    expect(Object.values(counted.maximumCalls).reduce((sum, count) => sum + count, 0)).toBeGreaterThan(20)
     const review = yield* checkSource('let r = mail.list({mailbox:"inbox"}); return true', environment)
     const failure = yield* runChecked(review, { resolve: () => Effect.succeed(done({ messages: Array.from({ length: 11 }, () => ({ id: "one", unread: false })) })) }).pipe(Effect.flip)
     expect(failure.reason).toBe("value-limit")

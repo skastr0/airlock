@@ -127,7 +127,9 @@ account.
 | Request | What happens |
 | --- | --- |
 | `GET /tools` | What a program can call, and how to write one |
-| `POST /run` `{ "runId", "source" }` | Runs an Airlock program. The same `runId` again replays recorded results |
+| `POST /review` `{ "source" }` | Reviews a program without running it: its Plan, any refusals, and whether the Plan is approved |
+| `POST /approve-plan` `{ "plan" }` | Approves a reviewed Plan by its id |
+| `POST /run` `{ "runId", "source", "plan"? }` | Runs an Airlock program. The same `runId` again replays recorded results. Under an approved `plan`, the program must review to it, and its reads and fully fixed requests run without waiting |
 | `GET /pending` | Writes waiting for a decision |
 | `POST /commit` `{ "id" }` | Sends one. A second commit answers `not-pending` |
 | `POST /cancel` `{ "id" }` | Drops one |
@@ -142,14 +144,18 @@ in front of them.
 Each of these is checked in workerd by `test/cloudflare-durable.test.ts` and
 `test/security-isolated-runner.test.ts`:
 
-- reach the network, a cache, a binding or a secret: `fetch(...)` is just an
-  action nobody granted, and `env.MAIL_TOKEN` is a name that is not bound;
-- call a tool the policy does not grant, or a granted tool outside its grant.
-  Nothing happens, and the program gets a `refused` receipt with a sentence
-  such as ``mail.send is not allowed: `to` is not allowed by grant "company-mail"``;
-- exceed the policy's call budget, loop past the iteration budget, build a
-  value past the size limits, send an oversized input or return an oversized
-  result: the run fails with a fixed reason code;
+- reach the network, a cache, a binding or a secret: `fetch(...)` is not an
+  action this session grants, and `env.MAIL_TOKEN` is a name that is not
+  bound. Either way the program does not check, and nothing runs;
+- call a tool outside its grant. When the program fixes the argument, review
+  refuses the whole program before it runs (`review_refused`, naming the call
+  and `grant`). When the value comes from a result, nothing happens and the
+  program gets a `refused` receipt with a sentence such as
+  ``mail.send is not allowed: `to` is not allowed by grant "company-mail"``;
+- make more calls or loop more often than the budgets allow: review counts
+  every call and iteration first and refuses a program that could;
+- build a value past the size limits, send an oversized input or return an
+  oversized result: the run fails with a fixed reason code;
 - leak through an error: a failure carries a reason, a line and a column,
   never the program's own text.
 
@@ -161,6 +167,10 @@ Each of these is checked in workerd by `test/cloudflare-durable.test.ts` and
   `tool_failed`. The language has no way to catch that. Running the program
   again under the same `runId` returns the recorded results of calls that
   already ran.
+- **A program is reviewed before it runs.** It must narrow a receipt
+  (`if r.state == "done"` or `assert r.state == "done"`) before reading its
+  result, and a `for` over a result's list counts that list's declared
+  maximum length, which is why `mail.list` returns a page of five.
 - **The language is small.** There is no reassignment and a `let` inside a
   loop ends with the loop, so a program cannot build up a list or a count. It
   can read, branch, act on each item of a list, and return what it found.

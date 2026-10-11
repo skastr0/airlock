@@ -902,6 +902,9 @@ export const defineOutbox = <const Kinds extends IntentKinds>(
             (execution === undefined || execution.when !== "now" || execution.effect === "request" || kind.effect !== execution.effect)) {
             return yield* new InvalidDispatchAuthorization({ field: "admission.execution.when", reason: "tool policy-auto requires admitted non-request now authority" })
           }
+          if ((provenance.committedBy === "reviewed-plan") !== (provenance.plan !== undefined)) {
+            return yield* new InvalidDispatchAuthorization({ field: "provenance.plan", reason: "a plan names exactly the reviewed-plan commits" })
+          }
           // Verify the sealed material before anything becomes irreversible.
           const sealed = yield* sealedDispatchOf(staged)
           const dispatch = sealed.dispatch

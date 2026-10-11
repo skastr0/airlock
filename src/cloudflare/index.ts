@@ -14,7 +14,9 @@ export {
   type AirlockObjectApi,
   type AirlockObjectOptions,
   type GuestDescription,
-  type Reply
+  type ProgramReview,
+  type Reply,
+  type RunRequest
 } from "./AirlockObject.ts"
 export type { ObjectState } from "./Platform.ts"
 

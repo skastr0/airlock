@@ -104,6 +104,7 @@ export {
   GuestFault,
   GuestLimits,
   GuestOutcome,
+  GuestReview,
   GuestToolFailure,
   type GuestRun,
   GuestRunner

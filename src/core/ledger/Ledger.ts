@@ -22,7 +22,9 @@ export class LedgerEntry extends Schema.Class<LedgerEntry>("LedgerEntry")({
     "cancel",
     "refuse",
     "capture",
-    "expire"
+    "expire",
+    /** A supervisor approved the Plan whose id is `ref`. */
+    "approve"
   ]),
   ref: Schema.String,
   detail: Schema.optionalKey(Schema.String),

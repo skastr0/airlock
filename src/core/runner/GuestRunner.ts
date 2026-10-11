@@ -1,5 +1,7 @@
 import { Context, type Effect, Schema } from "effect"
 import type { GuestSurface } from "../airlock/Airlock.ts"
+import { FlowExplanation } from "../review/Flow.ts"
+import { ReviewedPlan, ReviewRefusal } from "../review/Review.ts"
 
 /**
  * Runs an untrusted Airlock program (.air) against a guest surface. The
@@ -26,6 +28,10 @@ export const GuestLimits = Schema.Struct({
   maxNodes: Schema.Int,
   /** Loop iterations across the whole run; the language has no other way to repeat. */
   maxLoopIterations: Schema.Int,
+  /** Items review assumes a result list may hold when its contract names no maximum. */
+  maxListItems: Schema.Int,
+  /** UTF-8 bytes of the reviewed Plan. */
+  maxPlanBytes: Schema.Int,
   /** Statements and expressions evaluated across the whole run: the bound on computing, whatever the clock does. */
   maxSteps: Schema.Int,
   /** Nodes of everything the program holds in names at one time. */
@@ -46,6 +52,8 @@ export const defaultGuestLimits: GuestLimits = {
   maxDepth: 16,
   maxNodes: 2_048,
   maxLoopIterations: 1_000,
+  maxListItems: 64,
+  maxPlanBytes: 262_144,
   maxSteps: 100_000,
   maxTotalNodes: 16_384,
   maxTotalStringUnits: 262_144,
@@ -59,6 +67,8 @@ export const defaultGuestLimits: GuestLimits = {
  */
 export const GuestFailureReason = Schema.Literals([
   "invalid_code",
+  "review_refused",
+  "plan_mismatch",
   "tool_call_limit",
   "tool_input_limit",
   "tool_input_invalid",
@@ -122,7 +132,9 @@ export const GuestOutcome = Schema.Union([
     /** Where in the source the program stopped, when the failure has a place. */
     at: Schema.optionalKey(Schema.Struct({ line: Schema.Int, column: Schema.Int })),
     fault: Schema.optionalKey(GuestFault),
-    failure: Schema.optionalKey(GuestToolFailure)
+    failure: Schema.optionalKey(GuestToolFailure),
+    /** Why review refused the program: which call, which argument, which rule. */
+    refusals: Schema.optionalKey(Schema.Array(ReviewRefusal))
   })
 ])
 export type GuestOutcome = typeof GuestOutcome.Type
@@ -142,10 +154,37 @@ export interface GuestRun {
 }
 
 /**
- * A run always ends in an outcome; it does not fail. Whatever the program
- * does, the caller gets a bounded result or one of the fixed reasons.
+ * What review found, before anything runs: the Plan a supervisor approves,
+ * with any refusals and the flow behind each argument; or why the program
+ * could not be reviewed, in the same fixed words a run uses.
+ */
+export const GuestReview = Schema.Union([
+  Schema.Struct({
+    ok: Schema.Literal(true),
+    plan: ReviewedPlan,
+    refusals: Schema.Array(ReviewRefusal),
+    explanations: Schema.Array(FlowExplanation)
+  }),
+  Schema.Struct({
+    ok: Schema.Literal(false),
+    reason: GuestFailureReason,
+    at: Schema.optionalKey(Schema.Struct({ line: Schema.Int, column: Schema.Int })),
+    fault: Schema.optionalKey(GuestFault)
+  })
+])
+export type GuestReview = typeof GuestReview.Type
+
+/**
+ * A run always ends in an outcome and a review always ends in a review; they
+ * do not fail. A run under an approved Plan (the surface names it) is held to
+ * that Plan: a program that reviews to any other ends as `plan_mismatch`.
+ * Review and run share their limits, so the Plan a review shows is the Plan
+ * the same run is held to.
  */
 export class GuestRunner extends Context.Service<
   GuestRunner,
-  { readonly run: (run: GuestRun) => Effect.Effect<GuestOutcome> }
+  {
+    readonly run: (run: GuestRun) => Effect.Effect<GuestOutcome>
+    readonly review: (review: Omit<GuestRun, "signal">) => Effect.Effect<GuestReview>
+  }
 >()("airlock/core/GuestRunner") {}

@@ -2,8 +2,13 @@ import { describe, expect, it } from "vitest"
 import { Effect, Result, Schema } from "effect"
 import type { GuestSurface } from "../src/core/airlock/Airlock.ts"
 import { GuestOutcome, GuestRunner, type GuestRun } from "../src/core/runner/GuestRunner.ts"
+import { defineToolContract } from "../src/core/contract/ToolContract.ts"
 import { programRunner } from "../src/core/runner/ProgramRunner.ts"
+import { reviewContext } from "./support/ReviewContext.ts"
 import { hostileSources, runnerExamples, seeded } from "./support/hostile-air-corpus.ts"
+
+const Echoed = Schema.Struct({ value: Schema.optionalKey(Schema.Union([Schema.String, Schema.Number, Schema.Boolean])) })
+const Echo = defineToolContract({ name: "security.echo", version: "1", effect: "capture", input: Echoed, output: Schema.NullOr(Echoed) })
 
 // Malformed nested results deliberately exercise a defective host boundary.
 const done = (result: unknown) => ({ state: "done" as const, id: "security-result", result: result as Schema.Json })
@@ -11,7 +16,7 @@ const done = (result: unknown) => ({ state: "done" as const, id: "security-resul
 const run = (source: string, call: GuestSurface["call"], options: Pick<GuestRun, "limits" | "bindings"> = {}) =>
   Effect.runPromise(Effect.gen(function* () {
     const runner = yield* GuestRunner
-    return yield* runner.run({ source, surface: { tools: ["security.echo"], actions: [], description: "", call },
+    return yield* runner.run({ source, surface: { tools: ["security.echo"], actions: [], description: "", call, review: reviewContext(Echo) },
       ...options, limits: { wallTimeMs: 5_000, ...options.limits } })
   }).pipe(Effect.provide(programRunner)))
 

@@ -7,7 +7,7 @@ import {
   unmetToolGrants,
   validateToolGrants
 } from "../admission/ToolGrant.ts"
-import { canonicalJson, type DigestUnavailable, sha256Text } from "../Canonical.ts"
+import { canonicalJson, type DigestUnavailable, type Sha256Digest, sha256Text } from "../Canonical.ts"
 import type { ToolContract } from "../contract/ToolContract.ts"
 import type { TrustedDecoder } from "../contract/Decoder.ts"
 import { validateFlowRules } from "../contract/FlowRules.ts"
@@ -16,7 +16,7 @@ import { type ToolHost, ResourceRefused } from "../contract/ToolHost.ts"
 import { loadResourcePolicy } from "../admission/ResourcePolicy.ts"
 import { prepareWire } from "../contract/Wire.ts"
 import type { Done, Refused, Staged } from "../contract/Receipt.ts"
-import type { OutboxDefinition, OutboxOf, CaptureError, CaptureFailed, CaptureTag, PerformError, StageError } from "../outbox/Outbox.ts"
+import type { OutboxDefinition, OutboxOf, CaptureError, CaptureFailed, CaptureTag, Emission, PerformError, StageError } from "../outbox/Outbox.ts"
 import {
   DispatchProvenance,
   EmissionAdmission,
@@ -89,8 +89,18 @@ export type ToolCallError =
 
 // ── the session ─────────────────────────────────────────────────────────────
 
+export interface CallOptions {
+  /**
+   * The call is one the session's approved Plan covers. It is staged and then
+   * committed under the Plan, without waiting for a supervisor. Ignored when
+   * the session has no Plan.
+   */
+  readonly covered?: boolean
+}
+
 type Method<Contract> = (
-  input: ToolContract.WireOf<Contract>
+  input: ToolContract.WireOf<Contract>,
+  options?: CallOptions
 ) => Effect.Effect<CallResult<Contract>, ToolCallError>
 
 /**
@@ -118,6 +128,12 @@ export interface ToolSessionOptions<Granted extends string> {
   readonly host?: ToolHost
   /** Hold applied to every call this session stages. */
   readonly holdMillis?: number
+  /**
+   * A Plan a supervisor approved, which this session's run was reviewed to.
+   * The host checks the approval and the runner holds each call to the Plan;
+   * the session commits covered calls under it.
+   */
+  readonly plan?: Sha256Digest
 }
 
 const encoder = new TextEncoder()
@@ -177,7 +193,7 @@ export const openToolSession = <Contracts extends ToolContracts, Granted extends
     let calls = 0
     let inputBytes = 0
 
-    const method = (contract: ToolContract.Any) => (wire: unknown) =>
+    const method = (contract: ToolContract.Any) => (wire: unknown, call?: CallOptions) =>
       Effect.gen(function* () {
         // Budgets are charged before anything else and are never refunded, so a
         // call that fails for any reason still counts.
@@ -293,7 +309,29 @@ export const openToolSession = <Contracts extends ToolContracts, Granted extends
           } satisfies Done<unknown>
         }
         const staged = yield* service.stage(request).pipe(Effect.flatMap(deliver))
-        return { state: "staged", id: staged.id } satisfies Staged
+        if (options.plan === undefined || call?.covered !== true || (staged.state !== "staged" && staged.state !== "committed")) {
+          return { state: "staged", id: staged.id } satisfies Staged
+        }
+        const committed: Emission<Contracts, "committed"> = staged.state === "committed" ? staged as Emission<Contracts, "committed"> : yield* service.commit(
+          staged.id,
+          new DispatchProvenance({
+            committedBy: "reviewed-plan",
+            plan: options.plan,
+            grantId: grantIds.join(","),
+            grantSelector: summary.tool,
+            target: summary.target
+          })
+        ).pipe(
+          Effect.catchTag("EmissionRefused", (error) => unlessLapsed(error, error.id)),
+          Effect.catchTag("InvalidDispatchAuthorization", (error) => unlessLapsed(error)),
+          Effect.flatMap(deliver)
+        )
+        return {
+          state: "done",
+          id: committed.id,
+          result: committed.outcome,
+          ...(committed.held === undefined ? {} : { wayBack: committed.held })
+        } satisfies Done<unknown>
       }).pipe(Effect.catchTags({
         InvalidToolInput: (error) => Effect.succeed({ state: "refused" as const, refusal: { code: "invalid-input", message: `${error.tool} was given an invalid input` } }),
         ToolCallNotGranted: (error) => Effect.succeed({ state: "refused" as const, refusal: { code: "not-allowed", message: error.unmet.length === 0

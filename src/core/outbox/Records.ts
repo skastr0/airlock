@@ -27,14 +27,19 @@ export class DispatchAuthorization extends Schema.Class<DispatchAuthorization>(
   target: Schema.String
 }) {}
 
-export const CommitAuthority = Schema.Literals(["supervisor", "policy-auto"])
+/**
+ * `reviewed-plan` commits a call that a supervisor approved ahead of time, as
+ * part of a reviewed program; `plan` names that program's Plan.
+ */
+export const CommitAuthority = Schema.Literals(["supervisor", "policy-auto", "reviewed-plan"])
 export type CommitAuthority = typeof CommitAuthority.Type
 
-/** Recorded, never interpreted: who committed, and under which grant. */
+/** Recorded, never interpreted: who committed, and under which grant or plan. */
 export class DispatchProvenance extends Schema.Class<DispatchProvenance>(
   "DispatchProvenance"
 )({
   committedBy: CommitAuthority,
+  plan: Schema.optionalKey(Sha256Digest),
   grantId: Schema.optionalKey(Schema.String),
   grantSelector: Schema.optionalKey(Schema.String),
   dispatchClass: Schema.optionalKey(Schema.Literal("read")),

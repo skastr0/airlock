@@ -23,7 +23,8 @@ describe("language: current duration contract boundary", () => {
       return { malformed, valid }
     }).pipe(Effect.provide(layer), Effect.provide(programRunner), Effect.scoped)
     expect(handled).toBe(1)
-    expect(JSON.stringify(outcomes.malformed)).toContain('"code":"invalid-input"')
+    // The literal is checked against the contract's input before the run, so nothing is called.
+    expect(outcomes.malformed).toEqual({ ok: false, reason: "invalid_code", toolCalls: 0, at: { line: 1, column: 8 } })
     expect(outcomes.valid.ok).toBe(true)
   }))
 })

@@ -1,11 +1,12 @@
-import { type Crypto, Effect, Layer, Option, Schema } from "effect"
+import { type Crypto, DateTime, Effect, Layer, Option, Schema } from "effect"
 import { InvalidToolContract, type ToolContract } from "../contract/ToolContract.ts"
 import { defineDecoderCatalog, type TrustedDecoder } from "../contract/Decoder.ts"
 import { validateFlowDecoders } from "../contract/Flow.ts"
 import { portableToolHost } from "../contract/PortableToolHost.ts"
 import { HeldReference, RecoveryRestoration, type ToolHost } from "../contract/ToolHost.ts"
 import { CallReceipt, type GuestReceipt } from "../contract/Receipt.ts"
-import type { Ledger } from "../ledger/Ledger.ts"
+import { Sha256Digest } from "../Canonical.ts"
+import { Ledger, LedgerEntry } from "../ledger/Ledger.ts"
 import type { ClosedUnderCompensation } from "../outbox/Intent.ts"
 import { defineOutbox, type OutboxDefinition, type OutboxOf } from "../outbox/Outbox.ts"
 import type { OutboxStore } from "../outbox/OutboxStore.ts"
@@ -16,8 +17,9 @@ import {
   type OutboxStateCorrupt,
   type OutboxStoreFailed
 } from "../outbox/Records.ts"
+import type { ReviewContext } from "../review/Surface.ts"
 import type { ToolPolicy } from "../session/ToolPolicy.ts"
-import { openToolSession, type ToolContracts } from "../session/ToolSession.ts"
+import { type CallOptions, openToolSession, type ToolContracts } from "../session/ToolSession.ts"
 import { type GuestAction, guestAction, guestDescription } from "./Declaration.ts"
 import { handlersFor, type Implementations } from "./Implement.ts"
 
@@ -60,13 +62,18 @@ export interface GuestSurface {
   readonly tools: ReadonlyArray<string>
   /**
    * Calls one granted tool with its JSON input. A read that is pre-authorized
-   * returns its result; anything else returns a staged receipt.
+   * returns its result, and so does a call the approved Plan covers; anything
+   * else returns a staged receipt.
    */
-  readonly call: (tool: string, input: unknown) => Effect.Effect<GuestReceipt, AirlockFailure>
+  readonly call: (tool: string, input: unknown, options?: CallOptions) => Effect.Effect<GuestReceipt, AirlockFailure>
+  /** The approved Plan this run is held to, when it was opened under one. */
+  readonly plan?: Sha256Digest
   /** Each granted tool as an action: its name, its shapes, and whether a call runs at once or is staged. */
   readonly actions: ReadonlyArray<GuestAction>
   /** The language in a few lines and one plain line per action, for a prompt. */
   readonly description: string
+  /** What a run is reviewed against: the granted contracts, the decoders and the policy. Never handed to the program. */
+  readonly review: ReviewContext
 }
 
 /** The trusted side: what a supervisor can see and do. Results are plain data. */
@@ -79,6 +86,20 @@ export interface Supervisor {
   readonly compensate: (id: string, holdMillis?: number) => Effect.Effect<EmissionView, AirlockFailure>
   /** Restores the stored host recovery reference; forward grant expiry is irrelevant. */
   readonly restore: (id: string) => Effect.Effect<typeof RecoveryRestoration.Encoded, AirlockFailure>
+  /**
+   * Approves a reviewed Plan by its id. A run opened under it has the calls
+   * the Plan covers committed without waiting; every other call is staged as
+   * usual. Approving again is a no-op.
+   */
+  readonly approvePlan: (plan: string) => Effect.Effect<{ readonly plan: Sha256Digest }, AirlockFailure, Ledger>
+  readonly approved: (plan: string) => Effect.Effect<boolean, AirlockFailure, Ledger>
+}
+
+export interface GuestOptions<Env> {
+  readonly runId: string
+  readonly env: Env
+  /** An approved Plan to hold the run to. The approval is read from the Ledger. */
+  readonly plan?: string
 }
 
 export interface Airlock<Contracts extends ToolContracts, Env> {
@@ -97,11 +118,14 @@ export interface Airlock<Contracts extends ToolContracts, Env> {
     OutboxStoreFailed | OutboxStateCorrupt,
     OutboxStore | Ledger | Crypto.Crypto
   >
-  /** Opens a guest's view for one run. Replaying a run id returns recorded results. */
-  readonly guest: (options: {
-    readonly runId: string
-    readonly env: Env
-  }) => Effect.Effect<GuestSurface, AirlockFailure, OutboxOf<Contracts> | Crypto.Crypto>
+  /**
+   * Opens a guest's view for one run. Replaying a run id returns recorded
+   * results. Naming a Plan that no supervisor approved is `not-allowed`.
+   */
+  readonly guest: {
+    (options: GuestOptions<Env> & { readonly plan?: undefined }): Effect.Effect<GuestSurface, AirlockFailure, OutboxOf<Contracts> | Crypto.Crypto>
+    (options: GuestOptions<Env>): Effect.Effect<GuestSurface, AirlockFailure, OutboxOf<Contracts> | Crypto.Crypto | Ledger>
+  }
   readonly supervisor: (env: Env) => Effect.Effect<Supervisor, never, OutboxOf<Contracts>>
 }
 
@@ -221,14 +245,33 @@ export const defineAirlock = <const List extends ReadonlyArray<ToolContract.Any>
     effect: Effect.Effect<A, E, OutboxOf<ToolContracts> | Crypto.Crypto>
   ) => effect as unknown as Effect.Effect<A, E, OutboxOf<Contracts> | Crypto.Crypto>
 
-  const guest: Airlock<Contracts, Env>["guest"] = ({ runId, env }) =>
-    forThisDefinition(Effect.gen(function* () {
+  const planIdOf = (plan: string) =>
+    Option.match(Schema.decodeUnknownOption(Sha256Digest)(plan), {
+      onNone: () => Effect.fail(failure("not-found", `${plan.slice(0, 80)} is not a plan id`)),
+      onSome: (id) => Effect.succeed(id)
+    })
+  const isApproved = (plan: Sha256Digest) =>
+    Effect.gen(function* () {
+      const ledger = yield* Ledger
+      const entries = yield* ledger.entries.pipe(Effect.mapError(() => failure("unavailable", "the ledger could not be read")))
+      return entries.some((entry) => entry.act === "approve" && entry.ref === plan)
+    })
+  const approvedPlan = (plan: string) =>
+    Effect.flatMap(planIdOf(plan), (id) =>
+      Effect.flatMap(isApproved(id), (approved) =>
+        approved ? Effect.succeed(id) : Effect.fail(failure("not-allowed", `plan ${id} has not been approved`))))
+
+  const open = ({ runId, env, plan }: GuestOptions<Env>) =>
+    Effect.gen(function* () {
       const decided = policy(env)
-      const opened = yield* openToolSession(kernel, { runId, policy: decided, decoders, host: host(env) }).pipe(
+      const approved = plan === undefined ? undefined : yield* approvedPlan(plan)
+      const opened = yield* openToolSession(kernel, {
+        runId, policy: decided, decoders, host: host(env), ...(approved === undefined ? {} : { plan: approved })
+      }).pipe(
         Effect.mapError(explain("this session"))
       )
       const session: {
-        readonly [name: string]: ((input: never) => Effect.Effect<unknown, Tagged>) | undefined
+        readonly [name: string]: ((input: never, options?: CallOptions) => Effect.Effect<unknown, Tagged>) | undefined
       } = opened
       const tools = Object.keys(session).sort()
       const actions = tools.flatMap((name) => {
@@ -241,16 +284,20 @@ export const defineAirlock = <const List extends ReadonlyArray<ToolContract.Any>
         const retention = modes.size === 0 ? undefined : modes.size > 1 ? "by-grant" : modes.has("keep") ? "keep" : "digest"
         return [guestAction(contract, immediate.every(Boolean) ? "all" : immediate.some(Boolean) ? "some" : "none", retention)]
       })
+      const granted: { [name: string]: ToolContract.Any } = {}
+      for (const name of tools) if (Object.hasOwn(byName, name)) granted[name] = byName[name]!
       return {
         tools,
         actions,
         description: guestDescription(actions),
-        call: (tool, input) => {
+        review: { contracts: granted, decoders, policy: decided, host: host(env) },
+        ...(approved === undefined ? {} : { plan: approved }),
+        call: (tool, input, options) => {
           const method = Object.hasOwn(session, tool) ? session[tool] : undefined
           if (method === undefined) {
             return Effect.succeed({ state: "refused", refusal: { code: "unknown-tool", message: `${tool} is not a tool this session grants` } })
           }
-          return method(input as never).pipe(
+          return method(input as never, options).pipe(
             Effect.mapError(explain(tool)),
             Effect.map((result): GuestReceipt => {
               const settled = result as import("../contract/Receipt.ts").Done<unknown> | import("../contract/Receipt.ts").Staged | import("../contract/Receipt.ts").Refused
@@ -265,7 +312,12 @@ export const defineAirlock = <const List extends ReadonlyArray<ToolContract.Any>
           )
         }
       } satisfies GuestSurface
-    }))
+    })
+
+  // A plan-less open never reads the Ledger; the requirement follows the options.
+  const guest = ((options: GuestOptions<Env>) =>
+    forThisDefinition(open(options) as Effect.Effect<GuestSurface, AirlockFailure, OutboxOf<ToolContracts> | Crypto.Crypto>)
+  ) as Airlock<Contracts, Env>["guest"]
 
   const supervisorOf = (env: Env): Effect.Effect<Supervisor, never, OutboxOf<ToolContracts>> => Effect.gen(function* () {
     const service = yield* kernel.Outbox
@@ -329,7 +381,17 @@ export const defineAirlock = <const List extends ReadonlyArray<ToolContract.Any>
             ),
             Effect.mapError(explain(id)),
             Effect.flatMap((emission) => view(emission, id))
-          ))
+          )),
+      approvePlan: (plan) =>
+        Effect.gen(function* () {
+          const id = yield* planIdOf(plan)
+          const ledger = yield* Ledger
+          yield* ledger.record(new LedgerEntry({
+            at: yield* DateTime.now, effect: "computation", act: "approve", ref: id, key: `plan:${id}:approve`
+          })).pipe(Effect.mapError(() => failure("unavailable", `plan ${id} could not be recorded as approved`)))
+          return { plan: id }
+        }),
+      approved: (plan) => Effect.flatMap(planIdOf(plan), isApproved)
     }
   })
 

@@ -14,11 +14,21 @@ const script = (await build({
   stdin: {
     resolveDir: resolve(import.meta.dirname, ".."),
     contents: `
-      import { Effect } from "effect";
-      import { GuestRunner, programRunner } from "./src/core/index.ts";
+      import { Effect, Schema } from "effect";
+      import { defineToolContract, GuestRunner, programRunner } from "./src/core/index.ts";
+      import { reviewContext } from "./test/support/ReviewContext.ts";
       let reached = 0;
+      // Exact shapes: an optional "constructor" key would be satisfied by the prototype's own.
+      const Echoed = Schema.Union([
+        Schema.Struct({ continued: Schema.Boolean }),
+        Schema.Struct({ ["__proto__"]: Schema.Struct({ polluted: Schema.Boolean }), constructor: Schema.String })
+      ]);
+      const contracts = [
+        defineToolContract({ name: "security.throw", version: "1", effect: "capture", input: Schema.Struct({}), output: Schema.Null }),
+        defineToolContract({ name: "security.echo", version: "1", effect: "capture", input: Echoed, output: Echoed })
+      ];
       const surface = {
-        tools: ["security.throw", "security.echo"], actions: [], description: "",
+        tools: ["security.throw", "security.echo"], actions: [], description: "", review: reviewContext(...contracts),
         call: (tool, input) => {
           reached += 1;
           return tool === "security.throw" ? Effect.die(new Error("host-canary-secret")) : Effect.succeed({ state: "done", id: "call-1", result: input });
@@ -120,24 +130,26 @@ describe("security: the program runner in real workerd", () => {
       `env.HOST_SECRET({})`
     ]
     for (const source of refused) {
-      // The program is handed a refusal; the host's tools were never reached.
+      // The program does not check, so it never runs; the host's tools were never reached.
       const reply = await run(`return ${source}`)
-      expect([source, reply.outcome.ok, (reply.outcome["result"] as { state?: string; refusal?: { code?: string } }).state,
-        (reply.outcome["result"] as { refusal?: { code?: string } }).refusal?.code, reply.reached])
-        .toEqual([source, true, "refused", "unknown-tool", 0])
+      expect([source, reply.outcome.ok, reply.outcome["reason"], reply.outcome["toolCalls"], reply.reached])
+        .toEqual([source, false, "invalid_code", 0, 0])
     }
     const unbound = ["return HOST_SECRET", "return env.HOST_SECRET", "return globalThis", "return caches", "return security", "return constructor", "return __proto__"]
     for (const source of unbound) {
       const reply = await run(source)
       expect([source, reply.outcome["reason"], reply.outcome["fault"], reply.reached])
-        .toEqual([source, "execution_failed", "unbound-name", 0])
+        .toEqual([source, "invalid_code", "unbound-name", 0])
     }
     // A value's own machinery is not reachable either: there are records and lists, not objects.
     for (const source of [`return { a: 1 }.constructor`, `return [1].length`, `return "text".length`, `return { a: 1 }.__proto__`]) {
       const reply = await run(source)
       expect([source, reply.outcome.ok, reply.reached]).toEqual([source, false, 0])
     }
-    const echoed = await run(`return security.echo({ __proto__: { polluted: true }, constructor: "c" }).result`)
+    const echoed = await run(`
+      let echoed = security.echo({ __proto__: { polluted: true }, constructor: "c" })
+      assert echoed.state == "done"
+      return echoed.result`)
     // The key travels as plain data, an own property on both sides, and changes no prototype.
     expect(JSON.stringify(echoed.outcome)).toBe(
       '{"ok":true,"result":{"__proto__":{"polluted":true},"constructor":"c"},"toolCalls":1}'
@@ -160,9 +172,11 @@ describe("security: the program runner in real workerd", () => {
       expect(reply.outcome.ok).toBe(false)
       expect(JSON.stringify(reply.outcome)).not.toMatch(/guest-log-canary-secret|binding-canary-secret/)
     }
-    // A refused call is the program's to read; unread, nothing of it is in the outcome.
+    // A call to a name that is not a tool is refused before the run, and nothing of it is in the outcome.
     const called = await run(`guest_log_canary_secret({ text: "guest-log-canary-secret" })\nreturn 1`)
-    expect(called.outcome).toEqual({ ok: true, result: 1, toolCalls: 1 })
+    expect(called.outcome).toMatchObject({ ok: false, reason: "invalid_code", toolCalls: 0 })
+    expect(JSON.stringify(called.outcome)).not.toMatch(/guest-log-canary-secret|binding-canary-secret/)
+    expect(called.reached).toBe(0)
     expect(logs.join("\n")).toContain("trusted-log-control")
     expect(logs.join("\n")).not.toContain("guest-log-canary-secret")
     expect(logs.join("\n")).not.toContain("binding-canary-secret")

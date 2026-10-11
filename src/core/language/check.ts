@@ -11,8 +11,31 @@ import type { Expression, Program, Span, Statement } from "./ast.ts"
 import { DurationSchema, SpanSchema } from "./ast.ts"
 import { parse } from "./parser.ts"
 
+/** What kind of mistake a program made, as a fixed word that carries none of its text. */
+export const CheckFault = Schema.Literals([
+  "unbound-name", "invalid-operation", "invalid-call", "missing-field", "invalid-index", "duplicate-field", "zero", "overflow"
+])
+export type CheckFault = typeof CheckFault.Type
+const faults: ReadonlyArray<readonly [RegExp, CheckFault]> = [
+  [/^unbound /, "unbound-name"],
+  [/^(ungranted tool |computed tool name|tool call takes one record)/, "invalid-call"],
+  [/^(missing field |possibly omitted field |field access requires a narrowed record)/, "missing-field"],
+  [/^duplicate record field/, "duplicate-field"],
+  [/^(safe index requires|at takes|at requires)/, "invalid-index"],
+  [/^certain arithmetic zero failure/, "zero"],
+  [/^certain arithmetic overflow failure/, "overflow"],
+  [/^(expected |literal type mismatch|union type mismatch|comparison shape mismatch|ordered comparison requires|record fields must match exactly|list record field mismatch)/, "invalid-operation"]
+]
+
 /** Types a parsed program against the granted contracts and bounds every call it can make. */
-export class CheckError extends Schema.TaggedError<CheckError>()("CheckError", { detail: Schema.String, span: SpanSchema }) {}
+export class CheckError extends Schema.TaggedError<CheckError>()("CheckError", {
+  detail: Schema.String, span: SpanSchema, fault: Schema.optionalKey(CheckFault)
+}) {
+  static of(detail: string, span: Span): CheckError {
+    const fault = faults.find(([pattern]) => pattern.test(detail))?.[1]
+    return new CheckError(fault === undefined ? { detail, span } : { detail, span, fault })
+  }
+}
 export interface CheckedTool {
   readonly contract: ToolContract.Any
 }
@@ -63,6 +86,11 @@ export interface CheckedProgram {
 }
 type Counts = Record<string, number>
 type Scope = ReadonlyMap<string, Fact>
+/**
+ * Joining constant strings doubles them; past this many units a join is
+ * checked as any string and only the run builds it, under the run's limits.
+ */
+const MAX_FOLDED_STRING = 65_536
 const unique = (...sets: readonly (readonly string[])[]) => [...new Set(sets.flat())]
 const fact = (type: Type, dataOrigins: readonly string[] = [], refinements: readonly string[] = [], constant?: Schema.Json, controlOrigins: readonly string[] = []): Fact => ({ type, dataOrigins, controlOrigins, origins: unique(dataOrigins, controlOrigins), refinements, ...(constant === undefined ? {} : { constant }) })
 const roles = (value: Fact, dataOrigins: readonly string[], controlOrigins: readonly string[]): Fact => ({ ...value, dataOrigins, controlOrigins, origins: unique(dataOrigins, controlOrigins) })
@@ -91,7 +119,7 @@ export const checkSource = (source: string, environment: CheckEnvironment): Effe
 })
 
 const check = (program: Program, environment: CheckEnvironment): CheckedProgram => {
-  const fail: (detail: string, span?: Span) => never = (detail, span = program.span) => { throw new CheckError({ detail, span }) }
+  const fail: (detail: string, span?: Span) => never = (detail, span = program.span) => { throw CheckError.of(detail, span) }
   for (const limit of [environment.maxCalls, environment.maxIterations, environment.maxListItems]) if (!Number.isSafeInteger(limit) || limit < 0) fail("invalid review limit")
   const calls: CallFact[] = [], tools = new Set<string>()
   const expressionFacts = new Map<Expression, Fact>()
@@ -337,7 +365,11 @@ const check = (program: Program, environment: CheckEnvironment): CheckedProgram 
           if (!["==", "!="].includes(expression.operator) && left.value.type.kind === "boolean") fail("ordered comparison requires string/number", expression.span)
           return { value: computed(scalar("boolean")), counts }
         }
-        if (expression.operator === "+" && allKind(left.value, "string") && allKind(right.value, "string")) return { value: computed(fact({ kind: "string" }, [], [], typeof left.value.constant === "string" && typeof right.value.constant === "string" ? left.value.constant + right.value.constant : undefined)), counts }
+        if (expression.operator === "+" && allKind(left.value, "string") && allKind(right.value, "string")) {
+          const joined = typeof left.value.constant === "string" && typeof right.value.constant === "string" && left.value.constant.length + right.value.constant.length <= MAX_FOLDED_STRING
+            ? left.value.constant + right.value.constant : undefined
+          return { value: computed(fact({ kind: "string" }, [], [], joined)), counts }
+        }
         compatible(left.value, scalar("number"), expression.span); compatible(right.value, scalar("number"), expression.span)
         if (typeof left.value.constant === "number" && typeof right.value.constant === "number") {
           if (expression.operator === "/" && right.value.constant === 0) fail("certain arithmetic zero failure", expression.span)
@@ -434,6 +466,8 @@ const check = (program: Program, environment: CheckEnvironment): CheckedProgram 
           const message = statement.message === undefined ? { counts: {}, value: scalar("string") } : expr(statement.message, scope, unique(pc, condition.value.origins))
           compatible(message.value, scalar("string"), statement.span)
           counts = add(counts, add(condition.counts, message.counts)); pc = unique(pc, condition.value.origins)
+          // Past a passed assert its condition holds; a failed one ends the run.
+          scope = new Map(narrow(statement.test, scope, true))
           break
         }
         case "IfStatement": {
@@ -503,7 +537,6 @@ const check = (program: Program, environment: CheckEnvironment): CheckedProgram 
     bindings.set(name, fromModel(model, `binding.${name}`))
   }
   const result = statements(program.body, bindings, [])
-  if (Object.values(result.counts).reduce((sum, count) => sum + count, 0) > environment.maxCalls || result.iterations > environment.maxIterations) fail("reviewed bound exceeds budget")
   return { program, environment, tools: [...tools].sort(), maximumCalls: result.counts, calls, iterations: result.iterations, expressionFacts }
 }
 

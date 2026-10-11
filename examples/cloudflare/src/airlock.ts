@@ -33,7 +33,7 @@ export const airlock = defineAirlock({
   implement: {
     "mail.list": ({ mailbox: name }) => {
       mailbox.push({ did: "listed", detail: name })
-      return { messages: inbox.map(({ id, from, subject, unread }) => ({ id, from, subject, unread })) }
+      return { messages: inbox.slice(0, 5).map(({ id, from, subject, unread }) => ({ id, from, subject, unread })) }
     },
     "mail.read": ({ id }) => {
       const message = inbox.find((candidate) => candidate.id === id)

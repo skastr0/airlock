@@ -26,10 +26,10 @@ const sourceOf = (origin: string, review: CheckedProgram): typeof FlowSource.Typ
     if (origin === `${root}state`) return { tool: call.tool, part: "receipt", field: "state" }
     if (origin === `${root}result`) return { tool: call.tool, part: "result", field: "$" }
     if (origin.startsWith(`${root}result.`)) {
-      const field = origin.slice(`${root}result.`.length)
-      // The first demonstration uses scalar result fields. Nested or list
-      // paths need a typed origin tree; never broaden them by string prefix.
-      if (field.length > 0 && !/[.\[\]|]/.test(field)) return { tool: call.tool, part: "result", field }
+      // A nested or listed origin belongs to the top-level result field that
+      // holds it, as its run-time label does; the name is a whole segment.
+      const field = /^[^.[\]|]+/.exec(origin.slice(`${root}result.`.length))?.[0]
+      if (field !== undefined) return { tool: call.tool, part: "result", field }
     }
   }
   return undefined
@@ -77,13 +77,19 @@ export const reviewArgumentFlows = (
       let edge: FlowObligation = { origin, mode, ...(source === undefined ? {} : { source }), ...(label === undefined ? {} : { label, effective: label }), rules: [] }
       edge = dischargeFlow(edge, call.tool, field, rules, conditions)
       flows.push(edge)
-      if (edge.effective === undefined || source === undefined) {
+      if (edge.effective === undefined) {
         explanations.push({ nodeId, field, origin, mode, policyId: sink?.id ?? "missing-sink", reason: "unknown-label" })
         continue
       }
       if (sink === undefined) continue
       const checked = yield* checkSink(edge.effective, sink).pipe(Effect.result)
       if (Result.isSuccess(checked)) continue
+      // Receipt ids, refusals, way-back references and bindings have a label
+      // but no rule source: no rule can release them, so nothing is suggested.
+      if (source === undefined) {
+        explanations.push({ nodeId, field, origin, mode, policyId: sink.id, reason: checked.failure.reason })
+        continue
+      }
       const when = Object.entries(review.environment.decoders).flatMap(([name, decoder]) => [...facts].flatMap(([field, fact]) =>
         fact.refinements.includes(decoderIdentity(decoder)) ? [{ field, decoder: { name, version: decoder.version } }] : []))
       const scope = { id: `allow:${nodeId}:${field}:${mode}:${source.part}:${source.field}`, source, sink: { tool: call.tool, field }, mode, when }
@@ -93,7 +99,7 @@ export const reviewArgumentFlows = (
       explanations.push({ nodeId, field, origin, mode, policyId: sink.id, reason: checked.failure.reason, allowWith })
     }
   }
-  const label = flows.some((flow) => flow.effective === undefined || flow.source === undefined)
+  const label = flows.some((flow) => flow.effective === undefined)
     ? undefined : combine(literal, ...flows.map((flow) => flow.effective!))
   return { flows, explanations, label }
 })

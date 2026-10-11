@@ -367,7 +367,13 @@ const trusted = async (request: Request, env: Env): Promise<Response> => {
   try {
     switch (url.pathname) {
       case "/airlock/run":
-        return json(await airlock.run({ runId: String(body["runId"]), source: String(body["source"]) }))
+        return json(await airlock.run({
+          runId: String(body["runId"]),
+          source: String(body["source"]),
+          ...(body["plan"] === undefined ? {} : { plan: String(body["plan"]) })
+        }))
+      case "/airlock/review": return json(await airlock.review({ source: String(body["source"]) }))
+      case "/airlock/approve-plan": return json(await airlock.approvePlan(String(body["plan"])))
       case "/airlock/describe": return json(await airlock.describe())
       case "/airlock/pending": return json(await airlock.pending())
       case "/airlock/inspect": return json(await airlock.inspect(String(body["id"])))

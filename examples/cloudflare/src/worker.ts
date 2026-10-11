@@ -23,12 +23,18 @@ export default {
     const url = new URL(request.url)
     const session = airlockClient(env.AIRLOCK, url.searchParams.get("session") ?? "demo")
     const body = request.method === "POST"
-      ? await request.json().catch(() => ({})) as { runId?: string; source?: string; id?: string }
+      ? await request.json().catch(() => ({})) as { runId?: string; source?: string; id?: string; plan?: string }
       : {}
     try {
       switch (`${request.method} ${url.pathname}`) {
         case "GET /tools": return json(await session.describe())
-        case "POST /run": return json(await session.run({ runId: body.runId ?? "", source: body.source ?? "" }))
+        case "POST /run": return json(await session.run({
+          runId: body.runId ?? "",
+          source: body.source ?? "",
+          ...(body.plan === undefined ? {} : { plan: body.plan })
+        }))
+        case "POST /review": return json(await session.review({ source: body.source ?? "" }))
+        case "POST /approve-plan": return json(await session.approvePlan(body.plan ?? ""))
         case "GET /pending": return json(await session.pending())
         case "POST /commit": return json(await session.commit(body.id ?? ""))
         case "POST /cancel": return json(await session.cancel(body.id ?? ""))
