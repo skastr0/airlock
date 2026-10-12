@@ -17,8 +17,8 @@ const list = (mailbox: string) =>
   Result.getOrThrow(MailList.summarize({ mailbox, query: "secret query" }))
 
 describe("core: tool contracts", () => {
-  it("requires exactly the Plan's four effect classes", () => {
-    expect(Plan.PlanEffect.literals).toEqual(Object.keys(Plan.PlanNodeKinds))
+  it("requires exactly the four effect classes", () => {
+    expect(Plan.PlanEffect.literals).toEqual(["capture", "invoke", "apply", "request"])
     const input = Schema.Struct({ value: Schema.String })
     const output = Schema.Struct({ ok: Schema.Boolean })
     for (const effect of Plan.PlanEffect.literals) {

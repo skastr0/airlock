@@ -1,5 +1,5 @@
 import { Effect, Result, Schema } from "effect"
-import { canonicalizeEndpoint, canonicalizeEndpointSelector } from "../admission/DispatchPolicy.ts"
+import { canonicalizeEndpoint, canonicalizeEndpointSelector } from "../admission/Endpoint.ts"
 import { canonicalJson } from "../Canonical.ts"
 import type { ResourceField } from "./Resource.ts"
 import { type BoundResource, type BoundScope, HostGrantRefused, ResourceBinding, type ResourceBindRequest, type ResourceResolver, ResourceRefused, type ToolHost } from "./ToolHost.ts"

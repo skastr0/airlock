@@ -1,15 +1,10 @@
-// Admission is a candidate pristine component: it owns the typed boundary
-// between inert drafts and runtime-minted authority, but no platform I/O.
-export * from "./Admission.ts"
-// A versioned, supervisor-authored box grant. It is not wired to the CLI.
+// A versioned, supervisor-authored box grant: the policy and verbs a sealed
+// install is pinned to.
 export * from "./BoxGrant.ts"
-// Dispatch classes are grant-side only: this module owns the vocabulary, the
-// canonical endpoint match, the auto-commit eligibility decision, and the
-// typed refusal for agent-side text that tries to name a class.
-export * from "./DispatchPolicy.ts"
-// The supervisor-plane answer to "which staged nodes may commit without a
-// further human act", shaped so no consumer can widen or re-derive a class.
-export * from "./SupervisorDispatch.ts"
-// Grants for typed tool contracts: a tool, a class, and conditions on the
+// The canonical form an endpoint must already have before any grant compares it.
+export * from "./Endpoint.ts"
+// Ceilings on the paths, executables and endpoints a call may name.
+export * from "./ResourcePolicy.ts"
+// Grants for typed tool contracts: a tool, when it runs, and conditions on the
 // fields its contract declares public.
 export * from "./ToolGrant.ts"

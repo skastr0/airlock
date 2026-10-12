@@ -3,7 +3,6 @@
  * can provide the ports: an OutboxStore, a Ledger, a Dispatcher, and
  * `effect/Crypto`. Nothing here names a file, a process, or an operating system.
  */
-export * as Actions from "./actions/index.ts"
 export * as Admission from "./admission/index.ts"
 export {
   type Airlock,
