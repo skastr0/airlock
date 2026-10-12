@@ -106,12 +106,13 @@ if (!existsSync("/usr/bin/sandbox-exec")) {
 }
 
 // The process.run tool on the real Cell: a confined run merged through Hold
-// and put back, an escape attempt, a failed run, and drift while it ran.
+// and put back, an escape attempt, a failed run, and drift while it ran; and
+// the same through the airlock command, where only the person's binary undoes.
 {
-  const expectedProcessRunTests = 6
+  const expectedProcessRunTests = 8
   const reportFile = join(mkdtempSync(join(tmpdir(), "airlock-process-run-")), "report.json")
   const result = run([
-    "--bun", "vitest", "run", "test/native-process-run.test.ts",
+    "--bun", "vitest", "run", "test/native-process-run.test.ts", "test/cli-native.test.ts",
     "--reporter=json", `--outputFile=${reportFile}`
   ])
   const report = Schema.decodeUnknownSync(Schema.fromJsonString(Schema.Struct({
