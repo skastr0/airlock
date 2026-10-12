@@ -15,17 +15,9 @@ if (AIRLOCK_BOX_MODE !== "root-tenant" && AIRLOCK_BOX_MODE !== "local-same-user"
 const generation = resolve(dirname(process.execPath), "..")
 process.env["AIRLOCK_SEAL"] = join(generation, "seal")
 process.env["AIRLOCK_HOME"] = join(generation, "home")
-process.env["AIRLOCK_DAEMON_SOCKET"] = join(generation, "ipc", "daemon.sock")
-process.env["AIRLOCK_REQUIRED_SEAL"] = "1"
 process.env["AIRLOCK_OPERATOR_KEY_SHA256_INTERNAL"] = AIRLOCK_OPERATOR_KEY_SHA256
 process.env["AIRLOCK_GENERATION_MODE_INTERNAL"] = AIRLOCK_BOX_MODE
 process.env["AIRLOCK_GENERATION_READINESS_INTERNAL"] = join(generation, "SEALED")
-if (AIRLOCK_BOX_MODE === "root-tenant") {
-  process.env["AIRLOCK_DAEMON_UID_INTERNAL"] = "0"
-} else {
-  // A caller cannot smuggle the root tenant constraint back into a local box.
-  delete process.env["AIRLOCK_DAEMON_UID_INTERNAL"]
-}
 
 await import("./cli.ts")
 
