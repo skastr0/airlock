@@ -260,7 +260,7 @@ is not a flag an agent can turn off.
 | --- | --- | --- |
 | run programs | `run`, `eval`, `review`, `describe` | same |
 | read state | `pending`, `inspect`, `ledger`, `doctor`, `capabilities` | same |
-| decide | `approve-plan`, `commit`, `cancel`, `undo` | **absent** |
+| decide | `approve-plan`, `commit`, `cancel`, `undo`, `reap` | **absent** |
 | reviewed local changes | `change` | `change`, without the deciding subcommands |
 
 The omissions are structural. Asking for one is a command-graph mismatch, not a

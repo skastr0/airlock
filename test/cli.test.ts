@@ -123,6 +123,22 @@ describe("airlock CLI", () => {
     expect(ledger.stdout).toContain(receipt.id)
   })
 
+  it("reaps only what Hold has kept longer than every receipt promises", () => {
+    const at = fixture()
+    writeFileSync(join(at.workspace, "note.txt"), "old")
+    const receipt = evaluate(at, write("note.txt", "new")).outcome.result as { readonly id: string }
+
+    const early = cli(at, ["reap", "--older-than", "1h"])
+    expect(early.status).toBe(1)
+    expect(json(early.stderr)).toMatchObject({ _tag: "CliInputError", field: "older-than" })
+
+    const reaped = cli(at, ["reap"])
+    expect(reaped.status, reaped.stderr).toBe(0)
+    expect(json(reaped.stdout)).toMatchObject({ reaped: [] })
+    expect(cli(at, ["undo", receipt.id, "--workspace", at.workspace]).status).toBe(0)
+    expect(readFileSync(join(at.workspace, "note.txt"), "utf8")).toBe("old")
+  })
+
   it("returns the recorded call when the same run id runs again, and never changes a file twice", () => {
     const at = fixture()
     const target = join(at.workspace, "note.txt")
@@ -241,7 +257,7 @@ describe("airlock CLI", () => {
     const at = fixture()
     const help = cli(at, ["--help"], { entry: "agent-cli" })
     expect(help.status).toBe(0)
-    for (const command of ["approve-plan", "commit", "cancel", "undo"]) {
+    for (const command of ["approve-plan", "commit", "cancel", "undo", "reap"]) {
       const ran = cli(at, [command, "emi_0", "--workspace", at.workspace], { entry: "agent-cli" })
       expect(ran.status, command).not.toBe(0)
       expect(ran.stdout, command).toBe("")

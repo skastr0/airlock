@@ -129,11 +129,11 @@ const suggestedCommands = (text: string): ReadonlyArray<string> =>
 const normalizeMismatch = (text: string) => stripAnsi(text)
   .replace(suggestionBlock, "\n")
   .replaceAll(basename(binary), "<binary>")
-  .replace(/\b(?:approve-plan|commit|cancel|undo|change|nonsense|exec|rm|write|send|serve)\b/g, "<command>")
+  .replace(/\b(?:approve-plan|commit|cancel|undo|reap|change|nonsense|exec|rm|write|send|serve)\b/g, "<command>")
   .trim()
 
 const allVerbs = BoxGrantVerb.literals
-const supervisorVerbs = ["approve-plan", "commit", "cancel", "undo"] as const
+const supervisorVerbs = ["approve-plan", "commit", "cancel", "undo", "reap"] as const
 const subcommandsOf = (help: string) => {
   const section = stripAnsi(help).split("SUBCOMMANDS")[1] ?? ""
   return section.split("\n").map((line) => line.trim().split(/\s+/)[0]!).filter((name) => name.length > 0)

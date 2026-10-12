@@ -34,7 +34,7 @@ const document = (overrides: Record<string, unknown> = {}) => ({
 
 const allVerbs = [
   "describe", "review", "run", "eval", "approve-plan", "pending", "inspect",
-  "commit", "cancel", "undo", "ledger", "doctor", "capabilities"
+  "commit", "cancel", "undo", "reap", "ledger", "doctor", "capabilities"
 ]
 
 const decoded = (input: unknown) => Effect.runPromise(decodeBoxGrant(input))
@@ -122,7 +122,7 @@ describe("box grant v2", () => {
 
     for (const verb of [
       "change", "shell", "serve", "exec", "rm", "write", "send", "flush",
-      "held", "reap", "actions", "schema", "runs", "run-receipt"
+      "held", "actions", "schema", "runs", "run-receipt"
     ]) expect(await rejected(document({ verbs: ["run", verb] })), verb).toBe(true)
   })
 

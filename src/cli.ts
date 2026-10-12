@@ -371,6 +371,28 @@ const makeCommit = supervising("commit", "Approve a waiting call and carry it ou
 const makeCancel = supervising("cancel", "Drop a waiting call; it never happens", (supervisor, id) => supervisor.cancel(id))
 const makeUndo = supervising("undo", "Put back what a completed call changed, from Hold", (supervisor, id) => supervisor.restore(id))
 
+const DURATION_UNITS = { ms: 1, s: 1000, m: 60_000, h: 3_600_000, d: 86_400_000 } as const
+
+const parseDuration = (field: string, raw: string): Effect.Effect<number, CliInputError> => {
+  const match = raw.match(/^(\d+)(ms|s|m|h|d)$/)
+  return match === null
+    ? failInput(field, "must be an integer duration such as 30s, 5m, 1h or 7d")
+    : Effect.succeed(Number(match[1]) * DURATION_UNITS[match[2] as keyof typeof DURATION_UNITS])
+}
+
+/** Every done receipt promises its `heldUntil`; nothing younger than the retention is reaped. */
+const makeReap = (seal: SealContext) => Command.make(
+  "reap",
+  { olderThan: Flag.String("older-than").pipe(Flag.withDefault("7d")) },
+  ({ olderThan }) => rendered(requireVerb(seal, "reap").pipe(
+    Effect.andThen(parseDuration("older-than", olderThan)),
+    Effect.flatMap((millis) => millis < HOLD_RETENTION_MILLIS
+      ? failInput("older-than", "a held call is kept for at least 7d; reap only what is older")
+      : Effect.succeed(millis)),
+    Effect.flatMap((millis) => Effect.flatMap(Hold, (hold) => hold.reap(millis)))
+  ))
+).pipe(Command.withDescription("Discard what Hold kept longer ago than --older-than (at least 7d); after this, undo cannot reach it"))
+
 const makePending = (seal: SealContext) => Command.make(
   "pending",
   { workspace: workspaceFlag },
@@ -595,6 +617,7 @@ const commandDescriptors: ReadonlyArray<CurrentCommandDescriptor> = [
   { verb: "commit", supervisor: makeCommit, supervisorOnly: true },
   { verb: "cancel", supervisor: makeCancel, supervisorOnly: true },
   { verb: "undo", supervisor: makeUndo, supervisorOnly: true },
+  { verb: "reap", supervisor: makeReap, supervisorOnly: true },
   { verb: "ledger", supervisor: makeLedger },
   { verb: "doctor", supervisor: makeDoctor },
   { verb: "capabilities", supervisor: makeCapabilities },

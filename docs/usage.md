@@ -10,7 +10,7 @@ Two binaries share one command set:
 
 - `airlock` is the person's. It has every command.
 - `airlock-agent` is the agent's. It has no command that decides: no
-  `approve-plan`, `commit`, `cancel` or `undo`.
+  `approve-plan`, `commit`, `cancel`, `undo` or `reap`.
 
 Every command prints JSON on stdout. A failure prints one JSON error on stderr
 and exits 1.
@@ -165,8 +165,14 @@ airlock inspect <id>            # one recorded call
 airlock commit <id>             # approve it and carry it out now
 airlock cancel <id>             # drop it; it never happens
 airlock undo <id>               # put back what a completed call changed
+airlock reap --older-than 30d   # discard what Hold kept longer ago than that
 airlock ledger                  # the append-only record of every act
 ```
+
+Hold keeps what every change replaced, and a copy of the workspace for every
+contained process, until `reap` discards it. `--older-than` defaults to and may
+not be less than 7d, the time every `done` receipt promises in its `heldUntil`.
+After a reap, `undo` cannot reach what was discarded.
 
 `undo` takes the `id` from a `done` receipt. For a process, it puts back
 everything the process's merge changed.

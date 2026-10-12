@@ -120,7 +120,7 @@ describe("portable sealed-box proof", () => {
     const help = await agent(["--help"])
     expect(help.status, help.stderr).toBe(0)
     for (const verb of agentVerbs) expect(help.stdout).toMatch(new RegExp(`\\b${verb}\\b`))
-    for (const denied of ["approve-plan", "commit", "cancel", "undo", "ledger", "change", "serve", "exec"])
+    for (const denied of ["approve-plan", "commit", "cancel", "undo", "reap", "ledger", "change", "serve", "exec"])
       expect(help.stdout).not.toMatch(new RegExp(`\\b${denied}\\b`))
 
     const observation = await agent([

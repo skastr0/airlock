@@ -20,6 +20,7 @@ export const BoxGrantVerb = Schema.Literals([
   "commit",
   "cancel",
   "undo",
+  "reap",
   "ledger",
   "doctor",
   "capabilities"
