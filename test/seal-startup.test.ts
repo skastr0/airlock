@@ -9,9 +9,9 @@ import {
 } from "node:fs"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
+import { Schema } from "effect"
 import { beforeAll, describe, expect, it } from "vitest"
-import { NativeActionCatalog } from "../src/core/actions/index.ts"
-import { AdmissionPolicy, BoxGrant } from "../src/core/admission/index.ts"
+import { BoxGrant, BoxGrantVerb } from "../src/core/admission/index.ts"
 import {
   BOX_GRANT_FILE,
   BOX_GRANT_SIGNATURE_FILE,
@@ -47,38 +47,32 @@ const makeSeal = (name: string, options: {
   readonly wrongBinary?: boolean
   readonly missingSignature?: boolean
   readonly catalogInGrant?: boolean
+  readonly v1Shape?: boolean
 } = {}) => {
   const directory = join(root, name)
   mkdirSync(directory, { recursive: true })
   const { privateKey, publicKey } = generateKeyPairSync("ed25519")
   const actualBinaryDigest = digest(readFileSync(binary))
-  const grant = new BoxGrant({
-    schemaVersion: "airlock/box-grant/v1",
-    admission: new AdmissionPolicy({
-      schemaVersion: "airlock/admission-policy/v2",
-      profile: "compatibility",
-      principal: "agent:startup-test",
-      realm: "local",
-      admittedBy: "operator:startup-test",
-      pathAllowlist: [root],
-      executableAllowlist: [],
-      executableEdges: [],
-      endpointGrants: []
-    }),
-    verbs: [
-      "rm", "write", "undo", "held", "reap", "send", "pending",
-      "commit", "cancel", "flush", "doctor", "capabilities", "actions",
-      "schema", "exec", "run", "eval", "ledger", "runs", "run-receipt",
-      "serve"
-    ],
-    nativeActions: NativeActionCatalog.map(({ name }) => name),
-    daemonOps: [],
+  const grant = Schema.decodeUnknownSync(BoxGrant)({
+    schemaVersion: "airlock/box-grant/v2",
+    policy: {
+      schemaVersion: "airlock/tool-policy/v1",
+      toolGrants: [{ id: "read", tool: "file.read", when: "now" }],
+      resources: { path: [root] },
+      budget: { maxCalls: 16, maxInputBytes: 65_536 }
+    },
+    verbs: BoxGrantVerb.literals,
     binaryDigest: options.wrongBinary
       ? Sha256Digest.make(`sha256:${"0".repeat(64)}`)
       : actualBinaryDigest
   })
-  // A grant in the removed shape, with a definition catalog, is not a grant.
-  const written = options.catalogInGrant ? { ...grant, catalog: [] } : grant
+  const encoded = Schema.encodeSync(BoxGrant)(grant)
+  // A grant with a definition catalog, or in the v1 shape, is not a grant.
+  const written = options.catalogInGrant
+    ? { ...encoded, catalog: [] }
+    : options.v1Shape
+      ? { ...encoded, schemaVersion: "airlock/box-grant/v1", nativeActions: ["file.read"], daemonOps: [] }
+      : encoded
   writeFileSync(join(directory, BOX_GRANT_FILE), `${JSON.stringify(written, null, 2)}\n`)
   writeFileSync(
     join(directory, OPERATOR_PUBLIC_KEY_FILE),
@@ -122,7 +116,8 @@ describe("sealed process startup", () => {
   it.each([
     ["missing signature", { missingSignature: true }],
     ["wrong binary digest", { wrongBinary: true }],
-    ["a grant with a definition catalog", { catalogInGrant: true }]
+    ["a grant with a definition catalog", { catalogInGrant: true }],
+    ["a grant in the v1 shape", { v1Shape: true }]
   ] as const)("fails before runtime state on %s", (_label, options) => {
     const name = `bad-${_label.replaceAll(" ", "-")}`
     const home = join(root, `${name}-home`)

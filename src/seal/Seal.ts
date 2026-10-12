@@ -82,8 +82,7 @@ export const SealVerificationPhase = Schema.Literals([
   "binary",
   "grant",
   "key",
-  "signature",
-  "reverify"
+  "signature"
 ])
 export type SealVerificationPhase = typeof SealVerificationPhase.Type
 
@@ -111,7 +110,6 @@ export const SealVerificationReason = Schema.Literals([
   "signature-invalid",
   "signature-verification-failed",
   "digest-mismatch",
-  "snapshot-mismatch",
   "installation-not-ready"
 ])
 export type SealVerificationReason = typeof SealVerificationReason.Type
@@ -504,35 +502,4 @@ export const verifyInstalledReadiness = (
     Effect.mapError((error) => error.reason === "installation-not-ready"
       ? error
       : failure("seal", readinessPath, "installation-not-ready"))
-  )
-
-/**
- * Perform all filesystem, signature and binary checks again, then
- * require identity with the originally verified immutable-by-convention data.
- */
-export const reverifySeal = (
-  expected: VerifiedSeal,
-  options: SealVerificationOptions = {}
-): Effect.Effect<VerifiedSeal, SealVerificationFailed> =>
-  verifySealAtPath(expected.sealPath, options).pipe(
-    Effect.flatMap((fresh) => {
-      if (fresh.grantDigest !== expected.grantDigest) {
-        return Effect.fail(failure(
-          "reverify",
-          join(expected.sealPath, BOX_GRANT_FILE),
-          "snapshot-mismatch"
-        ))
-      }
-      if (
-        fresh.binaryPath !== expected.binaryPath ||
-        fresh.binaryDigest !== expected.binaryDigest
-      ) {
-        return Effect.fail(failure(
-          "reverify",
-          expected.binaryPath,
-          "snapshot-mismatch"
-        ))
-      }
-      return Effect.succeed(fresh)
-    })
   )

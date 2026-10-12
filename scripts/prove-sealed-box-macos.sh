@@ -39,27 +39,12 @@ INSTALL=$(bun scripts/seal-box.ts install \
   --agent-group "$AGENT_GROUP" --agent-gid "$AGENT_GID" \
   --apply-ownership)
 GENERATION=$(printf '%s' "$INSTALL" | /usr/bin/python3 -c 'import json,sys; print(json.load(sys.stdin)["generation"])')
-PLIST=$(printf '%s' "$INSTALL" | /usr/bin/python3 -c 'import json,sys; print(json.load(sys.stdin)["launchd"])')
-LABEL="com.airlock.box.$BOX"
-
-/bin/launchctl bootstrap system "$PLIST"
-for _ in $(jot 100); do
-  if [ -S "$GENERATION/ipc/daemon.sock" ]; then break; fi
-  sleep 0.05
-done
-[ -S "$GENERATION/ipc/daemon.sock" ] || {
-  /bin/launchctl print "system/$LABEL" >&2 || true
-  echo "daemon socket did not become ready" >&2
-  exit 75
-}
 
 AGENT="$GENERATION/bin/airlock-agent"
 /usr/bin/sudo -u "$AGENT_USER" /usr/bin/env AIRLOCK_AGENT_SURFACE=1 \
   "$AGENT" eval --workspace "$WORKSPACE" --source 'return true'
 /usr/bin/sudo -u "$AGENT_USER" /usr/bin/env AIRLOCK_AGENT_SURFACE=1 \
-  "$AGENT" held
-/usr/bin/sudo -u "$AGENT_USER" /usr/bin/env AIRLOCK_AGENT_SURFACE=1 \
-  "$AGENT" pending
+  "$AGENT" pending --workspace "$WORKSPACE"
 
-printf '{"proof":"sealed-box-macos-two-principal","generation":"%s","daemon_uid":0,"agent_uid":%s,"activated":true}\n' \
+printf '{"proof":"sealed-box-macos-agent-principal","generation":"%s","agent_uid":%s}\n' \
   "$GENERATION" "$AGENT_UID"

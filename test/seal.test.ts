@@ -21,10 +21,10 @@ import {
   UnsealedSeal,
   VerifiedSeal,
   boxGrantSigningPayload,
-  loadStartupSeal,
-  reverifySeal
+  loadStartupSeal
 } from "../src/seal/index.ts"
 import { Sha256Digest } from "../src/core/Canonical.ts"
+import { ToolPolicy } from "../src/core/session/ToolPolicy.ts"
 
 const binary = new TextEncoder().encode("airlock compiled fixture v1\n")
 const flippedBinary = new TextEncoder().encode("airlock compiled fixture v2\n")
@@ -32,20 +32,14 @@ const flippedBinary = new TextEncoder().encode("airlock compiled fixture v2\n")
 const digest = (bytes: Uint8Array) =>
   Sha256Digest.make(`sha256:${createHash("sha256").update(bytes).digest("hex")}`)
 
-const admission = {
-  schemaVersion: "airlock/admission-policy/v2" as const,
-  profile: "native-contained" as const,
-  principal: "agent/seal-test",
-  realm: "local",
-  admittedBy: "operator/seal-test",
-  pathAllowlist: ["/workspace/**"],
-  executableAllowlist: ["/usr/bin/true"],
-  executableEdges: [],
-  endpointGrants: []
+const policy = {
+  schemaVersion: "airlock/tool-policy/v1" as const,
+  toolGrants: [{ id: "read", tool: "file.read", when: "now" }],
+  resources: { path: ["/workspace"] },
+  budget: { maxCalls: 16, maxInputBytes: 65_536 }
 }
 
 type FixtureOptions = {
-  readonly admission?: typeof admission
   readonly grantOverrides?: Readonly<Record<string, unknown>>
   readonly serializeGrant?: (grant: Record<string, unknown>) => string
   readonly writeGrant?: boolean
@@ -56,11 +50,9 @@ type FixtureOptions = {
 const makeFixture = async (options: FixtureOptions = {}) => {
   const sealPath = await mkdtemp(join(tmpdir(), "airlock-seal-"))
   const grantObject: Record<string, unknown> = {
-    schemaVersion: "airlock/box-grant/v1",
-    admission: options.admission ?? admission,
-    verbs: ["run", "actions"],
-    nativeActions: ["file.read", "process.run"],
-    daemonOps: ["commit"],
+    schemaVersion: "airlock/box-grant/v2",
+    policy,
+    verbs: ["run", "describe"],
     binaryDigest: digest(binary),
     ...options.grantOverrides
   }
@@ -86,9 +78,7 @@ const makeFixture = async (options: FixtureOptions = {}) => {
   return {
     sealPath,
     grant,
-    grantObject,
-    privateKey: keys.privateKey,
-    publicKey: keys.publicKey
+    grantObject
   }
 }
 
@@ -171,8 +161,10 @@ describe("startup seal verification", () => {
 
     expect(context).toBeInstanceOf(VerifiedSeal)
     expect(context._tag).toBe("VerifiedSeal")
-    expect(context.grant.admission.schemaVersion).toBe("airlock/admission-policy/v2")
-    expect(context.grant.nativeActions).toEqual(["file.read", "process.run"])
+    expect(context.grant.schemaVersion).toBe("airlock/box-grant/v2")
+    expect(context.grant.policy).toBeInstanceOf(ToolPolicy)
+    expect(context.grant.policy.toolGrants.map(({ tool }) => tool)).toEqual(["file.read"])
+    expect(context.grant.verbs).toEqual(["run", "describe"])
     expect(context.grantDigest).toMatch(/^sha256:[0-9a-f]{64}$/)
     expect(context.binaryDigest).toBe(digest(binary))
     expect(context.binaryPath).toBe("/fixture/airlock")
@@ -191,6 +183,33 @@ describe("startup seal verification", () => {
     expect(error).toMatchObject({ phase: "grant", reason: "invalid-grant" })
   })
 
+  it("refuses a grant in the v1 shape before reading its signature", async () => {
+    const fixture = await makeFixture()
+    await writeFile(join(fixture.sealPath, BOX_GRANT_FILE), JSON.stringify({
+      schemaVersion: "airlock/box-grant/v1",
+      admission: {
+        schemaVersion: "airlock/admission-policy/v2",
+        profile: "native-contained",
+        principal: "agent/seal-test",
+        realm: "local",
+        admittedBy: "operator/seal-test",
+        pathAllowlist: ["/workspace/**"],
+        executableAllowlist: [],
+        executableEdges: [],
+        endpointGrants: []
+      },
+      verbs: ["run"],
+      nativeActions: ["file.read"],
+      daemonOps: [],
+      binaryDigest: digest(binary)
+    }))
+    const error = await failed(loadStartupSeal({
+      sealPath: fixture.sealPath,
+      binarySnapshotProvider: provider()
+    }))
+    expect(error).toMatchObject({ phase: "grant", reason: "invalid-grant" })
+  })
+
   it("verifies whitespace and object-key reordered JSON against semantic grant identity", async () => {
     const fixture = await makeFixture({
       serializeGrant: (grant) =>
@@ -201,17 +220,23 @@ describe("startup seal verification", () => {
   })
 
   it("rejects a semantic grant change under the original signature", async () => {
-    const fixture = await makeFixture()
-    await writeFile(join(fixture.sealPath, BOX_GRANT_FILE), JSON.stringify({
-      ...fixture.grantObject,
-      verbs: ["held", "actions"]
-    }))
+    for (const widened of [
+      { verbs: ["run", "describe", "commit"] },
+      { policy: { ...policy, toolGrants: [...policy.toolGrants, { id: "rm", tool: "file.remove", when: "now" }] } },
+      { policy: { ...policy, resources: { path: ["/"] } } }
+    ]) {
+      const fixture = await makeFixture()
+      await writeFile(join(fixture.sealPath, BOX_GRANT_FILE), JSON.stringify({
+        ...fixture.grantObject,
+        ...widened
+      }))
 
-    const error = await failed(loadStartupSeal({
-      sealPath: fixture.sealPath,
-      binarySnapshotProvider: provider()
-    }))
-    expect(error).toMatchObject({ phase: "signature", reason: "signature-invalid" })
+      const error = await failed(loadStartupSeal({
+        sealPath: fixture.sealPath,
+        binarySnapshotProvider: provider()
+      }))
+      expect(error).toMatchObject({ phase: "signature", reason: "signature-invalid" })
+    }
   })
 
   it("rejects a missing grant without falling back to unsealed", async () => {
@@ -379,46 +404,5 @@ describe("startup seal verification", () => {
       binarySnapshotProvider: provider()
     }))
     expect(error).toMatchObject({ phase: "grant", reason: "too-large" })
-  })
-})
-
-describe("seal reverification", () => {
-  it("freshly verifies an unchanged seal", async () => {
-    const fixture = await makeFixture()
-    const expected = await load(fixture.sealPath)
-    const fresh = await Effect.runPromise(reverifySeal(expected, {
-      binarySnapshotProvider: provider()
-    }))
-    expect(fresh.grantDigest).toBe(expected.grantDigest)
-    expect(fresh.binaryDigest).toBe(expected.binaryDigest)
-  })
-
-  it("detects a newly valid but different grant", async () => {
-    const fixture = await makeFixture()
-    const expected = await load(fixture.sealPath)
-    const changedObject = { ...fixture.grantObject, verbs: ["held", "actions"] }
-    const changedGrant = await Effect.runPromise(decodeBoxGrant(changedObject))
-    await writeFile(
-      join(fixture.sealPath, BOX_GRANT_FILE),
-      JSON.stringify(changedObject)
-    )
-    await writeFile(
-      join(fixture.sealPath, BOX_GRANT_SIGNATURE_FILE),
-      sign(null, boxGrantSigningPayload(changedGrant), fixture.privateKey)
-    )
-
-    const error = await failed(reverifySeal(expected, {
-      binarySnapshotProvider: provider()
-    }))
-    expect(error).toMatchObject({ phase: "reverify", reason: "snapshot-mismatch" })
-  })
-
-  it("detects changed binary bytes on the fresh pass", async () => {
-    const fixture = await makeFixture()
-    const expected = await load(fixture.sealPath)
-    const error = await failed(reverifySeal(expected, {
-      binarySnapshotProvider: provider(flippedBinary)
-    }))
-    expect(error).toMatchObject({ phase: "binary", reason: "digest-mismatch" })
   })
 })

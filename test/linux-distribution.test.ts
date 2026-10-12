@@ -7,6 +7,7 @@ import {
   mkdtempSync,
   readFileSync,
   readdirSync,
+  realpathSync,
   symlinkSync,
   writeFileSync
 } from "node:fs"
@@ -236,28 +237,23 @@ describe.skipIf(process.platform !== "linux")("Linux distribution", () => {
     ], temporary)
     expect(installedResult.status, installedResult.stderr).toBe(0)
 
-    const workspace = join(temporary, "workspace")
+    mkdirSync(join(temporary, "workspace"))
+    const workspace = realpathSync(join(temporary, "workspace"))
     const home = join(temporary, "airlock-home")
     const policy = join(temporary, "policy.json")
     const program = join(temporary, "program.air")
-    mkdirSync(workspace)
     writeFileSync(
       program,
-      'return process.run({ executable: "/usr/bin/touch", args: ["installed.txt"], cwd: workspace, cellProfile: "native-contained", stdout: "capture", stderr: "capture" })\n'
+      'let ran = process.run({ executable: "/usr/bin/touch", args: ["installed.txt"], cwd: "." })\nreturn ran.state\n'
     )
     writeFileSync(policy, JSON.stringify({
-      schemaVersion: "airlock/admission-policy/v2",
-      profile: "native-contained",
-      principal: "agent:linux-distribution",
-      realm: "local",
-      admittedBy: "operator:linux-distribution",
-      pathAllowlist: [`${workspace}/**`],
-      executableAllowlist: ["/usr/bin/touch"],
-      executableEdges: [],
-      endpointGrants: []
+      schemaVersion: "airlock/tool-policy/v1",
+      toolGrants: [{ id: "touch", tool: "process.run", when: "now", host: { profile: "native-contained" } }],
+      resources: { path: [workspace], executable: { roots: ["/usr/bin/touch"], edges: [] } },
+      budget: { maxCalls: 4, maxInputBytes: 100_000 }
     }))
     const executed = spawnSync(installed(prefix).airlock, [
-      "run", program, "--workspace", workspace, "--profile", "native-contained"
+      "run", program, "--workspace", workspace
     ], {
       env: {
         ...process.env,
@@ -270,8 +266,8 @@ describe.skipIf(process.platform !== "linux")("Linux distribution", () => {
     })
     expect(executed.status, `${executed.stderr}\n${executed.stdout}`).toBe(0)
     expect(JSON.parse(executed.stdout)).toMatchObject({
-      profile: "native-contained",
-      result: { state: "succeeded" }
+      workspace,
+      outcome: { ok: true, result: "done" }
     })
     expect(existsSync(join(workspace, "installed.txt"))).toBe(true)
     expect(run(uninstall, ["--prefix", prefix], temporary).status).toBe(0)

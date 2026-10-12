@@ -1,84 +1,43 @@
 import { type DigestUnavailable, Sha256Digest, sha256Canonical } from "../Canonical.ts"
 import { type Crypto, Effect, Schema } from "effect"
-import { NativeActionName } from "../actions/index.ts"
-import { AdmissionPolicy } from "./Admission.ts"
+import { ToolPolicy } from "../session/ToolPolicy.ts"
 
 /**
- * A Box Grant is supervisor-authored authority for one Airlock binary and one
- * pinned action catalog. It is data only: decoding this document does not wire
- * it into the CLI, runtime, Hold, Outbox, or daemon.
+ * A Box Grant is supervisor-authored authority for one Airlock binary: the
+ * commands it answers and the policy every program it runs is held to. It is
+ * data only; the seal verifies it before any command is built.
  */
 
-/** The complete current `airlock` command graph, plus the reserved PR5 verb. */
+/** Every command a sealed `airlock` can be granted. */
 export const BoxGrantVerb = Schema.Literals([
-  "rm",
-  "write",
-  "undo",
-  "held",
-  "reap",
-  "send",
-  "pending",
-  "commit",
-  "cancel",
-  "flush",
-  "doctor",
-  "capabilities",
-  "actions",
-  "schema",
-  "exec",
+  "describe",
+  "review",
   "run",
   "eval",
+  "approve-plan",
+  "pending",
+  "inspect",
+  "commit",
+  "cancel",
+  "undo",
   "ledger",
-  "runs",
-  "run-receipt",
-  "serve"
+  "doctor",
+  "capabilities"
 ])
 export type BoxGrantVerb = typeof BoxGrantVerb.Type
 
-/** Privileged daemon operations. The program and tool planes cannot add one. */
-export const BoxGrantDaemonOp = Schema.Literals([
-  "commit",
-  "reap",
-  "flush",
-  "hold-expiry"
-])
-export type BoxGrantDaemonOp = typeof BoxGrantDaemonOp.Type
-
-const unique = <A>(
-  values: ReadonlyArray<A>,
-  identity: (value: A) => string,
-  description: string
-) => {
-  const identities = values.map(identity)
-  return new Set(identities).size === identities.length ||
-    `must not contain duplicate ${description}`
-}
-
 const UniqueBoxGrantVerbs = Schema.Array(BoxGrantVerb).pipe(
-  Schema.check(Schema.makeFilter((verbs) => unique(verbs, (verb) => verb, "verbs")))
-)
-const UniqueNativeActions = Schema.Array(NativeActionName).pipe(
-  Schema.check(Schema.makeFilter((actions) => unique(actions, (action) => action, "native actions")))
-)
-const UniqueDaemonOps = Schema.Array(BoxGrantDaemonOp).pipe(
-  Schema.check(Schema.makeFilter((operations) => unique(
-    operations,
-    (operation) => operation,
-    "daemon operations"
-  )))
+  Schema.check(Schema.makeFilter((verbs) => new Set(verbs).size === verbs.length || "must not contain duplicate verbs"))
 )
 
 /**
- * Strict `airlock/box-grant/v1` supervisor document. All arrays have set
- * semantics and therefore reject repeated identities instead of silently
- * normalizing them.
+ * Strict `airlock/box-grant/v2` supervisor document. `verbs` has set
+ * semantics and rejects a repeated verb instead of silently normalizing it.
  */
 export class BoxGrant extends Schema.Class<BoxGrant>("BoxGrant")({
-  schemaVersion: Schema.Literal("airlock/box-grant/v1"),
-  admission: AdmissionPolicy,
+  schemaVersion: Schema.Literal("airlock/box-grant/v2"),
+  policy: ToolPolicy,
   verbs: UniqueBoxGrantVerbs,
-  nativeActions: UniqueNativeActions,
-  daemonOps: UniqueDaemonOps,
   binaryDigest: Sha256Digest
 }) {}
 
@@ -89,25 +48,19 @@ export const decodeBoxGrant = (input: unknown) =>
 const lexical = (left: string, right: string) =>
   left < right ? -1 : left > right ? 1 : 0
 
-const canonicalBoxGrantContent = (grant: BoxGrant) => ({
-  ...grant,
-  // These fields are decoded as mathematical sets. Their input order cannot
-  // change the identity of the authority document.
-  verbs: [...grant.verbs].sort(lexical),
-  nativeActions: [...grant.nativeActions].sort(lexical),
-  daemonOps: [...grant.daemonOps].sort(lexical)
-})
+const encodeBoxGrant = Schema.encodeSync(BoxGrant)
 
 /**
  * Hash decoded semantic content, not input JSON spelling, object-key order, or
- * the order used to spell one of the grant's set-valued fields. The returned
- * digest uses the same `sha256:<64 lowercase hex>` wire format as the
- * binary pin.
+ * the order the verbs were listed in. The returned digest uses the same
+ * `sha256:<64 lowercase hex>` wire format as the binary pin.
  */
 export const hashBoxGrant = (
   grant: BoxGrant
-): Effect.Effect<Sha256Digest, DigestUnavailable, Crypto.Crypto> =>
-  sha256Canonical(canonicalBoxGrantContent(grant))
+): Effect.Effect<Sha256Digest, DigestUnavailable, Crypto.Crypto> => {
+  const encoded = encodeBoxGrant(grant)
+  return sha256Canonical({ ...encoded, verbs: [...encoded.verbs].sort(lexical) })
+}
 
 /** Decode first, then hash only the accepted semantic document. */
 export const decodeAndHashBoxGrant = (input: unknown) =>

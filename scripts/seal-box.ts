@@ -43,12 +43,10 @@ import {
   sep
 } from "node:path"
 import { Effect, Schema } from "effect"
-import { decodeBoxGrant } from "../src/core/admission/BoxGrant.ts"
-import {
-  AdmissionPolicy,
-  AdmissionPolicy
-} from "../src/core/admission/Admission.ts"
-import { checkDaemonSocket } from "../src/daemon/index.ts"
+import { BoxGrant, decodeBoxGrant } from "../src/core/admission/BoxGrant.ts"
+import { toolGrant } from "../src/core/admission/ToolGrant.ts"
+import { ToolPolicy, toolPolicy } from "../src/core/session/ToolPolicy.ts"
+import { FileGlob, FileInspect, FileList, FileRead, FileStat } from "../src/native/index.ts"
 import {
   BOX_GRANT_FILE,
   BOX_GRANT_SIGNATURE_FILE,
@@ -62,21 +60,20 @@ const usage = `usage: bun scripts/seal-box.ts <command> [options]
 
 Commands:
   keygen --private-key PATH --public-key PATH
-  create --binary FILE --admission FILE [--verb V ...] [--native-action A ...]
-         [--daemon-op O ...] --private-key FILE
-         --public-key FILE --out FRESH_DIR [--allow-sealed-compatibility]
+  create --binary FILE --policy FILE [--verb V ...] --private-key FILE
+         --public-key FILE --out FRESH_DIR
   verify --bundle DIR
   local --workspace DIR --out FRESH_DIR --private-key FILE --public-key FILE
-        [--admission FILE]
-        [--allow-sealed-compatibility] [--with-daemon-commit]
+        [--policy FILE]
   install --bundle DIR --root DIR --box ID --workspace DIR
-          [--daemon-user NAME --daemon-uid N --daemon-group NAME --daemon-gid N]
           [--agent-user NAME --agent-uid N --agent-group NAME --agent-gid N]
           [--apply-ownership]
 
-create emits BUNDLE/bin/airlock plus BUNDLE/seal/. local builds and publishes
-one same-user generation. install publishes one fresh root tenant generation;
-neither install mode invokes launchctl.`
+--policy names a strict airlock/tool-policy/v1 document: every program the box
+runs is held to it. create emits BUNDLE/bin/airlock plus BUNDLE/seal/. local
+builds and publishes one same-user generation. install publishes one fresh root
+tenant generation. Nothing here starts a process that outlives it: a person
+commits a waiting call with \`airlock commit <id>\`.`
 
 class CliError extends Error {
   constructor(message: string, readonly exitCode = 64) {
@@ -104,12 +101,10 @@ const optionSpecification = {
   },
   create: {
     single: new Set([
-      "--binary", "--admission", "--private-key", "--public-key", "--out"
+      "--binary", "--policy", "--private-key", "--public-key", "--out"
     ]),
-    repeated: new Set([
-      "--verb", "--native-action", "--daemon-op"
-    ]),
-    boolean: new Set(["--allow-sealed-compatibility"])
+    repeated: new Set(["--verb"]),
+    boolean: new Set<string>()
   },
   verify: {
     single: new Set(["--bundle"]),
@@ -118,17 +113,14 @@ const optionSpecification = {
   },
   local: {
     single: new Set([
-      "--workspace", "--out", "--private-key", "--public-key", "--admission"
+      "--workspace", "--out", "--private-key", "--public-key", "--policy"
     ]),
     repeated: new Set<string>(),
-    boolean: new Set([
-      "--allow-sealed-compatibility", "--with-daemon-commit"
-    ])
+    boolean: new Set<string>()
   },
   install: {
     single: new Set([
       "--bundle", "--root", "--box", "--workspace",
-      "--daemon-user", "--daemon-uid", "--daemon-group", "--daemon-gid",
       "--agent-user", "--agent-uid", "--agent-group", "--agent-gid"
     ]),
     repeated: new Set<string>(),
@@ -556,17 +548,22 @@ const keygen = async (): Promise<void> => {
   console.log(JSON.stringify({ privateKey: privatePath, publicKey: publicPath }))
 }
 
-const decodeAdmission = async (path: string): Promise<typeof AdmissionPolicy.Type> => {
-  const bytes = await readRegularNoSymlink("--admission", path, {
+const decodePolicy = async (path: string): Promise<ToolPolicy> => {
+  const bytes = await readRegularNoSymlink("--policy", path, {
     maxBytes: 256 * 1024
   })
-  const parsed = decodeJson("--admission", decodeUtf8("--admission", bytes))
+  const parsed = decodeJson("--policy", decodeUtf8("--policy", bytes))
+  let decoded: ToolPolicy
   try {
-    return await Effect.runPromise(
-      Schema.decodeUnknownEffect(AdmissionPolicy, { onExcessProperty: "error" })(parsed)
-    )
+    decoded = Schema.decodeUnknownSync(ToolPolicy, { onExcessProperty: "error" })(parsed)
   } catch {
-    return fail("--admission is not a strict AdmissionPolicy", 65)
+    return fail("--policy is not a strict ToolPolicy", 65)
+  }
+  // Flow rules are checked as they are composed, exactly as an unsealed policy file is.
+  try {
+    return toolPolicy(decoded)
+  } catch {
+    return fail("--policy has invalid flow rules", 65)
   }
 }
 
@@ -576,6 +573,55 @@ const sortedUnique = (flag: string, values: ReadonlyArray<string>): Array<string
     if (sorted[index] === sorted[index - 1]) fail(`${flag} must not contain duplicates`)
   }
   return sorted
+}
+
+const signedGrant = async (
+  policy: ToolPolicy,
+  requestedVerbs: ReadonlyArray<string>,
+  binary: Uint8Array,
+  privateKey: KeyObject
+) => {
+  const verbs = sortedUnique("--verb", requestedVerbs)
+  let grant: BoxGrant
+  try {
+    grant = await Effect.runPromise(decodeBoxGrant({
+      schemaVersion: "airlock/box-grant/v2",
+      policy: Schema.encodeSync(ToolPolicy)(policy),
+      verbs,
+      binaryDigest: sha256(binary)
+    }))
+  } catch {
+    return fail("grant options contain an invalid literal or combination", 65)
+  }
+  const signature = new Uint8Array(sign(null, boxGrantSigningPayload(grant), privateKey))
+  if (signature.byteLength !== 64) fail("Ed25519 produced an invalid signature size", 70)
+  return { grant, signature }
+}
+
+const writeSeal = async (
+  sealPath: string,
+  signed: { readonly grant: BoxGrant; readonly signature: Uint8Array },
+  publicKey: Uint8Array
+): Promise<void> => {
+  await mkdirFresh(sealPath)
+  await writeExclusive(
+    join(sealPath, BOX_GRANT_FILE),
+    `${JSON.stringify(Schema.encodeSync(BoxGrant)(signed.grant), null, 2)}\n`,
+    0o444
+  )
+  await writeExclusive(join(sealPath, BOX_GRANT_SIGNATURE_FILE), signed.signature, 0o444)
+  await writeExclusive(join(sealPath, OPERATOR_PUBLIC_KEY_FILE), publicKey, 0o444)
+}
+
+/** The state directories each component expects; components create the rest on first use. */
+const makeHome = async (home: string): Promise<void> => {
+  await mkdirFresh(home, 0o700)
+  for (const directory of ["hold", "outbox", "hold-locks", "outbox-locks"]) {
+    await mkdirFresh(join(home, directory), 0o700)
+  }
+  await writeExclusive(join(home, "ledger.jsonl"), "", 0o600)
+  await writeExclusive(join(home, "hold-locks", "active"), "", 0o600)
+  await writeExclusive(join(home, "outbox-locks", "active"), "", 0o600)
 }
 
 const verifyBundle = async (bundlePath: string) => {
@@ -631,12 +677,12 @@ const verifyBundle = async (bundlePath: string) => {
 const create = async (): Promise<void> => {
   const options = parseOptions("create")
   const binaryPath = requireAbsolute("--binary", required(options, "--binary"))
-  const admissionPath = requireAbsolute("--admission", required(options, "--admission"))
+  const policyPath = requireAbsolute("--policy", required(options, "--policy"))
   const privatePath = requireAbsolute("--private-key", required(options, "--private-key"))
   const publicPath = requireAbsolute("--public-key", required(options, "--public-key"))
   const out = requireAbsolute("--out", required(options, "--out"))
 
-  const allInputs = [binaryPath, admissionPath, privatePath, publicPath]
+  const allInputs = [binaryPath, policyPath, privatePath, publicPath]
   if (allInputs.some((path) => pathInside(out, path) || pathInside(path, out))) {
     fail("--out must be disjoint from every input path")
   }
@@ -644,54 +690,22 @@ const create = async (): Promise<void> => {
   if (await exists(out)) fail(`destination already exists: ${out}`, 73)
 
   const binary = await readRegularNoSymlink("--binary", binaryPath, { executable: true })
-  const admission = await decodeAdmission(admissionPath)
-  if (
-    admission.profile === "compatibility" &&
-    !options.boolean.has("--allow-sealed-compatibility")
-  ) {
-    fail("sealed compatibility policy requires --allow-sealed-compatibility", 65)
-  }
+  const policy = await decodePolicy(policyPath)
   const privateKey = await privateKeyFrom(privatePath)
   const suppliedPublic = await publicKeyFrom(publicPath)
   if (!samePublicKey(createPublicKey(privateKey), suppliedPublic.key)) {
     fail("supplied public key does not match private key", 65)
   }
   await requireBinaryOperatorAnchor(binaryPath, suppliedPublic.key)
-
-  const grantInput = {
-    schemaVersion: "airlock/box-grant/v1" as const,
-    admission,
-    verbs: sortedUnique("--verb", options.repeated.get("--verb") ?? []),
-    nativeActions: sortedUnique(
-      "--native-action",
-      options.repeated.get("--native-action") ?? []
-    ),
-    daemonOps: sortedUnique("--daemon-op", options.repeated.get("--daemon-op") ?? []),
-    binaryDigest: sha256(binary)
-  }
-  let grant
-  try {
-    grant = await Effect.runPromise(decodeBoxGrant(grantInput))
-  } catch {
-    return fail("grant options contain an invalid literal or combination", 65)
-  }
-  const signature = new Uint8Array(sign(null, boxGrantSigningPayload(grant), privateKey))
-  if (signature.byteLength !== 64) fail("Ed25519 produced an invalid signature size", 70)
+  const signed = await signedGrant(policy, options.repeated.get("--verb") ?? [], binary, privateKey)
 
   await mkdirFresh(out)
   const binPath = join(out, "bin")
   const sealPath = join(out, "seal")
   await mkdirFresh(binPath)
-  await mkdirFresh(sealPath)
   await writeExclusive(join(binPath, "airlock"), binary, 0o555)
   await writeExclusive(join(binPath, "airlock-agent"), binary, 0o555)
-  await writeExclusive(
-    join(sealPath, BOX_GRANT_FILE),
-    `${JSON.stringify(grant, null, 2)}\n`,
-    0o444
-  )
-  await writeExclusive(join(sealPath, BOX_GRANT_SIGNATURE_FILE), signature, 0o444)
-  await writeExclusive(join(sealPath, OPERATOR_PUBLIC_KEY_FILE), suppliedPublic.bytes, 0o444)
+  await writeSeal(sealPath, signed, suppliedPublic.bytes)
   const verified = await verifyBundle(out)
   console.log(JSON.stringify({
     bundle: out,
@@ -713,48 +727,18 @@ const verify = async (): Promise<void> => {
 }
 
 
-const localChildEnvironment = (): Record<string, string> =>
-  Object.fromEntries(
-    Object.entries(process.env).filter(
-      (entry): entry is [string, string] =>
-        entry[1] !== undefined && entry[0] !== "AIRLOCK_AGENT_SURFACE"
-    )
-  )
+/** What a same-user local box answers: programs and what they left waiting, never a decision. */
+const LOCAL_VERBS = [
+  "capabilities", "describe", "doctor", "eval", "inspect", "pending", "review", "run"
+] as const
 
-const startLocalDaemon = async (
-  binary: string,
-  workspace: string,
-  socketPath: string,
-  grantDigest: `sha256:${string}`
-): Promise<number> => {
-  const child = Bun.spawn({
-    cmd: [binary, "serve", "--interval", "1s"],
-    cwd: workspace,
-    env: localChildEnvironment(),
-    detached: true,
-    stdin: "ignore",
-    stdout: "ignore",
-    stderr: "ignore"
-  })
-  const deadline = Date.now() + 30_000
-  let ready = false
-  while (Date.now() < deadline) {
-    if (child.exitCode !== null) break
-    try {
-      await Effect.runPromise(checkDaemonSocket(socketPath, grantDigest, 250))
-      ready = true
-      break
-    } catch {
-      await new Promise((resolveDelay) => setTimeout(resolveDelay, 50))
-    }
-  }
-  if (!ready) {
-    if (child.exitCode === null) child.kill()
-    fail("local daemon did not become ready with the signed grant digest", 75)
-  }
-  child.unref()
-  return child.pid
-}
+/** With no policy file, a local box reads its workspace and changes nothing. */
+const observationPolicy = (workspace: string) => toolPolicy({
+  toolGrants: [FileGlob, FileInspect, FileList, FileRead, FileStat].map((contract) =>
+    toolGrant(contract, { id: contract.tag, when: "now" })),
+  resources: { path: [workspace] },
+  budget: { maxCalls: 256, maxInputBytes: 4_194_304 }
+})
 
 const shellQuote = (value: string): string =>
   `'${value.split("'").join(`'"'"'`)}'`
@@ -778,7 +762,7 @@ const local = async (): Promise<void> => {
     "--public-key",
     required(options, "--public-key")
   )
-  const requestedAdmission = options.single.get("--admission")
+  const requestedPolicy = options.single.get("--policy")
 
   // Resolve every authority-bearing input before claiming the fresh output.
   // In particular, /tmp and /private/tmp must compare as one physical scope.
@@ -794,11 +778,11 @@ const local = async (): Promise<void> => {
   )
   const publicPath = await canonicalLocalFile("--public-key", requestedPublic)
   if (privatePath === publicPath) fail("private and public key paths must differ")
-  const admissionPath = requestedAdmission === undefined
+  const policyPath = requestedPolicy === undefined
     ? undefined
     : await canonicalLocalFile(
-        "--admission",
-        requireAbsolute("--admission", requestedAdmission)
+        "--policy",
+        requireAbsolute("--policy", requestedPolicy)
       )
   if (pathsOverlap(out, workspace)) {
     fail("--out and --workspace must be physically disjoint")
@@ -809,7 +793,7 @@ const local = async (): Promise<void> => {
   const allInputs = [
     privatePath,
     publicPath,
-    ...(admissionPath === undefined ? [] : [admissionPath])
+    ...(policyPath === undefined ? [] : [policyPath])
   ]
   if (allInputs.some((path) => pathsOverlap(out, path))) {
     fail("--out must be physically disjoint from every input path")
@@ -820,26 +804,9 @@ const local = async (): Promise<void> => {
   if (!samePublicKey(createPublicKey(privateKey), suppliedPublic.key)) {
     fail("supplied public key does not match private key", 65)
   }
-
-  const admission = admissionPath === undefined
-    ? new AdmissionPolicy({
-        schemaVersion: "airlock/admission-policy/v2",
-        profile: "native-contained",
-        principal: "agent:local-box",
-        realm: "local",
-        admittedBy: "operator:local-box",
-        pathAllowlist: [`${workspace}/**`],
-        executableAllowlist: [],
-        executableEdges: [],
-        endpointGrants: []
-      })
-    : await decodeAdmission(admissionPath)
-  if (
-    admission.profile === "compatibility" &&
-    !options.boolean.has("--allow-sealed-compatibility")
-  ) {
-    fail("sealed compatibility policy requires --allow-sealed-compatibility", 65)
-  }
+  const policy = policyPath === undefined
+    ? observationPolicy(workspace)
+    : await decodePolicy(policyPath)
 
   // mkdir is the no-replace ownership boundary. Every failure before SEALED
   // leaves an inspectable but inert generation, and retries conservatively fail.
@@ -873,66 +840,13 @@ const local = async (): Promise<void> => {
     binaryPath,
     suppliedPublic.key
   )
-
-  const withDaemonCommit = options.boolean.has("--with-daemon-commit")
-  const grantInput = {
-    schemaVersion: "airlock/box-grant/v1" as const,
-    admission,
-    verbs: [
-      "actions", "doctor", "eval", "held", "pending", "run", "schema", "serve"
-    ],
-    nativeActions: [
-      "file.glob", "file.inspect", "file.list", "file.read", "file.stat",
-      "http.stage"
-    ],
-    daemonOps: withDaemonCommit ? ["commit"] : [],
-    binaryDigest: sha256(binary)
-  }
-  let grant
-  try {
-    grant = await Effect.runPromise(decodeBoxGrant(grantInput))
-  } catch {
-    return fail("local grant contains an invalid literal or combination", 65)
-  }
-  const signature = new Uint8Array(
-    sign(null, boxGrantSigningPayload(grant), privateKey)
-  )
-  if (signature.byteLength !== 64) {
-    fail("Ed25519 produced an invalid signature size", 70)
-  }
+  const signed = await signedGrant(policy, LOCAL_VERBS, binary, privateKey)
 
   await writeExclusive(join(binPath, "airlock-agent"), binary, 0o555)
   const sealPath = join(out, "seal")
-  await mkdirFresh(sealPath)
-  await writeExclusive(
-    join(sealPath, BOX_GRANT_FILE),
-    `${JSON.stringify(grant, null, 2)}\n`,
-    0o444
-  )
-  await writeExclusive(
-    join(sealPath, BOX_GRANT_SIGNATURE_FILE),
-    signature,
-    0o444
-  )
-  await writeExclusive(
-    join(sealPath, OPERATOR_PUBLIC_KEY_FILE),
-    suppliedPublic.bytes,
-    0o444
-  )
-
+  await writeSeal(sealPath, signed, suppliedPublic.bytes)
   const home = join(out, "home")
-  await mkdirFresh(home, 0o700)
-  for (const directory of [
-    "hold", "outbox", "hold-locks", "outbox-locks", "runs"
-  ]) {
-    await mkdirFresh(join(home, directory), 0o700)
-  }
-  await writeExclusive(join(home, "ledger.jsonl"), "", 0o600)
-  await writeExclusive(join(home, "hold-locks", "active"), "", 0o600)
-  await writeExclusive(join(home, "outbox-locks", "active"), "", 0o600)
-  const ipc = join(out, "ipc")
-  await mkdirFresh(ipc, 0o700)
-  await mkdirFresh(join(out, "run"), 0o700)
+  await makeHome(home)
 
   const verified = await verifyBundle(out)
   const readiness = join(out, "SEALED")
@@ -944,35 +858,14 @@ const local = async (): Promise<void> => {
       binaryDigest: verified.binaryDigest,
       ownershipApplied: false,
       localSameUser: true,
-      runnable: true,
-      activated: false
+      runnable: true
     })}\n`,
     0o444
   )
 
-  const socketPath = join(ipc, "daemon.sock")
-  const daemonPid = withDaemonCommit
-    ? await startLocalDaemon(
-        binaryPath,
-        workspace,
-        socketPath,
-        verified.grantDigest
-      )
-    : undefined
-  const binding = JSON.stringify({ workspace })
-  const recipe = [
-    `export AIRLOCK_SEAL=${shellQuote(sealPath)}`,
-    `export AIRLOCK_HOME=${shellQuote(home)}`,
-    `export AIRLOCK_DAEMON_SOCKET=${shellQuote(socketPath)}`,
-    ...(daemonPid === undefined
-      ? ["# daemonOps is empty; no daemon is required"]
-      : [
-          `export AIRLOCK_DAEMON_PID=${daemonPid} # same-digest daemon is ready`
-        ]),
-    `${shellQuote(binaryPath)} eval --workspace ${shellQuote(workspace)} ` +
-      `--bindings ${shellQuote(binding)} --source ` +
-      `${shellQuote('return file.stat({ path: "ok.txt" })')}`
-  ].join("\n")
+  // The compiled box finds its seal and home beside itself; the recipe needs neither.
+  const recipe = `${shellQuote(binaryPath)} eval --workspace ${shellQuote(workspace)} ` +
+    `--source ${shellQuote('return file.stat({ path: "ok.txt" })')}`
 
   console.log(JSON.stringify({
     generation: out,
@@ -980,15 +873,11 @@ const local = async (): Promise<void> => {
     agentBinary: join(binPath, "airlock-agent"),
     seal: sealPath,
     home,
-    socket: socketPath,
     readiness,
     operatorKeyAnchor: anchorPath,
     grantDigest: verified.grantDigest,
     binaryDigest: verified.binaryDigest,
-    profile: verified.grant.admission.profile,
-    daemonOps: verified.grant.daemonOps,
-    daemonPid,
-    daemonReady: daemonPid !== undefined,
+    verbs: verified.grant.verbs,
     localSameUser: true,
     runnable: true,
     recipe
@@ -1020,68 +909,6 @@ const principal = (flag: string, raw: string | undefined, fallback: string): str
   }
   return value
 }
-
-const plistEscape = (value: string): string => value
-  .replaceAll("&", "&amp;")
-  .replaceAll("<", "&lt;")
-  .replaceAll(">", "&gt;")
-  .replaceAll('"', "&quot;")
-  .replaceAll("'", "&apos;")
-
-const launchdPlist = (fields: {
-  readonly box: string
-  readonly binary: string
-  readonly seal: string
-  readonly home: string
-  readonly workspace: string
-  readonly daemonUser: string
-  readonly daemonGroup: string
-  readonly agentUser: string
-  readonly agentGroup: string
-  readonly ipcDirectory: string
-}) => `<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-  <key>Label</key>
-  <string>${plistEscape(`com.airlock.box.${fields.box}`)}</string>
-  <key>ProgramArguments</key>
-  <array>
-    <string>${plistEscape(fields.binary)}</string>
-    <string>serve</string>
-  </array>
-  <key>EnvironmentVariables</key>
-  <dict>
-    <key>AIRLOCK_SEAL</key>
-    <string>${plistEscape(fields.seal)}</string>
-    <key>AIRLOCK_HOME</key>
-    <string>${plistEscape(fields.home)}</string>
-    <key>AIRLOCK_WORKSPACE</key>
-    <string>${plistEscape(fields.workspace)}</string>
-    <key>AIRLOCK_IPC_DIRECTORY</key>
-    <string>${plistEscape(fields.ipcDirectory)}</string>
-    <key>AIRLOCK_DAEMON_SOCKET</key>
-    <string>${plistEscape(`${fields.ipcDirectory}/daemon.sock`)}</string>
-    <key>AIRLOCK_AGENT_USER</key>
-    <string>${plistEscape(fields.agentUser)}</string>
-    <key>AIRLOCK_AGENT_GROUP</key>
-    <string>${plistEscape(fields.agentGroup)}</string>
-  </dict>
-  <key>WorkingDirectory</key>
-  <string>${plistEscape(fields.workspace)}</string>
-  <key>UserName</key>
-  <string>${plistEscape(fields.daemonUser)}</string>
-  <key>GroupName</key>
-  <string>${plistEscape(fields.daemonGroup)}</string>
-  <key>Umask</key>
-  <integer>63</integer>
-  <key>RunAtLoad</key>
-  <true/>
-  <key>KeepAlive</key>
-  <true/>
-</dict>
-</plist>
-`
 
 const copyBundleInto = async (bundle: string, generation: string): Promise<void> => {
   const binary = await readRegularNoSymlink(
@@ -1127,36 +954,21 @@ const install = async (): Promise<void> => {
   await inspectDirectoryInput("--root", root, false)
   await inspectDirectoryInput("--workspace", workspace, true)
   const verified = await verifyBundle(bundle)
-  if (verified.grant.admission.profile === "compatibility") {
-    // Creation required a loud flag; installation keeps the fact visible but
-    // accepts an already signed operator decision rather than inventing one.
-  }
 
-  // v1 defaults terminal authority to root because Hold/Outbox state is
-  // owner-private; merely spelling two non-root names in a plist would not
-  // make that state mutually accessible. Custom principals are emitted as an
-  // ownership plan only—this portable generator never claims to chown them.
-  const daemonUser = principal("--daemon-user", options.single.get("--daemon-user"), "root")
-  const daemonGroup = principal("--daemon-group", options.single.get("--daemon-group"), "wheel")
+  // The generation, its binary and its seal belong to root; the agent owns
+  // only its home. An agent that were root could rewrite the seal it runs under.
   const agentUser = principal("--agent-user", options.single.get("--agent-user"), "_airlock_agent")
   const agentGroup = principal("--agent-group", options.single.get("--agent-group"), "_airlock_agent")
-  const daemonUid = numericId("--daemon-uid", options.single.get("--daemon-uid"), 0)
-  const daemonGid = numericId("--daemon-gid", options.single.get("--daemon-gid"), 0)
   const agentUid = numericId("--agent-uid", options.single.get("--agent-uid"), 500)
   const agentGid = numericId("--agent-gid", options.single.get("--agent-gid"), 500)
-  if (daemonUid === agentUid) fail("daemon and agent UIDs must differ")
-  if (daemonGid === agentGid) fail("daemon and agent GIDs must differ")
-  if (daemonUser === agentUser) fail("daemon and agent users must differ")
-  if (daemonGroup === agentGroup) fail("daemon and agent groups must differ")
+  if (agentUid === 0 || agentUser === "root") fail("the agent principal must not be root")
+  if (agentGid === 0 || agentGroup === "wheel") fail("the agent group must not be root's group")
   const applyOwnership = options.boolean.has("--apply-ownership")
   if (
     applyOwnership &&
     (typeof process.getuid !== "function" || process.getuid() !== 0)
   ) {
     fail("--apply-ownership requires root", 77)
-  }
-  if (applyOwnership && (daemonUser !== "root" || daemonUid !== 0)) {
-    fail("--apply-ownership requires the v1 root daemon principal", 64)
   }
 
   const boxesRoot = join(installRoot, "boxes")
@@ -1179,34 +991,10 @@ const install = async (): Promise<void> => {
   // conservatively refuse it rather than replacing or removing any bytes.
   await mkdirFresh(destination)
   await copyBundleInto(bundle, destination)
-  await mkdirFresh(join(destination, "home"), 0o700)
-  for (const directory of ["hold", "outbox", "hold-locks", "outbox-locks", "runs"]) {
-    await mkdirFresh(join(destination, "home", directory), 0o700)
-  }
-  await writeExclusive(join(destination, "home", "ledger.jsonl"), "", 0o600)
-  await writeExclusive(join(destination, "home", "hold-locks", "active"), "", 0o600)
-  await writeExclusive(join(destination, "home", "outbox-locks", "active"), "", 0o600)
-  await mkdirFresh(join(destination, "run"), 0o2750)
-  await mkdirFresh(join(destination, "ipc"), 0o750)
-  await mkdirFresh(join(destination, "launchd"))
+  await makeHome(home)
+  const agentLaunchPath = join(destination, "agent-launch.json")
   await writeExclusive(
-    join(destination, "launchd", `com.airlock.box.${box}.plist`),
-    launchdPlist({
-      box,
-      binary: join(destination, "bin", "airlock"),
-      seal: join(destination, "seal"),
-      home,
-      workspace,
-      daemonUser,
-      daemonGroup,
-      agentUser,
-      agentGroup,
-      ipcDirectory: join(destination, "ipc")
-    }),
-    0o444
-  )
-  await writeExclusive(
-    join(destination, "launchd", `com.airlock.box.${box}.agent.json`),
+    agentLaunchPath,
     `${JSON.stringify({
       schemaVersion: "airlock/agent-launch/v1",
       executable: join(destination, "bin", "airlock-agent"),
@@ -1215,7 +1003,7 @@ const install = async (): Promise<void> => {
       group: agentGroup,
       gid: agentGid,
       environment: { AIRLOCK_AGENT_SURFACE: "1" },
-      note: "launch from the tenant harness; this file is inert and not activated by install"
+      note: "launch from the tenant harness; this file is inert"
     }, null, 2)}\n`,
     0o444
   )
@@ -1223,40 +1011,14 @@ const install = async (): Promise<void> => {
   await writeExclusive(
     principalsPath,
     `${JSON.stringify({
-      daemon: {
-        user: daemonUser,
-        uid: daemonUid,
-        group: daemonGroup,
-        gid: daemonGid,
-        terminalAuthority: true
-      },
       agent: { user: agentUser, uid: agentUid, group: agentGroup, gid: agentGid },
       ownershipApplied: applyOwnership,
       ownershipRequired: {
         generationOwner: { uid: 0, gid: 0 },
         agentHome: { path: home, uid: agentUid, gid: agentGid, mode: "0700" },
-        run: {
-          path: join(destination, "run"),
-          uid: 0,
-          gid: agentGid,
-          mode: "02750"
-        },
-        ipc: {
-          path: join(destination, "ipc"),
-          uid: daemonUid,
-          gid: agentGid,
-          mode: "02750"
-        },
         note: applyOwnership
-          ? "ownership plan applied; launchctl activation remains separate"
-          : "rerun is intentionally refused; inspect this plan and apply ownership before activation"
-      },
-      ipc: {
-        directory: join(destination, "ipc"),
-        owner: daemonUser,
-        client: agentUser,
-        sharedGroup: agentGroup,
-        activation: "not-activated"
+          ? "ownership plan applied"
+          : "rerun is intentionally refused; inspect this plan and apply ownership before use"
       }
     }, null, 2)}
 `,
@@ -1265,12 +1027,11 @@ const install = async (): Promise<void> => {
   await verifyBundle(destination)
 
   if (applyOwnership) {
-    // Only paths deliberately writable by a principal receive non-root
-    // ownership. Seal, binary, plist, metadata, and the generation root stay
-    // immutable root-owned artifacts.
+    // Only the agent's home receives non-root ownership. Seal, binary,
+    // metadata, and the generation root stay immutable root-owned artifacts.
     await chown(home, agentUid, agentGid)
     await chmod(home, 0o700)
-    for (const directory of ["hold", "outbox", "hold-locks", "outbox-locks", "runs"]) {
+    for (const directory of ["hold", "outbox", "hold-locks", "outbox-locks"]) {
       await chown(join(home, directory), agentUid, agentGid)
       await chmodExact(join(home, directory), 0o700)
     }
@@ -1280,16 +1041,12 @@ const install = async (): Promise<void> => {
       await chown(join(home, file), agentUid, agentGid)
       await chmodExact(join(home, file), 0o600)
     }
-    await chown(join(destination, "run"), 0, agentGid)
-    await chmodExact(join(destination, "run"), 0o2750)
-    await chown(join(destination, "ipc"), daemonUid, agentGid)
-    await chmodExact(join(destination, "ipc"), 0o2750)
     await chown(destination, 0, 0)
     await chown(join(destination, "bin"), 0, 0)
     await chown(join(destination, "bin", "airlock"), 0, 0)
     await chown(join(destination, "bin", "airlock-agent"), 0, 0)
     await chown(join(destination, "seal"), 0, 0)
-    await chown(join(destination, "launchd"), 0, 0)
+    await chown(agentLaunchPath, 0, 0)
     await chown(principalsPath, 0, 0)
   }
 
@@ -1303,8 +1060,7 @@ const install = async (): Promise<void> => {
       grantDigest: verified.grantDigest,
       binaryDigest: verified.binaryDigest,
       ownershipApplied: applyOwnership,
-      runnable: applyOwnership,
-      activated: false
+      runnable: applyOwnership
     })}
 `,
     0o444
@@ -1315,8 +1071,7 @@ const install = async (): Promise<void> => {
     grantDigest: verified.grantDigest,
     ownershipApplied: applyOwnership,
     runnable: applyOwnership,
-    launchd: join(destination, "launchd", `com.airlock.box.${box}.plist`),
-    activated: false
+    agentLaunch: agentLaunchPath
   }))
 }
 

@@ -1,267 +1,252 @@
 import { spawnSync } from "node:child_process"
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs"
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, symlinkSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
 import { describe, expect, it } from "vitest"
 
 const repository = resolve(import.meta.dirname, "..")
 
-const run = (
-  args: ReadonlyArray<string>,
-  home: string,
-  environment: Readonly<Record<string, string>> = {},
-  cwd: string = repository
-) =>
-  spawnSync("bun", [join(repository, "src/cli.ts"), ...args], {
-    cwd,
-    env: { ...process.env, AIRLOCK_HOME: home, ...environment },
-    encoding: "utf8"
-  })
+type Fixture = Readonly<{ root: string; workspace: string; home: string }>
 
-const json = (value: string) => JSON.parse(value) as Record<string, unknown>
-
-const isolatedWorkspace = (prefix: string) => {
-  const root = mkdtempSync(join(tmpdir(), prefix))
-  const home = join(root, "home")
+const fixture = (): Fixture => {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), "airlock-cli-")))
   const workspace = join(root, "workspace")
   mkdirSync(workspace)
-  return { home, workspace } as const
+  return { root, workspace, home: join(root, "home") }
 }
 
-describe("agent-facing CLI", () => {
-  it("discovers the host profile envelope and closed action vocabulary", () => {
-    const home = mkdtempSync(join(tmpdir(), "airlock-cli-"))
-    const doctor = run(["doctor"], home)
-    const actions = run(["actions"], home)
-    const schema = run(["schema", "plan"], home)
+const cli = (
+  at: Fixture,
+  args: ReadonlyArray<string>,
+  options: { readonly policy?: unknown; readonly entry?: "cli" | "agent-cli" } = {}
+) => {
+  const environment: Record<string, string | undefined> = { ...process.env, AIRLOCK_HOME: at.home }
+  delete environment["AIRLOCK_SEAL"]
+  delete environment["AIRLOCK_POLICY_FILE"]
+  if (options.policy !== undefined) {
+    const file = join(at.root, "policy.json")
+    writeFileSync(file, typeof options.policy === "string" ? options.policy : JSON.stringify(options.policy))
+    environment["AIRLOCK_POLICY_FILE"] = file
+  }
+  return spawnSync("bun", [join(repository, "src", `${options.entry ?? "cli"}.ts`), ...args], {
+    cwd: at.workspace,
+    env: environment,
+    encoding: "utf8",
+    timeout: 45_000
+  })
+}
 
-    expect(doctor.status).toBe(0)
-    expect(json(doctor.stdout)).toMatchObject({
-      platform: process.platform,
-      profiles: { compatibility: { available: true } }
-    })
-    if (process.platform === "linux") {
-      expect(json(doctor.stdout)).toMatchObject({
-        linux: { schemaVersion: "airlock/linux-capabilities/v1" }
-      })
+type Outcome = {
+  readonly ok: boolean
+  readonly result?: unknown
+  readonly reason?: string
+  readonly toolCalls: number
+}
+
+const evaluate = (at: Fixture, source: string, extra: ReadonlyArray<string> = [], policy?: unknown) => {
+  const ran = cli(at, ["eval", "--workspace", at.workspace, "--source", source, ...extra], { policy })
+  const report = JSON.parse(ran.stdout) as { readonly runId: string; readonly workspace: string; readonly outcome: Outcome }
+  return { ...report, status: ran.status }
+}
+
+const json = (stdout: string) => JSON.parse(stdout) as unknown
+
+/** A policy over `workspace` that grants these file tools, each when it says. */
+const filePolicy = (workspace: string, grants: ReadonlyArray<readonly [tool: string, when: "now" | "approved"]>) => ({
+  schemaVersion: "airlock/tool-policy/v1",
+  toolGrants: grants.map(([tool, when]) => ({ id: tool, tool, when })),
+  resources: { path: [workspace] },
+  budget: { maxCalls: 16, maxInputBytes: 100_000 }
+})
+
+const write = (path: string, content: string) =>
+  `let w = file.write({ path: ${JSON.stringify(path)}, content: ${JSON.stringify(content)} })\nreturn w`
+
+describe("airlock CLI", () => {
+  it("describes the file tools of the default policy and nothing else", () => {
+    const at = fixture()
+    const described = cli(at, ["describe", "--workspace", at.workspace])
+    expect(described.status, described.stderr).toBe(0)
+    const { actions, description } = json(described.stdout) as {
+      readonly actions: ReadonlyArray<{ readonly name: string }>
+      readonly description: string
     }
-    expect(actions.status).toBe(0)
-    expect(json(actions.stdout)).toMatchObject({ schemaVersion: "airlock/actions/v1" })
-    expect(schema.status).toBe(0)
-    expect(json(schema.stdout)).toMatchObject({
-      plan: { nodes: ["Capture", "Invoke", "Apply", "RequestExternal"] }
-    })
+    expect(actions.map((action) => action.name)).toEqual([
+      "file.copy", "file.glob", "file.inspect", "file.list", "file.mkdir",
+      "file.move", "file.read", "file.remove", "file.stat", "file.write"
+    ])
+    expect(description).toContain("file.write(")
   })
 
-  it("executes argv atoms in compatibility or an explicit native Cell and refuses VM fallback", () => {
-    const home = mkdtempSync(join(tmpdir(), "airlock-cli-"))
-    const executed = run([
-      "exec", "--executable", "/bin/echo", "--arg", "hello world", "--cwd", "/tmp", "--timeout", "1s"
-    ], home)
-    expect(executed.status).toBe(0)
-    expect(json(executed.stdout)).toMatchObject({
-      profile: "compatibility",
-      executable: "/bin/echo",
-      args: ["hello world"],
-      stdout: "hello world\n"
-    })
-
-    const sourceWorkspace = join(home, "source")
-    const privateWorkspace = join(home, "private")
-    mkdirSync(sourceWorkspace)
-    const native = run([
-      "exec", "--executable", "/bin/echo", "--arg", "private", "--cwd", sourceWorkspace,
-      "--profile", "native-contained", "--private-workspace", privateWorkspace
-    ], home)
-    expect(native.status).toBe(0)
-    expect(json(native.stdout)).toMatchObject({
-      schemaVersion: "airlock/cell-receipt/v1",
-      profile: "native-contained",
-      network: "deny",
-      processReceipt: { stdout: "private\n" }
-    })
-
-    const refused = run([
-      "exec", "--executable", "/bin/echo", "--cwd", "/tmp", "--profile", "vm-enclosed"
-    ], home)
-    expect(refused.status).toBe(1)
-    expect(json(refused.stderr)).toMatchObject({ _tag: "CliInputError", field: "profile" })
-  })
-
-  it("inherits the supervisor environment only in compatibility mode", () => {
-    const home = mkdtempSync(join(tmpdir(), "airlock-cli-"))
-    const executed = run([
-      "exec",
-      "--executable", "/usr/bin/printenv",
-      "--arg", "AIRLOCK_PARITY_SENTINEL",
-      "--cwd", "/tmp"
-    ], home, { AIRLOCK_PARITY_SENTINEL: "visible-in-compatibility" })
-
-    expect(executed.status).toBe(0)
-    expect(json(executed.stdout)).toMatchObject({
-      profile: "compatibility",
-      stdout: "visible-in-compatibility\n"
-    })
-  })
-
-  it("runs pure Airlock programs with Schema-decoded JSON bindings", () => {
-    const home = mkdtempSync(join(tmpdir(), "airlock-cli-"))
-    const program = join(home, "program.air")
-    writeFileSync(program, 'return greeting + " world"\n')
-
-    const pure = run(["run", program, "--workspace", home, "--bindings", '{"greeting":"hello"}'], home)
-    expect(pure.status).toBe(0)
-    expect(json(pure.stdout)).toMatchObject({
-      schemaVersion: "airlock/program-run/v1",
-      result: { result: "hello world", plans: [] }
-    })
-  })
-
-  it("gives a file in the workspace no way to name a new action", () => {
-    const home = mkdtempSync(join(tmpdir(), "airlock-cli-tools-"))
-    const tools = join(home, ".airlock", "tools")
-    mkdirSync(join(home, ".airlock"))
-    mkdirSync(tools)
-    const marker = join(home, "ran")
-    writeFileSync(join(tools, "touch.airlock-tool.json"), JSON.stringify({
-      schemaVersion: "airlock/tool-definition/v2",
-      id: "touch_marker",
-      version: "1.0.0",
-      executables: [{ realm: "local", selector: "/usr/bin/touch" }],
-      actions: [{
-        name: "go",
-        inputSchema: { type: "object", additionalProperties: false },
-        args: [{ _tag: "Literal", value: marker }],
-        cwd: { _tag: "Literal", value: home },
-        lowering: "invoke", effectFootprint: ["invoke"], resultDecoder: "exit-status"
-      }]
-    }))
-    const program = join(home, "tool.air")
-    writeFileSync(program, "return touch_marker.go({})")
-
-    const executed = run(["run", program, "--workspace", home], home)
-    expect(json(executed.stdout === "" ? executed.stderr : executed.stdout)).not.toMatchObject({
-      result: { state: "succeeded" }
-    })
+  it("refuses a program that calls an ungranted tool before anything runs", () => {
+    const at = fixture()
+    const marker = join(at.workspace, "ran.txt")
+    const run = evaluate(at, `return process.run({ executable: "/usr/bin/touch", args: [${JSON.stringify(marker)}], cwd: "." })`)
+    expect(run.status).toBe(1)
+    expect(run.outcome).toMatchObject({ ok: false, reason: "invalid_code", toolCalls: 0 })
     expect(existsSync(marker)).toBe(false)
-
-    const listed = run(["actions"], home, {}, home)
-    expect(listed.status).toBe(0)
-    const actions = json(listed.stdout) as unknown as { readonly actions: ReadonlyArray<{ readonly name: string }> }
-    expect(Object.keys(actions).sort()).toEqual(["actions", "schemaVersion"])
-    expect(actions.actions.map(({ name }) => name).some((name) => name.startsWith("touch_marker"))).toBe(false)
   })
 
-  it("returns a typed partial report when a later program failure aborts after completed actions", () => {
-    const { home, workspace } = isolatedWorkspace("airlock-cli-")
-    const program = join(workspace, "partial.air")
-    writeFileSync(program, `
-      let written = file.write({ path: "partial.txt", content: "first" })
-      let staged = http.stage({ endpoint: "https://example.invalid/partial", method: "POST", body: "payload", holdMillis: 60000 })
-      assert false, "stop after the partial report is admitted"
-      return { written: written, staged: staged }
-    `)
+  it("runs a program file with bindings and binds the workspace itself", () => {
+    const at = fixture()
+    const program = join(at.root, "greet.air")
+    writeFileSync(program, `return { greeting: "hello " + name, workspace: workspace }\n`)
+    const ran = cli(at, ["run", program, "--workspace", at.workspace, "--bindings", JSON.stringify({ name: "ada" })])
+    expect(ran.status, ran.stderr).toBe(0)
+    expect(json(ran.stdout)).toMatchObject({
+      workspace: at.workspace,
+      outcome: { ok: true, result: { greeting: "hello ada", workspace: at.workspace }, toolCalls: 0 }
+    })
 
-    const executed = run(["run", program, "--workspace", workspace], home)
-    expect(executed.status).toBe(1)
+    const reserved = cli(at, ["run", program, "--workspace", at.workspace, "--bindings", JSON.stringify({ workspace: "/" })])
+    expect(reserved.status).toBe(1)
+    expect(reserved.stdout).toBe("")
+    expect(json(reserved.stderr)).toMatchObject({ _tag: "CliInputError", field: "bindings" })
+  })
 
-    const report = json(executed.stdout) as {
-      readonly result: {
-        readonly state: string
-        readonly result: null
-        readonly failure?: {
-          readonly action: string
-          readonly phase: string
-          readonly causeTag?: string
-        }
-        readonly actions: ReadonlyArray<{
-          readonly result: {
-            readonly value: Record<string, unknown>
-          }
-        }>
-      }
+  it("changes a file at once through Hold, and undo puts the old content back", () => {
+    const at = fixture()
+    const target = join(at.workspace, "note.txt")
+    writeFileSync(target, "old")
+    const run = evaluate(at, write("note.txt", "new"))
+    expect(run.status).toBe(0)
+    const receipt = run.outcome.result as { readonly state: string; readonly id: string }
+    expect(receipt).toMatchObject({ state: "done", result: { previous_held: true, bytes: 3 } })
+    expect(readFileSync(target, "utf8")).toBe("new")
+
+    const undone = cli(at, ["undo", receipt.id, "--workspace", at.workspace])
+    expect(undone.status, undone.stderr).toBe(0)
+    expect(readFileSync(target, "utf8")).toBe("old")
+
+    const ledger = cli(at, ["ledger"])
+    expect(ledger.status, ledger.stderr).toBe(0)
+    expect(ledger.stdout).toContain(receipt.id)
+  })
+
+  it("returns the recorded call when the same run id runs again, and never changes a file twice", () => {
+    const at = fixture()
+    const target = join(at.workspace, "note.txt")
+    writeFileSync(target, "hello")
+    const read = `let r = file.read({ path: "note.txt", format: "text" })\nreturn r`
+    const first = evaluate(at, read, ["--run-id", "read-once"])
+    const again = evaluate(at, read, ["--run-id", "read-once"])
+    expect(first.outcome).toMatchObject({ ok: true, result: { state: "done", result: "hello" } })
+    expect(again.outcome.result).toEqual(first.outcome.result)
+
+    // A change is bound to the file as it was; once the file is not, the
+    // recorded call cannot be the one this run would make.
+    expect(evaluate(at, write("note.txt", "airlock"), ["--run-id", "write-once"]).status).toBe(0)
+    writeFileSync(target, "edited by a person")
+    const replayed = evaluate(at, write("note.txt", "airlock"), ["--run-id", "write-once"])
+    expect(replayed.status).toBe(1)
+    expect(replayed.outcome).toMatchObject({ ok: false, reason: "tool_failed", failure: { code: "conflict" } })
+    expect(readFileSync(target, "utf8")).toBe("edited by a person")
+  })
+
+  it("refuses paths that leave the workspace: dot-dot, absolute and through a symlink", () => {
+    const at = fixture()
+    const outside = join(at.root, "outside.txt")
+    writeFileSync(outside, "outside")
+    symlinkSync(outside, join(at.workspace, "link.txt"))
+
+    for (const path of ["../outside.txt", outside, "link.txt"]) {
+      const run = evaluate(at, write(path, "escaped"))
+      expect(run.status, path).toBe(0)
+      expect(run.outcome.result, path).toMatchObject({ state: "refused", refusal: { code: "not-allowed" } })
     }
-
-    expect(report.result.state).toBe("partial")
-    expect(report.result.result).toBeNull()
-    expect(report.result.failure).toMatchObject({
-      action: "program",
-      phase: "language",
-      causeTag: "AssertionFailed"
-    })
-    expect(report.result.actions).toHaveLength(2)
-    expect(report.result.actions[0]!.result.value).toMatchObject({
-      state: "applied",
-      act_id: expect.any(String)
-    })
-    expect(report.result.actions[1]!.result.value).toMatchObject({
-      state: "staged",
-      emission_id: expect.any(String)
-    })
-    expect(readFileSync(join(workspace, "partial.txt"), "utf8")).toBe("first")
+    expect(readFileSync(outside, "utf8")).toBe("outside")
   })
 
-  it("runs a real read → process stdin → write → stage program through admission, Runtime, Hold, and Outbox", () => {
-    const { home, workspace } = isolatedWorkspace("airlock-cli-")
-    const program = join(workspace, "workflow.air")
-    writeFileSync(join(workspace, "input.txt"), "source bytes\n")
-    writeFileSync(program, `
-      let observed = file.read({ path: "input.txt" })
-      let processed = process.run({ executable: "/bin/cat", args: [], cwd: ${JSON.stringify(workspace)}, stdin: { kind: "text", value: "source bytes\\n" }, stdout: "capture" })
-      let written = file.write({ path: "output.txt", content: "written" })
-      let staged = http.stage({ endpoint: "https://example.invalid/jobs", method: "POST", body: "done" })
-      return { observed: observed, processed: processed, written: written, staged: staged }
-    `)
+  it("stages a change the policy holds for approval; a person commits or cancels it", () => {
+    const at = fixture()
+    const policy = filePolicy(at.workspace, [["file.write", "approved"]])
+    const staged = evaluate(at, write("kept.txt", "kept"), [], policy)
+    const dropped = evaluate(at, write("dropped.txt", "dropped"), [], policy)
+    for (const run of [staged, dropped]) {
+      expect(run.status).toBe(0)
+      expect(run.outcome.result).toMatchObject({ state: "staged", id: expect.any(String) })
+    }
+    const keptId = (staged.outcome.result as { readonly id: string }).id
+    const droppedId = (dropped.outcome.result as { readonly id: string }).id
+    expect(existsSync(join(at.workspace, "kept.txt"))).toBe(false)
 
-    const executed = run(["run", program, "--workspace", workspace], home)
-    expect(executed.status).toBe(0)
-    expect(readFileSync(join(workspace, "output.txt"), "utf8")).toBe("written")
-    const report = json(executed.stdout)
-    expect(report).toMatchObject({
-      result: {
-        result: {
-          observed: "source bytes\n",
-          processed: { state: "succeeded", stdout: "source bytes\n" },
-          written: { state: "applied", target: expect.stringMatching(/\/output\.txt$/) },
-          staged: { state: "staged", endpoint: "https://example.invalid/jobs" }
-        },
-        plans: expect.any(Array)
-      }
-    })
-    const artifacts = (report.result as { artifacts: Array<Record<string, unknown>> }).artifacts
-    expect(artifacts.length).toBeGreaterThan(0)
-    expect(artifacts.every((artifact) => !("bytes" in artifact))).toBe(true)
+    const pending = cli(at, ["pending", "--workspace", at.workspace], { policy })
+    expect(pending.status, pending.stderr).toBe(0)
+    expect((json(pending.stdout) as ReadonlyArray<{ readonly id: string }>).map((call) => call.id).sort())
+      .toEqual([keptId, droppedId].sort())
+
+    expect(cli(at, ["commit", keptId, "--workspace", at.workspace], { policy }).status).toBe(0)
+    expect(cli(at, ["cancel", droppedId, "--workspace", at.workspace], { policy }).status).toBe(0)
+    expect(readFileSync(join(at.workspace, "kept.txt"), "utf8")).toBe("kept")
+    expect(existsSync(join(at.workspace, "dropped.txt"))).toBe(false)
+    expect(json(cli(at, ["pending", "--workspace", at.workspace], { policy }).stdout)).toEqual([])
   })
 
-  it("refuses native-contained program execution without independent supervisor policy input", () => {
-    const home = mkdtempSync(join(tmpdir(), "airlock-cli-"))
-    const program = join(home, "program.air")
-    writeFileSync(program, "return true\n")
-    const refused = run(["run", program, "--workspace", home, "--profile", "native-contained"], home)
-    expect(refused.status).toBe(1)
-    expect(json(refused.stderr)).toMatchObject({ _tag: "CliInputError", field: "AIRLOCK_POLICY_FILE" })
+  it("runs a reviewed program under its approved plan, and refuses a different program under it", () => {
+    const at = fixture()
+    writeFileSync(join(at.workspace, "note.txt"), "hello")
+    const policy = filePolicy(at.workspace, [["file.read", "approved"]])
+    const read = (path: string) =>
+      `let r = file.read({ path: ${JSON.stringify(path)}, format: "text" })\nreturn r.state`
 
-    const policy = join(home, "native-policy.json")
-    writeFileSync(policy, JSON.stringify({
-      schemaVersion: "airlock/admission-policy/v2",
-      profile: "native-contained",
-      principal: "agent:test",
-      realm: "local",
-      admittedBy: "operator:test",
-      pathAllowlist: [`${home}/**`],
-      executableAllowlist: [],
-      executableEdges: [],
-      endpointGrants: []
-    }))
-    const downgrade = run(
-      ["run", program, "--workspace", home, "--profile", "compatibility"],
-      home,
-      { AIRLOCK_POLICY_FILE: policy }
-    )
-    expect(downgrade.status).toBe(1)
-    expect(json(downgrade.stderr)).toMatchObject({
-      _tag: "CliInputError",
-      field: "AIRLOCK_POLICY_FILE"
-    })
+    expect(evaluate(at, read("note.txt"), [], policy).outcome).toMatchObject({ ok: true, result: "staged" })
+
+    const reviewed = cli(at, ["review", "--source", read("note.txt"), "--workspace", at.workspace], { policy })
+    expect(reviewed.status, reviewed.stderr).toBe(0)
+    const { review, approved } = json(reviewed.stdout) as { readonly review: { readonly plan: { readonly id: string } }; readonly approved: boolean }
+    expect(approved).toBe(false)
+
+    const approve = cli(at, ["approve-plan", review.plan.id, "--workspace", at.workspace], { policy })
+    expect(approve.status, approve.stderr).toBe(0)
+    expect(json(cli(at, ["review", "--source", read("note.txt"), "--workspace", at.workspace], { policy }).stdout))
+      .toMatchObject({ approved: true })
+
+    const planned = evaluate(at, read("note.txt"), ["--plan", review.plan.id], policy)
+    expect(planned.outcome).toMatchObject({ ok: true, result: "done" })
+
+    const other = evaluate(at, read("other.txt"), ["--plan", review.plan.id], policy)
+    expect(other.status).toBe(1)
+    expect(other.outcome).toMatchObject({ ok: false, reason: "plan_mismatch", toolCalls: 0 })
+  })
+
+  it("runs in the workspace the directory really is, and refuses one that is not a directory", () => {
+    const at = fixture()
+    const alias = join(at.root, "alias")
+    symlinkSync(at.workspace, alias)
+    const viaAlias = cli(at, ["eval", "--workspace", alias, "--source", "return workspace"])
+    expect(viaAlias.status, viaAlias.stderr).toBe(0)
+    expect(json(viaAlias.stdout)).toMatchObject({ workspace: at.workspace, outcome: { result: at.workspace } })
+
+    const file = join(at.root, "file.txt")
+    writeFileSync(file, "")
+    for (const workspace of [join(at.root, "missing"), file]) {
+      const ran = cli(at, ["eval", "--workspace", workspace, "--source", "return 1"])
+      expect(ran.status, workspace).toBe(1)
+      expect(ran.stdout, workspace).toBe("")
+      expect(json(ran.stderr), workspace).toMatchObject({ _tag: "CliInputError", field: "workspace" })
+    }
+  })
+
+  it("rejects a policy file that is not exactly a tool policy", () => {
+    const at = fixture()
+    for (const policy of ["not json", { ...filePolicy(at.workspace, []), extra: true }]) {
+      const ran = cli(at, ["eval", "--workspace", at.workspace, "--source", "return 1"], { policy })
+      expect(ran.status).toBe(1)
+      expect(ran.stdout).toBe("")
+      expect(json(ran.stderr)).toMatchObject({ _tag: "CliInputError", field: "AIRLOCK_POLICY_FILE" })
+    }
+  })
+
+  it("gives the agent's binary no command that decides", () => {
+    const at = fixture()
+    const help = cli(at, ["--help"], { entry: "agent-cli" })
+    expect(help.status).toBe(0)
+    for (const command of ["approve-plan", "commit", "cancel", "undo"]) {
+      const ran = cli(at, [command, "emi_0", "--workspace", at.workspace], { entry: "agent-cli" })
+      expect(ran.status, command).not.toBe(0)
+      expect(ran.stdout, command).toBe("")
+    }
+    const described = cli(at, ["describe", "--workspace", at.workspace], { entry: "agent-cli" })
+    expect(described.status, described.stderr).toBe(0)
   })
 })

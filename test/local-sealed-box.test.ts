@@ -16,7 +16,7 @@ import {
 } from "node:fs"
 import { tmpdir } from "node:os"
 import { basename, join, relative, resolve } from "node:path"
-import { afterAll, beforeAll, describe, expect, it } from "vitest"
+import { beforeAll, describe, expect, it } from "vitest"
 
 const repository = resolve(import.meta.dirname, "..")
 const script = join(repository, "scripts", "seal-box.ts")
@@ -28,6 +28,7 @@ const cleanEnvironment = (extra: Record<string, string | undefined> = {}) => ({
   FORCE_COLOR: undefined,
   NO_COLOR: "1",
   AIRLOCK_AGENT_SURFACE: undefined,
+  AIRLOCK_POLICY_FILE: undefined,
   ...extra
 })
 
@@ -57,22 +58,13 @@ const stripAnsi = (text: string) =>
   text.replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, "")
 
 const normalizeMismatch = (text: string, binary: string) => stripAnsi(text)
+  .replace(/\n\s*Did you mean this\?\n(?: {4}\S+\n?)+/, "\n")
   .replaceAll(basename(binary), "<binary>")
-  .replace(/\b(?:commit|exec|undo|nonsense)\b/g, "<command>")
+  .replace(/\b(?:approve-plan|commit|cancel|undo|ledger|change|exec|nonsense)\b/g, "<command>")
   .trim()
 
-const waitForExit = async (pid: number) => {
-  const deadline = Date.now() + 5_000
-  while (Date.now() < deadline) {
-    try {
-      process.kill(pid, 0)
-      await new Promise((done) => setTimeout(done, 25))
-    } catch {
-      return
-    }
-  }
-  throw new Error(`daemon ${pid} did not exit`)
-}
+const outcomeOf = (invocation: SpawnSyncReturns<string>) =>
+  (JSON.parse(invocation.stdout) as { readonly outcome: Record<string, unknown> }).outcome
 
 type LocalOutput = {
   readonly generation: string
@@ -80,19 +72,18 @@ type LocalOutput = {
   readonly agentBinary: string
   readonly seal: string
   readonly home: string
-  readonly socket: string
   readonly readiness: string
   readonly operatorKeyAnchor: string
   readonly grantDigest: string
   readonly binaryDigest: string
-  readonly profile: string
-  readonly daemonOps: ReadonlyArray<string>
-  readonly daemonPid?: number
-  readonly daemonReady: boolean
+  readonly verbs: ReadonlyArray<string>
   readonly localSameUser: boolean
   readonly runnable: boolean
   readonly recipe: string
 }
+
+const observationTools = ["file.glob", "file.inspect", "file.list", "file.read", "file.stat"]
+const localVerbs = ["capabilities", "describe", "doctor", "eval", "inspect", "pending", "review", "run"]
 
 describe.skipIf(!isNonRootDarwin)("same-user local sealed generation", () => {
   const root = mkdtempSync(join(tmpdir(), "airlock-local-sealed-"))
@@ -103,7 +94,6 @@ describe.skipIf(!isNonRootDarwin)("same-user local sealed generation", () => {
   const requestedGeneration = join(root, "box")
   let local: LocalOutput
   let localRecipeOutput = ""
-  let daemonPid: number | undefined
 
   const startupClone = (name: string): string => {
     const clone = join(realpathSync(root), name)
@@ -112,6 +102,13 @@ describe.skipIf(!isNonRootDarwin)("same-user local sealed generation", () => {
     cpSync(local.seal, join(clone, "seal"), { recursive: true })
     cpSync(local.readiness, join(clone, "SEALED"))
     return clone
+  }
+
+  const rewriteGrant = (clone: string, edit: (grant: Record<string, any>) => unknown) => {
+    const path = join(clone, "seal", "box-grant.json")
+    const edited = edit(JSON.parse(readFileSync(path, "utf8")))
+    chmodSync(path, 0o644)
+    writeFileSync(path, `${JSON.stringify(edited, null, 2)}\n`)
   }
 
   beforeAll(() => {
@@ -134,73 +131,43 @@ describe.skipIf(!isNonRootDarwin)("same-user local sealed generation", () => {
     localRecipeOutput = created.stderr
   }, 120_000)
 
-  afterAll(async () => {
-    if (daemonPid !== undefined) {
-      try {
-        process.kill(daemonPid, "SIGTERM")
-        await waitForExit(daemonPid)
-      } catch {
-        // A daemon already killed by its test needs no cleanup.
-      }
-    }
-  })
-
-  it("publishes a current-user, compile-bound generation and no private key", () => {
+  it("publishes a current-user, compile-bound, read-only generation and no private key", () => {
     expect(local.generation).toBe(join(realpathSync(root), "box"))
-    expect(local.profile).toBe("native-contained")
-    expect(local.daemonOps).toEqual([])
-    expect(local.daemonReady).toBe(false)
+    expect(local.verbs).toEqual(localVerbs)
     expect(local.localSameUser).toBe(true)
     expect(local.runnable).toBe(true)
     expect(local.recipe).toContain('file.stat({ path: "ok.txt" })')
+    expect(local.recipe).not.toContain("--bindings")
     expect(localRecipeOutput).toContain("# Airlock local sealed recipe (copy and paste)")
     expect(localRecipeOutput).toContain('return file.stat({ path: "ok.txt" })')
     expect(localRecipeOutput).not.toContain('\\"ok.txt\\"')
-    expect(local.recipe).toContain("# daemonOps is empty; no daemon is required")
-    expect(local.recipe).not.toContain(" serve ")
 
     const readiness = JSON.parse(readFileSync(local.readiness, "utf8"))
-    expect(readiness).toMatchObject({
+    expect(readiness).toEqual({
       schemaVersion: "airlock/installed-generation/v1",
       grantDigest: local.grantDigest,
       binaryDigest: local.binaryDigest,
       ownershipApplied: false,
       localSameUser: true,
-      runnable: true,
-      activated: false
+      runnable: true
     })
-    const grant = JSON.parse(readFileSync(
-      join(local.seal, "box-grant.json"),
-      "utf8"
-    ))
+    const grant = JSON.parse(readFileSync(join(local.seal, "box-grant.json"), "utf8"))
     expect(grant).toMatchObject({
-      admission: {
-        schemaVersion: "airlock/admission-policy/v2",
-        profile: "native-contained",
-        pathAllowlist: [`${physicalWorkspace}/**`],
-        executableAllowlist: [],
-        executableEdges: [],
-        endpointGrants: []
+      schemaVersion: "airlock/box-grant/v2",
+      policy: {
+        schemaVersion: "airlock/tool-policy/v1",
+        resources: { path: [physicalWorkspace] }
       },
-      verbs: ["actions", "doctor", "eval", "held", "pending", "run", "schema", "serve"],
-      nativeActions: [
-        "file.glob", "file.inspect", "file.list", "file.read", "file.stat",
-        "http.stage"
-      ],
-      daemonOps: []
+      verbs: localVerbs
     })
+    expect(grant.policy.toolGrants.map(({ tool, when }: { tool: string; when: string }) => [tool, when]))
+      .toEqual(observationTools.map((tool) => [tool, "now"]))
+    expect(readdirSync(local.generation).sort()).toEqual(["SEALED", "bin", "home", "seal"])
 
-    for (const path of [
-      local.generation,
-      local.binary,
-      local.seal,
-      local.home,
-      join(local.generation, "ipc")
-    ]) {
+    for (const path of [local.generation, local.binary, local.seal, local.home]) {
       expect(statSync(path).uid).toBe(process.getuid!())
     }
     expect(statSync(local.home).mode & 0o777).toBe(0o700)
-    expect(statSync(join(local.generation, "ipc")).mode & 0o777).toBe(0o700)
     expect(statSync(join(local.generation, "bin")).mode & 0o777).toBe(0o755)
     expect(statSync(local.binary).mode & 0o777).toBe(0o555)
     expect(statSync(local.agentBinary).mode & 0o777).toBe(0o555)
@@ -226,7 +193,6 @@ describe.skipIf(!isNonRootDarwin)("same-user local sealed generation", () => {
     const doctor = invoke(local.binary, ["doctor"], workspace, {
       AIRLOCK_SEAL: join(root, "attacker-seal"),
       AIRLOCK_HOME: join(root, "attacker-home"),
-      AIRLOCK_DAEMON_UID_INTERNAL: "0",
       AIRLOCK_GENERATION_MODE_INTERNAL: "root-tenant"
     })
     expect(doctor.status, doctor.stderr).toBe(0)
@@ -259,26 +225,23 @@ describe.skipIf(!isNonRootDarwin)("same-user local sealed generation", () => {
     })
   })
 
-  it("runs the signed observation surface and publishes the real stat result", () => {
+  it("runs the signed observation surface and describes nothing more", () => {
     const observed = invoke(local.binary, [
       "eval",
       "--workspace", physicalWorkspace,
-      "--source", `return file.stat({ path: "${physicalWorkspace}/ok.txt" })`
+      "--source", `let s = file.stat({ path: "${physicalWorkspace}/ok.txt" })\nassert s.state == "done", "stat"\nreturn s.result`
     ], workspace)
     expect(observed.status, observed.stderr).toBe(0)
-    expect(JSON.parse(observed.stdout)).toMatchObject({
-      profile: "native-contained",
-      result: {
-        state: "succeeded",
-        result: { kind: "file", bytes: 3 }
-      }
+    expect(outcomeOf(observed)).toMatchObject({
+      ok: true,
+      result: { kind: "file", bytes: 3 },
+      toolCalls: 1
     })
 
-    const schema = invoke(local.binary, ["schema", "file.stat"], workspace)
-    expect(schema.status, schema.stderr).toBe(0)
-    const resultSchema = JSON.parse(schema.stdout).action.resultSchema
-    expect(resultSchema.properties.bytes).toBeDefined()
-    expect(resultSchema.properties.size).toBeUndefined()
+    const described = invoke(local.binary, ["describe", "--workspace", workspace], workspace)
+    expect(described.status, described.stderr).toBe(0)
+    const surface = JSON.parse(described.stdout) as { readonly actions: ReadonlyArray<{ readonly name: string }> }
+    expect(surface.actions.map(({ name }) => name)).toEqual(observationTools)
   })
 
   it("runs the printed workspace-relative stat", () => {
@@ -288,83 +251,100 @@ describe.skipIf(!isNonRootDarwin)("same-user local sealed generation", () => {
       "--source", 'return file.stat({ path: "ok.txt" })'
     ], workspace)
     expect(observed.status, observed.stderr).toBe(0)
-    expect(JSON.parse(observed.stdout)).toMatchObject({
-      result: { state: "succeeded", result: { bytes: 3 } }
+    expect(outcomeOf(observed)).toMatchObject({
+      ok: true,
+      result: { state: "done", result: { bytes: 3 } }
     })
   })
 
-  it("keeps process.run off the surface and leaves the file unchanged", () => {
+  it("keeps changes and processes off the surface and reads nothing beyond the workspace", () => {
     const before = readFileSync(join(workspace, "ok.txt"))
-    const attempted = invoke(local.binary, [
-      "eval",
-      "--workspace", workspace,
-      "--bindings", JSON.stringify({ workspace }),
-      "--source",
-      'return process.run({ executable: "/bin/sh", args: ["-c", "> ok.txt"], cwd: workspace, stdout: "capture", stderr: "capture" })'
-    ], workspace)
-    expect(attempted.status).toBe(1)
-    expect(JSON.parse(attempted.stdout)).toMatchObject({
-      result: {
-        state: "failed",
-        failure: {
-          phase: "contract",
-          causeTag: "ProgramActionDecodeFailed"
-        }
-      }
-    })
+    for (const source of [
+      'return process.run({ executable: "/bin/sh", args: ["-c", "> ok.txt"], cwd: workspace })',
+      'return file.write({ path: "ok.txt", content: "" })',
+      'return file.remove({ path: "ok.txt" })'
+    ]) {
+      const attempted = invoke(local.binary, ["eval", "--workspace", workspace, "--source", source], workspace)
+      expect(attempted.status, source).toBe(1)
+      expect(outcomeOf(attempted)).toMatchObject({ ok: false, reason: "invalid_code", toolCalls: 0 })
+    }
     expect(readFileSync(join(workspace, "ok.txt"))).toEqual(before)
+
+    writeFileSync(join(root, "beside.txt"), "beside the workspace")
+    const escaped = invoke(local.binary, [
+      "eval", "--workspace", workspace,
+      "--source", `return file.read({ path: "${realpathSync(root)}/beside.txt", format: "text" })`
+    ], workspace)
+    expect(escaped.status, escaped.stderr).toBe(0)
+    expect(outcomeOf(escaped)).toMatchObject({ ok: true, result: { state: "refused", refusal: { code: "not-allowed" } } })
+    expect(escaped.stdout).not.toContain("beside the workspace")
   })
 
-  it("hides commit, undo, and exec as ordinary missing subcommands", () => {
+  it("hides a person's decisions and local changes as ordinary missing subcommands", () => {
     const nonsense = invoke(local.binary, ["nonsense"], workspace)
     expect(nonsense.status).not.toBe(0)
-    for (const denied of ["commit", "undo", "exec"] as const) {
+    for (const denied of ["approve-plan", "commit", "cancel", "undo", "ledger", "change", "exec"] as const) {
       const result = invoke(local.binary, [denied], workspace)
-      expect(result.status).toBe(nonsense.status)
+      expect(result.status, denied).toBe(nonsense.status)
       expect(normalizeMismatch(result.stderr, local.binary)).toBe(
         normalizeMismatch(nonsense.stderr, local.binary)
       )
     }
     const help = invoke(local.binary, ["--help"], workspace)
     expect(help.status, help.stderr).toBe(0)
-    for (const hidden of ["commit", "undo", "exec", "write", "rm"])
+    for (const hidden of ["approve-plan", "commit", "cancel", "undo", "change", "exec"])
       expect(help.stdout).not.toMatch(new RegExp(`\\b${hidden}\\b`))
   })
 
-  it("fails startup on a tampered grant and on a grant in the removed catalog shape", () => {
-    const signatureClone = startupClone("signature-tamper")
-    const signatureGrantPath = join(signatureClone, "seal", "box-grant.json")
-    const signatureGrant = JSON.parse(readFileSync(signatureGrantPath, "utf8"))
-    signatureGrant.admission.admittedBy = "attacker:unsigned-edit"
-    chmodSync(signatureGrantPath, 0o644)
-    writeFileSync(signatureGrantPath, `${JSON.stringify(signatureGrant, null, 2)}\n`)
-    const signatureRefused = invoke(
-      join(signatureClone, "bin", "airlock"),
-      ["doctor"],
-      workspace
-    )
-    expect(signatureRefused.status).toBe(78)
-    expect(JSON.parse(signatureRefused.stderr)).toMatchObject({
-      _tag: "SealVerificationFailed",
-      reason: "signature-invalid"
-    })
+  it("fails startup on a tampered or widened grant and on a grant in a removed shape", () => {
+    const refusedWith = (clone: string, reason: string) => {
+      const refused = invoke(join(clone, "bin", "airlock"), ["doctor"], workspace)
+      expect(refused.status, clone).toBe(78)
+      expect(refused.stdout).toBe("")
+      expect(JSON.parse(refused.stderr)).toMatchObject({ _tag: "SealVerificationFailed", reason })
+    }
 
-    const catalogClone = startupClone("catalog-shape")
-    const catalogGrantPath = join(catalogClone, "seal", "box-grant.json")
-    const catalogGrant = JSON.parse(readFileSync(catalogGrantPath, "utf8"))
-    catalogGrant.catalog = []
-    chmodSync(catalogGrantPath, 0o644)
-    writeFileSync(catalogGrantPath, `${JSON.stringify(catalogGrant, null, 2)}\n`)
-    const catalogRefused = invoke(
-      join(catalogClone, "bin", "airlock"),
-      ["doctor"],
-      workspace
-    )
-    expect(catalogRefused.status).toBe(78)
-    expect(JSON.parse(catalogRefused.stderr)).toMatchObject({
-      _tag: "SealVerificationFailed",
-      reason: "invalid-grant"
-    })
+    const widenedPolicy = startupClone("policy-widened")
+    rewriteGrant(widenedPolicy, (grant) => ({
+      ...grant,
+      policy: {
+        ...grant.policy,
+        toolGrants: [...grant.policy.toolGrants, { id: "write", tool: "file.write", when: "now", where: {} }]
+      }
+    }))
+    refusedWith(widenedPolicy, "signature-invalid")
+
+    const widenedCeiling = startupClone("ceiling-widened")
+    rewriteGrant(widenedCeiling, (grant) => ({ ...grant, policy: { ...grant.policy, resources: { path: ["/"] } } }))
+    refusedWith(widenedCeiling, "signature-invalid")
+
+    const widenedVerbs = startupClone("verbs-widened")
+    rewriteGrant(widenedVerbs, (grant) => ({ ...grant, verbs: [...grant.verbs, "commit"] }))
+    refusedWith(widenedVerbs, "signature-invalid")
+
+    const catalog = startupClone("catalog-shape")
+    rewriteGrant(catalog, (grant) => ({ ...grant, catalog: [] }))
+    refusedWith(catalog, "invalid-grant")
+
+    const v1 = startupClone("v1-shape")
+    rewriteGrant(v1, ({ policy: _policy, ...grant }) => ({
+      ...grant,
+      schemaVersion: "airlock/box-grant/v1",
+      admission: {
+        schemaVersion: "airlock/admission-policy/v2",
+        profile: "native-contained",
+        principal: "agent:local-box",
+        realm: "local",
+        admittedBy: "operator:local-box",
+        pathAllowlist: [`${physicalWorkspace}/**`],
+        executableAllowlist: [],
+        executableEdges: [],
+        endpointGrants: []
+      },
+      nativeActions: ["file.read"],
+      daemonOps: []
+    }))
+    refusedWith(v1, "invalid-grant")
   }, 120_000)
 
   it("keeps a source loader outside the compiled sealed identity", () => {
@@ -437,8 +417,16 @@ describe.skipIf(!isNonRootDarwin)("same-user local sealed generation", () => {
     expect(existsSync(aliasOut)).toBe(false)
   })
 
-  it("requires the loud compatibility flag before claiming the output", () => {
-    const admission = join(root, "compatibility.json")
+  it("refuses a policy that is not a strict ToolPolicy before claiming the output", () => {
+    const loose = join(root, "loose-policy.json")
+    writeFileSync(loose, `${JSON.stringify({
+      schemaVersion: "airlock/tool-policy/v1",
+      toolGrants: [{ id: "read", tool: "file.read", when: "now" }],
+      resources: { path: [physicalWorkspace] },
+      budget: { maxCalls: 8, maxInputBytes: 4096 },
+      daemonOps: ["commit"]
+    })}\n`)
+    const admission = join(root, "admission-policy.json")
     writeFileSync(admission, `${JSON.stringify({
       schemaVersion: "airlock/admission-policy/v2",
       profile: "compatibility",
@@ -450,67 +438,28 @@ describe.skipIf(!isNonRootDarwin)("same-user local sealed generation", () => {
       executableEdges: [],
       endpointGrants: []
     })}\n`)
-    const out = join(root, "compatibility-without-flag")
-    const refused = runSeal([
-      "local",
-      "--workspace", workspace,
-      "--out", out,
-      "--private-key", privateKey,
-      "--public-key", publicKey,
-      "--admission", admission
-    ])
-    expect(refused.status).toBe(65)
-    expect(refused.stderr).toContain("--allow-sealed-compatibility")
-    expect(existsSync(out)).toBe(false)
+    for (const policy of [loose, admission]) {
+      const out = join(root, `refused-${basename(policy, ".json")}`)
+      const refused = runSeal([
+        "local",
+        "--workspace", workspace,
+        "--out", out,
+        "--private-key", privateKey,
+        "--public-key", publicKey,
+        "--policy", policy
+      ])
+      expect(refused.status, policy).toBe(65)
+      expect(refused.stderr).toContain("--policy is not a strict ToolPolicy")
+      expect(existsSync(out)).toBe(false)
+    }
+    for (const removed of [["--admission", admission], ["--allow-sealed-compatibility"], ["--with-daemon-commit"]]) {
+      const out = join(root, "refused-removed-option")
+      const refused = runSeal([
+        "local", "--workspace", workspace, "--out", out,
+        "--private-key", privateKey, "--public-key", publicKey, ...removed
+      ])
+      expect(refused.status, removed[0]).toBe(64)
+      expect(existsSync(out)).toBe(false)
+    }
   })
-
-  it("starts one same-binary commit daemon and fails closed after it dies", async () => {
-    const daemonGeneration = join(root, "daemon-box")
-    const created = runSeal([
-      "local",
-      "--workspace", workspace,
-      "--out", daemonGeneration,
-      "--private-key", privateKey,
-      "--public-key", publicKey,
-      "--with-daemon-commit"
-    ], {
-      // The compile-bound local wrapper must delete this inherited root limit.
-      AIRLOCK_DAEMON_UID_INTERNAL: "0"
-    })
-    expect(created.status, created.stderr).toBe(0)
-    expect(created.stderr).toContain("same-digest daemon is ready")
-    expect(created.stderr).toContain('return file.stat({ path: "ok.txt" })')
-    const daemon = JSON.parse(created.stdout) as LocalOutput
-    daemonPid = daemon.daemonPid
-    expect(daemon.daemonOps).toEqual(["commit"])
-    expect(daemon.daemonReady).toBe(true)
-    expect(daemonPid).toEqual(expect.any(Number))
-    expect(daemon.recipe).toContain(`AIRLOCK_DAEMON_PID=${daemonPid}`)
-    expect(daemon.recipe).not.toContain(" serve ")
-    expect(lstatSync(daemon.socket).isSocket()).toBe(true)
-    process.kill(daemonPid!, 0)
-
-    const live = invoke(daemon.binary, [
-      "eval",
-      "--workspace", physicalWorkspace,
-      "--source", `return file.stat({ path: "${physicalWorkspace}/ok.txt" })`
-    ], workspace)
-    expect(live.status, live.stderr).toBe(0)
-    expect(JSON.parse(live.stdout)).toMatchObject({
-      result: { state: "succeeded", result: { bytes: 3 } }
-    })
-
-    process.kill(daemonPid!, "SIGTERM")
-    await waitForExit(daemonPid!)
-    daemonPid = undefined
-    const dead = invoke(daemon.binary, [
-      "eval", "--workspace", workspace, "--source", "return true"
-    ], workspace)
-    expect(dead.status).toBe(1)
-    expect(dead.stdout).toBe("")
-    expect(JSON.parse(dead.stderr)).toMatchObject({
-      _tag: "CliInputError",
-      field: "daemon"
-    })
-  }, 120_000)
 })

@@ -3,64 +3,47 @@ import { Argument, CliError, Command, Flag } from "effect/unstable/cli"
 import { BunServices } from "@effect/platform-bun"
 import { Cause, Console, Crypto, Effect, Exit, FileSystem, Layer, ManagedRuntime, Option, Runtime as EffectRuntime, Schema } from "effect"
 import * as nodePath from "node:path"
-import * as nodeOs from "node:os"
 import { createInterface } from "node:readline"
-import {
-  AdmissionPolicy,
-  type BoxGrantVerb,
-  admit
-} from "./core/admission/index.ts"
-import {
-  NativeActionCatalog,
-  type NativeActionCall as NativeActionCallValue,
-  type NativeActionName,
-  mapNativeActionPathSelectors,
-  nativeActionSchema
-} from "./core/actions/index.ts"
-import { AirlockHome, layerFromEnv } from "./AirlockHome.ts"
-import { ActId, ScopeEscape } from "./core/domain.ts"
-import { Hold } from "./Hold.ts"
+import { type BoxGrantVerb } from "./core/admission/index.ts"
+import { toolGrant } from "./core/admission/ToolGrant.ts"
+import { type AirlockFailure, defineAirlock, type Supervisor } from "./core/airlock/Airlock.ts"
+import type { Ledger } from "./core/ledger/Ledger.ts"
+import { Canonical } from "./core/index.ts"
+import { GuestReview, GuestRunner } from "./core/runner/GuestRunner.ts"
+import { programRunner } from "./core/runner/ProgramRunner.ts"
+import { ToolPolicy, toolPolicy } from "./core/session/ToolPolicy.ts"
+import * as WebCrypto from "./core/WebCrypto.ts"
+import { layerFromEnv } from "./AirlockHome.ts"
 import { HoldLive } from "./HoldLive.ts"
+import { Hold } from "./Hold.ts"
 import { Change, ChangeLive } from "./change/Change.ts"
 import { formatContent, formatInventory, formatReview } from "./change-view.ts"
-import {
-  type LanguageValue,
-  LanguageValueSchema
-} from "./core/language/evaluator.ts"
-import { FileLedger, FileLedgerLive } from "./host/FileLedger.ts"
-import { Cell, CellLive, CellRequest } from "./cell/index.ts"
+import { FileArtifacts, FileArtifactsLive } from "./host/FileArtifacts.ts"
+import { FileLedger, FileLedgerLive, ledgerLayer } from "./host/FileLedger.ts"
+import * as FileOutboxStore from "./host/FileOutboxStore.ts"
+import { HeldCalls, HeldCallsConfig, HeldCallsLive } from "./host/HeldCalls.ts"
+import { FilesystemContracts, filesystemTools } from "./host/FilesystemTools.ts"
+import { filesystemHost } from "./host/FilesystemHost.ts"
+import { filesystemRecovery } from "./host/FilesystemRecovery.ts"
+import { Cell, CellLive } from "./cell/index.ts"
 import { LinuxPlatform, LinuxPlatformLive } from "./platform/linux/index.ts"
 import { MacosPlatform, MacosPlatformLive } from "./platform/macos/index.ts"
 import {
+  FileCopy,
+  FileGlob,
+  FileInspect,
+  FileList,
+  FileMkdir,
+  FileMove,
+  FileRead,
+  FileRemove,
+  FileStat,
+  FileWrite,
+  NativeFileSystem,
   NativeFileSystemLive,
-  NativeFilesystemConfig,
-  bindPhysicalPathSelector
+  NativeFilesystemConfig
 } from "./native/index.ts"
-import { ProcessRequest, ProcessRunner, ProcessRunnerLive } from "./process/Process.ts"
-import { Outbox, OutboxLive } from "./Outbox.ts"
-import { Canonical, DispatchProvenance, EmissionId, IdempotencyKey } from "./core/index.ts"
-import {
-  checkDaemonSocket,
-  runDaemon,
-  runDaemonHealthServer
-} from "./daemon/index.ts"
-import {
-  ProgramActionDecodeFailed,
-  ProgramExecutionLive,
-  ProgramRequest,
-  ProgramRunner,
-  type ProgramPathSelectorBinder,
-  canonicalizeProgramAction,
-  draftForAction,
-  nativeActionResultSchema,
-  unchangedProgramPathSelector
-} from "./program/index.ts"
-import {
-  makeFileRuntimeRunJournal,
-  RuntimeConfig,
-  RuntimeConfigLive,
-  RuntimeLive
-} from "./runtime/index.ts"
+import { ProcessRunner, ProcessRunnerLive } from "./process/Process.ts"
 import { AIRLOCK_VERSION } from "./version.ts"
 import {
   type SealContext,
@@ -71,9 +54,10 @@ import {
 import { describeFailure, reasonOf } from "./FailureText.ts"
 
 /**
- * CLI is deliberately an adapter: it parses agent-facing atoms, invokes typed
- * services, and renders receipts. It never owns filesystem mutation, process
- * spawning, or external dispatch authority.
+ * CLI is deliberately an adapter: it parses agent-facing atoms, opens one
+ * Airlock over this machine's filesystem tools, and renders what it answers.
+ * Programs act only through that Airlock; nothing here changes a file, starts
+ * a process or sends a request itself.
  */
 
 export class CliInputError extends Schema.TaggedError<CliInputError>()(
@@ -83,171 +67,18 @@ export class CliInputError extends Schema.TaggedError<CliInputError>()(
 
 const emit = (value: unknown) => Console.log(JSON.stringify(value, null, 2))
 
+const failed = Effect.sync(() => {
+  process.exitCode = 1
+})
+
 const rendered = <A, E, R>(
   effect: Effect.Effect<A, E, R>,
   format?: (value: A) => string
 ) =>
   effect.pipe(
     Effect.flatMap(value => format === undefined ? emit(value) : Console.log(format(value))),
-    Effect.catch((error) =>
-      Console.error(JSON.stringify(error)).pipe(
-        Effect.andThen(Effect.sync(() => {
-          process.exitCode = 1
-        }))
-      )
-    )
+    Effect.catch((error) => Console.error(JSON.stringify(error)).pipe(Effect.andThen(failed)))
   )
-
-const renderedProgram = <A extends {
-  readonly result: {
-    readonly state: string
-  }
-}, E, R>(
-  effect: Effect.Effect<A, E, R>
-) =>
-  effect.pipe(
-    Effect.tap((value) => emit(value)),
-    Effect.tap((value) =>
-      value.result.state === "succeeded"
-        ? Effect.void
-        : Effect.sync(() => {
-            process.exitCode = 1
-          })
-    ),
-    Effect.catch((error) =>
-      Console.error(JSON.stringify(error)).pipe(
-        Effect.andThen(Effect.sync(() => {
-          process.exitCode = 1
-        }))
-      )
-    )
-  )
-
-const projectInlineArtifact = (artifact: {
-  readonly id: string
-  readonly bytes: Uint8Array
-  readonly mediaType: string
-  readonly provenance: string
-}) => ({
-  id: artifact.id,
-  mediaType: artifact.mediaType,
-  byteLength: artifact.bytes.byteLength,
-  provenance: artifact.provenance
-})
-
-const projectPlan = (plan: {
-  readonly id: string
-  readonly actionReference: string
-  readonly nodes: ReadonlyArray<{
-    readonly id: string
-    readonly _tag: string
-    readonly dependsOn: ReadonlyArray<string>
-  }>
-}) => ({
-  id: plan.id,
-  actionReference: plan.actionReference,
-  nodes: plan.nodes.map((node) => ({
-    id: node.id,
-    kind: node._tag,
-    dependsOn: [...node.dependsOn]
-  }))
-})
-
-const projectProgramRun = (run: {
-  readonly state: string
-  readonly result: LanguageValue
-  readonly plans: ReadonlyArray<{
-    readonly id: string
-    readonly actionReference: string
-    readonly nodes: ReadonlyArray<{
-      readonly id: string
-      readonly _tag: string
-      readonly dependsOn: ReadonlyArray<string>
-    }>
-  }>
-  readonly actions: ReadonlyArray<{
-    readonly request: {
-      readonly call: {
-        readonly action: string
-        readonly input: unknown
-      }
-      readonly callDigest: string
-      readonly draft: {
-        readonly id: string
-        readonly actionReference: string
-        readonly nodes: ReadonlyArray<{
-          readonly id: string
-          readonly _tag: string
-          readonly dependsOn: ReadonlyArray<string>
-        }>
-      }
-      readonly inlineArtifacts: ReadonlyArray<{
-        readonly id: string
-        readonly bytes: Uint8Array
-        readonly mediaType: string
-        readonly provenance: string
-      }>
-    }
-    readonly result: {
-      readonly value: unknown
-      readonly artifacts: ReadonlyArray<{
-        readonly id: string
-        readonly bytes: Uint8Array
-        readonly mediaType: string
-        readonly provenance: string
-      }>
-    }
-  }>
-  readonly artifacts: ReadonlyArray<{
-    readonly id: string
-    readonly bytes: Uint8Array
-    readonly mediaType: string
-    readonly provenance: string
-  }>
-  readonly failure?: {
-    readonly action: string
-    readonly phase: string
-    readonly causeTag?: string
-    readonly reason: string
-  }
-}) => ({
-  state: run.state,
-  result: run.result,
-  plans: run.plans.map(projectPlan),
-  actions: run.actions.map((record) => ({
-    request: {
-      call: record.request.call,
-      callDigest: record.request.callDigest,
-      draft: projectPlan(record.request.draft),
-      inlineArtifacts: record.request.inlineArtifacts.map(projectInlineArtifact)
-    },
-    result: {
-      value: record.result.value,
-      artifacts: record.result.artifacts.map(projectInlineArtifact)
-    }
-  })),
-  artifacts: run.artifacts.map(projectInlineArtifact),
-  ...(run.failure === undefined ? {} : { failure: run.failure })
-})
-
-const projectCompactProgramRun = (
-  run: Parameters<typeof projectProgramRun>[0]
-) => ({
-  state: run.state,
-  result: run.result,
-  plans: run.plans.map((plan) => ({
-    id: plan.id,
-    actionReference: plan.actionReference,
-    nodeCount: plan.nodes.length
-  })),
-  counts: {
-    plans: run.plans.length,
-    actions: run.actions.length,
-    artifacts: run.artifacts.length
-  },
-  artifacts: run.artifacts.map(projectInlineArtifact),
-  ...(run.failure === undefined ? {} : { failure: run.failure })
-})
 
 const failInput = (field: string, reason: string) =>
   Effect.fail(new CliInputError({ field, reason }))
@@ -255,312 +86,305 @@ const failInput = (field: string, reason: string) =>
 /**
  * Parsing removes every ungranted verb from a sealed command graph. This is a
  * final handler-boundary defense against a stale graph, not the user-visible
- * denial path: denied verbs deliberately fail as ordinary command mismatches.
+ * denial path: denied verbs fail as ordinary command mismatches.
  */
-const requireVerb = (
-  seal: SealContext,
-  verb: BoxGrantVerb
-): Effect.Effect<void, CliInputError> =>
+const requireVerb = (seal: SealContext, verb: BoxGrantVerb): Effect.Effect<void, CliInputError> =>
   seal._tag === "UnsealedSeal" || seal.grant.verbs.includes(verb)
     ? Effect.void
     : failInput("verb", `the verified seal does not grant ${verb}`)
 
-const allowedNativeActions = (seal: SealContext): ReadonlySet<NativeActionName> =>
-  seal._tag === "UnsealedSeal"
-    ? new Set(NativeActionCatalog.map((action) => action.name))
-    : new Set(seal.grant.nativeActions)
+// ── the Airlock over this machine ───────────────────────────────────────────
 
-/** Like requireVerb, this is defense after sealed root construction. */
-const requireNativeAction = (
-  seal: SealContext,
-  action: NativeActionName
-): Effect.Effect<void, CliInputError> =>
-  allowedNativeActions(seal).has(action)
-    ? Effect.void
-    : failInput(
-        "native-action",
-        `the verified seal does not grant ${action}`
-      )
+/** How long Hold keeps what a change replaced, so `undo` can put it back. */
+const HOLD_RETENTION_MILLIS = 7 * 24 * 60 * 60 * 1000
+/** A response a web request returns beyond this is truncated. */
+const RESPONSE_LIMIT_BYTES = 1_048_576
 
 /**
- * The compatibility profile is Bash parity, so it preserves the supervisor's
- * process environment. Contained profiles never call this helper: their
- * environment remains an explicit capability supplied by the admitted Plan.
+ * With no policy file, a program may read and change files in its workspace
+ * and nothing else. Reads run at once; a change runs at once through Hold, so
+ * `airlock undo` can put it back. Starting a process or reaching the network
+ * needs a policy that grants it.
  */
-const compatibilityEnvironment = (): Readonly<Record<string, string>> =>
-  Object.fromEntries(
-    Object.entries(process.env).filter(
-      (entry): entry is [string, string] => entry[1] !== undefined
-    )
-  )
-
-const parseDuration = (field: string, raw: string): Effect.Effect<number, CliInputError> => {
-  const match = raw.match(/^(\d+)(ms|s|m|h|d)$/)
-  if (match === null) return failInput(field, "must be an integer duration such as 250ms, 30s, 5m, 1h, or 7d")
-  const units = { ms: 1, s: 1000, m: 60_000, h: 3_600_000, d: 86_400_000 }
-  return Effect.succeed(Number(match[1]) * units[match[2] as keyof typeof units])
-}
-
-const duration = (name: string, fallback: string) =>
-  Flag.String(name).pipe(Flag.withDefault(fallback))
-
-const daemonSocketPath = (): Effect.Effect<string, CliInputError> => {
-  const value = process.env["AIRLOCK_DAEMON_SOCKET"]
-  return value !== undefined && value.trim().length > 0 && nodePath.isAbsolute(value)
-    ? Effect.succeed(value)
-    : failInput("AIRLOCK_DAEMON_SOCKET", "an absolute daemon socket path is required in sealed mode")
-}
-
-const requireSealedDaemon = (seal: SealContext) =>
-  seal._tag === "VerifiedSeal" && seal.grant.daemonOps.length > 0
-  ? daemonSocketPath().pipe(
-      Effect.flatMap((socketPath) => checkDaemonSocket(
-        socketPath,
-        seal.grantDigest
-      )),
-      Effect.mapError((error) => new CliInputError({
-        field: "daemon",
-        reason: reasonOf(error)
-      })),
-      Effect.asVoid
-    )
-  : Effect.void
-
-const scopeOption = Flag.String("scope").pipe(Flag.withDefault("/"))
-
-const profileOption = Flag.Literals("profile", [
-  "compatibility",
-  "native-contained",
-  "vm-enclosed"
-]).pipe(Flag.withDefault("compatibility" as const))
-
-type ProgramProfile = "compatibility" | "native-contained" | "vm-enclosed"
-
-const isProgramProfile = (value: string): value is ProgramProfile =>
-  value === "compatibility" ||
-  value === "native-contained" ||
-  value === "vm-enclosed"
-
-/**
- * The reduced harness binary does not accept a profile option from the agent.
- * A supervisor may pin it in the process environment; omission retains the
- * compatibility default required by the ratchet law.
- */
-const agentProgramProfile = Effect.suspend(() => {
-  const requested = process.env["AIRLOCK_AGENT_PROFILE"] ?? "compatibility"
-  return isProgramProfile(requested)
-    ? Effect.succeed(requested)
-    : failInput(
-        "AIRLOCK_AGENT_PROFILE",
-        "expected compatibility, native-contained, or vm-enclosed"
-      )
+const workspacePolicy = (workspace: string) => toolPolicy({
+  toolGrants: [
+    ...[FileInspect, FileStat, FileRead, FileList, FileGlob].map((contract) =>
+      toolGrant(contract, { id: contract.tag, when: "now" })),
+    ...[FileWrite, FileRemove, FileMkdir, FileCopy, FileMove].map((contract) =>
+      toolGrant(contract, { id: contract.tag, when: "now" }))
+  ],
+  resources: { path: [workspace] },
+  budget: { maxCalls: 256, maxInputBytes: 4_194_304 }
 })
 
-const resolveWithin = (
-  scope: string,
-  raw: string
-): Effect.Effect<string, ScopeEscape> => {
-  const resolvedScope = nodePath.resolve(scope)
-  const resolved = nodePath.resolve(raw)
-  return resolved === resolvedScope ||
-    resolvedScope === "/" ||
-    resolved.startsWith(`${resolvedScope}/`)
-    ? Effect.succeed(resolved)
-    : Effect.fail(new ScopeEscape({ requested: resolved, scope: resolvedScope }))
-}
+const policyFileError = (reason: string) => new CliInputError({ field: "AIRLOCK_POLICY_FILE", reason })
 
-const parseBindings = (raw: Option.Option<string>): Effect.Effect<Readonly<Record<string, LanguageValue>>, CliInputError> => {
-  if (Option.isNone(raw)) return Effect.succeed({})
-  return Effect.try({
-    try: () => {
-      const value: unknown = JSON.parse(raw.value)
-      if (value === null || Array.isArray(value) || typeof value !== "object") {
-        throw new Error("must be a JSON object")
-      }
-      return value
-    },
-    catch: (cause) => new CliInputError({
-      field: "bindings",
-      reason: reasonOf(cause)
-    })
-  }).pipe(
-    Effect.flatMap(Schema.decodeUnknownEffect(
-      Schema.Record(Schema.String, LanguageValueSchema)
+/** The supervisor's policy: the sealed one, the file `AIRLOCK_POLICY_FILE` names, or the workspace default. */
+const policyFor = (seal: SealContext, workspace: string): Effect.Effect<ToolPolicy, CliInputError, FileSystem.FileSystem> => {
+  if (seal._tag === "VerifiedSeal") return Effect.succeed(seal.grant.policy)
+  const policyFile = process.env["AIRLOCK_POLICY_FILE"]
+  if (policyFile === undefined || policyFile.trim().length === 0) return Effect.succeed(workspacePolicy(workspace))
+  return Effect.flatMap(FileSystem.FileSystem, (fs) => fs.readFileString(policyFile)).pipe(
+    Effect.mapError((error) => policyFileError(describeFailure(error))),
+    Effect.flatMap((text) => Schema.decodeUnknownEffect(Schema.fromJsonString(ToolPolicy), { onExcessProperty: "error" })(text).pipe(
+      Effect.mapError((error) => policyFileError(reasonOf(error)))
     )),
-    Effect.mapError((cause) => new CliInputError({
-      field: "bindings",
-      reason: reasonOf(cause)
+    // Flow rules are checked as they are composed; a bad rule is the file's fault.
+    Effect.flatMap((policy) => Effect.try({
+      try: () => toolPolicy(policy),
+      catch: (error) => policyFileError(reasonOf(error))
     }))
   )
 }
 
-const compatibilityPolicy = (workspace: string) => new AdmissionPolicy({
-  schemaVersion: "airlock/admission-policy/v2",
-  profile: "compatibility",
-  principal: "airlock-cli-agent",
-  realm: "local",
-  admittedBy: "airlock-cli compatibility supervisor",
-  pathAllowlist: [workspace],
-  executableAllowlist: [],
-  executableEdges: [],
-  endpointGrants: []
-})
-
-const bindPolicyPathScopes = (
-  policy: AdmissionPolicy
-): Effect.Effect<AdmissionPolicy, never, FileSystem.FileSystem> => {
-  if (policy.profile !== "native-contained") return Effect.succeed(policy)
-
-  return Effect.gen(function* () {
-    const pathAllowlist = yield* Effect.forEach(
-      policy.pathAllowlist,
-      (scope) => {
-        const recursive = scope.endsWith("/**")
-        const rawRoot = recursive ? scope.slice(0, -3) : scope
-        const root = rawRoot.length === 0 ? nodePath.parse(scope).root : rawRoot
-        if (!nodePath.isAbsolute(root)) return Effect.succeed(scope)
-        return bindPhysicalPathSelector("/", root, {
-          rejectSymlinksWithinWorkspace: false
-        }).pipe(
-          Effect.map((canonical) =>
-            recursive
-              ? canonical === nodePath.parse(canonical).root
-                ? `${canonical}**`
-                : `${canonical}/**`
-              : canonical
-          ),
-          // A future or otherwise unusable trusted scope remains an inert
-          // lexical policy spelling; it never becomes requested authority.
-          Effect.catch(() => Effect.succeed(scope))
-        )
-      },
-      { concurrency: 1 }
-    )
-    return new AdmissionPolicy({ ...policy, pathAllowlist })
-  })
-}
-
-const sealedAdmissionFailure = (
-  action: NativeActionName,
-  cause: unknown
-) => new CliInputError({
-  field: "admission",
-  reason: `${action}: ${reasonOf(cause)}`
-})
-
-/**
- * Raw compatibility verbs keep their direct adapters, but a sealed
- * route first constructs and admits the equivalent native-action Plan. Thus a
- * second CLI spelling can never bypass the signed path or endpoint policy.
- * The decoded, bound call is returned so direct raw physics uses exactly the
- * operand admission checked.
- */
-const admitSealedNativeAction = (
-  seal: SealContext,
-  action: NativeActionName,
-  input: unknown,
-  workspace: string = process.cwd()
-): Effect.Effect<
-  NativeActionCallValue | undefined,
-  CliInputError,
-  FileSystem.FileSystem | Crypto.Crypto
-> => {
-  // The ratchet: no decode, binding, or stricter validation is introduced
-  // on the zero-config compatibility route.
-  if (seal._tag === "UnsealedSeal") return Effect.succeed(undefined)
-  return Effect.gen(function* () {
-    const policy = yield* bindPolicyPathScopes(seal.grant.admission)
-    const decoded = yield* canonicalizeProgramAction(action, input).pipe(
-      Effect.mapError((cause) => sealedAdmissionFailure(action, cause))
-    )
-    const call = seal.grant.admission.profile === "native-contained"
-      ? yield* mapNativeActionPathSelectors(
-          decoded,
-          (selector) => bindPhysicalPathSelector(workspace, selector)
-        ).pipe(Effect.mapError((cause) => sealedAdmissionFailure(action, cause)))
-      : decoded
-    const request = yield* draftForAction(call, 0).pipe(
-      Effect.mapError((cause) => sealedAdmissionFailure(action, cause))
-    )
-    yield* admit(request.draft, policy).pipe(
-      Effect.mapError((cause) => sealedAdmissionFailure(action, cause))
-    )
-    return call
-  })
-}
-
-/**
- * Policies are supervisor input, never inferred from an action request. The
- * compatibility policy is deliberately broad under the ratchet; contained
- * execution requires an independently supplied, schema-decoded policy.
- */
-const supervisorPolicy = (
-  profile: "compatibility" | "native-contained" | "vm-enclosed",
-  workspace: string
-): Effect.Effect<AdmissionPolicy, CliInputError, FileSystem.FileSystem> => {
-  if (profile === "vm-enclosed") {
-    return failInput("profile", "vm-enclosed has no bundled VM Cell backend; refusing fallback")
-  }
-  const policyFile = process.env["AIRLOCK_POLICY_FILE"]
-  if (policyFile === undefined || policyFile.trim().length === 0) {
-    return profile === "compatibility"
-      ? Effect.succeed(compatibilityPolicy(workspace))
-      : failInput("AIRLOCK_POLICY_FILE", "is required for native-contained program execution")
-  }
-  return Effect.flatMap(FileSystem.FileSystem, (fs) => fs.readFileString(policyFile).pipe(
-    Effect.mapError((error) => new CliInputError({ field: "AIRLOCK_POLICY_FILE", reason: describeFailure(error) })),
-    Effect.flatMap(Schema.decodeUnknownEffect(Schema.fromJsonString(AdmissionPolicy))),
-    Effect.mapError((error) => new CliInputError({ field: "AIRLOCK_POLICY_FILE", reason: reasonOf(error) })),
-    Effect.flatMap((policy) => policy.profile === profile
-      ? Effect.succeed(policy)
-      : failInput("AIRLOCK_POLICY_FILE", `policy profile ${policy.profile} does not match selected ${profile}`)
-    )
-  ))
-}
-
-/**
- * Native containment must give every downstream authority seam the same
- * physical workspace name. In particular, resolving only lexically would let
- * an agent select an allowed path whose ancestor is a symlink to a directory
- * outside the supervisor's policy.
- *
- * Compatibility intentionally retains its existing lexical behavior. This is
- * an opt-in containment check, not a new zero-config restriction.
- */
-const bindProgramWorkspace = (
-  profile: ProgramProfile,
-  requestedWorkspace: string
-): Effect.Effect<string, CliInputError, FileSystem.FileSystem> => {
-  const requested = nodePath.resolve(requestedWorkspace)
-  if (profile !== "native-contained") return Effect.succeed(requested)
-
-  return Effect.gen(function* () {
+/** The workspace a run's relative paths name, as the directory it really is. */
+const workspaceOf = (requested: string): Effect.Effect<string, CliInputError, FileSystem.FileSystem> =>
+  Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem
-    const workspace = yield* fs.realPath(requested).pipe(
-      Effect.mapError((cause) =>
-        new CliInputError({
-          field: "workspace",
-          reason: `cannot resolve native-contained workspace ${requested}: ${describeFailure(cause)}`
-        })
-      )
+    const workspace = yield* fs.realPath(nodePath.resolve(requested)).pipe(
+      Effect.mapError((error) => new CliInputError({ field: "workspace", reason: describeFailure(error) }))
     )
     const info = yield* fs.stat(workspace).pipe(
-      Effect.mapError((cause) =>
-        new CliInputError({
-          field: "workspace",
-          reason: `cannot inspect native-contained workspace ${workspace}: ${describeFailure(cause)}`
-        })
-      )
+      Effect.mapError((error) => new CliInputError({ field: "workspace", reason: describeFailure(error) }))
     )
-    if (info.type !== "Directory") {
-      return yield* failInput(
-        "workspace",
-        `native-contained workspace must resolve to a directory; found ${info.type} at ${workspace}`
-      )
-    }
+    if (info.type !== "Directory") return yield* failInput("workspace", `${workspace} is not a directory`)
     return workspace
   })
-}
+
+const workspaceFlag = Flag.String("workspace").pipe(Flag.withDefault(process.cwd()))
+
+/** Whether this machine enforces every fence `native-contained` promises. */
+const nativeContainment = Effect.suspend(
+  (): Effect.Effect<boolean, unknown, LinuxPlatform | MacosPlatform> =>
+    process.platform === "linux"
+      ? Effect.flatMap(LinuxPlatform, (linux) => Effect.map(linux.capabilityReport, (report) =>
+          report.cloneOrCopyWorkspace.posture === "enforced" &&
+          report.nativeContainment.namespaces.posture === "enforced" &&
+          report.nativeContainment.privateWritableView.posture === "enforced" &&
+          report.nativeContainment.liveWorkspaceWriteFence.posture === "enforced" &&
+          report.nativeContainment.deniedNetworkFence.posture === "enforced" &&
+          report.nativeContainment.executableObjectFence.posture === "enforced" &&
+          report.nativeContainment.bootstrapEnvironment.posture === "enforced"))
+      : Effect.flatMap(MacosPlatform, (macos) => Effect.map(macos.capabilityReport, (report) =>
+          report.nativeContainment.seatbelt.posture === "enforced" &&
+          report.nativeContainment.privateWritableView.posture === "enforced" &&
+          report.nativeContainment.liveWorkspaceWriteFence.posture === "enforced" &&
+          report.nativeContainment.deniedNetworkFence.posture === "enforced"))
+)
+
+/**
+ * Opens the Airlock over this machine for one command: the filesystem tools
+ * on `workspace`, held to `policy`, recording into the Airlock home.
+ */
+const openAirlock = (seal: SealContext, requestedWorkspace: string) =>
+  Effect.gen(function* () {
+    const workspace = yield* workspaceOf(requestedWorkspace)
+    const policy = yield* policyFor(seal, workspace)
+    const confiningProfiles = (yield* nativeContainment.pipe(Effect.orElseSucceed(() => false)))
+      ? ["native-contained" as const]
+      : []
+    const services = yield* Effect.gen(function* () {
+      return {
+        calls: yield* HeldCalls,
+        hold: yield* Hold,
+        files: yield* NativeFileSystem,
+        process: yield* ProcessRunner,
+        cell: yield* Cell,
+        artifacts: yield* FileArtifacts
+      }
+    }).pipe(Effect.provide(
+      Layer.mergeAll(
+        HeldCallsLive(new HeldCallsConfig({ retentionMillis: HOLD_RETENTION_MILLIS })),
+        NativeFileSystemLive(new NativeFilesystemConfig({ workspace })),
+        FileArtifactsLive
+      )
+    ))
+    const host = yield* filesystemHost({ workspace, confiningProfiles, recovery: filesystemRecovery(services.calls) })
+    const airlock = defineAirlock({
+      contracts: FilesystemContracts,
+      implement: filesystemTools({
+        ...services,
+        workspace,
+        // A process starts from nothing but what its call names, and the call is public.
+        environment: {},
+        confiningProfiles,
+        responseLimitBytes: RESPONSE_LIMIT_BYTES
+      }),
+      host,
+      policy
+    })
+    const context = yield* Layer.build(
+      Layer.mergeAll(airlock.layer(undefined), programRunner).pipe(
+        Layer.provideMerge(Layer.mergeAll(FileOutboxStore.layer, ledgerLayer, WebCrypto.layer))
+      )
+    ).pipe(Effect.mapError((error) => new CliInputError({ field: "airlock", reason: reasonOf(error) })))
+    return { airlock, context, workspace }
+  })
+
+type Opened = Effect.Success<ReturnType<typeof openAirlock>>
+
+/** A command's work over the opened Airlock. */
+const withAirlock = <A, E, R>(
+  seal: SealContext,
+  verb: BoxGrantVerb,
+  workspace: string,
+  body: (opened: Opened) => Effect.Effect<A, E, R>
+) =>
+  requireVerb(seal, verb).pipe(
+    Effect.andThen(openAirlock(seal, workspace)),
+    Effect.flatMap(body),
+    Effect.scoped
+  )
+
+// ── programs ────────────────────────────────────────────────────────────────
+
+const parseBindings = (raw: Option.Option<string>): Effect.Effect<Readonly<Record<string, Schema.Json>>, CliInputError> =>
+  Option.isNone(raw)
+    ? Effect.succeed({})
+    : Schema.decodeUnknownEffect(Schema.fromJsonString(Schema.Record(Schema.String, Schema.Json)))(raw.value).pipe(
+        Effect.mapError((error) => new CliInputError({ field: "bindings", reason: reasonOf(error) }))
+      )
+
+const readProgram = (file: string) =>
+  Effect.flatMap(FileSystem.FileSystem, (fs) => fs.readFileString(file)).pipe(
+    Effect.mapError((error) => new CliInputError({ field: "program.air", reason: describeFailure(error) }))
+  )
+
+/** A program's source: the file it names, or the source given inline. Exactly one. */
+const sourceOf = (file: Option.Option<string>, inline: Option.Option<string>) =>
+  Option.isSome(file) && Option.isNone(inline)
+    ? readProgram(file.value)
+    : Option.isNone(file) && Option.isSome(inline)
+      ? Effect.succeed(inline.value)
+      : failInput("source", "give a program file or --source, not both")
+
+const freshRunId = Effect.map(Effect.flatMap(Crypto.Crypto, (crypto) => crypto.randomUUIDv4), (uuid) => `run-${uuid}`)
+
+/**
+ * Reviews and runs one program. Its result is the run's outcome; a run that
+ * did not produce a result exits 1. The run id names the run again: running
+ * the same id once more returns the recorded results of calls that already ran.
+ */
+const runProgram = (
+  seal: SealContext,
+  verb: "run" | "eval",
+  request: {
+    readonly source: Effect.Effect<string, CliInputError, FileSystem.FileSystem>
+    readonly workspace: string
+    readonly bindings: Option.Option<string>
+    readonly runId: Option.Option<string>
+    readonly plan: Option.Option<string>
+  }
+) =>
+  rendered(withAirlock(seal, verb, request.workspace, ({ airlock, context, workspace }) =>
+    Effect.gen(function* () {
+      const source = yield* request.source
+      const bindings = yield* parseBindings(request.bindings)
+      if (Object.hasOwn(bindings, "workspace")) return yield* failInput("bindings", "workspace is bound by airlock")
+      const runId = Option.isSome(request.runId) ? request.runId.value : yield* freshRunId
+      const surface = yield* (Option.isSome(request.plan)
+        ? airlock.guest({ runId, env: undefined, plan: request.plan.value })
+        : airlock.guest({ runId, env: undefined }))
+      const runner = yield* GuestRunner
+      const outcome = yield* runner.run({ source, surface, bindings: { ...bindings, workspace } })
+      if (!outcome.ok) yield* failed
+      return { runId, workspace, outcome }
+    }).pipe(Effect.provide(context))
+  ))
+
+const programFile = Argument.File("program.air")
+const runIdFlag = Flag.String("run-id").pipe(Flag.optional, Flag.withDescription("Run again under this id; calls that already ran return their recorded results"))
+const planFlag = Flag.String("plan").pipe(Flag.optional, Flag.withDescription("Hold the run to this approved Plan; the calls it covers run without waiting"))
+const bindingsFlag = Flag.String("bindings").pipe(Flag.optional, Flag.withDescription("A JSON object of names the program can read"))
+
+const makeRun = (seal: SealContext) => Command.make(
+  "run",
+  { program: programFile, workspace: workspaceFlag, bindings: bindingsFlag, runId: runIdFlag, plan: planFlag },
+  ({ program, ...request }) => runProgram(seal, "run", { ...request, source: readProgram(program) })
+).pipe(Command.withDescription("Review and run an Airlock program"))
+
+const makeEval = (seal: SealContext) => Command.make(
+  "eval",
+  { source: Flag.String("source"), workspace: workspaceFlag, bindings: bindingsFlag, runId: runIdFlag, plan: planFlag },
+  ({ source, ...request }) => runProgram(seal, "eval", { ...request, source: Effect.succeed(source) })
+).pipe(Command.withDescription("Review and run Airlock source given as one argument"))
+
+const makeReview = (seal: SealContext) => Command.make(
+  "review",
+  {
+    program: programFile.pipe(Argument.optional),
+    source: Flag.String("source").pipe(Flag.optional),
+    workspace: workspaceFlag,
+    bindings: bindingsFlag
+  },
+  ({ program, source, workspace, bindings }) =>
+    rendered(withAirlock(seal, "review", workspace, ({ airlock, context, workspace }) =>
+      Effect.gen(function* () {
+        const text = yield* sourceOf(program, source)
+        const bound = yield* parseBindings(bindings)
+        const surface = yield* airlock.guest({ runId: "review", env: undefined })
+        const runner = yield* GuestRunner
+        const review = yield* runner.review({ source: text, surface, bindings: { ...bound, workspace } })
+        if (!review.ok || review.refusals.length > 0) yield* failed
+        const approved = review.ok
+          ? yield* Effect.flatMap(airlock.supervisor(undefined), (supervisor) => supervisor.approved(review.plan.id))
+          : false
+        return { review: Schema.encodeSync(GuestReview)(review), approved }
+      }).pipe(Effect.provide(context))
+    ))
+).pipe(Command.withDescription("Review a program without running it: its Plan, any refusals, and whether the Plan is approved"))
+
+const makeDescribe = (seal: SealContext) => Command.make(
+  "describe",
+  { workspace: workspaceFlag },
+  ({ workspace }) =>
+    rendered(withAirlock(seal, "describe", workspace, ({ airlock, context }) =>
+      Effect.map(airlock.guest({ runId: "describe", env: undefined }), (surface) => ({
+        actions: surface.actions,
+        description: surface.description
+      })).pipe(Effect.provide(context))
+    ))
+).pipe(Command.withDescription("What a program can call here, and how to write one"))
+
+// ── the supervisor ──────────────────────────────────────────────────────────
+
+const id = Argument.String("id")
+
+/** One supervisor operation, as a command. */
+const supervising = <A>(
+  verb: BoxGrantVerb,
+  description: string,
+  operation: (supervisor: Supervisor, id: string) => Effect.Effect<A, AirlockFailure, Ledger>
+) => (seal: SealContext) => Command.make(
+  verb,
+  { id, workspace: workspaceFlag },
+  ({ id, workspace }) =>
+    rendered(withAirlock(seal, verb, workspace, ({ airlock, context }) =>
+      Effect.flatMap(airlock.supervisor(undefined), (supervisor) => operation(supervisor, id)).pipe(Effect.provide(context))
+    ))
+).pipe(Command.withDescription(description))
+
+const makeApprovePlan = supervising("approve-plan", "Approve a reviewed Plan by its id; a run held to it does not wait for the calls it covers",
+  (supervisor, plan) => supervisor.approvePlan(plan))
+const makeInspect = supervising("inspect", "Show one recorded call", (supervisor, id) => supervisor.inspect(id))
+const makeCommit = supervising("commit", "Approve a waiting call and carry it out now", (supervisor, id) => supervisor.commit(id))
+const makeCancel = supervising("cancel", "Drop a waiting call; it never happens", (supervisor, id) => supervisor.cancel(id))
+const makeUndo = supervising("undo", "Put back what a completed call changed, from Hold", (supervisor, id) => supervisor.restore(id))
+
+const makePending = (seal: SealContext) => Command.make(
+  "pending",
+  { workspace: workspaceFlag },
+  ({ workspace }) =>
+    rendered(withAirlock(seal, "pending", workspace, ({ airlock, context }) =>
+      Effect.flatMap(airlock.supervisor(undefined), (supervisor) => supervisor.pending).pipe(Effect.provide(context))
+    ))
+).pipe(Command.withDescription("List the calls waiting for a decision"))
+
+const makeLedger = (seal: SealContext) => Command.make("ledger", {}, () =>
+  rendered(requireVerb(seal, "ledger").pipe(
+    Effect.andThen(Effect.flatMap(FileLedger, (ledger) => ledger.entries))
+  ))
+).pipe(Command.withDescription("The append-only record of every act"))
 
 // ── reviewed local changes ──────────────────────────────────────────────────
 
@@ -568,11 +392,7 @@ const renderedChangeOutcome = <A extends { readonly state: string }, E, R>(
   effect: Effect.Effect<A, E, R>,
   successfulStates: ReadonlyArray<string> = ["installed", "undone"]
 ) => rendered(effect.pipe(
-  Effect.tap((outcome) => Effect.sync(() => {
-    if (!successfulStates.includes(outcome.state)) {
-      process.exitCode = 1
-    }
-  }))
+  Effect.tap((outcome) => successfulStates.includes(outcome.state) ? Effect.void : failed)
 ))
 
 const confirmChange = () => Effect.callback<boolean>((resume) => {
@@ -634,7 +454,7 @@ const makeChange = (seal: SealContext, agent = false) => {
       if (!(yield* confirmChange())) return { version: "change-approval/v1", id: review.id, state: "not-approved", proposalDigest: review.proposalDigest }
       // Bind approval to the review already displayed; never refresh its digest.
       const outcome = yield* change.apply({ id: review.id, expectedDigest: review.proposalDigest })
-      if (outcome.state !== "installed") yield* Effect.sync(() => { process.exitCode = 1 })
+      if (outcome.state !== "installed") yield* failed
       return outcome
     }))))).pipe(Command.withDescription("Review and approve the displayed digest on an interactive supervisor terminal")),
     Command.make("retire", { id, expectedDigest: Flag.String("expect-digest") }, request => renderedChangeOutcome(local.pipe(
@@ -674,194 +494,7 @@ const makeChange = (seal: SealContext, agent = false) => {
 
 const makeAgentChange = (seal: SealContext) => makeChange(seal, true)
 
-// ── mutation verbs ──────────────────────────────────────────────────────────
-
-const makeRm = (seal: SealContext) => Command.make(
-  "rm",
-  { target: Argument.String("target"), scope: scopeOption },
-  ({ scope, target }) => rendered(
-    requireVerb(seal, "rm").pipe(
-      Effect.andThen(requireNativeAction(seal, "file.remove")),
-      Effect.flatMap(() => resolveWithin(scope, target)),
-      Effect.flatMap((resolved) => admitSealedNativeAction(
-        seal,
-        "file.remove",
-        { action: "file.remove", path: resolved }
-      ).pipe(
-        Effect.flatMap((call) => Effect.flatMap(Hold, (hold) =>
-          hold.remove(
-            call?.action === "file.remove" ? call.path : resolved
-          )
-        ))
-      ))
-    )
-  )
-).pipe(Command.withDescription("Recursive remove — staged, recoverable via undo"))
-
-const makeWrite = (seal: SealContext) => Command.make(
-  "write",
-  { target: Argument.String("target"), content: Argument.String("content"), scope: scopeOption },
-  ({ content, scope, target }) => rendered(
-    requireVerb(seal, "write").pipe(
-      Effect.andThen(requireNativeAction(seal, "file.write")),
-      Effect.flatMap(() => resolveWithin(scope, target)),
-      Effect.flatMap((resolved) => admitSealedNativeAction(
-        seal,
-        "file.write",
-        { action: "file.write", path: resolved, content }
-      ).pipe(
-        Effect.flatMap((call) => Effect.flatMap(Hold, (hold) =>
-          hold.overwrite(
-            call?.action === "file.write" ? call.path : resolved,
-            content
-          )
-        ))
-      ))
-    )
-  )
-).pipe(Command.withDescription("Overwrite — previous version held, recoverable"))
-
-const makeUndo = (seal: SealContext) => Command.make(
-  "undo",
-  { id: Argument.String("act-id").pipe(Argument.optional) },
-  ({ id }) =>
-    rendered(Effect.gen(function* () {
-      yield* requireVerb(seal, "undo")
-      const hold = yield* Hold
-      if (Option.isNone(id)) return yield* hold.undoLast
-      const actId = yield* Schema.decodeUnknownEffect(ActId)(id.value).pipe(
-        Effect.mapError((cause) =>
-          new CliInputError({
-            field: "act-id",
-            reason: reasonOf(cause)
-          })
-        )
-      )
-      return yield* hold.undo(actId)
-    }))
-).pipe(Command.withDescription("Restore a held act (defaults to the most recent)"))
-
-const makeHeld = (seal: SealContext) => Command.make("held", {}, () =>
-  rendered(
-    requireVerb(seal, "held").pipe(
-      Effect.andThen(Effect.flatMap(Hold, (hold) => hold.held))
-    )
-  )
-).pipe(Command.withDescription("List held (recoverable) mutations"))
-
-const makeReap = (seal: SealContext) => Command.make(
-  "reap",
-  { olderThan: duration("older-than", "7d") },
-  ({ olderThan }) => rendered(
-    requireVerb(seal, "reap").pipe(
-      Effect.andThen(parseDuration("older-than", olderThan)),
-      Effect.flatMap((millis) => Effect.flatMap(Hold, (hold) => hold.reap(millis)))
-    )
-  )
-).pipe(Command.withDescription("Reclaim held bytes — the second phase, the only unlink"))
-
-// ── emission verbs ──────────────────────────────────────────────────────────
-
-const methodOption = Flag.Literals("method", ["GET", "POST", "PUT", "PATCH", "DELETE"])
-  .pipe(Flag.withDefault("POST" as const))
-
-const makeSend = (seal: SealContext) => Command.make(
-  "send",
-  {
-    url: Argument.String("url"),
-    method: methodOption,
-    body: Flag.String("body").pipe(Flag.optional),
-    hold: duration("hold", "30s")
-  },
-  ({ body, hold, method, url }) => rendered(
-    requireVerb(seal, "send").pipe(
-      Effect.andThen(requireNativeAction(seal, "http.stage")),
-      Effect.flatMap(() => parseDuration("hold", hold)),
-      Effect.flatMap((millis) => {
-        const bodyValue = Option.getOrUndefined(body)
-        return admitSealedNativeAction(
-          seal,
-          "http.stage",
-          {
-            action: "http.stage",
-            endpoint: url,
-            method,
-            ...(bodyValue === undefined ? {} : { body: bodyValue }),
-            holdMillis: millis
-          }
-        ).pipe(
-          // Each `send` is a new act: a fresh key, so nothing is replayed.
-          Effect.andThen(Effect.flatMap(Crypto.Crypto, (crypto) => crypto.randomUUIDv4)),
-          Effect.flatMap((uuid) => Effect.flatMap(Outbox, (outbox) => outbox.stage({
-            key: IdempotencyKey.make(`cli-send:${uuid}`),
-            intent: {
-              kind: "http",
-              dispatch: {
-                url,
-                method,
-                headers: {},
-                ...(bodyValue === undefined ? {} : { body: bodyValue })
-              }
-            },
-            holdMillis: millis
-          })))
-        )
-      })
-    )
-  )
-).pipe(Command.withDescription("Stage an external request — nothing is sent yet"))
-
-const makePending = (seal: SealContext) => Command.make("pending", {}, () =>
-  rendered(
-    requireVerb(seal, "pending").pipe(
-      Effect.andThen(Effect.flatMap(Outbox, (outbox) => outbox.pending))
-    )
-  )
-).pipe(Command.withDescription("List staged emissions"))
-
-/** An id the kernel could have issued, or a usage error; never a defect. */
-const emissionIdArgument = (raw: string) =>
-  Schema.decodeUnknownEffect(EmissionId)(raw).pipe(
-    Effect.mapError(() => new CliInputError({
-      field: "emission-id",
-      reason: "expected an emission id such as emi_<32 hex digits>"
-    }))
-  )
-
-const makeCommit = (seal: SealContext) => Command.make(
-  "commit",
-  { id: Argument.String("emission-id") },
-  ({ id }) => rendered(
-    requireVerb(seal, "commit").pipe(
-      Effect.andThen(emissionIdArgument(id)),
-      Effect.flatMap((emissionId) => Effect.flatMap(Outbox, (outbox) => outbox.commit(
-        emissionId,
-        new DispatchProvenance({ committedBy: "supervisor" })
-      )))
-    )
-  )
-).pipe(Command.withDescription("Approve and send a staged emission now"))
-
-const makeCancel = (seal: SealContext) => Command.make(
-  "cancel",
-  { id: Argument.String("emission-id") },
-  ({ id }) => rendered(
-    requireVerb(seal, "cancel").pipe(
-      Effect.andThen(emissionIdArgument(id)),
-      Effect.flatMap((emissionId) => Effect.flatMap(Outbox, (outbox) => outbox.cancel(emissionId)))
-    )
-  )
-).pipe(Command.withDescription("Cancel a staged emission — it was never sent"))
-
-const makeFlush = (seal: SealContext) => Command.make("flush", {}, () =>
-  rendered(
-    requireVerb(seal, "flush").pipe(
-      Effect.andThen(Effect.flatMap(Outbox, (outbox) => outbox.flush))
-    )
-  )
-).pipe(Command.withDescription("Send every staged emission whose hold expired"))
-
-// ── discovery + structured computation ──────────────────────────────────────
+// ── this machine ────────────────────────────────────────────────────────────
 
 const compatibilityCapability = {
   available: true,
@@ -929,631 +562,14 @@ const capabilityPayload = Effect.suspend(
 )
 
 const makeDoctor = (seal: SealContext) => Command.make("doctor", {}, () =>
-  rendered(
-    requireVerb(seal, "doctor").pipe(Effect.andThen(capabilityPayload))
-  )
+  rendered(requireVerb(seal, "doctor").pipe(Effect.andThen(capabilityPayload)))
 ).pipe(Command.withDescription("Report the exact host enforcement envelope"))
 
 const makeCapabilities = (seal: SealContext) => Command.make("capabilities", {}, () =>
-  rendered(
-    requireVerb(seal, "capabilities").pipe(Effect.andThen(capabilityPayload))
-  )
+  rendered(requireVerb(seal, "capabilities").pipe(Effect.andThen(capabilityPayload)))
 ).pipe(Command.withDescription("Machine-readable alias for doctor"))
 
-const visibleNativeActions = (seal: SealContext) => {
-  const allowed = allowedNativeActions(seal)
-  return NativeActionCatalog.filter((action) => allowed.has(action.name))
-}
-
-const makeActions = (seal: SealContext) => Command.make("actions", {}, () => rendered(
-  requireVerb(seal, "actions").pipe(
-    Effect.map(() => ({
-      schemaVersion: "airlock/actions/v1",
-      actions: visibleNativeActions(seal)
-    }))
-  )
-)).pipe(Command.withDescription("List the actions a program can call"))
-
-/**
- * Draft 2020-12 JSON Schema for one discovery contract. Unmodeled properties
- * are rejected, matching the decoder the CLI applies to action input.
- */
-const discoveryJsonSchema = (schema: Schema.Top) => {
-  const document = Schema.toJsonSchemaDocument(schema, {
-    onExcessProperty: "error"
-  })
-  return {
-    $schema: "https://json-schema.org/draft/2020-12/schema",
-    ...(Object.keys(document.definitions).length === 0
-      ? {}
-      : { $defs: document.definitions }),
-    ...document.schema
-  }
-}
-
-const nativeActionInputSchema = (
-  name: (typeof NativeActionCatalog)[number]["name"]
-) => {
-  const canonical = discoveryJsonSchema(nativeActionSchema(name))
-  if (!("properties" in canonical)) return canonical
-  const { action: _discriminator, ...properties } = canonical.properties as Record<string, unknown>
-  return {
-    ...canonical,
-    required: ((canonical as { readonly required?: ReadonlyArray<string> }).required ?? []).filter((field) => field !== "action"),
-    properties
-  }
-}
-
-const nativeActionResultJsonSchema = (
-  name: (typeof NativeActionCatalog)[number]["name"]
-) => discoveryJsonSchema(nativeActionResultSchema(name))
-
-const nativeActionDiscoveryDescriptor = (
-  action: (typeof NativeActionCatalog)[number]
-) => ({
-  ...action,
-  resultSchema: nativeActionResultJsonSchema(action.name)
-})
-
-const makeSchema = (seal: SealContext) => Command.make(
-  "schema",
-  { subject: Argument.String("subject").pipe(Argument.optional) },
-  ({ subject }) => rendered(Effect.gen(function* () {
-    yield* requireVerb(seal, "schema")
-    const requested = Option.getOrElse(subject, () => "all")
-    const nativeActions = visibleNativeActions(seal)
-    const native = nativeActions.find((action) => action.name === requested)
-    if (native !== undefined) {
-      return {
-        schemaVersion: "airlock/discovery/v1",
-        action: {
-          ...nativeActionDiscoveryDescriptor(native),
-          inputSchema: nativeActionInputSchema(native.name)
-        }
-      }
-    }
-    if (!(["all", "actions", "plan", "language"] as const).includes(requested as "all" | "actions" | "plan" | "language")) {
-      return yield* failInput("subject", "expected actions, plan, language, all, or a native action name")
-    }
-    return {
-      schemaVersion: "airlock/discovery/v1",
-      ...(requested === "all" || requested === "actions" ? {
-        actions: nativeActions.map(nativeActionDiscoveryDescriptor)
-      } : {}),
-      ...(requested === "all" || requested === "plan" ? {
-        plan: {
-          schemaVersion: "airlock/plan/v1",
-          nodes: ["Capture", "Invoke", "Apply", "RequestExternal"],
-          invoke: {
-            executable: "absolute path",
-            args: "string[]",
-            descendantExecutables: "additional absolute executable paths",
-            commandString: false
-          }
-        }
-      } : {}),
-      ...(requested === "all" || requested === "language" ? {
-        language: {
-          syntax: "airlock",
-          effects: "identifier ActionResolver calls only",
-          control: [
-            "let",
-            "if",
-            "for finite range",
-            "for captured list",
-            "return",
-            "assert"
-          ]
-        }
-      } : {})
-    }
-  }))
-).pipe(Command.withDescription("Discover versioned action, Plan, and language contracts"))
-
-type RawExecInput = {
-  readonly executable: string
-  readonly arg: ReadonlyArray<string>
-  readonly descendantExecutable: ReadonlyArray<string>
-  readonly cwd: string
-  readonly privateWorkspace: Option.Option<string>
-  readonly timeout: Option.Option<string>
-  readonly outputLimitBytes: number
-}
-
-const executeRawProcess = (
-  input: RawExecInput,
-  profile: ProgramProfile
-) => Effect.gen(function* () {
-  const timeoutMs: number | undefined = yield* (
-    Option.isNone(input.timeout)
-      ? Effect.succeed<number | undefined>(undefined)
-      : parseDuration("timeout", input.timeout.value)
-  )
-  const request = new ProcessRequest({
-    executable: input.executable,
-    args: input.arg,
-    cwd: input.cwd,
-    env: profile === "compatibility" ? compatibilityEnvironment() : {},
-    stdout: "capture",
-    stderr: "capture",
-    outputLimitBytes: input.outputLimitBytes,
-    ...(timeoutMs === undefined ? {} : { timeoutMs })
-  })
-  if (profile === "compatibility") {
-    const runner = yield* ProcessRunner
-    const receipt = yield* runner.run(request)
-    return {
-      schemaVersion: "airlock/process-receipt/v1",
-      profile,
-      ...receipt,
-      stdout: new TextDecoder().decode(receipt.stdout),
-      stderr: new TextDecoder().decode(receipt.stderr)
-    }
-  }
-  if (profile === "native-contained") {
-    if (Option.isNone(input.privateWorkspace)) {
-      return yield* failInput(
-        "private-workspace",
-        "is required for native-contained execution and must not already exist"
-      )
-    }
-    const cell = yield* Cell
-    const receipt = yield* cell.run(new CellRequest({
-      sourceWorkspace: input.cwd,
-      privateWorkspace: input.privateWorkspace.value,
-      process: request,
-      descendantExecutables: input.descendantExecutable,
-      network: "deny"
-    }))
-    return {
-      schemaVersion: "airlock/cell-receipt/v1",
-      profile,
-      ...receipt,
-      processReceipt: {
-        ...receipt.processReceipt,
-        stdout: new TextDecoder().decode(receipt.processReceipt.stdout),
-        stderr: new TextDecoder().decode(receipt.processReceipt.stderr)
-      }
-    }
-  }
-  return yield* failInput(
-    "profile",
-    "vm-enclosed has no bundled VM Cell backend; refusing host fallback"
-  )
-})
-
-/** Raw sealed exec must honor the exact root and descendant executable edges. */
-const requireSealedExecAdmission = (
-  policy: AdmissionPolicy,
-  executable: string,
-  descendants: ReadonlyArray<string>
-): Effect.Effect<void, CliInputError> => {
-  if (
-    !nodePath.isAbsolute(executable) ||
-    executable.includes("\0") ||
-    !policy.executableAllowlist.includes(executable)
-  ) {
-    return failInput(
-      "executable",
-      `${executable} is outside the sealed admission executable allowlist`
-    )
-  }
-  if (descendants.length === 0) return Effect.void
-  const edge = policy.executableEdges.find((candidate) =>
-    candidate.root === executable
-  )
-  const denied = descendants.find((descendant) =>
-    !nodePath.isAbsolute(descendant) ||
-    descendant.includes("\0") ||
-    !edge?.descendants.includes(descendant)
-  )
-  return denied === undefined
-    ? Effect.void
-    : failInput(
-        "descendant-executable",
-        `${denied} is outside the sealed admission executable edge for ${executable}`
-      )
-}
-
-const makeExec = (seal: SealContext) => Command.make(
-  "exec",
-  {
-    executable: Flag.String("executable"),
-    arg: Flag.String("arg").pipe(Flag.atLeast(0)),
-    descendantExecutable: Flag.String("descendant-executable").pipe(
-      Flag.atLeast(0)
-    ),
-    cwd: Flag.String("cwd"),
-    profile: profileOption,
-    privateWorkspace: Flag.String("private-workspace").pipe(Flag.optional),
-    timeout: Flag.String("timeout").pipe(Flag.optional),
-    outputLimitBytes: Flag.Int("output-limit-bytes").pipe(Flag.withDefault(1_048_576))
-  },
-  ({ profile, ...input }) => rendered(
-    requireVerb(seal, "exec").pipe(
-      Effect.andThen(requireNativeAction(seal, "process.run")),
-      Effect.flatMap(() => executeRawProcess(input, profile))
-    )
-  )
-).pipe(Command.withDescription("Run an absolute executable with argv atoms; no command-string form exists"))
-
-const makeSealedExec = (seal: SealContext) => Command.make(
-  "exec",
-  {
-    executable: Flag.String("executable"),
-    arg: Flag.String("arg").pipe(Flag.atLeast(0)),
-    descendantExecutable: Flag.String("descendant-executable").pipe(
-      Flag.atLeast(0)
-    ),
-    cwd: Flag.String("cwd"),
-    privateWorkspace: Flag.String("private-workspace").pipe(Flag.optional),
-    timeout: Flag.String("timeout").pipe(Flag.optional),
-    outputLimitBytes: Flag.Int("output-limit-bytes").pipe(Flag.withDefault(1_048_576))
-  },
-  (input) => rendered(Effect.gen(function* () {
-    yield* requireVerb(seal, "exec")
-    yield* requireNativeAction(seal, "process.run")
-    if (seal._tag !== "VerifiedSeal") {
-      return yield* failInput("seal", "sealed exec reached an unsealed command graph")
-    }
-    const policy = yield* bindPolicyPathScopes(seal.grant.admission)
-    yield* requireSealedExecAdmission(
-      policy,
-      input.executable,
-      input.descendantExecutable
-    )
-    const call = yield* admitSealedNativeAction(seal, "process.run", {
-      action: "process.run",
-      executable: input.executable,
-      args: input.arg,
-      descendantExecutables: input.descendantExecutable,
-      cwd: input.cwd,
-      env: {},
-      cellProfile: seal.grant.admission.profile,
-      stdout: "capture",
-      stderr: "capture",
-      outputLimitBytes: input.outputLimitBytes
-    })
-    if (call?.action !== "process.run") {
-      return yield* failInput("admission", "sealed exec did not bind process.run")
-    }
-    return yield* executeRawProcess(
-      { ...input, cwd: call.cwd },
-      seal.grant.admission.profile
-    )
-  }))
-).pipe(Command.withDescription("Run an admitted absolute executable with argv atoms; no command-string form exists"))
-
-const executeProgram = (
-  seal: SealContext,
-  source: string,
-  rawBindings: Option.Option<string>,
-  selectedProfile: ProgramProfile,
-  requestedWorkspace: string,
-  compact = false
-) =>
-  Effect.gen(function* () {
-    const profile = seal._tag === "VerifiedSeal"
-      ? seal.grant.admission.profile
-      : selectedProfile
-    yield* requireSealedDaemon(seal)
-    const home = yield* AirlockHome
-    const fs = yield* FileSystem.FileSystem
-    const workspace = yield* bindProgramWorkspace(profile, requestedWorkspace)
-    const policy = yield* (
-      seal._tag === "VerifiedSeal"
-        ? bindPolicyPathScopes(seal.grant.admission)
-        : supervisorPolicy(profile, workspace).pipe(
-            Effect.flatMap(bindPolicyPathScopes)
-          )
-    )
-    const parsedBindings = yield* parseBindings(rawBindings)
-    const bindingsValue = profile === "native-contained"
-      ? { ...parsedBindings, workspace }
-      : parsedBindings
-    const runtimeLayer = RuntimeLive.pipe(
-      Layer.provideMerge(RuntimeConfigLive(new RuntimeConfig({
-        workspace,
-        profile,
-        runJournalDirectory: nodePath.join(home.home, "runs"),
-        environment: profile === "compatibility" ? compatibilityEnvironment() : {}
-      }))),
-      Layer.provideMerge(
-        NativeFileSystemLive(new NativeFilesystemConfig({ workspace }))
-      )
-    )
-    const bindPath: ProgramPathSelectorBinder = profile === "native-contained"
-      ? (action, selector) => bindPhysicalPathSelector(workspace, selector).pipe(
-          Effect.mapError((cause) => new ProgramActionDecodeFailed({
-            action,
-            reason: reasonOf(cause)
-          })),
-          Effect.provideService(FileSystem.FileSystem, fs)
-        )
-      : unchangedProgramPathSelector
-    const programLayer = seal._tag === "VerifiedSeal"
-      ? ProgramExecutionLive(
-          policy,
-          new Set(seal.grant.nativeActions),
-          { sealDigest: seal.grantDigest },
-          bindPath
-        )
-      : ProgramExecutionLive(policy, undefined, undefined, bindPath)
-    const runner = yield* ProgramRunner.pipe(
-      Effect.provide(programLayer.pipe(Layer.provideMerge(runtimeLayer)))
-    )
-    const result = yield* runner.run(new ProgramRequest({ source, bindings: bindingsValue }))
-    return {
-      schemaVersion: "airlock/program-run/v1",
-      profile,
-      workspace,
-      result: compact
-        ? projectCompactProgramRun(result)
-        : projectProgramRun(result)
-    }
-  })
-
-const makeRun = (seal: SealContext) => Command.make(
-  "run",
-  {
-    program: Argument.File("program.air"),
-    bindings: Flag.String("bindings").pipe(Flag.optional),
-    profile: profileOption,
-    workspace: Flag.String("workspace").pipe(Flag.withDefault(process.cwd()))
-  },
-  ({ program, bindings, profile, workspace: requestedWorkspace }) =>
-    renderedProgram(Effect.gen(function* () {
-      yield* requireVerb(seal, "run")
-      const fs = yield* FileSystem.FileSystem
-      const source = yield* fs.readFileString(program).pipe(
-        Effect.mapError((error) => new CliInputError({ field: "program.air", reason: describeFailure(error) }))
-      )
-      return yield* executeProgram(
-        seal,
-        source,
-        bindings,
-        profile,
-        requestedWorkspace
-      )
-    }))
-).pipe(Command.withDescription("Run an Airlock program through explicit admission, runtime, Hold, and Outbox seams"))
-
-const makeEvalProgram = (seal: SealContext) => Command.make(
-  "eval",
-  {
-    source: Flag.String("source"),
-    bindings: Flag.String("bindings").pipe(Flag.optional),
-    profile: profileOption,
-    workspace: Flag.String("workspace").pipe(Flag.withDefault(process.cwd()))
-  },
-  ({ source, bindings, profile, workspace }) =>
-    renderedProgram(
-      requireVerb(seal, "eval").pipe(
-        Effect.andThen(executeProgram(
-          seal,
-          source,
-          bindings,
-          profile,
-          workspace
-        ))
-      )
-    )
-).pipe(Command.withDescription("Run Airlock source supplied as one structured argument by an agent harness"))
-
-const makeAgentRun = (seal: SealContext) => Command.make(
-  "run",
-  {
-    program: Argument.File("program.air"),
-    bindings: Flag.String("bindings").pipe(Flag.optional),
-    compact: Flag.Boolean("compact").pipe(Flag.withDefault(false)),
-    workspace: Flag.String("workspace").pipe(Flag.withDefault(process.cwd()))
-  },
-  ({ program, bindings, compact, workspace: requestedWorkspace }) =>
-    renderedProgram(Effect.gen(function* () {
-      yield* requireVerb(seal, "run")
-      const profile = yield* agentProgramProfile
-      const fs = yield* FileSystem.FileSystem
-      const source = yield* fs.readFileString(program).pipe(
-        Effect.mapError((error) =>
-          new CliInputError({
-            field: "program.air",
-            reason: describeFailure(error)
-          })
-        )
-      )
-      return yield* executeProgram(
-        seal,
-        source,
-        bindings,
-        profile,
-        requestedWorkspace,
-        compact
-      )
-    }))
-).pipe(
-  Command.withDescription(
-    "Run an Airlock program under the supervisor-pinned agent profile"
-  )
-)
-
-const makeAgentEvalProgram = (seal: SealContext) => Command.make(
-  "eval",
-  {
-    source: Flag.String("source"),
-    bindings: Flag.String("bindings").pipe(Flag.optional),
-    compact: Flag.Boolean("compact").pipe(Flag.withDefault(false)),
-    workspace: Flag.String("workspace").pipe(Flag.withDefault(process.cwd()))
-  },
-  ({ source, bindings, compact, workspace }) =>
-    renderedProgram(Effect.gen(function* () {
-      yield* requireVerb(seal, "eval")
-      const profile = yield* agentProgramProfile
-      return yield* executeProgram(
-        seal,
-        source,
-        bindings,
-        profile,
-        workspace,
-        compact
-      )
-    }))
-).pipe(
-  Command.withDescription(
-    "Run supplied Airlock source under the supervisor-pinned agent profile"
-  )
-)
-
-/** Sealed program commands expose no profile selector on either binary alias. */
-const makeSealedRun = (seal: SealContext) => Command.make(
-  "run",
-  {
-    program: Argument.File("program.air"),
-    bindings: Flag.String("bindings").pipe(Flag.optional),
-    compact: Flag.Boolean("compact").pipe(Flag.withDefault(false)),
-    workspace: Flag.String("workspace").pipe(Flag.withDefault(process.cwd()))
-  },
-  ({ program, bindings, compact, workspace: requestedWorkspace }) =>
-    renderedProgram(Effect.gen(function* () {
-      yield* requireVerb(seal, "run")
-      if (seal._tag !== "VerifiedSeal") {
-        return yield* failInput("seal", "sealed run reached an unsealed command graph")
-      }
-      const profile = seal.grant.admission.profile
-      const fs = yield* FileSystem.FileSystem
-      const source = yield* fs.readFileString(program).pipe(
-        Effect.mapError((error) =>
-          new CliInputError({ field: "program.air", reason: describeFailure(error) })
-        )
-      )
-      return yield* executeProgram(
-        seal,
-        source,
-        bindings,
-        profile,
-        requestedWorkspace,
-        compact
-      )
-    }))
-).pipe(Command.withDescription("Run an Airlock program under the signed sealed admission"))
-
-const makeSealedEvalProgram = (seal: SealContext) => Command.make(
-  "eval",
-  {
-    source: Flag.String("source"),
-    bindings: Flag.String("bindings").pipe(Flag.optional),
-    compact: Flag.Boolean("compact").pipe(Flag.withDefault(false)),
-    workspace: Flag.String("workspace").pipe(Flag.withDefault(process.cwd()))
-  },
-  ({ source, bindings, compact, workspace }) =>
-    renderedProgram(Effect.gen(function* () {
-      yield* requireVerb(seal, "eval")
-      if (seal._tag !== "VerifiedSeal") {
-        return yield* failInput("seal", "sealed eval reached an unsealed command graph")
-      }
-      const profile = seal.grant.admission.profile
-      return yield* executeProgram(
-        seal,
-        source,
-        bindings,
-        profile,
-        workspace,
-        compact
-      )
-    }))
-).pipe(Command.withDescription("Run supplied Airlock source under the signed sealed admission"))
-
-// ── ledger ──────────────────────────────────────────────────────────────────
-
-const makeLedger = (seal: SealContext) => Command.make("ledger", {}, () =>
-  rendered(
-    requireVerb(seal, "ledger").pipe(
-      Effect.andThen(Effect.flatMap(FileLedger, (ledger) => ledger.entries))
-    )
-  )
-).pipe(Command.withDescription("The append-only record of every act"))
-
-const recentRunLimit = Flag.Int("limit").pipe(
-  Flag.withDefault(10),
-  Flag.withDescription("Latest Runtime Plans to return (1-100)")
-)
-
-const makeRuns = (seal: SealContext) => Command.make(
-  "runs",
-  { limit: recentRunLimit },
-  ({ limit }) => rendered(Effect.gen(function* () {
-    yield* requireVerb(seal, "runs")
-    if (limit < 1 || limit > 100) {
-      return yield* failInput("limit", "must be an integer from 1 through 100")
-    }
-    const home = yield* AirlockHome
-    const recent = yield* makeFileRuntimeRunJournal(
-      nodePath.join(home.home, "runs")
-    ).recent
-    return recent.slice(0, limit)
-  }))
-).pipe(
-  Command.withDescription(
-    "List the latest redacted durable receipt for each Runtime Plan"
-  )
-)
-
-const makeRunReceipt = (seal: SealContext) => Command.make(
-  "run-receipt",
-  {
-    planId: Flag.String("plan-id")
-  },
-  ({ planId }) => rendered(Effect.gen(function* () {
-    yield* requireVerb(seal, "run-receipt")
-    const home = yield* AirlockHome
-    return yield* makeFileRuntimeRunJournal(
-      nodePath.join(home.home, "runs")
-    ).inspect(planId)
-  }))
-).pipe(
-  Command.withDescription(
-    "Inspect the latest durable Runtime receipt for one Plan id"
-  )
-)
-
-
-const makeServe = (seal: SealContext) => Command.make(
-  "serve",
-  {
-    interval: duration("interval", "1s"),
-    reapOlderThan: Flag.String("reap-older-than").pipe(Flag.optional)
-  },
-  ({ interval, reapOlderThan }) => rendered(Effect.gen(function* () {
-    yield* requireVerb(seal, "serve")
-    if (seal._tag !== "VerifiedSeal") {
-      return yield* failInput("seal", "airlock serve requires a verified seal")
-    }
-    const requiredDaemonUid = process.env["AIRLOCK_DAEMON_UID_INTERNAL"]
-    if (requiredDaemonUid !== undefined && (
-      typeof process.getuid !== "function" ||
-      String(process.getuid()) !== requiredDaemonUid
-    )) {
-      return yield* failInput("principal", "airlock serve requires the installed daemon UID")
-    }
-    const intervalMillis = yield* parseDuration("interval", interval)
-    const reapOlderThanMillis = Option.isSome(reapOlderThan)
-      ? yield* parseDuration("reap-older-than", reapOlderThan.value)
-      : undefined
-    const socketPath = yield* daemonSocketPath()
-    return yield* Effect.raceFirst(
-      runDaemon({
-        seal,
-        intervalMillis,
-        ...(reapOlderThanMillis === undefined ? {} : { reapOlderThanMillis })
-      }),
-      runDaemonHealthServer({
-        socketPath,
-        state: { grantDigest: seal.grantDigest, ready: true }
-      })
-    )
-  }))
-).pipe(Command.withDescription(
-  "Run the sealed supervisor loop and health-only local socket"
-))
+// ── the command graph ───────────────────────────────────────────────────────
 
 type CurrentCommandVerb = BoxGrantVerb | "change"
 type AnyCliCommand = Command.Command<any, any, any, any, any>
@@ -1563,53 +579,26 @@ type CurrentCommandDescriptor = Readonly<{
   verb: CurrentCommandVerb
   supervisor: CommandFactory
   agent?: CommandFactory
-  sealed?: CommandFactory
-  nativeAction?: NativeActionName
-  sealedOnly?: boolean
+  /** A person's decision: never on the agent's binary unless a seal grants it. */
+  supervisorOnly?: boolean
 }>
 
-/**
- * One construction table owns the complete graph. `serve` is sealed-only;
- * `change` is local-only and its agent factory omits terminal authority.
- */
+/** One construction table owns the complete graph. `change` is local-only. */
 const commandDescriptors: ReadonlyArray<CurrentCommandDescriptor> = [
-  { verb: "rm", supervisor: makeRm, nativeAction: "file.remove" },
-  { verb: "write", supervisor: makeWrite, nativeAction: "file.write" },
-  { verb: "undo", supervisor: makeUndo },
-  { verb: "held", supervisor: makeHeld },
-  { verb: "reap", supervisor: makeReap },
-  { verb: "send", supervisor: makeSend, nativeAction: "http.stage" },
+  { verb: "describe", supervisor: makeDescribe },
+  { verb: "review", supervisor: makeReview },
+  { verb: "run", supervisor: makeRun },
+  { verb: "eval", supervisor: makeEval },
+  { verb: "approve-plan", supervisor: makeApprovePlan, supervisorOnly: true },
   { verb: "pending", supervisor: makePending },
-  { verb: "commit", supervisor: makeCommit },
-  { verb: "cancel", supervisor: makeCancel },
-  { verb: "flush", supervisor: makeFlush },
+  { verb: "inspect", supervisor: makeInspect },
+  { verb: "commit", supervisor: makeCommit, supervisorOnly: true },
+  { verb: "cancel", supervisor: makeCancel, supervisorOnly: true },
+  { verb: "undo", supervisor: makeUndo, supervisorOnly: true },
+  { verb: "ledger", supervisor: makeLedger },
   { verb: "doctor", supervisor: makeDoctor },
   { verb: "capabilities", supervisor: makeCapabilities },
-  { verb: "actions", supervisor: makeActions },
-  { verb: "schema", supervisor: makeSchema },
-  { verb: "exec", supervisor: makeExec, sealed: makeSealedExec, nativeAction: "process.run" },
-  { verb: "run", supervisor: makeRun, agent: makeAgentRun, sealed: makeSealedRun },
-  { verb: "eval", supervisor: makeEvalProgram, agent: makeAgentEvalProgram, sealed: makeSealedEvalProgram },
-  { verb: "ledger", supervisor: makeLedger },
-  { verb: "runs", supervisor: makeRuns },
-  { verb: "run-receipt", supervisor: makeRunReceipt },
-  { verb: "serve", supervisor: makeServe, sealedOnly: true },
   { verb: "change", supervisor: makeChange, agent: makeAgentChange }
-]
-
-const unsealedAgentVerbOrder: ReadonlyArray<CurrentCommandVerb> = [
-  "doctor",
-  "capabilities",
-  "actions",
-  "schema",
-  "run",
-  "eval",
-  "held",
-  "pending",
-  "ledger",
-  "runs",
-  "run-receipt",
-  "change"
 ]
 
 /** A zero-grant root has no subcommands; every candidate is refused by parsing. */
@@ -1620,50 +609,33 @@ const makeRoot = (
 
 const makeUnsealedSupervisorRoot = (seal: SealContext) => makeRoot(
   "airlock",
-  commandDescriptors
-    .filter((descriptor) => descriptor.sealedOnly !== true)
-    .map((descriptor) => descriptor.supervisor(seal))
+  commandDescriptors.map((descriptor) => descriptor.supervisor(seal))
 )
 
-/**
- * The unsealed harness surface remains deliberately reduced and retains its
- * supervisor-environment profile pin.
- */
+/** The agent's binary has no command that decides what a person decides. */
 const makeUnsealedAgentRoot = (seal: SealContext) => makeRoot(
   "airlock-agent",
-  unsealedAgentVerbOrder.map((verb) => {
-    const descriptor = commandDescriptors.find((item) => item.verb === verb)!
-    return (descriptor.agent ?? descriptor.supervisor)(seal)
-  })
+  commandDescriptors
+    .filter((descriptor) => descriptor.supervisorOnly !== true)
+    .map((descriptor) => (descriptor.agent ?? descriptor.supervisor)(seal))
 )
-
-const sealedDescriptorIsEligible = (
-  seal: SealContext,
-  descriptor: CurrentCommandDescriptor
-) => seal._tag === "VerifiedSeal" &&
-  descriptor.verb !== "change" &&
-  seal.grant.verbs.includes(descriptor.verb) &&
-  (descriptor.nativeAction === undefined ||
-    seal.grant.nativeActions.includes(descriptor.nativeAction))
 
 /** Both installed aliases consume this same grant-filtered command graph. */
 const makeSealedRoot = (seal: SealContext, name: string) => makeRoot(
   name,
   commandDescriptors
     .filter((descriptor) =>
-      sealedDescriptorIsEligible(seal, descriptor) &&
-      !(name === "airlock-agent" && descriptor.verb === "serve")
-    )
-    .map((descriptor) =>
-      (descriptor.sealed ?? descriptor.supervisor)(seal)
-    )
+      seal._tag === "VerifiedSeal" &&
+      descriptor.verb !== "change" &&
+      seal.grant.verbs.includes(descriptor.verb))
+    .map((descriptor) => descriptor.supervisor(seal))
 )
 
 /**
  * Seal verification is the process bootstrap boundary. A present, invalid seal
- * exits before AirlockHome, FileLedger, Hold, Outbox, Runtime, or any command
+ * exits before AirlockHome, FileLedger, Hold, the Outbox, or any command
  * handler is constructed. Only an actually absent AIRLOCK_SEAL selects the
- * unchanged compatibility path.
+ * unsealed path.
  */
 const startupSeal = async (): Promise<SealContext | undefined> => {
   const rawOperatorKeyDigest = process.env[
@@ -1731,11 +703,7 @@ const runCli = async (seal: SealContext): Promise<void> => {
   const LedgerLayer = FileLedgerLive.pipe(
     Layer.provideMerge(PlatformAndHomeLayer)
   )
-  const StateLayer = Layer.mergeAll(
-    LedgerLayer,
-    HoldLive.pipe(Layer.provideMerge(LedgerLayer)),
-    OutboxLive.pipe(Layer.provideMerge(LedgerLayer))
-  )
+  const StateLayer = HoldLive.pipe(Layer.provideMerge(LedgerLayer))
   const ChangeStateLayer = ChangeLive.pipe(Layer.provideMerge(StateLayer))
 
   const HostExecutionLayer = Layer.mergeAll(

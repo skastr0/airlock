@@ -1,114 +1,77 @@
 import { spawnSync } from "node:child_process"
-import {
-  existsSync,
-  mkdirSync,
-  mkdtempSync,
-  realpathSync,
-  writeFileSync
-} from "node:fs"
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
 import { describe, expect, it } from "vitest"
 import { nativeContainmentSupported } from "./support/NativeContainmentTest.ts"
 
 const repository = resolve(import.meta.dirname, "..")
-const supported =
-  nativeContainmentSupported &&
-  existsSync("/usr/bin/touch")
+const supported = nativeContainmentSupported && existsSync("/usr/bin/touch") && existsSync("/bin/rm")
 
-const invoke = (
-  args: ReadonlyArray<string>,
-  home: string,
-  policy: string
-) =>
-  spawnSync("bun", ["src/cli.ts", ...args], {
-    cwd: repository,
-    env: {
-      ...process.env,
-      AIRLOCK_HOME: home,
-      AIRLOCK_POLICY_FILE: policy
-    },
-    encoding: "utf8",
-    timeout: 30_000
+type Fixture = Readonly<{ workspace: string; home: string; policy: string }>
+
+/** Processes run at once, but only inside the native Cell, and only these executables. */
+const fixture = (executables: ReadonlyArray<string>): Fixture => {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), "airlock-cli-native-")))
+  const workspace = join(root, "workspace")
+  const policy = join(root, "policy.json")
+  mkdirSync(workspace)
+  writeFileSync(policy, JSON.stringify({
+    schemaVersion: "airlock/tool-policy/v1",
+    toolGrants: [{ id: "run", tool: "process.run", when: "now", host: { profile: "native-contained" } }],
+    resources: { path: [workspace], executable: { roots: executables, edges: [] } },
+    budget: { maxCalls: 4, maxInputBytes: 100_000 }
+  }))
+  return { workspace, home: join(root, "home"), policy }
+}
+
+const invoke = (entry: "cli" | "agent-cli", args: ReadonlyArray<string>, at: Fixture) => {
+  const environment: Record<string, string | undefined> = { ...process.env, AIRLOCK_HOME: at.home, AIRLOCK_POLICY_FILE: at.policy }
+  delete environment["AIRLOCK_SEAL"]
+  return spawnSync("bun", [`src/${entry}.ts`, ...args], { cwd: repository, env: environment, encoding: "utf8", timeout: 30_000 })
+}
+
+/** Runs one process from the agent's binary and returns its done receipt. */
+const runProcess = (at: Fixture, executable: string, args: ReadonlyArray<string>) => {
+  const source =
+    `let ran = process.run({ executable: ${JSON.stringify(executable)}, args: ${JSON.stringify(args)}, cwd: "." })\n` +
+    `assert ran.state == "done", "the process did not run"\nreturn ran`
+  const ran = invoke("agent-cli", ["eval", "--workspace", at.workspace, "--source", source], at)
+  expect(ran.status, `${ran.stderr}\n${ran.stdout}`).toBe(0)
+  const { outcome } = JSON.parse(ran.stdout) as {
+    readonly outcome: { readonly result: { readonly id: string; readonly result: { readonly outcome: string; readonly merged: unknown } } }
+  }
+  return outcome.result
+}
+
+describe.skipIf(!supported)("native-contained processes through the CLI", () => {
+  it("merges what a contained process created through Hold, and undo removes it", { timeout: 30_000 }, () => {
+    const at = fixture(["/usr/bin/touch"])
+    const receipt = runProcess(at, "/usr/bin/touch", ["created.txt"])
+    expect(receipt.result).toMatchObject({ outcome: "exited", merged: [{ path: "created.txt", kind: "created" }] })
+    expect(existsSync(join(at.workspace, "created.txt"))).toBe(true)
+
+    const undone = invoke("cli", ["undo", receipt.id, "--workspace", at.workspace], at)
+    expect(undone.status, undone.stderr).toBe(0)
+    expect(existsSync(join(at.workspace, "created.txt"))).toBe(false)
   })
 
-describe.skipIf(!supported)("native-contained agent CLI", () => {
-  it("admits a program, merges its private delta through Hold, and undoes it", () => {
-    const root = mkdtempSync(join(tmpdir(), "airlock-cli-native-"))
-    const workspace = join(root, "workspace")
-    const home = join(root, "home")
-    const program = join(root, "create.air")
-    const policy = join(root, "policy.json")
-    const created = join(workspace, "created.txt")
-    mkdirSync(workspace)
-    const canonicalCreated = join(realpathSync(workspace), "created.txt")
-    writeFileSync(
-      program,
-      'return process.run({ executable: "/usr/bin/touch", args: ["created.txt"], cwd: workspace, cellProfile: "native-contained", stdout: "capture", stderr: "capture" })\n'
-    )
-    writeFileSync(policy, JSON.stringify({
-      schemaVersion: "airlock/admission-policy/v2",
-      profile: "native-contained",
-      principal: "agent:cli-native-test",
-      realm: "local",
-      admittedBy: "operator:cli-native-test",
-      pathAllowlist: [`${workspace}/**`],
-      executableAllowlist: ["/usr/bin/touch"],
-      executableEdges: [],
-      endpointGrants: []
-    }))
+  it("lets rm -rf delete only through Hold; the agent cannot undo it, the supervisor restores exact bytes", { timeout: 30_000 }, () => {
+    const at = fixture(["/bin/rm"])
+    const target = join(at.workspace, "protected", "nested", "unique.txt")
+    mkdirSync(join(at.workspace, "protected", "nested"), { recursive: true })
+    writeFileSync(target, "exact bytes that must survive\n")
 
-    const run = invoke([
-      "run",
-      program,
-      "--workspace",
-      workspace,
-      "--profile",
-      "native-contained"
-    ], home, policy)
-    expect(run.status, run.stderr).toBe(0)
-    expect(existsSync(created)).toBe(true)
+    const receipt = runProcess(at, "/bin/rm", ["-rf", "protected"])
+    expect(receipt.result).toMatchObject({ outcome: "exited" })
+    expect(existsSync(join(at.workspace, "protected"))).toBe(false)
 
-    const report = JSON.parse(run.stdout) as {
-      readonly profile: string
-      readonly result: {
-        readonly result: {
-          readonly state: string
-          readonly receipts: ReadonlyArray<{ readonly state: string }>
-        }
-        readonly plans: ReadonlyArray<{
-          readonly nodes: ReadonlyArray<{ readonly kind: string }>
-        }>
-      }
-    }
-    expect(report.profile).toBe("native-contained")
-    expect(report.result.result.state).toBe("succeeded")
-    expect(report.result.result.receipts.map(({ state }) => state)).toEqual([
-      "succeeded",
-      "succeeded"
-    ])
-    expect(report.result.plans[0]?.nodes.map(({ kind }) => kind)).toEqual([
-      "Invoke",
-      "Apply"
-    ])
+    const deniedUndo = invoke("agent-cli", ["undo", receipt.id, "--workspace", at.workspace], at)
+    expect(deniedUndo.status).not.toBe(0)
+    expect(existsSync(join(at.workspace, "protected"))).toBe(false)
 
-    const held = invoke(["held"], home, policy)
-    expect(held.status, held.stderr).toBe(0)
-    expect(JSON.parse(held.stdout)).toEqual([
-      expect.objectContaining({
-        target: canonicalCreated,
-        act: "overwrite",
-        hasPayload: false,
-        status: "held"
-      }),
-      expect.objectContaining({
-        purpose: "runtime-private",
-        status: "held"
-      })
-    ])
-
-    const undone = invoke(["undo"], home, policy)
+    const undone = invoke("cli", ["undo", receipt.id, "--workspace", at.workspace], at)
     expect(undone.status, undone.stderr).toBe(0)
-    expect(existsSync(created)).toBe(false)
-  }, 20_000)
+    expect(readFileSync(target, "utf8")).toBe("exact bytes that must survive\n")
+  })
 })

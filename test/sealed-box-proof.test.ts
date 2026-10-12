@@ -1,58 +1,43 @@
-import { BunServices } from "@effect/platform-bun"
 import { createHash, generateKeyPairSync, sign } from "node:crypto"
-import { spawn, spawnSync, type ChildProcess } from "node:child_process"
+import { spawn, spawnSync } from "node:child_process"
 import { createServer, type Server } from "node:http"
-import { cpSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs"
+import { cpSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
-import { Effect, Fiber, Layer } from "effect"
+import { Schema } from "effect"
 import { afterAll, beforeAll, describe, expect, it } from "vitest"
-import * as AirlockHome from "../src/AirlockHome.ts"
-import {
-  AdmissionPolicy,
-  BoxGrant,
-  EndpointGrantPolicy,
-} from "../src/core/admission/index.ts"
-import { daemonTick, runDaemonHealthServer } from "../src/daemon/index.ts"
-import { HoldLive } from "../src/HoldLive.ts"
-import { FileLedgerLive } from "../src/host/FileLedger.ts"
-import { Outbox, OutboxLive } from "../src/Outbox.ts"
+import { BoxGrant } from "../src/core/admission/index.ts"
 import {
   BOX_GRANT_FILE,
   BOX_GRANT_SIGNATURE_FILE,
-  BinarySnapshot,
   OPERATOR_PUBLIC_KEY_FILE,
   boxGrantDigest,
-  boxGrantSigningPayload,
-  reverifySeal,
-  verifySealAtPath
+  boxGrantSigningPayload
 } from "../src/seal/index.ts"
 import { Sha256Digest } from "../src/core/Canonical.ts"
 
 const repository = resolve(import.meta.dirname, "..")
-const root = mkdtempSync(join(tmpdir(), "airlock-sealed-proof-"))
+const root = realpathSync(mkdtempSync(join(tmpdir(), "airlock-sealed-proof-")))
 const generation = join(root, "generation")
 const binary = join(generation, "bin", "airlock")
 const agentBinary = join(generation, "bin", "airlock-agent")
 const workspace = join(root, "workspace")
 const home = join(generation, "home")
-const socketPath = join(generation, "ipc", "daemon.sock")
 const sealPath = join(generation, "seal")
+const policyPath = join(root, "signed-policy.json")
 const operator = generateKeyPairSync("ed25519")
 const publicKeyPath = join(root, "operator.pub.pem")
 let provider: Server
 let origin = ""
 let hits = 0
-let grant: BoxGrant
-let healthFiber: Fiber.Fiber<never, unknown> | undefined
 
 const sha256 = (bytes: Uint8Array) =>
   Sha256Digest.make(`sha256:${createHash("sha256").update(bytes).digest("hex")}`)
 
+const agentVerbs = ["describe", "eval", "inspect", "pending", "run"] as const
+
 beforeAll(async () => {
   mkdirSync(join(generation, "bin"), { recursive: true })
-  mkdirSync(join(generation, "ipc"), { recursive: true })
-  mkdirSync(home, { recursive: true })
   mkdirSync(workspace, { recursive: true })
   writeFileSync(join(workspace, "observed.txt"), "sealed observation\n")
   writeFileSync(publicKeyPath, operator.publicKey.export({ format: "pem", type: "spki" }))
@@ -65,7 +50,7 @@ beforeAll(async () => {
   })
   expect(built.status, built.stderr).toBe(0)
   cpSync(binary, agentBinary)
-  provider = createServer((request, response) => {
+  provider = createServer((_request, response) => {
     hits += 1
     response.writeHead(200, { "content-type": "application/json" })
     response.end('{"ok":true}\n')
@@ -75,34 +60,25 @@ beforeAll(async () => {
   if (address === null || typeof address === "string") throw new Error("provider unavailable")
   origin = `http://127.0.0.1:${address.port}`
 
-  mkdirSync(sealPath, { recursive: true })
-  grant = new BoxGrant({
-    schemaVersion: "airlock/box-grant/v1",
-    admission: new AdmissionPolicy({
-      schemaVersion: "airlock/admission-policy/v2",
-      profile: "compatibility",
-      principal: "agent:sealed-proof",
-      realm: "local",
-      admittedBy: "operator:sealed-proof",
-      pathAllowlist: [`${workspace}/**`],
-      executableAllowlist: [],
-      executableEdges: [],
-      endpointGrants: [
-        new EndpointGrantPolicy({
-          selector: `${origin}/v1/*`, methods: ["GET"], class: "read", commit: "auto"
-        }),
-        // Granted, but not pre-authorized: this one waits for a supervisor.
-        new EndpointGrantPolicy({ selector: `${origin}/v2/*`, methods: ["GET"] })
-      ]
-    }),
-    verbs: ["eval", "run", "held", "pending", "serve"],
-    nativeActions: [
-      "file.inspect", "file.read", "file.list", "file.glob", "file.stat", "http.stage"
+  const policy = {
+    schemaVersion: "airlock/tool-policy/v1",
+    toolGrants: [
+      ...["file.inspect", "file.read", "file.list", "file.glob", "file.stat"].map((tool) => ({ id: tool, tool, when: "now" })),
+      // Granted, but every send waits for a person.
+      { id: "send", tool: "http.stage", when: "approved" }
     ],
-    daemonOps: ["commit"],
+    resources: { path: [workspace], endpoint: [`${origin}/v1/*`] },
+    budget: { maxCalls: 32, maxInputBytes: 65_536 }
+  }
+  writeFileSync(policyPath, JSON.stringify(policy))
+  mkdirSync(sealPath, { recursive: true })
+  const grant = Schema.decodeUnknownSync(BoxGrant)({
+    schemaVersion: "airlock/box-grant/v2",
+    policy,
+    verbs: agentVerbs,
     binaryDigest: sha256(readFileSync(binary))
   })
-  writeFileSync(join(sealPath, BOX_GRANT_FILE), `${JSON.stringify(grant, null, 2)}\n`)
+  writeFileSync(join(sealPath, BOX_GRANT_FILE), `${JSON.stringify(Schema.encodeSync(BoxGrant)(grant), null, 2)}\n`)
   writeFileSync(join(sealPath, BOX_GRANT_SIGNATURE_FILE), sign(null, boxGrantSigningPayload(grant), operator.privateKey))
   writeFileSync(join(sealPath, OPERATOR_PUBLIC_KEY_FILE), operator.publicKey.export({ format: "pem", type: "spki" }))
   writeFileSync(join(generation, "SEALED"), `${JSON.stringify({
@@ -110,146 +86,101 @@ beforeAll(async () => {
     grantDigest: boxGrantDigest(grant),
     binaryDigest: grant.binaryDigest,
     ownershipApplied: true,
-    runnable: true,
-    activated: false
+    runnable: true
   })}\n`)
 }, 60_000)
 
 afterAll(async () => {
-  if (healthFiber !== undefined) await Effect.runPromise(Fiber.interrupt(healthFiber))
   await new Promise<void>((done) => provider.close(() => done()))
 })
 
-const env = () => ({
-  ...process.env,
-  FORCE_COLOR: undefined,
-  NO_COLOR: "1",
-  AIRLOCK_AGENT_SURFACE: "1"
-})
-
-const invoke = async (args: ReadonlyArray<string>) => {
-  const child = spawn(agentBinary, [...args], { cwd: workspace, env: env(), stdio: ["ignore", "pipe", "pipe"] })
+const run = async (command: ReadonlyArray<string>, args: ReadonlyArray<string>, env: Record<string, string | undefined>) => {
+  const child = spawn(command[0]!, [...command.slice(1), ...args], {
+    cwd: workspace,
+    env: { ...process.env, FORCE_COLOR: undefined, NO_COLOR: "1", AIRLOCK_POLICY_FILE: undefined, ...env },
+    stdio: ["ignore", "pipe", "pipe"]
+  })
   let stdout = ""
   let stderr = ""
   child.stdout!.setEncoding("utf8").on("data", (chunk) => { stdout += chunk })
   child.stderr!.setEncoding("utf8").on("data", (chunk) => { stderr += chunk })
   const status = await new Promise<number | null>((done, reject) => {
-    const timer = setTimeout(() => { child.kill("SIGKILL"); reject(new Error("agent command timeout")) }, 10_000)
+    const timer = setTimeout(() => { child.kill("SIGKILL"); reject(new Error("command timeout")) }, 20_000)
     child.once("error", reject)
     child.once("exit", (code) => { clearTimeout(timer); done(code) })
   })
   return { status, stdout, stderr }
 }
 
-const waitFor = async (predicate: () => boolean, failure: string) => {
-  const deadline = Date.now() + 5_000
-  while (Date.now() < deadline) {
-    if (predicate()) return
-    await new Promise((done) => setTimeout(done, 20))
-  }
-  throw new Error(failure)
-}
-
-const stateLayer = OutboxLive.pipe(
-  Layer.provideMerge(FileLedgerLive),
-  Layer.provideMerge(AirlockHome.layer(home)),
-  Layer.provideMerge(BunServices.layer)
-).pipe(Layer.provideMerge(
-  HoldLive.pipe(
-    Layer.provideMerge(FileLedgerLive),
-    Layer.provideMerge(AirlockHome.layer(home)),
-    Layer.provideMerge(BunServices.layer)
-  )
-))
-
-const verifiedSeal = () => {
-  const bytes = new Uint8Array(readFileSync(binary))
-  const provider = () => Effect.succeed(new BinarySnapshot({ path: binary, rawBytes: bytes }))
-  return Effect.runPromise(verifySealAtPath(sealPath, { binarySnapshotProvider: provider })).then((seal) => ({ seal, provider }))
-}
+/** The agent's sealed binary, as its harness launches it. */
+const agent = (args: ReadonlyArray<string>) => run([agentBinary], args, { AIRLOCK_AGENT_SURFACE: "1" })
 
 describe("portable sealed-box proof", () => {
-  it("allows only the four agent verbs and the signed observation surface", async () => {
-    const { seal } = await verifiedSeal()
-    healthFiber = Effect.runFork(runDaemonHealthServer({
-      socketPath,
-      state: { grantDigest: seal.grantDigest, ready: true }
-    }))
-    await waitFor(() => { try { return lstatSync(socketPath).isSocket() } catch { return false } }, "health socket missing")
-
-    const help = await invoke(["--help"])
+  it("answers only the signed agent verbs and runs the signed observation surface", async () => {
+    const help = await agent(["--help"])
     expect(help.status, help.stderr).toBe(0)
-    for (const verb of ["eval", "run", "held", "pending"]) expect(help.stdout).toMatch(new RegExp(`\\b${verb}\\b`))
-    for (const denied of ["serve", "exec", "write", "rm", "send", "commit", "reap", "flush"])
+    for (const verb of agentVerbs) expect(help.stdout).toMatch(new RegExp(`\\b${verb}\\b`))
+    for (const denied of ["approve-plan", "commit", "cancel", "undo", "ledger", "change", "serve", "exec"])
       expect(help.stdout).not.toMatch(new RegExp(`\\b${denied}\\b`))
-    expect(grant.nativeActions).toEqual([
-      "file.inspect", "file.read", "file.list", "file.glob", "file.stat", "http.stage"
-    ])
-    expect(grant.nativeActions).not.toContain("process.run")
 
-    const observation = await invoke([
+    const observation = await agent([
       "eval", "--workspace", workspace, "--source",
       'let a = file.inspect({ path: "observed.txt" })\n' +
       'let b = file.read({ path: "observed.txt", format: "text" })\n' +
       'let c = file.list({ path: "." })\n' +
       'let d = file.glob({ root: ".", pattern: "*.txt" })\n' +
-      'return file.stat({ path: "observed.txt" })'
+      'let e = file.stat({ path: "observed.txt" })\n' +
+      'assert b.state == "done", "read"\n' +
+      "return [a.state, b.result, c.state, d.state, e.state]"
     ])
     expect(observation.status, observation.stderr).toBe(0)
-    const payload = JSON.parse(observation.stdout)
-    expect(payload.result.actions.map((entry: { request: { call: { action: string } } }) => entry.request.call.action))
-      .toEqual(["file.inspect", "file.read", "file.list", "file.glob", "file.stat"])
-    expect(payload.result.plans.flatMap((plan: { nodes: ReadonlyArray<{ kind: string }> }) => plan.nodes.map((node) => node.kind)))
-      .toEqual(["Capture", "Capture", "Capture", "Capture", "Capture"])
-    expect((await invoke(["held"])).stdout.trim()).toBe("[]")
-  }, 30_000)
+    expect(JSON.parse(observation.stdout).outcome).toEqual({
+      ok: true,
+      result: ["done", "sealed observation\n", "done", "done", "done"],
+      toolCalls: 5
+    })
+    expect(JSON.parse((await agent(["pending", "--workspace", workspace])).stdout)).toEqual([])
+  }, 60_000)
 
-  it("commits read evidence only through daemonTick and keeps a request without pre-authorization pending", async () => {
+  it("leaves a staged request waiting for a person: the agent's binary cannot commit it", async () => {
     const before = hits
-    const readProgram = join(workspace, "read.air")
-    writeFileSync(readProgram, `return http.stage({ endpoint: "${origin}/v1/status", method: "GET", holdMillis: 0 })\n`)
-    const staged = await invoke(["run", readProgram, "--workspace", workspace])
+    const program = join(workspace, "send.air")
+    writeFileSync(program, `return http.stage({ endpoint: "${origin}/v1/status", method: "POST", body: "hello", holdMillis: 0 })\n`)
+    const staged = await agent(["run", program, "--workspace", workspace])
     expect(staged.status, staged.stderr).toBe(0)
-    expect(JSON.parse(staged.stdout)).toMatchObject({ result: { result: { state: "staged" } } })
+    expect(JSON.parse(staged.stdout).outcome).toMatchObject({ ok: true, result: { state: "staged" } })
     expect(hits).toBe(before)
-    const pendingBefore = JSON.parse((await invoke(["pending"])).stdout)
-    expect(pendingBefore).toHaveLength(1)
-    expect(pendingBefore[0].authorization).toMatchObject({ dispatchClass: "read" })
 
-    const { seal, provider } = await verifiedSeal()
-    const report = await Effect.runPromise(daemonTick({
-      seal,
-      reverify: (expected) => reverifySeal(expected, { binarySnapshotProvider: provider })
-    }).pipe(Effect.provide(stateLayer)))
-    expect(report.attempted).toEqual([pendingBefore[0].id])
-    expect(report.committed).toEqual([pendingBefore[0].id])
-    expect(hits).toBe(before + 1)
-    expect(JSON.parse((await invoke(["pending"])).stdout)).toEqual([])
-
-    const mutate = await invoke([
+    const outside = await agent([
       "eval", "--workspace", workspace, "--source",
-      `return http.stage({ endpoint: "${origin}/v2/status", method: "GET", holdMillis: 0 })`
+      `return http.stage({ endpoint: "${origin}/v2/status", method: "POST", holdMillis: 0 })`
     ])
-    expect(mutate.status, mutate.stderr).toBe(0)
-    const pendingMutate = JSON.parse((await invoke(["pending"])).stdout)
-    expect(pendingMutate).toHaveLength(1)
-    expect(pendingMutate[0].authorization).toBeUndefined()
-    const second = await Effect.runPromise(daemonTick({
-      seal,
-      reverify: (expected) => reverifySeal(expected, { binarySnapshotProvider: provider })
-    }).pipe(Effect.provide(stateLayer)))
-    expect(second.attempted).toEqual([])
-    expect(hits).toBe(before + 1)
-  }, 30_000)
+    expect(JSON.parse(outside.stdout).outcome).toMatchObject({ ok: true, result: { state: "refused" } })
 
-  it("fails closed when the same-seal daemon disappears", async () => {
-    await Effect.runPromise(Fiber.interrupt(healthFiber!))
-    healthFiber = undefined
-    const refused = await invoke([
-      "eval", "--workspace", workspace, "--source", "return true"
-    ])
-    expect(refused.status).toBe(1)
-    expect(refused.stdout).toBe("")
-    expect(JSON.parse(refused.stderr)).toMatchObject({ _tag: "CliInputError", field: "daemon" })
-  })
+    const pending = JSON.parse((await agent(["pending", "--workspace", workspace])).stdout) as ReadonlyArray<{ readonly id: string }>
+    expect(pending).toHaveLength(1)
+    const id = pending[0]!.id
+
+    for (const decision of ["commit", "cancel", "approve-plan"]) {
+      const refused = await agent([decision, id, "--workspace", workspace])
+      expect(refused.status, decision).not.toBe(0)
+      expect(refused.stderr).toContain("Unknown subcommand")
+    }
+    // The non-agent name is the same sealed graph, not a way around it.
+    const direct = await run([binary], ["commit", id, "--workspace", workspace], {})
+    expect(direct.status).not.toBe(0)
+    expect(direct.stderr).toContain("Unknown subcommand")
+    expect(hits).toBe(before)
+    expect(JSON.parse((await agent(["pending", "--workspace", workspace])).stdout)).toHaveLength(1)
+
+    // A person, holding the same policy over the same state, commits it.
+    const committed = await run(["bun", join(repository, "src", "cli.ts")], ["commit", id, "--workspace", workspace], {
+      AIRLOCK_HOME: home,
+      AIRLOCK_POLICY_FILE: policyPath
+    })
+    expect(committed.status, committed.stderr).toBe(0)
+    expect(JSON.parse(committed.stdout)).toMatchObject({ id, state: "committed", provenance: { committedBy: "supervisor" } })
+    expect(hits).toBe(before + 1)
+    expect(JSON.parse((await agent(["pending", "--workspace", workspace])).stdout)).toEqual([])
+  }, 60_000)
 })

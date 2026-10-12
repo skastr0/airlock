@@ -14,7 +14,7 @@ import {
   writeFileSync
 } from "node:fs"
 import { tmpdir } from "node:os"
-import { dirname, join, resolve } from "node:path"
+import { join, resolve } from "node:path"
 import { describe, expect, it } from "vitest"
 
 const repository = resolve(import.meta.dirname, "..")
@@ -31,28 +31,34 @@ const digest = (bytes: Uint8Array) =>
   `sha256:${createHash("sha256").update(bytes).digest("hex")}`
 const mode = (path: string) => statSync(path).mode & 0o7777
 
-const admission = (workspace: string, profile: "native-contained" | "compatibility" = "native-contained") => ({
-  schemaVersion: "airlock/admission-policy/v2",
-  profile,
-  principal: "agent/seal-box-test",
-  realm: "local",
-  admittedBy: "operator/seal-box-test",
-  pathAllowlist: [`${workspace}/**`],
-  executableAllowlist: ["/bin/sh"],
-  executableEdges: [],
-  endpointGrants: []
+const toolPolicy = (workspace: string) => ({
+  schemaVersion: "airlock/tool-policy/v1",
+  toolGrants: [
+    { id: "read", tool: "file.read", when: "now", where: {} },
+    { id: "write", tool: "file.write", when: "approved", where: {} }
+  ],
+  resources: { path: [workspace] },
+  flowRules: [],
+  flow: {},
+  budget: { maxCalls: 16, maxInputBytes: 65_536 }
 })
+
+const reverseKeys = (value: unknown): unknown => {
+  if (Array.isArray(value)) return value.map(reverseKeys)
+  if (value === null || typeof value !== "object") return value
+  return Object.fromEntries(Object.entries(value).reverse().map(([key, child]) => [key, reverseKeys(child)]))
+}
 
 type Fixture = {
   readonly root: string
   readonly workspace: string
   readonly binary: string
-  readonly admission: string
+  readonly policy: string
   readonly privateKey: string
   readonly publicKey: string
 }
 
-const fixture = (profile: "native-contained" | "compatibility" = "native-contained"): Fixture => {
+const fixture = (): Fixture => {
   const root = temporary()
   const workspace = join(root, "workspace")
   const keys = join(root, "keys")
@@ -62,8 +68,8 @@ const fixture = (profile: "native-contained" | "compatibility" = "native-contain
   const binaryBytes = Buffer.from("#!/bin/sh\necho sealed-fixture\n")
   writeFileSync(binary, binaryBytes)
   chmodSync(binary, 0o755)
-  const policy = join(root, "admission.json")
-  writeFileSync(policy, `${JSON.stringify(admission(workspace, profile), null, 2)}\n`)
+  const policy = join(root, "policy.json")
+  writeFileSync(policy, `${JSON.stringify(toolPolicy(workspace), null, 2)}\n`)
   const privateKey = join(keys, "operator-private.pem")
   const publicKey = join(keys, "operator-public.pem")
   const generated = run([
@@ -78,47 +84,36 @@ const fixture = (profile: "native-contained" | "compatibility" = "native-contain
     `${binary}.operator-key.sha256`,
     `sha256:${createHash("sha256").update(operatorDer).digest("hex")}\n`
   )
-  return {
-    root,
-    workspace,
-    binary,
-    admission: policy,
-    privateKey,
-    publicKey
-  }
+  return { root, workspace, binary, policy, privateKey, publicKey }
 }
 
 const createArgs = (
   item: Fixture,
   out: string,
-  options: { readonly compatibility?: boolean; readonly reversed?: boolean } = {}
+  options: { readonly reversed?: boolean; readonly policy?: string } = {}
 ): Array<string> => [
   "create",
   "--binary", item.binary,
-  "--admission", item.admission,
+  "--policy", options.policy ?? item.policy,
   ...(options.reversed
-    ? ["--verb", "actions", "--verb", "run", "--native-action", "process.run", "--native-action", "file.read", "--daemon-op", "reap", "--daemon-op", "commit"]
-    : ["--verb", "run", "--verb", "actions", "--native-action", "file.read", "--native-action", "process.run", "--daemon-op", "commit", "--daemon-op", "reap"]),
+    ? ["--verb", "pending", "--verb", "eval", "--verb", "run"]
+    : ["--verb", "run", "--verb", "eval", "--verb", "pending"]),
   "--private-key", item.privateKey,
   "--public-key", item.publicKey,
-  "--out", out,
-  ...(options.compatibility ? ["--allow-sealed-compatibility"] : [])
+  "--out", out
 ]
 
-const created = (
-  profile: "native-contained" | "compatibility" = "native-contained",
-  options: { readonly compatibility?: boolean; readonly reversed?: boolean } = {}
-) => {
-  const item = fixture(profile)
+const created = () => {
+  const item = fixture()
   const bundle = join(item.root, "bundle")
-  const result = run(createArgs(item, bundle, options))
+  const result = run(createArgs(item, bundle))
   expect(result.status, result.stderr).toBe(0)
   return { ...item, bundle, result }
 }
 
 const grant = (bundle: string) => JSON.parse(
   readFileSync(join(bundle, "seal", "box-grant.json"), "utf8")
-) as { readonly binaryDigest: string; readonly nativeActions: ReadonlyArray<string> }
+) as { readonly binaryDigest: string; readonly verbs: ReadonlyArray<string>; readonly policy: unknown }
 
 describe("seal-box operator bundle tool", () => {
   it("generates Ed25519 PEM keys exclusively with private/public modes and no key output", () => {
@@ -141,14 +136,16 @@ describe("seal-box operator bundle tool", () => {
     expect(readFileSync(publicKey)).toEqual(publicBefore)
   })
 
-  it("creates and verifies a self-contained bundle with exact binary bytes, the granted actions and readonly modes", () => {
+  it("creates and verifies a self-contained bundle with exact binary bytes, the signed policy and readonly modes", () => {
     const item = created()
     const checked = run(["verify", "--bundle", item.bundle])
     expect(checked.status, checked.stderr).toBe(0)
     expect(readFileSync(join(item.bundle, "bin", "airlock"))).toEqual(readFileSync(item.binary))
     expect(readFileSync(join(item.bundle, "bin", "airlock-agent"))).toEqual(readFileSync(item.binary))
-    expect(grant(item.bundle).nativeActions).toEqual(["file.read", "process.run"])
-    expect(grant(item.bundle)).not.toHaveProperty("catalog")
+    expect(grant(item.bundle)).toMatchObject({ schemaVersion: "airlock/box-grant/v2", verbs: ["eval", "pending", "run"] })
+    expect(grant(item.bundle).policy).toEqual(toolPolicy(item.workspace))
+    for (const removed of ["catalog", "admission", "nativeActions", "daemonOps"])
+      expect(grant(item.bundle)).not.toHaveProperty(removed)
     expect(readdirSync(join(item.bundle, "seal")).sort()).toEqual([
       "box-grant.ed25519", "box-grant.json", "operator-ed25519.pub.pem"
     ])
@@ -166,17 +163,21 @@ describe("seal-box operator bundle tool", () => {
   })
 
   it("fails verification for a flipped binary, a widened grant, and missing signature", () => {
-    for (const corrupt of ["binary", "grant", "signature"] as const) {
+    for (const corrupt of ["binary", "policy", "verbs", "signature"] as const) {
       const item = created()
       if (corrupt === "binary") {
         const path = join(item.bundle, "bin", "airlock")
         chmodSync(path, 0o755)
         writeFileSync(path, Buffer.from("flipped"))
-      } else if (corrupt === "grant") {
-        // The grant is what the box pins: one more action under the old signature.
+      } else if (corrupt === "policy" || corrupt === "verbs") {
+        // The grant is what the box pins: more authority under the old signature.
         const path = join(item.bundle, "seal", "box-grant.json")
-        const widened = JSON.parse(readFileSync(path, "utf8")) as { nativeActions: Array<string> }
-        widened.nativeActions.push("file.remove")
+        const widened = JSON.parse(readFileSync(path, "utf8")) as {
+          verbs: Array<string>
+          policy: { toolGrants: Array<unknown> }
+        }
+        if (corrupt === "policy") widened.policy.toolGrants.push({ id: "rm", tool: "file.remove", when: "now", where: {} })
+        else widened.verbs.push("commit")
         chmodSync(path, 0o644)
         writeFileSync(path, JSON.stringify(widened))
       } else {
@@ -190,17 +191,52 @@ describe("seal-box operator bundle tool", () => {
     }
   })
 
-  it("rejects invalid literals, duplicates, unknown options, and private-key hazards", () => {
+  it("rejects invalid verbs, duplicates, removed and unknown options, loose policies, and private-key hazards", () => {
     const item = fixture()
     const cases: ReadonlyArray<Array<string>> = [
       [...createArgs(item, join(item.root, "bad-verb")), "--verb", "shell"],
-      [...createArgs(item, join(item.root, "bad-native")), "--native-action", "plugin.run"],
-      [...createArgs(item, join(item.root, "bad-daemon")), "--daemon-op", "dispatch"],
+      [...createArgs(item, join(item.root, "removed-verb")), "--verb", "serve"],
+      [...createArgs(item, join(item.root, "local-verb")), "--verb", "change"],
       [...createArgs(item, join(item.root, "duplicate")), "--verb", "run"],
+      [...createArgs(item, join(item.root, "native")), "--native-action", "file.read"],
+      [...createArgs(item, join(item.root, "daemon")), "--daemon-op", "commit"],
+      [...createArgs(item, join(item.root, "admission")), "--admission", item.policy],
+      [...createArgs(item, join(item.root, "compatibility")), "--allow-sealed-compatibility"],
       [...createArgs(item, join(item.root, "unknown")), "--surprise", "yes"],
-      [...createArgs(item, join(item.root, "definition")), "--definition", item.admission]
+      [...createArgs(item, join(item.root, "definition")), "--definition", item.policy]
     ]
-    for (const args of cases) expect(run(args).status).not.toBe(0)
+    for (const args of cases) {
+      const refused = run(args)
+      expect(refused.status, args.join(" ")).not.toBe(0)
+      expect(existsSync(args[args.indexOf("--out") + 1]!)).toBe(false)
+    }
+
+    const loose = join(item.root, "loose-policy.json")
+    writeFileSync(loose, JSON.stringify({ ...toolPolicy(item.workspace), verbs: ["commit"] }))
+    const admission = join(item.root, "admission-policy.json")
+    writeFileSync(admission, JSON.stringify({
+      schemaVersion: "airlock/admission-policy/v2",
+      profile: "native-contained",
+      principal: "agent/seal-box-test",
+      realm: "local",
+      admittedBy: "operator/seal-box-test",
+      pathAllowlist: [`${item.workspace}/**`],
+      executableAllowlist: [],
+      executableEdges: [],
+      endpointGrants: []
+    }))
+    const looseGrant = join(item.root, "loose-grant.json")
+    writeFileSync(looseGrant, JSON.stringify({
+      ...toolPolicy(item.workspace),
+      toolGrants: [{ id: "read", tool: "file.read", when: "now", escalate: true }]
+    }))
+    for (const policy of [loose, admission, looseGrant]) {
+      const out = join(item.root, `policy-${policy.split("/").pop()}`)
+      const refused = run(createArgs(item, out, { policy }))
+      expect(refused.status, policy).toBe(65)
+      expect(refused.stderr).toContain("--policy is not a strict ToolPolicy")
+      expect(existsSync(out)).toBe(false)
+    }
 
     chmodSync(item.privateKey, 0o644)
     expect(run(createArgs(item, join(item.root, "broad-private"))).status).not.toBe(0)
@@ -212,21 +248,14 @@ describe("seal-box operator bundle tool", () => {
     expect(run(linked).status).not.toBe(0)
   })
 
-  it("requires a loud compatibility flag", () => {
-    const item = fixture("compatibility")
-    const refused = run(createArgs(item, join(item.root, "refused")))
-    expect(refused.status).not.toBe(0)
-    expect(refused.stderr).toContain("--allow-sealed-compatibility")
-    const allowed = run(createArgs(item, join(item.root, "allowed"), { compatibility: true }))
-    expect(allowed.status, allowed.stderr).toBe(0)
-  })
-
-  it("has stable grant identity and deterministic signatures across repeated-option order", () => {
+  it("has stable grant identity and deterministic signatures across verb order and policy key order", () => {
     const item = fixture()
+    const reversedPolicy = join(item.root, "reversed-policy.json")
+    writeFileSync(reversedPolicy, JSON.stringify(reverseKeys(toolPolicy(item.workspace))))
     const first = join(item.root, "first")
     const second = join(item.root, "second")
     expect(run(createArgs(item, first)).status).toBe(0)
-    expect(run(createArgs(item, second, { reversed: true })).status).toBe(0)
+    expect(run(createArgs(item, second, { reversed: true, policy: reversedPolicy })).status).toBe(0)
     expect(readFileSync(join(second, "seal", "box-grant.json"))).toEqual(
       readFileSync(join(first, "seal", "box-grant.json"))
     )
@@ -235,21 +264,19 @@ describe("seal-box operator bundle tool", () => {
     )
   })
 
-  it("installs one fresh generation and launchd plist wholly outside the workspace", () => {
+  it("installs one fresh generation wholly outside the workspace, with no daemon in it", () => {
     const item = created()
     const root = join(item.root, "system-root")
     const installed = run([
       "install", "--bundle", item.bundle, "--root", root,
       "--box", "alpha", "--workspace", item.workspace,
-      "--daemon-user", "airlockd", "--daemon-uid", "501",
-      "--daemon-group", "airlockd", "--daemon-gid", "501",
       "--agent-user", "airlock_agent", "--agent-uid", "502",
       "--agent-group", "airlock_agent", "--agent-gid", "502"
     ])
     expect(installed.status, installed.stderr).toBe(0)
     const output = JSON.parse(installed.stdout) as {
       readonly generation: string
-      readonly launchd: string
+      readonly agentLaunch: string
       readonly readiness: string
     }
     expect(output.generation.startsWith(`${root}/Library/Airlock/boxes/alpha/`)).toBe(true)
@@ -257,53 +284,41 @@ describe("seal-box operator bundle tool", () => {
     expect(mode(output.generation)).toBe(0o755)
     expect(output.readiness).toBe(join(output.generation, "SEALED"))
     expect(mode(output.readiness)).toBe(0o444)
-    expect(JSON.parse(readFileSync(output.readiness, "utf8"))).toMatchObject({
+    expect(JSON.parse(readFileSync(output.readiness, "utf8"))).toEqual({
       schemaVersion: "airlock/installed-generation/v1",
+      grantDigest: expect.stringMatching(/^sha256:[0-9a-f]{64}$/),
+      binaryDigest: digest(readFileSync(item.binary)),
       ownershipApplied: false,
-      runnable: false,
-      activated: false
+      runnable: false
     })
     expect(readFileSync(join(output.generation, "bin", "airlock"))).toEqual(readFileSync(item.binary))
     expect(readFileSync(join(output.generation, "bin", "airlock-agent"))).toEqual(readFileSync(item.binary))
-    expect(JSON.parse(readFileSync(
-      join(output.generation, "launchd", "com.airlock.box.alpha.agent.json"),
-      "utf8"
-    ))).toMatchObject({
+    expect(output.agentLaunch).toBe(join(output.generation, "agent-launch.json"))
+    expect(JSON.parse(readFileSync(output.agentLaunch, "utf8"))).toMatchObject({
       schemaVersion: "airlock/agent-launch/v1",
       executable: join(output.generation, "bin", "airlock-agent"),
       user: "airlock_agent",
+      uid: 502,
       environment: { AIRLOCK_AGENT_SURFACE: "1" }
     })
+    expect(readdirSync(output.generation).sort()).toEqual([
+      "SEALED", "agent-launch.json", "bin", "home", "principals.json", "seal"
+    ])
     expect(mode(join(output.generation, "home"))).toBe(0o700)
-    for (const directory of ["hold", "outbox", "hold-locks", "outbox-locks", "runs"]) {
+    for (const directory of ["hold", "outbox", "hold-locks", "outbox-locks"]) {
       expect(mode(join(output.generation, "home", directory))).toBe(0o700)
     }
     expect(mode(join(output.generation, "home", "ledger.jsonl"))).toBe(0o600)
-    expect(mode(join(output.generation, "run"))).toBe(0o2750)
     const principals = JSON.parse(readFileSync(join(output.generation, "principals.json"), "utf8"))
-    expect(principals).toMatchObject({
+    expect(principals).toEqual({
+      agent: { user: "airlock_agent", uid: 502, group: "airlock_agent", gid: 502 },
       ownershipApplied: false,
       ownershipRequired: {
-        agentHome: { mode: "0700" },
-        run: { mode: "02750" },
-        ipc: { mode: "02750" }
-      },
-      ipc: { sharedGroup: "airlock_agent" }
+        generationOwner: { uid: 0, gid: 0 },
+        agentHome: { path: join(output.generation, "home"), uid: 502, gid: 502, mode: "0700" },
+        note: expect.any(String)
+      }
     })
-    const plist = readFileSync(output.launchd, "utf8")
-    expect(plist).toContain(`<string>${join(output.generation, "bin", "airlock")}</string>`)
-    expect(plist).toContain("<string>serve</string>")
-    expect(plist).toContain(`<string>${join(output.generation, "seal")}</string>`)
-    expect(plist).toContain(`<string>${join(output.generation, "home")}</string>`)
-    expect(plist).toContain(`<string>${join(output.generation, "ipc")}</string>`)
-    expect(plist).toContain("<key>AIRLOCK_AGENT_USER</key>\n    <string>airlock_agent</string>")
-    expect(plist).toContain("<key>UserName</key>\n  <string>airlockd</string>")
-    expect(plist).toContain("<key>GroupName</key>\n  <string>airlockd</string>")
-    expect(plist).toContain("<key>Umask</key>\n  <integer>63</integer>")
-    if (process.platform === "darwin") {
-      const lint = spawnSync("plutil", ["-lint", output.launchd], { encoding: "utf8" })
-      expect(lint.status, lint.stderr).toBe(0)
-    }
   })
 
   it("derives production --root / as /Library/Airlock instead of rejecting filesystem root", () => {
@@ -326,7 +341,7 @@ describe("seal-box operator bundle tool", () => {
     expect(refused.stderr).toContain("requires root")
   })
 
-  it("refuses unsafe paths, symlink input, equal principals, and second install without altering the first", () => {
+  it("refuses unsafe paths, symlink input, a root agent, daemon options, and second install without altering the first", () => {
     const item = created()
     const root = join(item.root, "root")
     const base = [
@@ -334,7 +349,12 @@ describe("seal-box operator bundle tool", () => {
       "--box", "safe", "--workspace", item.workspace
     ]
     expect(run([...base.slice(0, 7), "../escape", ...base.slice(9)]).status).not.toBe(0)
-    expect(run([...base, "--daemon-uid", "700", "--agent-uid", "700"]).status).not.toBe(0)
+    for (const rootAgent of [
+      ["--agent-uid", "0"], ["--agent-user", "root"], ["--agent-gid", "0"], ["--agent-group", "wheel"]
+    ]) expect(run([...base, ...rootAgent]).status, rootAgent.join(" ")).not.toBe(0)
+    for (const daemon of [["--daemon-user", "root"], ["--daemon-uid", "0"]]) {
+      expect(run([...base, ...daemon]).status, daemon.join(" ")).toBe(64)
+    }
     expect(run(["install", "--bundle", item.bundle, "--root", item.workspace, "--box", "safe", "--workspace", item.workspace]).status).not.toBe(0)
 
     const bundleLink = join(item.root, "bundle-link")
@@ -348,6 +368,7 @@ describe("seal-box operator bundle tool", () => {
     const workspaceLink = join(item.root, "workspace-link")
     symlinkSync(item.workspace, workspaceLink)
     expect(run(["install", "--bundle", item.bundle, "--root", root, "--box", "safe", "--workspace", workspaceLink]).status).not.toBe(0)
+    expect(existsSync(join(root, "Library", "Airlock", "boxes", "safe"))).toBe(false)
 
     const first = run(base)
     expect(first.status, first.stderr).toBe(0)

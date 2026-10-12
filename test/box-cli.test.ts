@@ -11,8 +11,9 @@ import {
 } from "node:fs"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
+import { Schema } from "effect"
 import { beforeAll, describe, expect, it } from "vitest"
-import { AdmissionPolicy, BoxGrant, EndpointGrantPolicy } from "../src/core/admission/index.ts"
+import { BoxGrant, BoxGrantVerb } from "../src/core/admission/index.ts"
 import {
   BOX_GRANT_FILE,
   BOX_GRANT_SIGNATURE_FILE,
@@ -54,28 +55,31 @@ beforeAll(() => {
 const digest = (bytes: Uint8Array) =>
   Sha256Digest.make(`sha256:${createHash("sha256").update(bytes).digest("hex")}`)
 
+const grantFor = (fields: {
+  readonly policy: unknown
+  readonly verbs: ReadonlyArray<BoxGrantVerb>
+  readonly binary: string
+}) => Schema.decodeUnknownSync(BoxGrant)({
+  schemaVersion: "airlock/box-grant/v2",
+  policy: fields.policy,
+  verbs: fields.verbs,
+  binaryDigest: digest(readFileSync(fields.binary))
+})
+
 const writeGoodSeal = () => {
   mkdirSync(seal, { recursive: true })
   const { privateKey, publicKey } = operator
-  const grant = new BoxGrant({
-    schemaVersion: "airlock/box-grant/v1",
-    admission: new AdmissionPolicy({
-      schemaVersion: "airlock/admission-policy/v2",
-      profile: "compatibility",
-      principal: "agent:required-seal-test",
-      realm: "local",
-      admittedBy: "operator:required-seal-test",
-      pathAllowlist: [root],
-      executableAllowlist: [],
-      executableEdges: [],
-      endpointGrants: []
-    }),
+  const grant = grantFor({
+    policy: {
+      schemaVersion: "airlock/tool-policy/v1",
+      toolGrants: [],
+      resources: { path: [root] },
+      budget: { maxCalls: 0, maxInputBytes: 0 }
+    },
     verbs: ["doctor"],
-    nativeActions: [],
-    daemonOps: [],
-    binaryDigest: digest(readFileSync(binary))
+    binary
   })
-  writeFileSync(join(seal, BOX_GRANT_FILE), `${JSON.stringify(grant)}\n`)
+  writeFileSync(join(seal, BOX_GRANT_FILE), `${JSON.stringify(Schema.encodeSync(BoxGrant)(grant))}\n`)
   writeFileSync(
     join(seal, OPERATOR_PUBLIC_KEY_FILE),
     publicKey.export({ format: "pem", type: "spki" })
@@ -89,8 +93,7 @@ const writeGoodSeal = () => {
     grantDigest: boxGrantDigest(grant),
     binaryDigest: grant.binaryDigest,
     ownershipApplied: true,
-    runnable: true,
-    activated: false
+    runnable: true
   })}\n`)
 }
 
@@ -112,8 +115,7 @@ describe("required-seal tenant entrypoint", () => {
     mkdirSync(alternate, { recursive: true })
     const refused = invoke(["doctor"], {
       AIRLOCK_SEAL: alternate,
-      AIRLOCK_HOME: join(root, "attacker-home"),
-      AIRLOCK_DAEMON_SOCKET: join(root, "attacker.sock")
+      AIRLOCK_HOME: join(root, "attacker-home")
     })
     expect(refused.status).toBe(78)
     expect(refused.stdout).toBe("")
@@ -182,25 +184,20 @@ describe("required-seal tenant entrypoint", () => {
     mkdirSync(cloneSeal, { recursive: true })
     cpSync(binary, cloneBinary)
     const attacker = generateKeyPairSync("ed25519")
-    const grant = new BoxGrant({
-      schemaVersion: "airlock/box-grant/v1",
-      admission: new AdmissionPolicy({
-        schemaVersion: "airlock/admission-policy/v2",
-        profile: "compatibility",
-        principal: "agent:attacker",
-        realm: "local",
-        admittedBy: "attacker",
-        pathAllowlist: ["/"],
-        executableAllowlist: ["/bin/sh"],
-        executableEdges: [],
-        endpointGrants: [new EndpointGrantPolicy({ selector: "https://" })]
-      }),
-      verbs: ["exec", "serve"],
-      nativeActions: ["process.run"],
-      daemonOps: ["commit"],
-      binaryDigest: digest(readFileSync(cloneBinary))
+    const grant = grantFor({
+      policy: {
+        schemaVersion: "airlock/tool-policy/v1",
+        toolGrants: [
+          { id: "write", tool: "file.write", when: "now" },
+          { id: "process", tool: "process.run", when: "approved" }
+        ],
+        resources: { path: ["/"], executable: { roots: ["/bin/sh"], edges: [] } },
+        budget: { maxCalls: 1_000_000, maxInputBytes: 1_000_000_000 }
+      },
+      verbs: BoxGrantVerb.literals,
+      binary: cloneBinary
     })
-    writeFileSync(join(cloneSeal, BOX_GRANT_FILE), `${JSON.stringify(grant)}\n`)
+    writeFileSync(join(cloneSeal, BOX_GRANT_FILE), `${JSON.stringify(Schema.encodeSync(BoxGrant)(grant))}\n`)
     writeFileSync(
       join(cloneSeal, OPERATOR_PUBLIC_KEY_FILE),
       attacker.publicKey.export({ format: "pem", type: "spki" })
@@ -209,7 +206,7 @@ describe("required-seal tenant entrypoint", () => {
       join(cloneSeal, BOX_GRANT_SIGNATURE_FILE),
       sign(null, boxGrantSigningPayload(grant), attacker.privateKey)
     )
-    const refused = spawnSync(cloneBinary, ["exec", "--help"], {
+    const refused = spawnSync(cloneBinary, ["commit", "--help"], {
       cwd: repository,
       encoding: "utf8",
       env: { ...process.env, FORCE_COLOR: undefined, NO_COLOR: "1" }

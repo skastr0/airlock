@@ -49,7 +49,9 @@ describe("CLI failure finalization", () => {
         preload,
         "src/cli.ts",
         "undo",
-        "../invalid-act-id"
+        "../invalid-act-id",
+        "--workspace",
+        root
       ],
       {
         cwd: repository,
@@ -61,8 +63,8 @@ describe("CLI failure finalization", () => {
 
     expect(result.status).toBe(1)
     expect(JSON.parse(result.stderr)).toMatchObject({
-      _tag: "CliInputError",
-      field: "act-id"
+      _tag: "AirlockFailure",
+      code: "not-found"
     })
     expect(existsSync(marker)).toBe(true)
     expect(readFileSync(marker, "utf8")).toBe("released")
