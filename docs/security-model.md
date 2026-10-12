@@ -207,12 +207,10 @@ inventing an outcome. Cancel is meaningful only before the claim. Completed,
 failed, and uncertain are dispatch outcomes; enqueue/stage is not itself the
 external effect.
 
-A v2 supervisor policy may pre-authorize the commit for endpoint grants it
-classed `read` (`commit: "auto"`). That auto-commit is a caller of the same
-`Outbox.commit` after durable staging — no second wire site, and no program
-can select a class. It is implemented with local fixture evidence
-([`evidence/external-read-slice.md`](evidence/external-read-slice.md)), which
-is not vendor or brokerage evidence.
+On this machine a request always waits for a person: a policy that grants
+`http.stage` with `when: "now"` is refused when it loads. An approved plan
+lets a fully fixed request it names commit without a further decision; that
+commit is the same `Outbox.commit`, so there is still one wire site.
 
 A staged request is stored exactly as it will be sent: its URL, headers and
 body are kept, unencrypted, in the emission's sealed dispatch for as long as
@@ -314,18 +312,17 @@ until the supervisor reaps them.
 
 ### Fail-closed profile selection
 
-Native-contained program execution requires a supervisor policy whose profile
-matches the CLI profile. Missing policy or mismatched profile is refused.
-VM-enclosed is refused because no backend is installed. Neither path falls
-back to compatibility.
+How a process is confined is a grant's `host.profile`, which only the
+supervisor's policy sets; a `process.run` call has no profile field, so a
+program cannot ask for a weaker one. A grant may run a process at once only
+under `native-contained`, and only on a machine that enforces every native
+fence; otherwise the policy is refused when it loads. VM-enclosed is refused
+because no backend is installed. Nothing falls back to running unconfined.
 
-The installed `airlock-agent` binary narrows the command surface by omitting
-raw exec, direct mutation, dispatch/cancel, undo/reap, and flush. This is a
-useful defense-in-depth boundary. It also removes the agent-controlled profile
-option: the supervisor pins `AIRLOCK_AGENT_PROFILE`, and a structured node
-that asks for a weaker profile receives a failed `RuntimeCapabilityDenied`
-receipt without performing the effect. It does not prove the external harness
-withheld every alternate machine-effect tool.
+The installed `airlock-agent` binary has no command that decides: no
+`approve-plan`, `commit`, `cancel`, `undo` or `reap`. This is a useful
+defense-in-depth boundary. It does not prove the external harness withheld
+every alternate machine-effect tool.
 
 ### No tool definitions
 

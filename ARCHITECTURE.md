@@ -173,19 +173,19 @@ retained payload is deleted. Reviewed changes (`src/change`) freeze a
 candidate and a baseline, apply by exact digest, and undo against what was
 installed.
 
-### Runtime, Program, CLI and daemon
+### This machine, and the CLI
 
-- **Runtime** interprets an admitted Plan node by node: `Capture` and `Apply`
-  through the native filesystem and Hold, `Invoke` through the process runner
-  or a Cell, `RequestExternal` by staging in the Outbox (and committing inline
-  only when the supervisor's policy pre-authorized that node).
-- **Program** runs `.air` source: each action becomes a Plan fragment that is
-  admitted and executed, and its result is projected back to the language.
-- **CLI** (`airlock`, `airlock-agent`) is glue over those components. A
-  verified seal narrows the command graph to what the operator signed.
-- **Daemon** is the sealed supervisor loop: it commits pre-authorized read
-  emissions and reaps, re-verifying the seal immediately before each terminal
-  act.
+- **Filesystem tools** (`src/host/FilesystemTools.ts`) implement the file
+  contracts, `process.run` and `http.stage`: file changes through Hold, a
+  contained process in a Cell whose changes merge back through Hold, a request
+  only staged.
+- **Filesystem host** (`src/host/FilesystemHost.ts`) binds every path and
+  executable a call names to the physical object it means, and decides which
+  grants may run at once on this machine.
+- **CLI** (`airlock`, `airlock-agent`) is glue: it opens one Airlock over those
+  tools with the person's policy and runs a program through the program
+  runner. A verified seal pins the policy and narrows the command graph to
+  what the operator signed.
 
 ## Properties and the tests that hold them
 

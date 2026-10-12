@@ -1,1587 +1,207 @@
 # Using Airlock
 
-> Every command block below was executed on macOS 26.5.2 (arm64), Bun 1.3.14,
-> on 2026-08-03, against `airlock` / `airlock-agent` 0.1.0 built and installed
-> from this checkout — except the blocks explicitly marked **not executed in
-> this environment**. Output is real and trimmed with `…`. `$AIRLOCK_HOME` and
-> `$WORKSPACE` were bound to scratch directories; `bun run src/cli.ts` and
-> `bun run src/agent-cli.ts` are the equivalent dev forms.
->
-> Install first: [`install.md`](install.md).
+Airlock runs a program an agent wrote, and holds every call that program makes
+to a policy a person wrote. A program is a short `.air` file. It cannot touch
+anything directly: each thing it wants done is a call to a granted tool, and
+each call either runs at once, waits for a person, or is refused. Changes to
+files go through Hold, so a person can put them back.
 
-**Contents**
+Two binaries share one command set:
 
-1. [First program: the `.air` language in 10 minutes](#1-first-program-the-air-language-in-10-minutes)
-2. [The action vocabulary](#2-the-action-vocabulary)
-3. [Profiles and policy](#3-profiles-and-policy)
-4. [Dispatch classes](#4-dispatch-classes)
-5. [Hold and Outbox operations](#5-hold-and-outbox-operations-supervisor)
-6. [Agent-harness integration](#6-agent-harness-integration)
-7. [Corpus harness](#7-corpus-harness-for-evaluating-agents)
-8. [Troubleshooting: the failure taxonomy](#8-troubleshooting-the-failure-taxonomy)
+- `airlock` is the person's. It has every command.
+- `airlock-agent` is the agent's. It has no command that decides: no
+  `approve-plan`, `commit`, `cancel` or `undo`.
 
----
+Every command prints JSON on stdout. A failure prints one JSON error on stderr
+and exits 1.
 
-## 1. First program: the `.air` language in 10 minutes
+## 1. A first program
 
-An Airlock program is a small, total script. It has no functions, no `while`, no
-recursion, no imports, no shell strings, and no way to define a new action. Every
-effect is one of twelve verbs called as an identifier applied to **one record
-literal**.
+Ask what this workspace allows and how to write a program:
 
-### The whole grammar
+```sh
+airlock-agent describe --workspace .
+```
+
+`actions` lists each tool a program may call, the one record it takes, what it
+returns, and whether a call runs at once. `description` is the language in a
+page. That page is the agent's briefing; it is generated from the policy, so it
+is always current.
+
+A program:
 
 ```text
-let <name> = <expression>            bind a value; there is no assignment
-if <expression> { … } else { … }     the else arm is optional
-for <name> in <from>..<to> { … }     finite integer range, upper bound exclusive
-for <name> in <list> { … }           iterate a captured list
-assert <expression>, "message"       fail the run on a false test
-return <expression>                  the program result
-<expression>                         an expression statement
+let note = file.read({ path: "notes.md", format: "text" })
+assert note.state == "done", "could not read notes.md"
+let w = file.write({ path: "notes.bak", content: "backed up" })
+return { wrote: w.state }
 ```
 
-Values: strings, numbers, booleans, `null`, durations (`250ms`, `30s`, `5m`,
-`2h`, `1d`), lists (`[a, b]`), records (`{ key: value }`). Field access `a.b`,
-index access `a[0]`. Operators `|| && == != < <= > >= + - * / ! -`.
-
-Statements are separated by newlines or `;`. Confirmed live:
+Run it from a file or inline:
 
 ```sh
-airlock-agent schema language
+airlock-agent run backup.air --workspace .
+airlock-agent eval --workspace . --source 'return file.stat({ path: "notes.md" })'
 ```
 
-```json
-{
-  "schemaVersion": "airlock/discovery/v1",
-  "language": {
-    "syntax": "airlock",
-    "effects": "identifier ActionResolver calls only",
-    "control": ["let", "if", "for finite range", "for captured list", "return", "assert"]
-  }
-}
-```
+Every call returns a receipt:
 
-### A real first program
-
-```sh
-cat > "$WORKSPACE/first.air" <<'AIR'
-let greeting = file.write({
-  path: "greeting.txt",
-  content: "hello from Airlock\n"
-})
-assert greeting.state == "applied", "write did not apply"
-
-let text = file.read({ path: "greeting.txt", format: "text" })
-
-return {
-  target: greeting.target,
-  bytes: greeting.bytes,
-  text: text
-}
-AIR
-
-airlock-agent run "$WORKSPACE/first.air" --workspace "$WORKSPACE" --compact
-```
-
-```json
-{
-  "schemaVersion": "airlock/program-run/v1",
-  "profile": "compatibility",
-  "workspace": "$WORKSPACE",
-  "result": {
-    "state": "succeeded",
-    "result": {
-      "target": "$WORKSPACE/greeting.txt",
-      "bytes": 19,
-      "text": "hello from Airlock\n"
-    },
-    "plans": [
-      { "id": "program/9eb8c466…/0", "actionReference": "file.write@sha256:bee82be5…", "nodeCount": 1 },
-      { "id": "program/d64c3f83…/1", "actionReference": "file.read@sha256:69f9494e…",  "nodeCount": 1 }
-    ],
-    "counts": { "plans": 2, "actions": 2, "artifacts": 1 },
-    "artifacts": [
-      {
-        "id": "program/9eb8c466…/0/input/content",
-        "mediaType": "text/plain; charset=utf-8",
-        "byteLength": 19,
-        "provenance": "program:inline-content"
-      }
-    ]
-  }
-}
-```
-
-Exit code 0. Note what the report already tells you: two Plans, one node each,
-each Plan carrying a content-addressed `actionReference`, and the inline write
-content promoted to a tracked artifact.
-
-### Reading the program-run JSON report
-
-The envelope is always `airlock/program-run/v1` with three top-level fields
-(`profile`, `workspace`, `result`) and these fields inside `result`:
-
-| field | meaning |
+| `state` | Meaning |
 | --- | --- |
-| `state` | `succeeded`, `partial`, or `failed` |
-| `result` | the program's returned value, or `null` when it did not return |
-| `plans` | one Plan draft per action, with `id` and `actionReference` (`--compact` collapses nodes to `nodeCount`) |
-| `actions` | full form only: the decoded call, its `callDigest`, the Plan draft, inline artifacts, and the result value |
-| `artifacts` | artifact metadata — id, media type, byte length, `provenance` |
-| `counts` | `--compact` only: plan/action/artifact totals |
-| `failure` | present on `partial` and `failed` — see below |
+| `done` | It ran. `result` is what it returned; `id` names the call. |
+| `staged` | It was recorded and waits for a person. `id` names it. |
+| `refused` | Nothing happened. `refusal.code` and `refusal.message` say why. |
 
-`state` distinguishes two very different things:
+A program may read `receipt.result` only where the state is known to be
+`done`: inside `if receipt.state == "done" { ... }` or after an `assert`.
 
-- **`failed`** — nothing durable happened before the refusal, or the first action
-  itself refused.
-- **`partial`** — earlier actions *did* complete. Their records, Plan drafts, and
-  artifact metadata are retained alongside the typed failure. **A partial report
-  does not imply rollback.** Recovery is a supervisor act (`airlock undo`).
+The whole program is checked before anything runs. An unknown tool or field,
+a wrong type, or a call the policy cannot grant fails the run with
+`invalid_code` and the line and column, and no call is made.
 
-`failure` has four fields, and you repair from the leaves:
-
-```json
-"failure": {
-  "action": "program",
-  "phase": "language",
-  "causeTag": "MissingRecordField",
-  "reason": "{ \"field\": \"path\", \"span\": {\"start\":82,\"end\":95,\"line\":2,\"column\":17} }"
-}
-```
-
-- **`causeTag`** — the typed error that fired. The single most specific fact
-  available; read it first.
-- **`reason`** — the leaf underneath that tag. Here: field `path`, at line 2
-  column 17.
-- **`phase`** — which seam refused: `language` (did not parse or evaluate),
-  `contract` (the call did not match the action schema), `admission` (policy
-  refused a resource), `runtime` / `native-filesystem` (the effect itself
-  failed), `outbox` (staging failed).
-- **`action`** — the call that failed, or `program` for a language-phase failure.
-
-That exact failure came from a one-line mistake — `greeting.path` instead of
-`greeting.target`:
-
-```sh
-cat > "$WORKSPACE/bad-field.air" <<'AIR'
-let greeting = file.write({ path: "greeting.txt", content: "x" })
-return { wrote: greeting.path }
-AIR
-
-airlock-agent run "$WORKSPACE/bad-field.air" --workspace "$WORKSPACE" --compact
-```
-
-`state: "partial"` and exit 1: the write *applied*, then the field access failed.
-Input field names and result field names are different vocabularies — `file.write`
-takes `path` and returns `target`.
-
-### Control flow, records, lists, durations
-
-```sh
-cat > "$WORKSPACE/control.air" <<'AIR'
-let plan = {
-  label: "control-tour",
-  hold: 30s,
-  entries: [
-    { name: "a.txt", body: "alpha" },
-    { name: "b.txt", body: "beta" }
-  ]
-}
-
-assert plan.hold >= 1s, "hold must be at least one second"
-assert plan.entries[0].name == "a.txt", "first entry misnamed"
-
-for entry in plan.entries {
-  let written = file.write({ path: entry.name, content: entry.body })
-  assert written.state == "applied", "write failed"
-}
-
-let slots = ["slot-0.txt", "slot-1.txt", "slot-2.txt"]
-for index in 0..3 {
-  let filled = file.write({ path: slots[index], content: "slot" })
-  assert filled.state == "applied", "slot write failed"
-}
-
-if plan.label == "control-tour" {
-  return { label: plan.label, hold: plan.hold, slots: slots }
-} else {
-  return { label: "unexpected" }
-}
-AIR
-
-airlock-agent run "$WORKSPACE/control.air" --workspace "$WORKSPACE" --compact
-```
-
-```json
-"state": "succeeded",
-"result": {
-  "label": "control-tour",
-  "hold": { "kind": "Duration", "value": 30, "unit": "s" },
-  "slots": ["slot-0.txt", "slot-1.txt", "slot-2.txt"]
-},
-"counts": { "plans": 5, "actions": 5, "artifacts": 5 }
-```
-
-Five sharp edges, each of which cost a run to find:
-
-1. **There is no assignment.** `let` is the only binder and a `let` inside a loop
-   body does not escape it. A loop cannot accumulate into an outer variable — it
-   accumulates through *actions*, or you precompute a list.
-2. **A duration is a value, not a number.** It survives into the result as
-   `{ kind: "Duration", value, unit }`, and comparisons are duration-to-duration.
-   `plan.hold >= 1s` works; `plan.hold > 0` does not.
-3. **`+` does not coerce.** Both sides must be numbers, or both strings.
-   `"slot-" + index` fails with
-   `InvalidLanguageOperation … "requires numbers (or strings for +)"`.
-4. **`for … in 0..3` is exclusive** at the upper bound: three iterations.
-5. **Loops have one shared budget** — 10,000 visited items by default, and
-   exceeding it is `LoopLimitExceeded`.
-
-### Bindings: `workspace` is not automatic
-
-Supervisor-supplied bindings appear as free identifiers. `process.run` needs an
-absolute `cwd`, so nearly every real program wants `workspace` — and the CLI
-does **not** bind it for you:
-
-```sh
-airlock-agent run "$WORKSPACE/pipeline.air" --workspace "$WORKSPACE" --compact
-```
-
-```json
-"failure": {
-  "action": "program",
-  "phase": "language",
-  "causeTag": "UnboundIdentifier",
-  "reason": "{ \"name\": \"workspace\", \"span\": {\"start\":101,\"end\":110,\"line\":4,\"column\":8} }"
-}
-```
-
-Pass it explicitly:
-
-```sh
-airlock-agent run "$WORKSPACE/pipeline.air" \
-  --workspace "$WORKSPACE" \
-  --bindings "{\"workspace\":\"$WORKSPACE\"}" \
-  --compact
-```
-
-`--workspace` sets the *root* for relative `file.*` paths and for admission;
-`--bindings` supplies *values the program can read*. They are independent. The
-corpus harness always injects `workspace` into its bindings
-(`scripts/corpus-harness.ts:636`), which is why programs authored against
-[`examples/corpus/sidechannel.md`](../examples/corpus/sidechannel.md) can rely
-on it.
-
-More runnable programs: [`programs/snippets/`](programs/snippets/) and the
-24-page field guide in [`programs/`](programs/).
-
----
-
-## 2. The action vocabulary
-
-Twelve generic verbs. There are no Vouch-, archive-, SQLite-, Git-, or
-OpenShell-specific runtime verbs; existing Unix programs keep those semantics.
-
-**The live source of truth is the CLI, not this page.** Discovery is generated
-from the same Effect Schemas that decode action inputs and enforce evaluator
-results, so it cannot drift from either boundary:
-
-```sh
-airlock-agent actions
-airlock-agent schema process.run
-airlock-agent schema file.write
-airlock-agent schema plan
-```
+### The run report
 
 ```json
 {
-  "schemaVersion": "airlock/actions/v1",
-  "actions": [
-    { "name": "file.inspect", "node": "Capture",         "summary": "Capture an identity-safe filesystem inspection." },
-    { "name": "file.read",    "node": "Capture",         "summary": "Capture file bytes, text, or JSON." },
-    { "name": "file.list",    "node": "Capture",         "summary": "Capture a directory listing." },
-    { "name": "file.glob",    "node": "Capture",         "summary": "Capture a glob expansion rooted at an explicit path." },
-    { "name": "file.stat",    "node": "Capture",         "summary": "Capture filesystem metadata without following symlinks by default." },
-    { "name": "file.write",   "node": "Apply",           "summary": "Apply a held file write from content or an artifact." },
-    { "name": "file.remove",  "node": "Apply",           "summary": "Apply a held removal." },
-    { "name": "file.move",    "node": "Apply",           "summary": "Apply a managed move." },
-    { "name": "file.copy",    "node": "Apply",           "summary": "Apply a managed copy." },
-    { "name": "file.mkdir",   "node": "Apply",           "summary": "Apply managed directory creation." },
-    { "name": "process.run",  "node": "Invoke",          "summary": "Invoke one structured executable + args contract inside a Cell." },
-    { "name": "http.stage",   "node": "RequestExternal", "summary": "Stage an HTTP intent; it cannot dispatch from this lowering." }
-  ]
+  "runId": "run-6f1c…",
+  "workspace": "/Users/me/project",
+  "outcome": { "ok": true, "result": { "wrote": "done" }, "toolCalls": 2 }
 }
 ```
 
-`schema <action>` returns both `inputSchema` and the evaluator-enforced
-`resultSchema`; `schema actions` and `schema all` attach the same result contract
-to every visible native action. The compact `actions` listing above remains a
-summary. For example, `file.stat` publishes `bytes`—not a `size` alias.
+`workspace` is the real path of the directory, with symlinks resolved. A run
+that did not produce a result has `"ok": false`, a `reason`, and exits 1:
 
-### Observations (`Capture`)
-
-| action | required | optional | result |
-| --- | --- | --- | --- |
-| `file.inspect` | `path` | `realm` | `{ path, kind, bytes, mode, device, inode }` |
-| `file.read` | `path` | `realm`, `format` (`text`\|`bytes`\|`json`) | with `format: "text"`, a **bare string** |
-| `file.list` | `path` | `realm` | `[{ name, stat: { path, kind, bytes, mode, device, inode } }]` |
-| `file.glob` | `root`, `pattern` | `realm` | a list of absolute paths |
-| `file.stat` | `path` | `realm`, `followSymlinks` | `{ path, kind, bytes, mode, device, inode }` |
-
-The metadata field is **`bytes`**, not `size` — the single most common
-model-authored mistake in the
-[v0 corpus campaign](evidence/model-generated-corpus-v0.md).
-
-### Managed mutations (`Apply`) — all Hold-backed
-
-Every one of these routes through Hold, so every one is recoverable by the
-supervisor with `airlock undo` until `airlock reap` reclaims it.
-
-```sh
-cat > "$WORKSPACE/mutate.air" <<'AIR'
-let made = file.mkdir({ path: "stage" })
-let wrote = file.write({ path: "stage/one.txt", content: "one" })
-let copied = file.copy({ source: "stage/one.txt", destination: "stage/two.txt" })
-let moved = file.move({ source: "stage/two.txt", destination: "stage/three.txt" })
-let removed = file.remove({ path: "stage/three.txt" })
-let inspected = file.inspect({ path: "stage" })
-let stated = file.stat({ path: "stage/one.txt" })
-return {
-  made: made, wrote: wrote, copied: copied, moved: moved,
-  removed: removed, inspected: inspected, stated: stated
-}
-AIR
-
-airlock-agent run "$WORKSPACE/mutate.air" --workspace "$WORKSPACE" --compact
-```
-
-```json
-"state": "succeeded",
-"result": {
-  "made":    { "state": "applied", "action": "file.mkdir",  "path": "…/stage", "act_ids": ["act_63d723e9-19a5"] },
-  "wrote":   { "state": "applied", "action": "file.write",  "act_id": "act_12a922af-fc97", "target": "…/stage/one.txt",   "previous_held": false, "bytes": 3 },
-  "copied":  { "state": "applied", "action": "file.copy",   "act_id": "act_70d88707-aa49", "source": "stage/one.txt", "target": "…/stage/two.txt", "previous_held": false, "bytes": 3 },
-  "moved":   { "state": "applied", "action": "file.move",   "install_act_id": "act_0e2cbf61-fa8f", "remove_act_id": "act_4ab7a0d5-6bbb", "source": "…/stage/two.txt", "target": "…/stage/three.txt" },
-  "removed": { "state": "applied", "action": "file.remove", "act_id": "act_9ed531a7-82b4", "target": "…/stage/three.txt", "kind": "file" },
-  "inspected": { "path": "…/stage",         "kind": "directory", "bytes": 96, "mode": 16877, … },
-  "stated":    { "path": "…/stage/one.txt", "kind": "file",      "bytes": 3,  "mode": 33188, … }
-}
-```
-
-| action | required | optional |
-| --- | --- | --- |
-| `file.write` | `path` | `realm`, `content`, `sourceArtifact` |
-| `file.remove` | `path` | `realm` |
-| `file.move` | `source`, `destination` | `realm` |
-| `file.copy` | `source`, `destination` | `realm` |
-| `file.mkdir` | `path` | `realm`, `parents` |
-
-`file.move` and `file.copy` take **`source`/`destination`**, not `from`/`to`. Get
-it wrong and the contract phase tells you the exact legal set — see
-[section 8](#8-troubleshooting-the-failure-taxonomy).
-
-### Computation: `process.run` (`Invoke`)
-
-**There is no command-string form.** `airlock-agent schema plan` states it
-outright: `"commandString": false`. Argv is structured atoms; nothing is parsed
-by a shell, so `"literal; touch should-not-exist"` is one argument.
-
-Required: `executable` (absolute path), `args` (array of strings), `cwd`.
-Optional:
-
-| field | values |
+| `reason` | What happened |
 | --- | --- |
-| `cellProfile` | `compatibility` \| `native-contained` \| `vm-enclosed` |
-| `timeoutMs` | number |
-| `stdin` | `"discard"` \| `"inherit"` \| `{ kind: "text", value }` \| `{ kind: "artifact", id }` |
-| `stdout`, `stderr` | `"capture"` \| `"discard"` \| `"inherit"` |
-| `outputLimitBytes` | number |
-| `env` | string→string map |
-| `descendantExecutables` | additional absolute executable paths |
-| `readable`, `writable` | explicit `ResourceNeed` declarations |
-| `realm` | string |
+| `invalid_code` | The program did not check. `at` gives the line and column, `fault` the kind of mistake. Nothing ran. |
+| `review_refused` | The review found calls the policy refuses. `refusals` lists them. Nothing ran. |
+| `plan_mismatch` | Run with `--plan`, but this program's plan is not that plan. Nothing ran. |
+| `assert_failed` | An `assert` was false. Calls before it already ran. |
+| `tool_failed` | A call ended the run. `failure` names the tool, a code and a message. |
+| `tool_call_limit`, `tool_input_limit`, `tool_result_limit`, `loop_limit`, `step_limit`, `value_limit`, `output_limit`, `timeout` | A budget ran out. |
 
-`capture` materializes the stream as an artifact whose id is returned in
-`stdout_artifact` / `stderr_artifact` — and **that artifact id is how you build a
-pipeline** without a shell pipe:
+### Names a program can read
+
+`workspace` is always bound to the workspace's real path. Anything else is
+passed as a JSON object:
 
 ```sh
-cat > "$WORKSPACE/pipeline.air" <<'AIR'
-let selected = process.run({
-  executable: "/usr/bin/grep",
-  args: ["ERROR", "service.log"],
-  cwd: workspace,
-  stdin: "discard",
-  stdout: "capture",
-  stderr: "capture",
-  timeoutMs: 5000,
-  cellProfile: "compatibility"
-})
-assert selected.state == "succeeded", "grep failed"
-
-let upper = process.run({
-  executable: "/usr/bin/tr",
-  args: ["a-z", "A-Z"],
-  cwd: workspace,
-  stdin: { kind: "artifact", id: selected.stdout_artifact.id },
-  stdout: "capture",
-  stderr: "capture",
-  cellProfile: "compatibility"
-})
-assert upper.state == "succeeded", "tr failed"
-
-let written = file.write({ path: "errors.txt", content: upper.stdout })
-assert written.state == "applied", "write failed"
-
-return { selected: selected.stdout, transformed: upper.stdout }
-AIR
-
-airlock-agent run "$WORKSPACE/pipeline.air" --workspace "$WORKSPACE" \
-  --bindings "{\"workspace\":\"$WORKSPACE\"}" --compact
+airlock-agent run greet.air --bindings '{"name":"ada"}'
 ```
 
-```json
-"state": "succeeded",
-"result": {
-  "selected":    "ERROR disk full\nERROR socket closed\n",
-  "transformed": "ERROR DISK FULL\nERROR SOCKET CLOSED\n"
-}
-```
+`--bindings` may not set `workspace`.
 
-The result record of an Invoke:
+### Running again
+
+Every run has an id, `run-<uuid>` unless `--run-id` names one. Running the
+same id again returns the recorded receipt for each call that already ran,
+instead of making it again. A call is recorded against the files it named as
+they were. If one of those files has changed since, the run stops with
+`tool_failed` and code `conflict`, and nothing is written.
+
+## 2. The policy
+
+With no policy file, a program may read and change files in its workspace and
+nothing else. Reads run at once. Changes run at once through Hold.
+
+A person can write a policy and point `AIRLOCK_POLICY_FILE` at it:
 
 ```json
 {
-  "state": "succeeded",
-  "plan_id": "program/123fd9a8…/0",
-  "process_outcome": "exited",
-  "exit_code": 0,
-  "signal": null,
-  "stdout": "", "stderr": "",
-  "stdout_artifact": { "id": "…/artifact/0", "digest": "sha256:e3b0c442…", "media_type": "application/octet-stream", "byte_length": 0, "provenance": "invoke:stdout:/usr/bin/touch" },
-  "stderr_artifact": { … "provenance": "invoke:stderr:/usr/bin/touch" },
-  "delta_artifact":  { … "media_type": "application/vnd.airlock.cell-delta+json", "provenance": "cell-delta:/usr/bin/touch" },
-  "recovery": [],
-  "receipts": [ { "node_id": "…/node/0", "sequence": 1, "state": "succeeded", "error_tag": null, "output_artifacts": [ … ] }, … ]
-}
-```
-
-`delta_artifact` is the private workspace's derived delta, which Hold then
-applies. Observed non-null under `native-contained` and `null` under
-`compatibility` — consistent with the mechanism, since only `native-contained`
-prepares a private view.
-
-**`process_outcome` is data, not a program failure.** A timed-out or non-zero
-process returns a record with `state: "failed"`; the *program* still succeeds
-unless you assert on it. This is deliberate and it is a trap — always assert.
-See [section 8](#8-troubleshooting-the-failure-taxonomy).
-
-### External intent: `http.stage` (`RequestExternal`)
-
-Required: `endpoint`, `method`. Optional: `headers`, `body`, `bodyArtifact`,
-`holdMillis`, `realm`.
-
-```sh
-cat > "$WORKSPACE/stage.air" <<'AIR'
-let staged = http.stage({
-  endpoint: "https://api.example.com/hook",
-  method: "POST",
-  headers: { "content-type": "application/json" },
-  body: "{\"operation\":\"snapshot-ready\"}",
-  holdMillis: 300000
-})
-assert staged.state == "staged", "intent must stage, never send"
-return staged
-AIR
-
-airlock-agent run "$WORKSPACE/stage.air" --workspace "$WORKSPACE" --compact
-```
-
-```json
-"state": "succeeded",
-"result": {
-  "state": "staged",
-  "action": "http.stage",
-  "emission_id": "emi_789312fb-110f",
-  "method": "POST",
-  "endpoint": "https://api.example.com/hook",
-  "hold_millis": 300000
-}
-```
-
-Nothing crossed the wire. The lowering *cannot* dispatch: the only runtime
-wire-capable call for Airlock-owned `RequestExternal` work is lexically inside
-`Outbox.commit`. What a program produces is durable local intent plus an
-`emission_id` a supervisor can `commit` or `cancel` — see
-[section 5](#5-hold-and-outbox-operations-supervisor).
-
----
-
-## 3. Profiles and policy
-
-Two profiles are implemented; a third fails closed. The runtime never silently
-changes profiles, and a program cannot widen the one the supervisor selected.
-
-### `compatibility` — zero configuration, no containment claim
-
-The default. No policy file needed:
-
-```sh
-airlock exec --executable /bin/echo --arg "hello world" --cwd /tmp
-```
-
-It preserves broad Bash-like host capability and **makes no containment claim**:
-the child keeps the invoking user's ambient filesystem, network, configuration,
-descendant, and descriptor authority. Writes and sends the child performs
-*internally* are not converted into `Apply` or `RequestExternal` and get no Hold,
-Outbox, recovery, cancellation, or dispatch-uncertainty guarantee.
-
-What compatibility does **not** give up: managed verbs are still mediated. A
-`file.write` in a compatibility program is still an `Apply` through Hold, still
-recoverable by `undo` — as the [first program](#a-real-first-program) shows,
-running under `"profile": "compatibility"` and producing a held act. The
-containment claim is about the *child process*, not about the action vocabulary.
-
-### `native-contained` — a policy file is mandatory
-
-`native-contained` prepares a private writable workspace (APFS clone, or
-recursive copy), runs the executable under Seatbelt with a deny-default profile,
-denies writes to the live workspace while the process runs, denies network,
-derives a delta, and applies supported top-level changes through Hold.
-
-It is **not a confidentiality boundary**: the current Seatbelt profile permits
-ambient host reads. Check `airlock doctor` for the exact postures.
-
-The policy is supervisor-owned. A program cannot select its own grants.
-
-```sh
-cat > "$WORKSPACE/create.air" <<'AIR'
-return process.run({
-  executable: "/usr/bin/touch",
-  args: ["created.txt"],
-  cwd: workspace,
-  cellProfile: "native-contained",
-  stdout: "capture",
-  stderr: "capture"
-})
-AIR
-
-cat > "$WORKSPACE/policy.json" <<EOF
-{
-  "schemaVersion": "airlock/admission-policy/v2",
-  "profile": "native-contained",
-  "principal": "agent:docs",
-  "realm": "local",
-  "admittedBy": "operator:docs",
-  "pathAllowlist": ["$WORKSPACE/**"],
-  "executableAllowlist": ["/usr/bin/touch"],
-  "executableEdges": [],
-  "endpointGrants": []
-}
-EOF
-
-AIRLOCK_POLICY_FILE="$WORKSPACE/policy.json" airlock run "$WORKSPACE/create.air" \
-  --workspace "$WORKSPACE" \
-  --profile native-contained \
-  --bindings "{\"workspace\":\"$WORKSPACE\"}"
-
-test -f "$WORKSPACE/created.txt" && echo present
-airlock held
-airlock undo
-test ! -e "$WORKSPACE/created.txt" && echo absent
-```
-
-```text
-{ "schemaVersion": "airlock/program-run/v1", "profile": "native-contained", …
-  "result": { "state": "succeeded", "result": { "state": "succeeded",
-    "process_outcome": "exited", "exit_code": 0, … } } }
-present
-[ { "id": "act_6fbbdb22-5963", "act": "overwrite", … "status": "held" }, … ]
-{ "id": "act_b803c562-3a3e", "target": "$WORKSPACE/created.txt", "displaced": "act_641dc506-2f95", … }
-absent
-```
-
-The program lowered to `Invoke` + `Apply`, the executable and paths were
-admitted, `touch` ran in a native Cell against the private view, and the derived
-delta merged through Hold — so the supervisor could take the whole thing back
-with one `undo`.
-
-### Policy document
-
-| field | meaning |
-| --- | --- |
-| `schemaVersion` | `airlock/admission-policy/v2` |
-| `profile` | must equal the selected `--profile` |
-| `principal`, `realm`, `admittedBy` | who this policy is for, in which realm, granted by whom |
-| `pathAllowlist` | explicit path selectors; exact or trailing `**` |
-| `executableAllowlist` | absolute executable paths |
-| `executableEdges` | executables admitted **only** as descendants of a named root, so a helper grant never becomes a new root Invoke authority |
-| `endpointGrants` | structured endpoint grants; see [Endpoint grants](#endpoint-grants) |
-| `grantTtlMillis` | optional; a positive value issues expiring grants |
-
-### Typed refusals
-
-There is no fallback to compatibility. Each of the following was executed.
-
-**Missing policy** — a `CliInputError` before anything runs:
-
-```sh
-airlock run "$WORKSPACE/create.air" --workspace "$WORKSPACE" --profile native-contained \
-  --bindings "{\"workspace\":\"$WORKSPACE\"}"
-```
-
-```json
-{"field":"AIRLOCK_POLICY_FILE","reason":"is required for native-contained program execution","_tag":"CliInputError"}
-```
-
-**Profile mismatch** — the policy says `compatibility`, the run says
-`native-contained`:
-
-```json
-{"field":"AIRLOCK_POLICY_FILE","reason":"policy profile compatibility does not match selected native-contained","_tag":"CliInputError"}
-```
-
-**Resource outside the allowlist** — refused at the `admission` phase, before any
-Plan node executes:
-
-```json
-"failure": {
-  "action": "process.run@sha256:0481739d…",
-  "phase": "admission",
-  "causeTag": "AdmissionDenied",
-  "reason": "{ \"requirementId\": \"program/abd98cf0…/0/requirement/0\", \"reason\": \"selector /usr/bin/touch or realm local is outside the native-contained allowlist\" }"
-}
-```
-
-An `admission` phase is a refusal, not a bug to route around: no rewrite of the
-program can widen what the supervisor granted.
-
-**Profile weakening** — with `AIRLOCK_AGENT_PROFILE=native-contained` pinned, a
-program asking for a `compatibility` Cell is refused and performs no effect:
-
-```json
-"failure": {
-  "action": "process.run",
-  "phase": "runtime",
-  "causeTag": "RuntimePlanInvalid",
-  "reason": "{ \"planId\": \"program/c46df37d…/0\", \"reason\": \"Invoke program/c46df37d…/0/node/0 cannot widen native-contained runtime authority\" }"
-}
-```
-
-> Observed tag: `RuntimePlanInvalid`, from Plan validation, which precedes the
-> node-level `RuntimeCapabilityDenied` check. The node-level tag still exists
-> for authority denials that reach a node; profile widening is caught earlier,
-> at the Plan.
-
-### `vm-enclosed` — fails closed
-
-```json
-"vm-enclosed": {
-  "available": false,
-  "reason": "no VM backend is bundled in this runtime; a selected vm-enclosed profile must fail closed"
-}
-```
-
-Selecting it yields `RuntimeUnsupported`. It is a future, stronger enclosure —
-not a macOS v1 release prerequisite.
-
-Full envelope: [`macos-v1.md`](macos-v1.md),
-[`linux-v1.md`](linux-v1.md), and [`security-model.md`](security-model.md).
-
----
-
-## 4. Dispatch classes
-
-**Status: implemented candidate seam with a stated boundary.** Design source:
-[`rfc/dispatch-classes-and-provider-contract.md`](rfc/dispatch-classes-and-provider-contract.md).
-Executed evidence and claim boundary:
-[`evidence/external-read-slice.md`](evidence/external-read-slice.md).
-
-### The problem it solves
-
-`http.stage` always stages. For an irreversible send that is exactly right — a
-human should stand between intent and wire. But an idempotent *observation*
-(fetch a status endpoint) also stages, and then a program cannot read what it
-asked for without a supervisor round-trip. Dispatch classes let the supervisor
-grant, per endpoint, that a staged read may be committed immediately.
-
-### Classes are grant-side facts, and only grant-side
-
-The vocabulary lives in `src/core/admission/DispatchPolicy.ts` and nowhere else. No
-Plan node, program text, or third-party annotation carries it
-or can widen it.
-
-| class | supervisor's assertion |
-| --- | --- |
-| `read` | the endpoint treats this method/route as an idempotent observation |
-| `mutate` | remote state may change under a **provider-claimed** compensation — never an Airlock guarantee |
-| `irreversible-send` | the default and the floor |
-
-Ordering is `read < mutate < irreversible-send`, and the **stricter side always
-wins** when more than one grant fits.
-
-| commit mode | effect |
-| --- | --- |
-| `supervisor` | default: stays `staged` until an explicit `airlock commit` |
-| `auto` | the trusted runtime may call the ordinary `Outbox.commit` once staging has durably completed |
-
-`auto` never skips staging and never adds a second wire-capable call site. It
-requires an explicit `methods` list, and it is only legal on `class: "read"`.
-
-### Endpoint grants
-
-Endpoints are admitted through structured `endpointGrants`:
-
-```json
-{
-  "schemaVersion": "airlock/admission-policy/v2",
-  "profile": "native-contained",
-  "principal": "agent:example",
-  "realm": "local",
-  "admittedBy": "operator:example",
-  "pathAllowlist": [],
-  "executableAllowlist": [],
-  "executableEdges": [],
-  "endpointGrants": [
-    { "selector": "http://127.0.0.1:PORT/v1/*", "methods": ["GET"], "class": "read", "commit": "auto" }
-  ]
-}
-```
-
-A grant entry: `selector` (exact, or a trailing `*` prefix, matched **after
-canonicalization** — query and fragment never participate), optional `methods`,
-`class` (default `irreversible-send`), `commit` (default `supervisor`), optional
-`hold` bounds, optional `budget` (`maxBodyBytes` enforced by admission against
-inline bodies; `maxDispatchesPerRun` owned by the dispatch engine). A grant
-that omits `class` and `commit` grants the floor: an irreversible send that
-stays staged until an explicit supervisor commit.
-
-The policy loads through `AIRLOCK_POLICY_FILE` on both `airlock` and
-`airlock-agent`. A document in any other shape is refused.
-
-### Walking the proof end to end
-
-```sh
-bun run scripts/prove-external-read.ts
-```
-
-```text
-ok    positive/committed — state=committed
-ok    positive/reached the provider — provider saw ["GET /v1/status"]
-ok    positive/receipt names the committing authority — committed_by=policy-auto
-ok    positive/receipt names the dispatch class — dispatch_class=read
-ok    positive/receipt names the grant identity — grant_id=grant/program/606caed8…/requirement/0/ef4d83ac54f06b41 selector=http://127.0.0.1:61137/v1/*
-ok    positive/receipt names the actual endpoint — dispatched_endpoint=http://127.0.0.1:61137/v1/status
-ok    positive/receipt carries redacted response metadata — status=200 bytes=27 truncated=false limit=65536
-ok    positive/response body is a bounded artifact the program can read — artifact=program/606caed8…/0/artifact/1 body.state=green
-ok    positive/ledger records the authority and grant — ledger lines=2
-ok    unclassified/stays staged — state=staged committed_by=undefined
-ok    unclassified/never reached the provider — provider saw 0 request(s)
-ok    unclassified/intent is durably retained for a supervisor — outbox=["staged"]
-ok    ungranted/refused before staging — …"causeTag":"AdmissionDenied"…
-ok    ungranted/never reached the provider — provider saw 0 request(s)
-ok    program-class/typed refusal — …"causeTag":"ProgramActionDecodeFailed"…
-ok    mutate-grant/stays staged — state=staged
-ok    mutate-grant/never reached the provider — provider saw 0 request(s)
-ok    auto-on-mutate/policy refused as an invalid contract — …"causeTag":"AdmissionContractInvalid"…
-ok    oversized/committed and reached the provider — state=committed
-ok    oversized/capture stops at the bound — bytes=65536 of 200000 truncated=true
-ok    oversized/artifact carries only the bounded bytes — artifact bytes=65536
-
-21 passed, 0 failed (fixture provider at http://127.0.0.1:61137)
-```
-
-The proof starts a local fixture provider on an ephemeral `127.0.0.1` port,
-composes the real `Program` → `Admission` → `Runtime` → `Outbox` stack against a
-fresh temporary Airlock home per case, and runs real Airlock programs. Nothing
-is stubbed: every positive case is confirmed by the provider *receiving* the
-request, and every negative case by the provider recording that it never did.
-
-Read the rows as five things:
-
-1. **Staged intent comes first, always.** The runtime reaches a commit path only
-   after `Outbox.stage` has durably returned for that node. There is no branch
-   in which dispatch happens without a prior durable `staged` state.
-2. **Auto-commit is a caller of `Outbox.commit`, not a second dispatcher.** The
-   only `fetch(` in the repository is the host HTTP handler
-   (`src/host/HttpDispatcher.ts`), which acts only on a permit minted inside
-   `commit`; `test/authority-sites.test.ts` and `test/core-permit.test.ts` hold
-   both facts.
-3. **Receipts name the authority.** `committed_by = policy-auto` (versus
-   `supervisor` for a human commit), plus `dispatch_class`, `grant_id`, the
-   policy `grant_selector` verbatim, the endpoint actually dispatched to, and
-   redacted response metadata (`status`, `response_bytes`,
-   `response_truncated`, `response_limit_bytes` — never body bytes). The Ledger
-   line carries `by=policy-auto class=read grant=…`.
-4. **The response is a bounded artifact.** A committed read materializes a second
-   artifact on the node (slot 1) that the program can read.
-   `DISPATCH_RESPONSE_LIMIT_BYTES` is 65,536 and is a **construction constant**,
-   not a policy knob: the oversized case commits a 200,000-byte response, retains
-   exactly 65,536 bytes, and reports `truncated: true`.
-5. **The negative proofs are the load-bearing ones.** A grant naming neither
-   class nor commit leaves the intent `staged` and durably retained, with zero
-   provider requests. An endpoint fitting no grant is `AdmissionDenied` *before*
-   staging. A `mutate`-classed grant never auto-commits. A policy declaring
-   `commit: "auto"` on `class: "mutate"` is `AdmissionContractInvalid`. A program
-   naming `class` inside `http.stage` is a `ProgramActionDecodeFailed`. **Fail-closed by
-   absence**: the runtime is handed a list of authorizations, never a policy, and
-   an empty list — the default — means
-   every staged intent waits for an explicit supervisor commit.
-
-**Boundary.** One host, one realm, and the counterparty is a **fixture** — a
-local test HTTP server that exists so a proof has something behind an endpoint.
-It is not a provider adapter and says nothing about any real API's semantics,
-latency, or failure modes. `read` is a supervisor *judgment*, never a discovery:
-Airlock does not verify that a granted endpoint is idempotent, only that the
-class the supervisor wrote is the class that governed the dispatch. No retry
-semantics were added; `uncertain` is preserved exactly as before.
-
-### No vendor tools ship in-tree
-
-Airlock is provider-neutral. **No vendor tools and no provider adapters live
-in this repository**; the only provider in-tree is the local fixture used by
-proofs.
-
-```text
-EndpointProvider owns:                Airlock owns:
-  transport to the vendor API           admission and dispatch classes
-  credential custody and refresh        staging (Outbox) and the single wire site
-  vendor catalog and semantics          commit / cancel / uncertain physics
-  vendor-side semantics and errors      receipts and redaction
-```
-
-The provider is a **counterparty behind the endpoint**, not a component inside
-the trust base. Airlock's entire view of it: the endpoint selectors the
-supervisor grants and the HTTP
-dispatches `Outbox.commit` performs. Aggregators appear in the RFC only as
-example out-of-tree adopters with no privileged position.
-
----
-
-## 5. Hold and Outbox operations (supervisor)
-
-Two facts shape this section, each held by a construction test.
-**`Hold.reap` contains the repository's only irreversible removal site.**
-**The host HTTP handler contains the only network call, and it acts only on a
-permit the Outbox kernel mints at commit.**
-
-### Hold: write, held, undo
-
-```sh
-airlock write "$WORKSPACE/example.txt" first
-airlock write "$WORKSPACE/example.txt" second
-airlock held
-airlock undo
-```
-
-```json
-{ "id": "act_bd7389a4-5c98", "target": "$WORKSPACE/example.txt", "previousHeld": false, … }
-{ "id": "act_098d2228-da70", "target": "$WORKSPACE/example.txt", "previousHeld": true,  … }
-```
-
-`airlock rm` is the recursive counterpart, and it is exactly as recoverable:
-
-```sh
-airlock rm "$WORKSPACE/tree"
-airlock undo
-```
-
-```text
-{ "id": "act_e6f15587-6138", "target": "$WORKSPACE/tree", "kind": "directory", … }
-{ "id": "act_e6f15587-6138", "target": "$WORKSPACE/tree", … }
-$WORKSPACE/tree/deep/leaf.txt        # the whole tree came back
-```
-
-`airlock undo` with no argument restores the most recent held act; pass an
-`act-id` to target one. A restore that displaces a newer binding records it as
-`displaced`, so the undo itself is held too.
-
-### Rename, not copy
-
-Every Airlock-owned managed replacement **displaces the prior binding by
-rename**. Nothing is copied, so a large file costs the same as a small one and
-the prior bytes are never duplicated. Executed with inode identity:
-
-```sh
-airlock write "$WORKSPACE/example.txt" first
-stat -f '%i %N' "$WORKSPACE/example.txt"
-airlock write "$WORKSPACE/example.txt" second
-stat -f '%i %N' "$WORKSPACE/example.txt"
-find "$AIRLOCK_HOME" -inum 265887383
-```
-
-```text
-265887383 $WORKSPACE/example.txt
-265887389 $WORKSPACE/example.txt
-$AIRLOCK_HOME/hold/act_098d2228-da70/payload
-```
-
-Inode `265887383` — the file that *was* `example.txt` — is now the held payload
-under a different name. Same inode, moved by rename.
-
-**Precondition: same volume.** A rename cannot cross a filesystem boundary, so
-the Hold store must live on the same volume as the paths it manages. On macOS
-the mechanism is `renamex_np(RENAME_EXCL)`; a filesystem that cannot provide an
-atomic no-replace rename gets a typed `ExclusiveRenameUnavailable` — never a
-replacing rename. Hold journal publication stages and syncs a candidate before
-promotion, and startup can promote a valid staged-only journal.
-
-### Reap: the only unlink, and urgency is a parameter
-
-```sh
-airlock reap --older-than 7d
-airlock held
-airlock reap --older-than 0s
-airlock held
-```
-
-```json
-{ "reaped": [], "at": "2026-08-03T20:46:21.431Z" }
-10
-{ "reaped": 19, "at": "2026-08-03T20:46:21.767Z" }
-[]
-```
-
-`--older-than 0s` means **delete now**. That is not a special code path: the
-retention window is a parameter, and `0s` is the value that makes everything
-eligible. There is one unlink site regardless of urgency, so "I need this gone
-immediately" and "reclaim last week's bytes" traverse identical code.
-
-> The count above is honest and worth explaining: `held` listed 10 acts while
-> reap reclaimed 19. `held` shows acts with status `held`; reap also reclaims
-> acts already superseded or restored. Reap ≥ held is normal.
-
-Reap waiting stays **cancellable** until terminal removal authority is taken,
-leaving the held act intact. Once removal begins, removal and directory sync run
-as one uninterruptible terminal section. If cancellation interrupts later Ledger
-publication, Hold returns typed `HoldReapRecoveryRequired` evidence naming the
-confirmed removal set, rather than reporting a false ordinary failure. That is
-bounded cancellation evidence — not proof that every Reaper crash point has been
-exercised.
-
-### Outbox: send, pending, cancel, commit, flush
-
-The blocks in this subsection and the Ledger one were re-executed on
-2026-10-05 with Bun 1.4.2, after the Outbox moved onto the storage-agnostic
-kernel. Timestamps and the local port are elided; everything else is as
-printed.
-
-```sh
-airlock send https://api.example.com/hook --body '{"operation":"snapshot-ready"}' --hold 30s
-airlock pending
-airlock cancel emi_77ed07e8e359fd88b3f41bec9f369f49
-```
-
-```json
-{
-  "id": "emi_77ed07e8e359fd88b3f41bec9f369f49",
-  "key": "cli-send:fa98858e-b14c-4a22-bc88-89db3e8eaf80",
-  "kind": "http",
-  "dispatchDigest": "sha256:b1b1d5d9792fed60e5e87f62323e467baa7fcb7bb3d7b2f34740f8cc2bb64d3e",
-  "requestDigest": "sha256:a1c020d9b1d4c85df0f2353f185fed09f16cdc36854ebf802509bbda29321002",
-  "summary": { "method": "POST", "endpoint": "https://api.example.com/hook", "target": "https://api.example.com/hook", "headerNames": [], "bodyBytes": 30 },
-  "stagedAt": "…", "holdUntil": "…",
-  "ledgered": ["stage"],
-  "state": "staged"
-}
-```
-
-`send` records intent and sends nothing. The record is the public description:
-`summary` carries names and sizes, never header values or the body, and a URL's
-credentials, query values and fragment are removed from `endpoint`. The request
-itself is stored sealed beside the record and is never listed. The id is
-derived from `key`; `airlock send` uses a fresh key each time, so every
-invocation is a new emission. `pending` prints the same record inside a list.
-
-`cancel` reports the same record with `"state": "cancelled"`, a `cancelledAt`
-time and `"ledgered": ["stage", "cancel"]` — **it was never sent**.
-
-`commit` is the wire. Executed against a local fixture server:
-
-```sh
-airlock send http://127.0.0.1:PORT/hook --body '{"operation":"snapshot-ready"}' --hold 0s
-airlock commit emi_7574766855075ce23f49adf8c9ae902e
-```
-
-```json
-{
-  "id": "emi_7574766855075ce23f49adf8c9ae902e",
-  "key": "cli-send:fd14dd5b-8c04-4aa7-a968-5a601a72998e",
-  "kind": "http",
-  "dispatchDigest": "sha256:f79835dc37eb76ecd979ec3124716d448ff64fa6a5426cd3b7ee4fc87ac264bf",
-  "requestDigest": "sha256:28a6006226a1b57105056fb34352e8fb469e9da3e2a629d9a1cda9c00a077885",
-  "summary": { "method": "POST", "endpoint": "http://127.0.0.1:PORT/hook", "target": "http://127.0.0.1:PORT/hook", "headerNames": [], "bodyBytes": 30 },
-  "stagedAt": "…", "holdUntil": "…",
-  "ledgered": ["stage", "commit"],
-  "provenance": { "committedBy": "supervisor" },
-  "committingAt": "…",
-  "state": "committed",
-  "outcome": { "status": 200, "contentType": "application/json;charset=utf-8" },
-  "capture": { "retainedBytes": 31, "truncated": false, "limitBytes": 65536 },
-  "completedAt": "…"
-}
-```
-
-The fixture server's own log confirmed receipt of exactly
-`POST /hook {"operation":"snapshot-ready"}`. `committedBy: "supervisor"` is the
-human path; `policy-auto` is the [dispatch-class](#4-dispatch-classes)
-path. `capture` describes the bounded response that was retained; the bytes
-themselves are private. Committing the same id again fails with
-`EmissionNotPending`, and a dispatch whose result is unknown ends as
-`uncertain` and is never sent again.
-
-`flush` sends every staged emission whose hold has expired, and reports what it
-did not touch:
-
-```sh
-airlock flush
-```
-
-```json
-{ "committed": [], "failed": [], "waiting": 0 }
-```
-
-Dispatch is bounded HTTP with **manual** redirects — it is not the proposed
-general endpoint broker, and it does not follow a redirect to an address that
-was never staged. Compatibility children retain ambient network; their sends
-are not Outbox dispatches and get none of these guarantees.
-
-### Ledger
-
-```sh
-airlock ledger
-```
-
-```json
-[
-  { "at": "…", "effect": "emission", "act": "stage",  "ref": "emi_77ed07e8e359fd88b3f41bec9f369f49", "detail": "http https://api.example.com/hook", "key": "emi_77ed07e8e359fd88b3f41bec9f369f49:stage" },
-  { "at": "…", "effect": "emission", "act": "cancel", "ref": "emi_77ed07e8e359fd88b3f41bec9f369f49", "key": "emi_77ed07e8e359fd88b3f41bec9f369f49:cancel" },
-  { "at": "…", "effect": "emission", "act": "stage",  "ref": "emi_7574766855075ce23f49adf8c9ae902e", "detail": "http http://127.0.0.1:PORT/hook", "key": "emi_7574766855075ce23f49adf8c9ae902e:stage" },
-  { "at": "…", "effect": "emission", "act": "commit", "ref": "emi_7574766855075ce23f49adf8c9ae902e", "detail": "http [by=supervisor]", "key": "emi_7574766855075ce23f49adf8c9ae902e:commit" }
-]
-```
-
-An emission entry carries a `key`; recording the same key again is a no-op, so
-a receipt lost to a crash is written exactly once when the emission is next
-touched.
-
-Append-only, one line per act, with the committing authority named inline. Hold
-and Outbox serialize recovery transitions across processes with a bounded,
-recoverable exclusive-file lease (`O_EXLOCK` on macOS): authority is the open
-file description, the kernel releases it on close or process death, and stale
-owner JSON is an inert diagnostic rather than a lock to reclaim.
-
----
-
-## 6. Agent-harness integration
-
-The agent surface is deliberately small. See
-[the paired-binary model](install.md#the-paired-binary-model) for what is absent
-and why.
-
-### `run` and `eval`
-
-```sh
-airlock-agent run "$WORKSPACE/program.air" --workspace "$WORKSPACE" \
-  --bindings "{\"workspace\":\"$WORKSPACE\"}" --compact
-
-airlock-agent eval --workspace "$WORKSPACE" --compact \
-  --source 'let matched = file.glob({ root: ".", pattern: "*.txt" })
-return { matched: matched }'
-```
-
-```json
-{
-  "schemaVersion": "airlock/program-run/v1",
-  "profile": "compatibility",
-  "workspace": "$WORKSPACE",
-  "result": { "state": "succeeded", "result": { "matched": ["$WORKSPACE/input.txt"] }, … }
-}
-```
-
-| option | meaning |
-| --- | --- |
-| `--workspace` | root for relative `file.*` paths and for admission |
-| `--bindings` | JSON object of free identifiers the program may read |
-| `--compact` | deduplicated projection of action, Plan, node, artifact, and failure evidence |
-| `--source` | `eval` only: the program as one structured argument |
-
-`eval` exists so a harness never has to write a temp file. Neither accepts
-`--profile`.
-
-`--compact` reduces *evidence volume*, not output limits. Process output and the
-returned program value remain subject to their configured byte ceilings; compact
-mode is not a separate ceiling.
-
-### Reading state back
-
-```sh
-airlock-agent runs --limit 3
-airlock-agent run-receipt --plan-id "program/68459570-6b49-4b31-9061-1454ef46cd7f/6"
-airlock-agent held
-airlock-agent pending
-airlock-agent ledger
-```
-
-```json
-{
-  "schemaVersion": "airlock/runtime-run-snapshot/v1",
-  "planId": "program/68459570…/6",
-  "state": "succeeded",
-  "startedAt": "…", "observedAt": "…", "sequence": 4,
-  "receipts": [
-    { "schemaVersion": "airlock/receipt/v1", "id": "receipt_3081c149…", "nodeId": "…/node/0",
-      "sequence": 1, "state": "succeeded", "at": "…",
-      "inputDigests": [], "outputArtifacts": ["…/artifact/0"],
-      "resourceIdentities": ["lexical:endpoint:external:http://127.0.0.1:PORT/v1/status"] }
+  "schemaVersion": "airlock/tool-policy/v1",
+  "toolGrants": [
+    { "id": "read", "tool": "file.read", "when": "now" },
+    { "id": "write", "tool": "file.write" },
+    { "id": "build", "tool": "process.run", "when": "now", "host": { "profile": "native-contained" } },
+    { "id": "hook", "tool": "http.stage" }
   ],
-  "artifacts": [ { "id": "…/artifact/0", "digest": "sha256:37e9625c…", … } ]
-}
-```
-
-`runs` returns the latest redacted durable receipt per Plan — ten by default,
-`--limit` from 1 through 100. Every Plan Runtime execution requires persistent
-run-journal storage and claims a SHA-256-derived Plan identity with a
-kernel-backed lease before any adapter or world work; the claim is held through
-`running` → `finalizing` → terminal. Concurrent acquisition, sequential replay,
-or an existing recovered snapshot returns typed
-`RuntimeExecutionClaimRejected` — it does not execute the Plan again.
-
-### The repair loop
-
-This is the whole reason the failure record is shaped the way it is. Two kinds of
-failure, two kinds of repair:
-
-**Contract-phase refusals name the expected fields.** Nothing to guess:
-
-```sh
-cat > "$WORKSPACE/copy-wrong.air" <<'AIR'
-return file.copy({ from: "greeting.txt", to: "copy.txt" })
-AIR
-
-airlock-agent run "$WORKSPACE/copy-wrong.air" --workspace "$WORKSPACE" --compact
-```
-
-```json
-{ "action": "file.copy", "phase": "contract", "causeTag": "ProgramActionDecodeFailed" }
-```
-```text
-└─ is unexpected, expected: "action" | "source" | "destination" | "realm"
-```
-
-The leaf is the fix: rename `from`/`to` to `source`/`destination`.
-
-**Runtime failures carry a `causeTag`.** `RuntimeNodeFailure` on a read of an
-absent path, `RuntimeProcessFailure` with `process_outcome: "timed-out"`,
-`AdmissionDenied` on an ungranted resource, `RuntimePlanInvalid` on a
-profile-weakening attempt.
-
-The loop:
-
-1. Read `causeTag`. It is the most specific fact available.
-2. Read `reason` for the leaf — a field name, a span, a selector, a node id.
-3. Read `phase` to know *which seam* refused, and therefore whether a program
-   change can even help. `language` and `contract` are yours to fix.
-   `admission` is not: it is a refusal, and no rewrite widens a grant.
-4. Change only what the tag and reason implicate. Resubmit the **whole** program.
-
-### Recommended cold-start sidechannel
-
-A cold agent with no repository access can author passing programs from a
-sidechannel brief. The one this repository uses is regenerable:
-
-```sh
-bun run scripts/corpus-harness.ts --emit-sidechannel examples/corpus/sidechannel.md
-```
-
-The checked-in
-[`examples/corpus/sidechannel.md`](../examples/corpus/sidechannel.md) is the
-generated artifact. Its structure is the recommendation:
-
-1. **The complete action list** — `airlock-agent actions` verbatim, framed as
-   "nothing else is callable."
-2. **Input and evaluator-result schemas for the actions the task needs** —
-   `airlock-agent schema <action>` for each. Not all twelve; the brief ships
-   `process.run`, `file.read`, `file.stat`, `file.glob`, `file.write`,
-   `http.stage`. The `file.stat` result documents `bytes` (there is no `size`
-   alias), so a cold author can use the record the evaluator actually returns.
-3. **The grammar in a dozen lines**, including the three properties an author
-   cannot infer: no assignment, `+` does not coerce, `workspace` is a supervisor
-   binding.
-4. **Two or three worked programs** — take them from
-   [`programs/snippets/`](programs/snippets/): `01-first.air` (a captured
-   invoke), `02-control.air` (assert/for/if plus a managed write),
-   `05-pipeline.air` (artifact-as-stdin, the one shape with no shell analogue).
-   `03-capture.air` and `09-native-touch.air` if the task needs observation or
-   containment.
-5. **How to read a failure** — the four `failure` fields and the repair rule
-   above.
-
-The measured outcome of exactly this brief: two cold models, 8 task rows,
-7 succeeded within ≤3 attempts, first-attempt success on 6 of 8, and every
-failure in the campaign was `parse`-class (result-record decode — twice a
-missing `size` field) or `predicate`-class. See
-[`evidence/model-generated-corpus-v0.md`](evidence/model-generated-corpus-v0.md)
-for the full boundary; it is **not** an acceptance-rate claim.
-
----
-
-## 7. Corpus harness (for evaluating agents)
-
-`scripts/corpus-harness.ts` scores one candidate program against one task spec
-in an isolated realm, and aggregates recorded attempts into a report. It is how
-you measure whether an agent can actually do work through Airlock.
-
-```text
-corpus-harness — run one candidate program against one corpus task spec
-
-  single task:
-    bun run scripts/corpus-harness.ts --task <spec.json> --program <program.air> --json
-      [--profile compatibility|native-contained] [--policy <policy.json>]
-      [--timeout-ms 60000] [--attempt-id <id>] [--out <attempt.json>]
-
-  report over recorded attempts:
-    bun run scripts/corpus-harness.ts --report --attempts <directory> [--json]
-
-  regenerate the cold-start brief handed to a candidate model:
-    bun run scripts/corpus-harness.ts --emit-sidechannel examples/corpus/sidechannel.md
-```
-
-### Single-task mode
-
-```sh
-bun run scripts/corpus-harness.ts \
-  --task examples/corpus/tasks/04-pipe-through-parser.json \
-  --program campaign/task-4/attempt-1.air \
-  --json
-```
-
-```json
-{
-  "schemaVersion": "airlock/corpus-attempt/v1",
-  "taskId": "pipe-through-parser",
-  "attemptId": "264cda79-3fd9-4a8f-8366-b6ac40a1c978",
-  "programPath": "…/campaign/task-4/attempt-1.air",
-  "programBytes": 833,
-  "profile": "compatibility",
-  "wallMillis": 407,
-  "isolation": {
-    "root":         "/private/var/folders/…/airlock-corpus-pipe-through-parser-KeCOry",
-    "workspace":    "…/airlock-corpus-pipe-through-parser-KeCOry/workspace",
-    "airlockHome":  "…/airlock-corpus-pipe-through-parser-KeCOry/airlock-home"
+  "resources": {
+    "path": ["/Users/me/project"],
+    "executable": { "roots": ["/usr/bin/make"], "edges": [] },
+    "endpoint": ["https://hooks.example.com/build"]
   },
-  "outcome": "passed",
-  "taxonomy": "none",
-  "receipts": {
-    "programState": "succeeded",
-    "plans": 3, "actions": 3, "artifacts": 5, "artifactBytes": 108,
-    "runJournalEntries": 3, "outboxStaged": 0, "held": 1
-  },
-  "predicate": {
-    "total": 8, "passed": 8,
-    "checks": [
-      { "check": "program.state == succeeded",                        "passed": true, "detail": "state=succeeded" },
-      { "check": "file.exists out/errors.txt",                        "passed": true, "detail": "36 bytes" },
-      { "check": "file.contains out/errors.txt :: ERROR DISK FULL",   "passed": true, "detail": "found" },
-      { "check": "file.contains out/errors.txt :: ERROR SOCKET CLOSED","passed": true, "detail": "found" },
-      { "check": "file.notContains out/errors.txt :: WARN",           "passed": true, "detail": "absent" },
-      { "check": "file.notContains out/errors.txt :: INFO",           "passed": true, "detail": "absent" },
-      { "check": "result.contains selected :: ERROR disk full",       "passed": true, "detail": "ERROR disk full\nERROR socket closed\n" },
-      { "check": "result.contains transformed :: ERROR SOCKET CLOSED","passed": true, "detail": "ERROR DISK FULL\nERROR SOCKET CLOSED\n" }
-    ]
-  },
-  "cli": { "exitCode": 0, "stdoutBytes": 2263, "stderrExcerpt": "" }
+  "budget": { "maxCalls": 64, "maxInputBytes": 1000000 }
 }
 ```
 
-`outcome` is decided from **decoded receipts and bytes on disk**, not from the
-program's self-report. `taxonomy` classifies a failure (`parse`, `predicate`, …)
-so a campaign can be summarized without reading every attempt.
+- **`toolGrants`** names each tool a program may call. A tool with no grant
+  does not exist for the program; `describe` does not list it.
+- **`when`** is `now` (runs at once) or `approved`, the default (waits for a
+  person).
+- **`resources`** are ceilings. Every path, executable and endpoint a call
+  names must fall inside them. Paths are resolved to the file they really
+  are: `..`, absolute paths outside the ceiling, and symlinks out of it are
+  refused.
+- **`executable.roots`** are the programs `process.run` may start.
+  `executable.edges` lists, for a root, what it may in turn run
+  (`{ "root": "/usr/bin/git", "descendants": ["/bin/sh"] }`). A call must also
+  name those descendants in `descendantExecutables`.
+- **`budget`** caps calls and input bytes for one run.
 
-### Isolation
+The file must be exactly this shape: an unknown field, bad JSON or an
+inconsistent rule fails the command with a `CliInputError` naming
+`AIRLOCK_POLICY_FILE`.
 
-Every attempt gets a **fresh temporary root** holding both a clean `workspace`
-built from the spec's `workspaceFixture` and a **private `AIRLOCK_HOME`**. Two
-attempts therefore share no Hold store, no Outbox and no run journal. The harness spawns the real `airlock-agent` entrypoint as a
-subprocess with `--compact`, `--workspace`, and `--bindings` (always injecting
-`workspace`), so what is measured is the shipped surface, not an in-process
-shortcut.
+### What may run at once
 
-### Task spec shape
+`now` is accepted only where this machine can put things back:
 
-[`examples/corpus/tasks/`](../examples/corpus/tasks/) holds eight specs. The one
-run above:
-
-```json
-{
-  "schemaVersion": "airlock/corpus-task/v1",
-  "id": "pipe-through-parser",
-  "goal": "Select every ERROR line from logs/service.log with /usr/bin/grep, pipe that captured stdout artifact into /usr/bin/tr as stdin to upper-case it, and write the transformed bytes to out/errors.txt. Return a record { selected: <grep stdout>, transformed: <tr stdout> }.",
-  "workspaceFixture": {
-    "directories": ["out"],
-    "files": [ { "path": "logs/service.log", "content": "INFO boot ok\nERROR disk full\nWARN retrying\nERROR socket closed\nINFO shutdown\n" } ]
-  },
-  "notes": [
-    "process.run stdin accepts { kind: \"artifact\", id: <previous>.stdout_artifact.id } to connect two processes without a shell pipe."
-  ],
-  "successPredicate": {
-    "programState": "succeeded",
-    "files":  [ { "path": "out/errors.txt", "contains": ["ERROR DISK FULL", "ERROR SOCKET CLOSED"], "notContains": ["WARN", "INFO"] } ],
-    "result": [ { "path": "selected", "contains": "ERROR disk full" }, { "path": "transformed", "contains": "ERROR SOCKET CLOSED" } ]
-  }
-}
-```
-
-`goal` is the only thing the candidate agent sees besides the sidechannel;
-`notes` are optional hints; `successPredicate` is what actually scores it, over
-both files on disk and paths inside the returned value. `bindings` is optional
-and merged with the injected `workspace`.
-
-### Report mode
-
-```sh
-bun run scripts/corpus-harness.ts --task examples/corpus/tasks/04-pipe-through-parser.json \
-  --program campaign/task-4/attempt-1.air --out "$ATTEMPTS/04.json" --json
-bun run scripts/corpus-harness.ts --task examples/corpus/tasks/08-sorted-index.json \
-  --program campaign/task-8/attempt-1.air --out "$ATTEMPTS/08.json" --json
-
-bun run scripts/corpus-harness.ts --report --attempts "$ATTEMPTS"
-```
-
-```json
-{
-  "schemaVersion": "airlock/corpus-report/v1",
-  "generatedAt": "2026-08-03T20:41:44.788Z",
-  "attemptsDirectory": "$ATTEMPTS",
-  "totals": { "attempts": 2, "passed": 2, "failed": 0, "uniqueTasks": 2, "tasksWithAtLeastOnePass": 2 },
-  "taxonomy": [ { "taxonomy": "none", "attempts": 2 } ],
-  "latency": { "minimumMillis": 405, "medianMillis": 405, "p95Millis": 409, "maximumMillis": 409, "meanMillis": 407 },
-  "tasks": [
-    { "taskId": "pipe-through-parser", "attempts": 1, "passed": 1, "firstPassAttempt": 1, "medianMillis": 409, … },
-    { "taskId": "sorted-index",        "attempts": 1, "passed": 1, "firstPassAttempt": 1, … }
-  ]
-}
-```
-
-`firstPassAttempt` is the turns-to-success measure. `--out` is what makes report
-mode possible: write one attempt file per run, then aggregate the directory.
-
-Checked-in campaign programs live under `campaign/task-<n>/attempt-<k>.air`, and
-the campaign they came from is
-[`evidence/model-generated-corpus-v0.md`](evidence/model-generated-corpus-v0.md).
-Read its boundary before quoting any rate: 8 rows, 2 models, one machine, and
-explicitly **not** the acceptance corpus.
-
----
-
-## 8. Troubleshooting: the failure taxonomy
-
-Every entry below was reproduced in this session. Read `causeTag` first, then
-`reason`, then `phase`.
-
-### Language phase — the program did not parse or evaluate
-
-`causeTag` is one of `UnboundIdentifier`, `InvalidLanguageOperation`,
-`InvalidCallTarget`, `MissingRecordField`, `InvalidIndex`, `AssertionFailed`,
-`DuplicateRecordField`, `LoopLimitExceeded`. A parse error is not a program-run
-report at all — it is a bare `LanguageDiagnostic` on stderr with the offending
-span and the source echoed back:
-
-```json
-{"detail":"expected a newline or ';' between statements","span":{"start":392,"end":393,"line":19,"column":9},"source":"…","_tag":"LanguageDiagnostic"}
-```
-
-That one was an attempted assignment (`names = names`). There is no assignment.
-
-| observed | cause | fix |
-| --- | --- | --- |
-| `MissingRecordField` field `path` | read a field the result record does not have (`file.write` returns `target`) | use the real result field |
-| `UnboundIdentifier` name `workspace` | no `--bindings` | pass `--bindings '{"workspace":"…"}'` |
-| `InvalidLanguageOperation` `+` `requires numbers (or strings for +)` | `"slot-" + index` | precompute a list of strings |
-| `LoopLimitExceeded` | more than 10,000 visited items across all loops | bound the work |
-
-### Contract phase — `ProgramActionDecodeFailed`
-
-The call did not match the action schema. **The leaf names the expected fields**,
-which is the whole point:
-
-```sh
-airlock-agent run "$WORKSPACE/copy-wrong.air" --workspace "$WORKSPACE" --compact
-```
-
-```json
-{ "action": "file.copy", "phase": "contract", "causeTag": "ProgramActionDecodeFailed" }
-```
-```text
-└─ is unexpected, expected: "action" | "source" | "destination" | "realm"
-```
-
-Two more variants, both executed:
-
-```text
-["path"]  └─ is missing                                       # file.write with no path
-["args"]  └─ Expected ReadonlyArray<string>, actual "not-a-list"   # process.run args as a string
-```
-
-The Effect union prelude is noisy; the last line is the fix. Extract it:
-
-```sh
-airlock-agent run … --compact | python3 -c \
-  "import json,sys;print(json.load(sys.stdin)['result']['failure']['reason'].splitlines()[-1].strip())"
-```
-
-### Admission phase — `AdmissionDenied`, `AdmissionContractInvalid`
-
-```json
-"failure": {
-  "action": "process.run@sha256:0481739d…",
-  "phase": "admission",
-  "causeTag": "AdmissionDenied",
-  "reason": "{ \"requirementId\": \"program/abd98cf0…/0/requirement/0\", \"reason\": \"selector /usr/bin/touch or realm local is outside the native-contained allowlist\" }"
-}
-```
-
-Refused before any Plan node executes — `"actions": []` in the report. This is
-not a bug to work around: **no rewrite of the program widens a grant.** Either
-the supervisor adds the selector to the policy, or the work does not happen.
-
-`AdmissionContractInvalid` means the *policy itself* is illegal — e.g. declaring
-`commit: "auto"` on `class: "mutate"`.
-
-Before reaching admission, two policy problems surface as `CliInputError`:
-
-```json
-{"field":"AIRLOCK_POLICY_FILE","reason":"is required for native-contained program execution","_tag":"CliInputError"}
-{"field":"AIRLOCK_POLICY_FILE","reason":"policy profile compatibility does not match selected native-contained","_tag":"CliInputError"}
-```
-
-### Runtime phase — `RuntimePlanInvalid`
-
-Plan validation refused the Plan before executing it. Both observed cases are
-authority-shaped:
-
-```json
-"reason": "{ \"planId\": \"program/c46df37d…/0\", \"reason\": \"Invoke program/c46df37d…/0/node/0 cannot widen native-contained runtime authority\" }"
-"reason": "{ \"planId\": \"program/0a234a58…/0\", \"reason\": \"Apply program/0a234a58…/0/node/1 merge must target the admitted workspace root\" }"
-```
-
-The first is a profile-weakening attempt under `AIRLOCK_AGENT_PROFILE`. The
-second is a `native-contained` `cwd` pointing at a subdirectory rather than the
-admitted workspace root.
-
-### Runtime phase — `RuntimeNodeFailure`
-
-The effect itself failed. Reading an absent path:
-
-```sh
-cat > "$WORKSPACE/absent.air" <<'AIR'
-return file.read({ path: "absent.txt", format: "text" })
-AIR
-
-airlock-agent run "$WORKSPACE/absent.air" --workspace "$WORKSPACE" --compact
-```
-
-```json
-"failure": {
-  "action": "file.read",
-  "phase": "runtime",
-  "causeTag": "RuntimeNodeFailure",
-  "reason": "runtime node program/425070cb…/0/node/0 finished failed",
-  "runtime": {
-    "schemaVersion": "airlock/runtime-run/v1",
-    "state": "failed",
-    "receipts": [
-      { "nodeId": "…/node/0", "sequence": 1, "state": "failed",
-        "resourceIdentities": ["lexical:path:local:absent.txt"],
-        "errorTag": "RuntimeNodeFailure" }
-    ]
-  }
-}
-```
-
-`reason` is generic here, so read the embedded `runtime.receipts` —
-`resourceIdentities` names the exact path the node touched. Exit 1.
-
-### Timeouts — a returned outcome, not a program failure
-
-This is the highest-value trap in the whole surface.
-
-```sh
-cat > "$WORKSPACE/timeout.air" <<'AIR'
-let slow = process.run({
-  executable: "/bin/sleep",
-  args: ["5"],
-  cwd: workspace,
-  stdout: "capture",
-  stderr: "capture",
-  timeoutMs: 250,
-  cellProfile: "compatibility"
-})
-return { state: slow.state, outcome: slow.process_outcome, signal: slow.signal, exit: slow.exit_code }
-AIR
-
-airlock-agent run "$WORKSPACE/timeout.air" --workspace "$WORKSPACE" \
-  --bindings "{\"workspace\":\"$WORKSPACE\"}" --compact
-```
-
-```json
-"result": {
-  "state": "succeeded",
-  "result": { "state": "failed", "outcome": "timed-out", "signal": "SIGTERM", "exit": null }
-}
-```
-
-**Exit code 0.** The *program* succeeded — it ran and returned. The *process*
-timed out. The node receipt carries `errorTag: "RuntimeProcessFailure"`, but
-nothing propagates that into the program result unless you say so:
-
-```text
-assert slow.state == "succeeded", "sleep timed out"
-```
-
-`RuntimeProcessFailure` outcomes are `nonzero-exit`, `signal`, `timed-out`,
-`output-limit`, `cancelled`. Assert on `state` after **every** `process.run` — or
-your harness will read exit 0 and believe the work happened.
-
-### The rest of the runtime taxonomy
-
-Not reproduced here; from `src/runtime/Runtime.ts`:
-
-| tag | meaning |
+| Tool | May run at once? |
 | --- | --- |
-| `RuntimeUnsupported` | e.g. `vm-enclosed` selected with no VM backend installed |
-| `RuntimeCapabilityDenied` | node-level authority refusal (`right` names what was denied) |
-| `RuntimeMergeDrift` | the live workspace changed under a `native-contained` delta |
-| `RuntimeDeltaUnsupported` | the private-workspace delta contains a change Hold cannot apply |
-| `RuntimeExecutionClaimRejected` | concurrent acquisition, sequential replay, or an existing recovered snapshot for the same Plan id |
-| `RuntimeArtifactClaimMismatch` | a node's claimed artifacts differ from what materialized |
-| `RuntimeRecoveryRequired` | a durable transition needs supervisor recovery |
-| `RuntimeLifecycleFailure` | private-workspace lifecycle failed; names the workspaces |
-| `RuntimeAuthorityInvalid` | the supplied authority document did not validate |
+| `file.read`, `file.stat`, `file.list`, `file.glob`, `file.inspect` | Yes. |
+| `file.write`, `file.remove`, `file.mkdir`, `file.copy`, `file.move` | Yes. Hold keeps what they replace, so `undo` puts it back. |
+| `process.run` | Only with `host.profile` `native-contained`, on a machine that enforces it (`airlock doctor`). The process runs in a private copy of the workspace with no network; when it exits cleanly, what it changed is merged back through Hold. |
+| `http.stage` | Never. A request always waits for a person. |
 
-### Fast checks when something is off
+A grant that asks for more than this fails every command that opens the policy,
+with an `AirlockFailure` whose code is `invalid-policy`.
+
+## 3. The person's commands
 
 ```sh
-airlock doctor                      # is the mechanism you assumed actually "enforced"?
-airlock-agent actions               # is the action you want on this surface?
-airlock-agent schema file.copy      # what are the real input field names?
-airlock-agent runs --limit 5        # what did the last runs actually record?
-airlock held                        # is there something to undo?
-airlock pending                     # is an intent sitting staged?
+airlock pending                 # calls waiting for a decision
+airlock inspect <id>            # one recorded call
+airlock commit <id>             # approve it and carry it out now
+airlock cancel <id>             # drop it; it never happens
+airlock undo <id>               # put back what a completed call changed
+airlock ledger                  # the append-only record of every act
 ```
 
----
+`undo` takes the `id` from a `done` receipt. For a process, it puts back
+everything the process's merge changed.
 
-## See also
+### Approving a plan once
 
-- [`install.md`](install.md) — requirements, install paths, the paired-binary model, Linux status
-- [`../ARCHITECTURE.md`](../ARCHITECTURE.md) — the design as built: kernel, ports, host adapters
-- [`../ARCHITECTURE.md`](../ARCHITECTURE.md) — implemented architecture and epistemic status
-- [`macos-v1.md`](macos-v1.md) — the profile envelope in full
-- [`security-model.md`](security-model.md) — execution closure, endpoint brokerage, information labels
-- [`contracts/plan-runtime.md`](contracts/plan-runtime.md) — the Plan/runtime seam and the contract-change checklist
-- [`acceptance.md`](acceptance.md) — the v1 claim boundary
-- [`programs/`](programs/) — the *Airlock Programs* field guide and its runnable snippets
-- [`rfc/dispatch-classes-and-provider-contract.md`](rfc/dispatch-classes-and-provider-contract.md) — the external-effect growth path
+A person can approve what a program will do before it runs:
+
+```sh
+airlock review job.air          # its plan, any refusals, and whether the plan is approved
+airlock approve-plan <plan id>
+airlock-agent run job.air --plan <plan id>
+```
+
+Under an approved plan, reads and fully fixed requests the plan names run
+without waiting. Changes and processes still follow their grant: an approved
+plan does not let an unconfined process or a `when: "approved"` change skip
+approval. A different program run with `--plan` fails with `plan_mismatch`.
+
+## 4. Sealed installs
+
+A sealed install pins the policy and the commands into a signed grant, so
+neither the agent nor its environment can change them. See
+[local-sealed-box.md](local-sealed-box.md).
+
+## 5. Reviewed local changes
+
+`airlock change` stages, reviews and applies a change to a local file as one
+reviewed unit. See [changes.md](changes.md).
+
+## 6. Checking the machine
+
+```sh
+airlock doctor
+```
+
+reports which fences this machine enforces. `native-contained` is available
+only when every one of them is.

@@ -7,7 +7,7 @@
 ## What macOS v1 is
 
 macOS v1 exposes one Unix-shaped CLI and Airlock program surface over the same
-Plan, Admission, Runtime, Hold, Outbox, and receipt contracts.
+tool contracts, policy, Hold, Outbox, and receipts.
 
 The two available profiles serve different jobs:
 
@@ -31,7 +31,7 @@ bun run verify
 bun run build:macos
 sh scripts/install-macos.sh
 airlock doctor
-airlock-agent actions
+airlock-agent describe
 ```
 
 The builder ad-hoc signs both local artifacts, verifies their signatures, and
@@ -41,16 +41,11 @@ binary; replacement and uninstall preserve prior binaries through a unique
 Trash transaction. Developer ID signing, notarization, and public provenance
 remain release-owner gates.
 
-`airlock` is the supervisor surface. `airlock-agent` omits raw exec, direct
-mutation, dispatch/cancel, undo/reap, and flush while retaining program,
-schema/capability, and read-only state commands. Agent program commands do not
-accept `--profile`; the supervisor may pin `AIRLOCK_AGENT_PROFILE`, otherwise
-compatibility remains the default. A program may request structured
-Invoke/Apply nodes, but an attempted profile downgrade is refused at Plan
-validation as a failed `RuntimePlanInvalid` receipt ("cannot widen
-native-contained runtime authority") without performing the effect; the
-node-level `RuntimeCapabilityDenied` tag covers authority denials that reach a
-node.
+`airlock` is the person's surface. `airlock-agent` has the same commands
+except the ones that decide: `approve-plan`, `commit`, `cancel` and `undo`.
+How a process is confined is the policy's choice, never the program's: a
+`process.run` call has no profile field, and a grant runs it at once only under
+`host.profile` `native-contained`.
 
 `airlock doctor` and `airlock capabilities` return the same machine-readable
 report. It distinguishes an enforced mechanism from something merely present
@@ -66,87 +61,61 @@ or allowed. Relevant fields include:
 - process cancellation limits; and
 - VM backend availability.
 
-## Compatibility: implemented
+## Without containment
 
-Compatibility is the default:
-
-```sh
-airlock exec \
-  --executable /bin/echo \
-  --arg "hello world" \
-  --cwd /tmp
-```
-
-The executable and argument atoms remain separate, streams and timeout are
-explicit, and the process emits a receipt. The child otherwise runs under the
-user's existing host authority. Unknown tools remain runnable. Compatibility
-does not claim filesystem, process, network, secret, or configuration
-containment.
-
-Accordingly, writes or sends performed inside a compatibility child are ambient
-subprocess effects. Airlock does not reinterpret them as `Apply` or
-`RequestExternal`; they do not pass through Hold or Outbox and receive no
-recovery, cancellation, or dispatch-uncertainty guarantee.
-
-An Airlock program in compatibility receives a generated broad policy unless
-`AIRLOCK_POLICY_FILE` is supplied. If a supplied policy names another profile,
-execution is refused rather than reinterpreted.
+Without a confining profile, a `process.run` grant may only stage the call: it
+waits for a person, and when committed the process runs with the user's own
+authority. Nothing it writes passes through Hold. Airlock makes no
+containment claim for it.
 
 ## Native-contained: implemented subset
 
-Native-contained program execution requires:
+A program runs a process at once and contained when:
 
-1. `--profile native-contained`;
-2. a Schema-valid policy in `AIRLOCK_POLICY_FILE`;
-3. a matching `profile` field in that policy; and
-4. available native enforcement reported by `airlock doctor`.
+1. the policy in `AIRLOCK_POLICY_FILE` grants `process.run` with
+   `"when": "now"` and `"host": { "profile": "native-contained" }`;
+2. the executable is one of the policy's `resources.executable.roots`, and the
+   working directory is inside `resources.path`; and
+3. `airlock doctor` reports every native fence enforced. Otherwise the grant is
+   refused when the policy loads.
 
-Minimal policy shape:
+Minimal policy:
 
 ```json
 {
-  "schemaVersion": "airlock/admission-policy/v2",
-  "profile": "native-contained",
-  "principal": "agent:example",
-  "realm": "local",
-  "admittedBy": "operator:example",
-  "pathAllowlist": ["/absolute/workspace/**"],
-  "executableAllowlist": ["/usr/bin/touch"],
-  "executableEdges": [],
-  "endpointGrants": []
+  "schemaVersion": "airlock/tool-policy/v1",
+  "toolGrants": [
+    { "id": "touch", "tool": "process.run", "when": "now", "host": { "profile": "native-contained" } }
+  ],
+  "resources": {
+    "path": ["/absolute/workspace"],
+    "executable": { "roots": ["/usr/bin/touch"], "edges": [] }
+  },
+  "budget": { "maxCalls": 8, "maxInputBytes": 100000 }
 }
 ```
 
-`endpointGrants` are structured and supervisor-side: each carries a dispatch
-class and commit mode. A grant that omits both stays staged until an explicit
-supervisor commit, and no program or definition can select a class. A `read`-class `commit: "auto"` grant lets the trusted runtime
-auto-commit a staged intent through the same `Outbox.commit` — implemented
-with local fixture evidence
-([`evidence/external-read-slice.md`](evidence/external-read-slice.md)); real
-vendor brokerage remains future work.
-
-Minimal effectful program:
+Minimal program:
 
 ```text
-return process.run({ executable: "/usr/bin/touch", args: ["created.txt"], cwd: workspace, cellProfile: "native-contained", stdout: "capture", stderr: "capture" })
+let ran = process.run({ executable: "/usr/bin/touch", args: ["created.txt"], cwd: "." })
+assert ran.state == "done", "touch did not run"
+return ran.result.merged
 ```
 
 Run it with:
 
 ```sh
 AIRLOCK_POLICY_FILE=/absolute/policy.json \
-  airlock run /absolute/create.air \
-  --workspace /absolute/workspace \
-  --profile native-contained \
-  --bindings '{"workspace":"/absolute/workspace"}'
+  airlock-agent run /absolute/create.air --workspace /absolute/workspace
 ```
 
-The program lowers to an admitted `Invoke` followed by `Apply`. The Apply is
-part of the effectful program path; it is not a direct post-process copy.
-The root executable receives `invoke`; any additional executable that the root
-may spawn must be listed by `process.run.descendantExecutables`, requested
-with `execute`, and bound to that root by a matching `executableEdges` policy
-entry. A descendant-only Grant cannot select that helper as another root.
+The result lists what the process changed and was merged back through Hold;
+`airlock undo <receipt id>` puts it back. A process that does not exit cleanly
+has its changes discarded. The root executable receives `invoke`; any
+executable the root may spawn must be listed in the call's
+`descendantExecutables` and allowed for that root by a matching
+`resources.executable.edges` entry. A descendant cannot be started as a root.
 
 ### Native mechanism
 
@@ -182,12 +151,10 @@ Established by implementation and tests:
 - separate root `invoke` and root-scoped descendant `execute` authority;
 - exact Seatbelt executable-path fencing for declared roots, descendants, and
   demonstrated shebang chains;
-- Cell/Runtime evidence for requested, launch, allowed executable paths,
+- Cell evidence for requested, launch, allowed executable paths,
   root/descendant role, and workspace rebasing;
 - separate executable and argv atoms;
 - output capture and limits;
-- persistent run-journal publication plus a kernel-backed, single-use per-Plan
-  execution claim before adapter work;
 - same-process-group descendant ownership until exit, timeout, or cancellation;
 - top-level regular-file/directory delta detection;
 - preflight drift and source checks;
@@ -206,17 +173,15 @@ Not established:
   remote-filesystem Apply;
 - live SQLite/WAL, foreign writers, or other active protocol state;
 - atomic all-or-nothing multi-entry merge;
-- startup reconciliation for private workspaces left before Runtime could
-  register/finalize their exact identity; or
+- startup reconciliation for private workspaces left behind by a crash before
+  they were moved into Hold; or
 - resource-exhaustion resistance beyond current process/output bounds.
 
-Each native Invoke creates one private workspace tree. At Plan completion,
-failure, or cancellation, Runtime binds the exact directory identity and
-transfers it into Hold with `purpose: runtime-private`; it is never selected by
-ordinary undo and only the supervisor's Reaper may discard it. Runtime does not
-prefix-sweep neighboring paths. This closes the normal lifecycle path but does
-not make retention free: the tree remains held until reap, and an uncatchable
-process crash before finalization still requires future startup reconciliation.
+Each contained process run creates one private workspace tree. When the run
+ends, however it ends, the tree moves into Hold with `purpose: runtime-private`;
+it is never selected by `undo`, and only `airlock reap` discards it. Nothing
+sweeps neighbouring paths. Retention is not free: the tree stays until reaped,
+and a crash before it is moved still needs future startup reconciliation.
 
 The measured pre-retirement repository no-op baseline was about 6.1 seconds
 and about 212 MiB of logical tree data per Invoke. Same-volume retirement is an
@@ -249,9 +214,8 @@ semantics, immutable code identity, or persistent-authority safety.
 
 ## VM-enclosed: future backend
 
-The capability report currently marks the VM backend `not-provided`. Both
-`airlock exec --profile vm-enclosed` and `airlock run --profile vm-enclosed`
-fail explicitly.
+The capability report currently marks the VM backend `not-provided`. A grant that
+asks for `vm-enclosed` is refused when the policy loads.
 
 A future VM backend may offer a stronger realm:
 
@@ -267,9 +231,8 @@ attribute them to macOS v1.
 ## Failure posture
 
 - Missing enforcement is refusal, never downgrade.
-- Missing persistent run-journal storage, claim acquisition failure, or reuse
-  of a Plan identity is a typed `RuntimeExecutionClaimRejected`; any recovered
-  nonterminal snapshot refuses replay before adapter work.
+- A recorded call is replayed under its run id only if what it named is
+  unchanged; otherwise it is a `conflict` and nothing is redone.
 - A compatibility result carries no containment claim.
 - A native result applies only to the capability report and resource envelope
   exercised by that run.

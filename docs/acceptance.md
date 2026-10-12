@@ -70,11 +70,6 @@ Evidence present today:
   `make` descendants;
 - an eleventh destructive native workload proves recursive removal is
   Hold-backed and exactly undoable through the supervisor;
-- a [separate repeatability campaign](evidence/parity-50.md) launches the real
-  `airlock-agent` subprocess 50 times: exactly ten deterministic scripted cases
-  repeated five times, with 40 compatibility and 10 native-contained
-  successes under a five-minute automated-gate ceiling; these are not 50
-  unique or model-generated tasks, a direct-shell A/B, or a held-out corpus;
 - Hold and Outbox have bounded cross-process lease, stale-owner recovery, and
   journal/recovery tests, including cancellation of contended waiters without
   stealing the live owner;
@@ -100,12 +95,6 @@ Evidence present today:
   configured limits, and `runs --limit` is bounded to 1–100 snapshots; and
 - inert tool definitions execute end to end through existing generic actions,
   Admission, Plans, Runtime, and Schema-decoded results;
-- an [external-read fixture slice](evidence/external-read-slice.md) proves one
-  vertical path — a staged `RequestExternal` auto-committed through the
-  existing `Outbox.commit` under a supervisor `read`-class `commit: "auto"`
-  grant — across 26 cases against a local fixture provider on one macOS host;
-  it preserves the single wire site and is bounded evidence only, not a passed
-  brokerage gate, real-provider evidence, or corpus evidence; and
 - the separate [Linux native-contained evidence](evidence/linux-beachhead.md)
   now covers Linux platform primitives, containment, shared workloads, and
   local distribution. It neither borrows nor satisfies this document's

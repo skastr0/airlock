@@ -65,13 +65,12 @@ When a release exists, the paired command surface installs with:
 ```sh
 npm install --global @skastr0/airlock
 airlock --version
-airlock-agent actions
+airlock-agent describe
 ```
 
-Until then, **a checkout is the only way to get Airlock**, and the only way to
-get the surfaces documented in [`usage.md`](usage.md): admission-policy v2 with
-dispatch-class endpoint grants, the external-read slice, and
-the corpus harness. Do not read the npm block above as an available path.
+Until then, **a checkout is the only way to get Airlock** and the commands
+documented in [`usage.md`](usage.md). Do not read the npm block above as an
+available path.
 
 ## Install from a checkout
 
@@ -197,7 +196,7 @@ Then put the prefix on `PATH` and probe:
 ```sh
 export PATH="$PREFIX/bin:$PATH"
 airlock doctor
-airlock-agent actions
+airlock-agent describe
 ```
 
 `doctor` (alias: `capabilities`) reports the enforcement envelope, and
@@ -223,8 +222,8 @@ distinguishes *enforced* from merely *available*:
 }
 ```
 
-`airlock-agent actions` returns the twelve built-in actions. Both commands emit
-JSON only.
+`airlock-agent describe` lists the tools the current policy grants and how to
+write a program. Both commands emit JSON only.
 
 ### Uninstall
 
@@ -241,13 +240,12 @@ No build step. Run the entrypoints directly from the checkout:
 
 ```sh
 bun run src/cli.ts doctor
-bun run src/agent-cli.ts actions
-bun run src/agent-cli.ts schema process.run
+bun run src/agent-cli.ts describe
 ```
 
 Everywhere the docs write `airlock`, `bun run src/cli.ts` is the equivalent; for
-`airlock-agent`, `bun run src/agent-cli.ts`. Both forms were exercised for this
-document. `bun run dev` is a shorthand for the supervisor entrypoint.
+`airlock-agent`, `bun run src/agent-cli.ts`. `bun run dev` is a shorthand for
+the person's entrypoint.
 
 ## The paired-binary model
 
@@ -255,95 +253,43 @@ Airlock ships **two** executables from one codebase because the authority split
 is the product, not a packaging detail.
 
 `src/agent-cli.ts` sets `AIRLOCK_AGENT_SURFACE=1` before importing the CLI, so
-the reduced command graph is *constructed*, not filtered at call time. It is not
-a flag an agent can turn off.
+the agent's command graph is *constructed* without the commands that decide. It
+is not a flag an agent can turn off.
 
-| | `airlock` (supervisor) | `airlock-agent` (harness-facing) |
+| | `airlock` (person) | `airlock-agent` (agent) |
 | --- | --- | --- |
-| run programs | `run`, `eval` | `run`, `eval` |
-| pick the profile | `--profile` | **absent** — pinned by the supervisor |
-| discovery | `doctor`, `capabilities`, `actions`, `schema` | same |
-| read state | `held`, `pending`, `ledger`, `runs`, `run-receipt` | same |
-| raw process execution | `exec` | **absent** |
-| direct mutation | `write`, `rm` | **absent** |
-| recovery | `undo`, `reap` | **absent** |
-| dispatch | `send`, `commit`, `cancel`, `flush` | **absent** |
+| run programs | `run`, `eval`, `review`, `describe` | same |
+| read state | `pending`, `inspect`, `ledger`, `doctor`, `capabilities` | same |
+| decide | `approve-plan`, `commit`, `cancel`, `undo` | **absent** |
+| reviewed local changes | `change` | `change`, without the deciding subcommands |
 
 The omissions are structural. Asking for one is a command-graph mismatch, not a
 permission error:
 
 ```sh
-airlock-agent undo
+airlock-agent undo emi_0
 ```
 
-```text
-Invalid subcommand for airlock-agent - use one of 'doctor', 'capabilities', 'actions',
-'schema', 'run', 'eval', 'held', 'pending', 'ledger', 'runs', 'run-receipt'
-```
-
-And `--profile` is refused before the CLI is even loaded, with exit 64:
-
-```sh
-airlock-agent run "$WORKSPACE/first.air" --profile native-contained
-```
-
-```text
-airlock-agent rejects --profile; the supervisor pins the execution profile
-```
+exits non-zero with an "invalid subcommand" message and prints nothing on
+stdout.
 
 ### Harness wiring
 
-Three environment variables are the whole supervisor-side configuration
-surface.
+Two environment variables are the whole person-side configuration.
 
-**`AIRLOCK_HOME`** — the state directory: Hold store, Outbox, run journals
-and locks. Defaults to `~/.airlock`. Give each
-isolated realm its own home; every command in these docs ran with an explicit
-`AIRLOCK_HOME` under a scratch root.
+**`AIRLOCK_HOME`** — the state directory: Hold store, recorded calls, the
+ledger and locks. Defaults to `~/.airlock`. Give each isolated realm its own
+home.
+
+**`AIRLOCK_POLICY_FILE`** — the person's tool policy. Without it, a program may
+read and change files in its workspace and nothing else. It is the only way
+grants enter the system; a program cannot select its own. See
+[The policy](usage.md#2-the-policy) for the document shape.
 
 ```sh
 export AIRLOCK_HOME="$PREFIX/home"
-airlock-agent runs --limit 3
+export AIRLOCK_POLICY_FILE="$PREFIX/policy.json"
 ```
-
-**`AIRLOCK_AGENT_PROFILE`** — pins the execution profile for
-`airlock-agent run`/`eval`. Unset, compatibility remains the ratchet default.
-Pinned to `native-contained`, a program that asks for a weaker Cell is refused
-and performs no effect:
-
-```sh
-AIRLOCK_AGENT_PROFILE=native-contained AIRLOCK_POLICY_FILE="$WORKSPACE/policy.json" \
-  airlock-agent run "$WORKSPACE/weaken.air" \
-  --workspace "$WORKSPACE" --bindings "{\"workspace\":\"$WORKSPACE\"}" --compact
-```
-
-```json
-"failure": {
-  "action": "process.run",
-  "phase": "runtime",
-  "causeTag": "RuntimePlanInvalid",
-  "reason": "{ \"planId\": \"program/c46df37d…/0\", \"reason\": \"Invoke program/c46df37d…/0/node/0 cannot widen native-contained runtime authority\" }"
-}
-```
-
-> The refusal observed here is `RuntimePlanInvalid` from Plan validation, which
-> fires before the node-level `RuntimeCapabilityDenied` check in
-> `src/runtime/Runtime.ts`. [`README.md`](../README.md) and
-> [`macos-v1.md`](macos-v1.md) describe this refusal as
-> `RuntimeCapabilityDenied`; treat the executed tag above as the observed one.
-
-**`AIRLOCK_POLICY_FILE`** — the supervisor-owned admission policy. It is
-**required** for `native-contained` program execution and is the only way grants
-enter the system; a program cannot select its own. See
-[Profiles and policy](usage.md#3-profiles-and-policy) for the document shape and
-the typed refusals for a missing or mismatched policy.
-
-```sh
-export AIRLOCK_POLICY_FILE="$WORKSPACE/policy.json"
-```
-
-The policy is an `airlock/admission-policy/v2` document; see
-[Policy document](usage.md#policy-document).
 
 ## Linux native-contained installation
 
@@ -410,7 +356,7 @@ nonstandard Bubblewrap with `AIRLOCK_BWRAP` or `--bwrap` during install.
 ```sh
 export PATH="$HOME/.local/bin:$PATH"
 AIRLOCK_BWRAP=/usr/local/bin/bwrap airlock doctor
-airlock-agent actions
+airlock-agent describe
 ```
 
 Uninstall preserves rather than deletes the installed unit and does not touch
