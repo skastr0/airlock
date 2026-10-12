@@ -133,7 +133,12 @@ const normalizeMismatch = (text: string) => stripAnsi(text)
   .trim()
 
 const allVerbs = BoxGrantVerb.literals
+/** What a person decides: on the unsealed person's binary only, never grantable to a seal. */
 const supervisorVerbs = ["approve-plan", "commit", "cancel", "undo", "reap"] as const
+const everyCommand = [
+  "describe", "review", "run", "eval", "approve-plan", "pending", "inspect",
+  "commit", "cancel", "undo", "reap", "ledger", "doctor", "capabilities", "change"
+]
 const subcommandsOf = (help: string) => {
   const section = stripAnsi(help).split("SUBCOMMANDS")[1] ?? ""
   return section.split("\n").map((line) => line.trim().split(/\s+/)[0]!).filter((name) => name.length > 0)
@@ -143,14 +148,14 @@ describe("sealed CLI grant graph", () => {
   it("keeps every command unsealed, and the agent's binary without a person's decisions", () => {
     const help = invoke(["--help"])
     expect(help.status, help.stderr).toBe(0)
-    expect(subcommandsOf(help.stdout)).toEqual([...allVerbs, "change"])
+    expect(subcommandsOf(help.stdout)).toEqual(everyCommand)
 
     const agentHelp = invoke(["--help"], { env: { AIRLOCK_AGENT_SURFACE: "1" } })
     expect(agentHelp.status, agentHelp.stderr).toBe(0)
-    expect(subcommandsOf(agentHelp.stdout)).toEqual([
-      ...allVerbs.filter((verb) => !(supervisorVerbs as ReadonlyArray<string>).includes(verb)),
-      "change"
-    ])
+    expect(subcommandsOf(agentHelp.stdout)).toEqual(
+      everyCommand.filter((verb) => !(supervisorVerbs as ReadonlyArray<string>).includes(verb))
+    )
+    expect([...allVerbs, ...supervisorVerbs, "change"].sort()).toEqual([...everyCommand].sort())
   })
 
   it("answers exactly the signed verbs on both aliases", () => {
@@ -320,14 +325,14 @@ describe("sealed CLI grant graph", () => {
     expect(JSON.parse(after.stdout)).toEqual(listed)
   })
 
-  it("constructs every grantable verb from one guarded descriptor table", () => {
+  it("constructs every command from one guarded descriptor table", () => {
     const source = readFileSync(join(repository, "src", "cli.ts"), "utf8")
     const table = source.slice(
       source.indexOf("const commandDescriptors"),
       source.indexOf("const makeRoot")
     )
     const mapped = [...table.matchAll(/\{ verb: "([^"]+)", supervisor:/g)].map((match) => match[1])
-    expect(mapped).toEqual([...allVerbs, "change"])
+    expect(mapped).toEqual(everyCommand)
     expect(source).toContain('descriptor.verb !== "change"')
     expect(source.match(/const requireVerb =/g)).toHaveLength(1)
     // Every handler re-checks its verb against the verified seal.

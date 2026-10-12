@@ -195,7 +195,9 @@ approval. A different program run with `--plan` fails with `plan_mismatch`.
 ## 4. Sealed installs
 
 A sealed install pins the policy and the commands into a signed grant, so
-neither the agent nor its environment can change them. See
+neither the agent nor its environment can change them. A sealed install is the
+agent's, so no seal grants a command that decides; a person decides with the
+unsealed `airlock` over the box's home. See
 [local-sealed-box.md](local-sealed-box.md).
 
 ## 5. Reviewed local changes

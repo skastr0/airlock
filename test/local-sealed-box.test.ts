@@ -319,8 +319,13 @@ describe.skipIf(!isNonRootDarwin)("same-user local sealed generation", () => {
     refusedWith(widenedCeiling, "signature-invalid")
 
     const widenedVerbs = startupClone("verbs-widened")
-    rewriteGrant(widenedVerbs, (grant) => ({ ...grant, verbs: [...grant.verbs, "commit"] }))
+    rewriteGrant(widenedVerbs, (grant) => ({ ...grant, verbs: [...grant.verbs, "ledger"] }))
     refusedWith(widenedVerbs, "signature-invalid")
+
+    // A sealed install is the agent's; no grant can name a person's decision.
+    const deciding = startupClone("deciding-verb")
+    rewriteGrant(deciding, (grant) => ({ ...grant, verbs: [...grant.verbs, "commit"] }))
+    refusedWith(deciding, "invalid-grant")
 
     const catalog = startupClone("catalog-shape")
     rewriteGrant(catalog, (grant) => ({ ...grant, catalog: [] }))

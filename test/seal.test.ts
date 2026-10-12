@@ -221,7 +221,7 @@ describe("startup seal verification", () => {
 
   it("rejects a semantic grant change under the original signature", async () => {
     for (const widened of [
-      { verbs: ["run", "describe", "commit"] },
+      { verbs: ["run", "describe", "ledger"] },
       { policy: { ...policy, toolGrants: [...policy.toolGrants, { id: "rm", tool: "file.remove", when: "now" }] } },
       { policy: { ...policy, resources: { path: ["/"] } } }
     ]) {

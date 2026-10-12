@@ -4,7 +4,7 @@ import { BunServices } from "@effect/platform-bun"
 import { Cause, Console, Crypto, Effect, Exit, FileSystem, Layer, ManagedRuntime, Option, Runtime as EffectRuntime, Schema } from "effect"
 import * as nodePath from "node:path"
 import { createInterface } from "node:readline"
-import { type BoxGrantVerb } from "./core/admission/index.ts"
+import { BoxGrantVerb } from "./core/admission/index.ts"
 import { toolGrant } from "./core/admission/ToolGrant.ts"
 import { type AirlockFailure, defineAirlock, type Supervisor } from "./core/airlock/Airlock.ts"
 import type { Ledger } from "./core/ledger/Ledger.ts"
@@ -88,8 +88,18 @@ const failInput = (field: string, reason: string) =>
  * final handler-boundary defense against a stale graph, not the user-visible
  * denial path: denied verbs fail as ordinary command mismatches.
  */
-const requireVerb = (seal: SealContext, verb: BoxGrantVerb): Effect.Effect<void, CliInputError> =>
-  seal._tag === "UnsealedSeal" || seal.grant.verbs.includes(verb)
+/**
+ * What a person decides. Every command of a sealed install is the agent's to
+ * run, so no seal can grant these; a person decides from outside the box.
+ */
+type DecisionVerb = "approve-plan" | "commit" | "cancel" | "undo" | "reap"
+type CommandVerb = BoxGrantVerb | DecisionVerb
+
+const granted = (seal: SealContext, verb: CommandVerb | "change") =>
+  seal._tag === "UnsealedSeal" || (Schema.is(BoxGrantVerb)(verb) && seal.grant.verbs.includes(verb))
+
+const requireVerb = (seal: SealContext, verb: CommandVerb): Effect.Effect<void, CliInputError> =>
+  granted(seal, verb)
     ? Effect.void
     : failInput("verb", `the verified seal does not grant ${verb}`)
 
@@ -226,7 +236,7 @@ type Opened = Effect.Success<ReturnType<typeof openAirlock>>
 /** A command's work over the opened Airlock. */
 const withAirlock = <A, E, R>(
   seal: SealContext,
-  verb: BoxGrantVerb,
+  verb: CommandVerb,
   workspace: string,
   body: (opened: Opened) => Effect.Effect<A, E, R>
 ) =>
@@ -352,7 +362,7 @@ const id = Argument.String("id")
 
 /** One supervisor operation, as a command. */
 const supervising = <A>(
-  verb: BoxGrantVerb,
+  verb: CommandVerb,
   description: string,
   operation: (supervisor: Supervisor, id: string) => Effect.Effect<A, AirlockFailure, Ledger>
 ) => (seal: SealContext) => Command.make(
@@ -593,7 +603,7 @@ const makeCapabilities = (seal: SealContext) => Command.make("capabilities", {},
 
 // ── the command graph ───────────────────────────────────────────────────────
 
-type CurrentCommandVerb = BoxGrantVerb | "change"
+type CurrentCommandVerb = CommandVerb | "change"
 type AnyCliCommand = Command.Command<any, any, any, any, any>
 type CommandFactory = (seal: SealContext) => AnyCliCommand
 
@@ -650,7 +660,7 @@ const makeSealedRoot = (seal: SealContext, name: string) => makeRoot(
     .filter((descriptor) =>
       seal._tag === "VerifiedSeal" &&
       descriptor.verb !== "change" &&
-      seal.grant.verbs.includes(descriptor.verb))
+      granted(seal, descriptor.verb))
     .map((descriptor) => descriptor.supervisor(seal))
 )
 

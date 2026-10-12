@@ -72,8 +72,9 @@ Commands:
 --policy names a strict airlock/tool-policy/v1 document: every program the box
 runs is held to it. create emits BUNDLE/bin/airlock plus BUNDLE/seal/. local
 builds and publishes one same-user generation. install publishes one fresh root
-tenant generation. Nothing here starts a process that outlives it: a person
-commits a waiting call with \`airlock commit <id>\`.`
+tenant generation. Nothing here starts a process that outlives it. No seal
+grants a person's decision: a person commits a waiting call with the unsealed
+\`airlock commit <id>\` over the box's home and policy.`
 
 class CliError extends Error {
   constructor(message: string, readonly exitCode = 64) {

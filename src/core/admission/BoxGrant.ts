@@ -8,19 +8,18 @@ import { ToolPolicy } from "../session/ToolPolicy.ts"
  * data only; the seal verifies it before any command is built.
  */
 
-/** Every command a sealed `airlock` can be granted. */
+/**
+ * Every command a sealed `airlock` can be granted. A sealed install is the
+ * agent's, so none of these decides what a person decides: approving a plan,
+ * committing, cancelling, undoing and reaping happen outside the box.
+ */
 export const BoxGrantVerb = Schema.Literals([
   "describe",
   "review",
   "run",
   "eval",
-  "approve-plan",
   "pending",
   "inspect",
-  "commit",
-  "cancel",
-  "undo",
-  "reap",
   "ledger",
   "doctor",
   "capabilities"

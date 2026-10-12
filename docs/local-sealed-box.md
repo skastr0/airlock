@@ -39,56 +39,47 @@ verification succeed. It is the final publication mutation for a default box.
 A partial failure before that point has no `SEALED` marker; the fresh path is
 preserved for inspection and a retry refuses to replace it.
 
-The default signed grant is `native-contained` and exposes only these verbs:
+The default signed grant exposes only these commands:
 
 ```text
-actions doctor eval held pending run schema serve
+capabilities describe doctor eval inspect pending review run
 ```
 
-Its native actions are:
+and its policy lets a program read the workspace and nothing else:
 
 ```text
-file.glob file.inspect file.list file.read file.stat http.stage
+file.glob file.inspect file.list file.read file.stat
 ```
 
-It has no `process.run`, managed write action, endpoint grant, or daemon
-operation. Therefore no daemon is started or required by default. Direct
-`commit`, `undo`, `exec`, `write`, and `rm` are absent subcommands. For example:
+A program that calls any other tool fails with `invalid_code` before anything
+runs. For example:
 
 ```sh
 /tmp/demo-box/bin/airlock eval --workspace /tmp/demo-ws \
   --source 'return file.stat({ path: "ok.txt" })'
 
-/tmp/demo-box/bin/airlock schema file.stat
-# resultSchema describes `bytes`; it does not invent a `size` alias.
+/tmp/demo-box/bin/airlock describe --workspace /tmp/demo-ws
 ```
 
-A custom `--admission ABSOLUTE_JSON` may be supplied. A compatibility admission is refused unless the same
-command also spells `--allow-sealed-compatibility`.
+`--policy ABSOLUTE_JSON` signs a different strict `airlock/tool-policy/v1`
+document instead; see [usage.md](usage.md#2-the-policy).
 
-## Same-user commit daemon
+## A person decides outside the box
 
-To grant the existing supervisor loop `commit` authority, opt in explicitly:
+Every command of a sealed install is the agent's to run, so no seal can grant
+one that decides: `approve-plan`, `commit`, `cancel`, `undo` and `reap` are
+refused in a grant and are absent subcommands of the box. A call the policy
+holds for approval waits in the box's home. A person decides on it with the
+unsealed `airlock`, over the same home and the same policy:
 
 ```sh
-bun scripts/seal-box.ts local \
-  --workspace /tmp/demo-ws \
-  --out /tmp/demo-box-with-daemon \
-  --private-key /tmp/airlock-operator.key \
-  --public-key /tmp/airlock-operator.pub \
-  --with-daemon-commit
+AIRLOCK_HOME=/tmp/demo-box/home AIRLOCK_POLICY_FILE=/path/to/policy.json \
+  airlock pending
+AIRLOCK_HOME=/tmp/demo-box/home AIRLOCK_POLICY_FILE=/path/to/policy.json \
+  airlock commit <id>
 ```
 
-This adds exactly `daemonOps: ["commit"]`, starts `bin/airlock serve`, and does
-not return success until the health-only Unix socket reports the same signed
-grant digest. The JSON result includes `daemonPid`, `daemonReady: true`, and a
-ready-to-copy recipe. The daemon dispatches only already staged evidence that
-the signed admission grant classed `read` and `auto`; it still calls the sole
-`Outbox.commit` network authority.
-
-When any daemon operation is present, `run` and `eval` require the same-digest
-daemon. Killing it makes the next program fail closed with `field: "daemon"`;
-there is no local commit fallback.
+Nothing a sealed box starts outlives the command that started it.
 
 ## Tamper and lifecycle boundary
 
@@ -99,10 +90,9 @@ or missing readiness marker exits 78 before Airlock state is constructed.
 Running `bun run src/cli.ts` with `AIRLOCK_SEAL` set remains rejected as
 `source-mode`; source loading is not a sealed identity.
 
-`Hold.reap` remains the only unlink authority. In particular, local deployment
-does not remove a stale Unix socket. An ungracefully killed daemon may leave
-that pathname behind, so create a **fresh `--out` generation** rather than
-promising restart or replacement in place.
+`Hold.reap` remains the only unlink authority, and only a person's unsealed
+`airlock reap` calls it. To change a box, create a **fresh `--out`
+generation** rather than replacing one in place.
 
 ## Threat boundary
 

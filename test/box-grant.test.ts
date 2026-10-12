@@ -33,8 +33,7 @@ const document = (overrides: Record<string, unknown> = {}) => ({
 })
 
 const allVerbs = [
-  "describe", "review", "run", "eval", "approve-plan", "pending", "inspect",
-  "commit", "cancel", "undo", "reap", "ledger", "doctor", "capabilities"
+  "describe", "review", "run", "eval", "pending", "inspect", "ledger", "doctor", "capabilities"
 ]
 
 const decoded = (input: unknown) => Effect.runPromise(decodeBoxGrant(input))
@@ -85,7 +84,7 @@ describe("box grant v2", () => {
       document({ policy: { ...policy, resources: { path: ["/"] } } }),
       document({ policy: { ...policy, budget: { ...policy.budget, maxCalls: 17 } } }),
       document({ policy: { ...policy, toolGrants: [{ ...policy.toolGrants[0], when: "now" }, { ...policy.toolGrants[1], when: "now" }] } }),
-      document({ verbs: ["run", "eval", "pending", "commit"] })
+      document({ verbs: ["run", "eval", "pending", "inspect"] })
     ]
     for (const candidate of widened) expect(await digestOf(candidate)).not.toBe(signed)
   })
@@ -121,6 +120,7 @@ describe("box grant v2", () => {
     expect(all.verbs).toEqual(allVerbs)
 
     for (const verb of [
+      "approve-plan", "commit", "cancel", "undo", "reap",
       "change", "shell", "serve", "exec", "rm", "write", "send", "flush",
       "held", "actions", "schema", "runs", "run-receipt"
     ]) expect(await rejected(document({ verbs: ["run", verb] })), verb).toBe(true)

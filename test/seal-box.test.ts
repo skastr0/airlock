@@ -177,7 +177,7 @@ describe("seal-box operator bundle tool", () => {
           policy: { toolGrants: Array<unknown> }
         }
         if (corrupt === "policy") widened.policy.toolGrants.push({ id: "rm", tool: "file.remove", when: "now", where: {} })
-        else widened.verbs.push("commit")
+        else widened.verbs.push("inspect")
         chmodSync(path, 0o644)
         writeFileSync(path, JSON.stringify(widened))
       } else {
@@ -197,6 +197,7 @@ describe("seal-box operator bundle tool", () => {
       [...createArgs(item, join(item.root, "bad-verb")), "--verb", "shell"],
       [...createArgs(item, join(item.root, "removed-verb")), "--verb", "serve"],
       [...createArgs(item, join(item.root, "local-verb")), "--verb", "change"],
+      [...createArgs(item, join(item.root, "deciding-verb")), "--verb", "commit"],
       [...createArgs(item, join(item.root, "duplicate")), "--verb", "run"],
       [...createArgs(item, join(item.root, "native")), "--native-action", "file.read"],
       [...createArgs(item, join(item.root, "daemon")), "--daemon-op", "commit"],
