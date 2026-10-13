@@ -29,8 +29,9 @@ You write four files:
 | `src/worker.ts` | The Durable Object export and your trusted routes | 61 |
 | `alchemy.run.ts` | The Worker and its binding on Cloudflare | 24 |
 
-The three Worker files import from `@skastr0/airlock/cloudflare` and nothing
-else. `alchemy.run.ts` adds `@skastr0/airlock/alchemy`, Alchemy and Effect.
+The three Worker files import from `@skastr0/airlock-cloudflare` and nothing
+else. `alchemy.run.ts` adds `@skastr0/airlock-cloudflare/alchemy`, Alchemy and
+Effect.
 `local.ts` is tooling that runs the example on your machine; you would not
 write it. `triage.air` is a program an agent might write.
 

@@ -1,6 +1,6 @@
 /**
- * The test Worker. It is bundled and run inside real workerd by
- * `test/cloudflare-durable.test.ts`; nothing here runs in the test process.
+ * The test Worker. It is bundled and run inside real workerd by the package's
+ * `cloudflare-durable.test.ts`; nothing here runs in the test process.
  *
  * One Durable Object class serves every route. Each conformance test runs in
  * its own object, so it has its own SQLite database, and reaches the adapters

@@ -23,7 +23,7 @@ things for the effects routed through it:
 ### The pipeline
 
 Every program, on every host, goes through the same gates
-(`src/core/runner/ProgramRunner.ts`):
+(`packages/airlock/src/runner/ProgramRunner.ts`):
 
 ```
 parse ──▶ check ──▶ review ──▶ run
@@ -42,8 +42,8 @@ describes this in full.
 ### Effect classes
 
 A tool contract declares one effect class
-(`src/core/contract/ToolContract.ts`), which is also a Plan node kind
-(`src/core/plan/Plan.ts`):
+(`packages/airlock/src/contract/ToolContract.ts`), which is also a Plan node kind
+(`packages/airlock/src/plan/Plan.ts`):
 
 | effect | what happens | may run at once |
 |---|---|---|
@@ -64,23 +64,24 @@ cannot select one, and an unsupported one (`vm-enclosed`) is refused rather
 than falling back.
 
 With no policy file, the CLI grants the workspace's file tools only
-(`src/cli.ts` `workspacePolicy`): a process or the network needs a policy
-that grants it.
+(`packages/cli/src/cli.ts` `workspacePolicy`): a process or the network needs a
+policy that grants it.
 
 ## Two halves: a kernel and a host
 
 ```
-src/core/     the kernel: storage-agnostic, runs anywhere Effect runs
-src/          the host: files, processes, the operating system, the CLI
+packages/airlock/       the kernel: storage-agnostic, runs anywhere Effect runs
+packages/cloudflare/    the cloud host: Durable Object storage and RPC
+packages/cli/           the local host: files, processes, the operating system, the CLI
 ```
 
-### The kernel, `src/core`
+### The kernel, `packages/airlock`
 
 The kernel imports only `effect` and its own files. It names no Node or Bun
 module, no platform package and no host global, so the same code runs under
 Bun, in a browser-style isolate, or in a Cloudflare Worker. It is published as
-`@skastr0/airlock/core`, with conformance suites and in-memory adapters at
-`@skastr0/airlock/core/testing`.
+`@skastr0/airlock`, with conformance suites and in-memory adapters at
+`@skastr0/airlock/testing`.
 
 It contains:
 
@@ -116,7 +117,7 @@ A session is opened from a `ToolPolicy`: tool grants under a shared resource
 ceiling per kind, a budget, sink policies, and named flow rules. Each call is
 admitted against its grant; grants carry `validUntil` and stop forward work
 when they lapse. The policy is a document: it can be stored, sealed, and named
-by its digest (`src/core/session/ToolPolicy.ts`, `ToolSession.ts`).
+by its digest (`packages/airlock/src/session/ToolPolicy.ts`, `ToolSession.ts`).
 
 ### The ports
 
@@ -187,7 +188,7 @@ writing its handler, with no kernel edit.
 
 ### Conformance
 
-Each port ships a suite in `src/core/testing` that takes a Layer and registers
+Each port ships a suite in `packages/airlock/src/testing` that takes a Layer and registers
 the invariant tests: durable put-if-absent, compare-and-set under races,
 terminal states, response bound, exclusive sections, idempotent replay,
 uncertain never retried, corrupt or tampered state failing closed, and a
@@ -200,7 +201,7 @@ Durable Object adapters pass the same suites.
 ## The host
 
 Everything shaped like a file, a process or an operating system lives outside
-`src/core`.
+`packages/airlock/src`.
 
 ### Adapters for the kernel's ports, `src/host`
 
@@ -251,13 +252,13 @@ digest, and undo against what was installed.
 
 ### The Cloudflare host
 
-`src/cloudflare` is a second host over the same kernel
-(`@skastr0/airlock/cloudflare`):
+`packages/cloudflare` is a second host over the same kernel
+(`@skastr0/airlock-cloudflare`):
 
 - **`DurableOutboxStore` / `DurableLedger`** put the OutboxStore and Ledger
   ports over Durable Object SQLite storage. They run the kernel's conformance
   suites inside workerd, including the crash-point sweep
-  (`test/cloudflare-durable.test.ts`).
+  (`packages/cloudflare/test/cloudflare-durable.test.ts`).
 - **`AirlockObject`** is the Durable Object a user's Worker exports: it holds
   the contracts, the implementations and the policy, evaluates one program at
   a time with a bounded waiting line, and exposes the supervisor routes
@@ -295,7 +296,7 @@ integration gates, and the portability proofs.
 
 - **A new host** (for example another cloud): write Layers for
   `OutboxStore`, `Ledger`, the `Dispatcher` handlers and `effect/Crypto`, and
-  run the conformance suites against them. Nothing in `src/core` changes; the
+  run the conformance suites against them. Nothing in `packages/airlock/src` changes; the
   Cloudflare host in `src/cloudflare` is the worked example.
 - **A new thing to send**: declare an intent kind, add it to `defineOutbox`,
   and write its handler. The compiler lists every place that must change.

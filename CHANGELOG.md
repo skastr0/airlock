@@ -4,6 +4,11 @@
 
 The first published release.
 
+- **Three packages.** `@skastr0/airlock` is the kernel — Effect-only, no host
+  code, with conformance suites at `@skastr0/airlock/testing`.
+  `@skastr0/airlock-cloudflare` runs the same programs in a Durable Object.
+  `@skastr0/airlock-cli` provides the `airlock` and `airlock-agent` commands
+  and is the only package that needs Bun on the machine.
 - **The `.air` language.** A small typed language an agent writes instead of
   calling tools one at a time. A whole program is checked before anything
   runs: an unknown tool or field, a wrong type or a call the policy cannot
@@ -28,9 +33,9 @@ The first published release.
   Bubblewrap, Landlock and seccomp on Linux) and merges back through Hold.
 - **Sealed installs** pin the policy and commands into a signed grant.
 - **Reviewed local changes** with `airlock change`.
-- **Cloudflare.** `@skastr0/airlock/cloudflare` runs the same programs in a
-  Durable Object over the same kernel, and `@skastr0/airlock/alchemy` declares
-  its bindings for an Alchemy stack.
-- **A portable kernel.** `@skastr0/airlock/core` imports only `effect`, and
-  `@skastr0/airlock/core/testing` ships conformance suites for any host's
-  storage.
+- **Cloudflare.** `@skastr0/airlock-cloudflare` runs the same programs in a
+  Durable Object over the same kernel, and its `alchemy` subpath declares the
+  bindings for an Alchemy stack.
+- **A portable kernel.** The kernel imports only `effect` and names no host,
+  and `@skastr0/airlock/testing` ships the conformance suites that judge any
+  host's storage.

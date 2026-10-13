@@ -59,10 +59,10 @@ could not be found, the entry says so.
 Jul 28, `claude …6b8451a39` and `git 6153459` (DESIGN.md). The founding incident: a test derived a path from the wrong root and truncated a real database with `>`. Status: in force (restated as the goal on Oct 9).
 
 **P2. Airlock programs are not TypeScript.**
-Jul 28, `claude …6b8451a39`. The operator: if an agent can still write a `node:fs` call, the guarantees are only behavioural ("pure data structure, json-like or a custom thing"). Reaffirmed Aug 2: ".air needed to be a language because a typescript DSL would support bypassing it". Status: in force, implemented in `src/core/language/*`. A two-day exception on Cloudflare is recorded in H9.
+Jul 28, `claude …6b8451a39`. The operator: if an agent can still write a `node:fs` call, the guarantees are only behavioural ("pure data structure, json-like or a custom thing"). Reaffirmed Aug 2: ".air needed to be a language because a typescript DSL would support bypassing it". Status: in force, implemented in `packages/airlock/src/language/*`. A two-day exception on Cloudflare is recorded in H9.
 
 **P3. The language is deny-by-default: an Airlock program can reach only what the DSL exposes.**
-Jul 29, `codex …3fcbcb9f8`: "an AIRLOCK program is built with airlock, executed with the airlock runtime". Status: in force, implemented. A program calls only declared tool contracts through the resolver (`src/core/language/run.ts`, `src/core/runner/ProgramRunner.ts`).
+Jul 29, `codex …3fcbcb9f8`: "an AIRLOCK program is built with airlock, executed with the airlock runtime". Status: in force, implemented. A program calls only declared tool contracts through the resolver (`packages/airlock/src/language/run.ts`, `packages/airlock/src/runner/ProgramRunner.ts`).
 
 **P4. Airlock is for AI agents, not humans.**
 Jul 29, `codex …3fcbcb9f8`: "I WAS NEVER FOR HUMANS". Status: in force.
@@ -89,17 +89,17 @@ Jul 29, `codex …3fcbcb9f8`, stated as an "actual invariant". Example: `tar` be
 Aug 2, `aug02-user-messages.txt` (04:01): "airlock should NOT ship with 'clickup' tools… same principle of airlock no shipping with reimplementation of a bunch of unix tools". Status: in force, implemented. `src/` has no vendor tools. The Cloudflare example's mail tools are user-side "virtual tools".
 
 **P12. Default to refusing; give agent authors strong, intentional tools to open things up.**
-Oct 9, `claude …dd9a0d9be`. The operator flagged it "very high level direction, please do not treat this as law". Status: in force as direction. Partly implemented: author release/endorse flow rules (`src/core/contract/FlowRules.ts`, git `084630d`) and the workspace-only default policy (H6).
+Oct 9, `claude …dd9a0d9be`. The operator flagged it "very high level direction, please do not treat this as law". Status: in force as direction. Partly implemented: author release/endorse flow rules (`packages/airlock/src/contract/FlowRules.ts`, git `084630d`) and the workspace-only default policy (H6).
 
 **P13. Code mode for Vortex visibly runs on Airlock, and the DSL is Airlock's own, with no split brain between local and cloud.**
-Oct 9, `claude …dd9a0d9be`: "makes it ours, our DSL… improvements to airlock propagate through local dev / CLI and cloud". Status: in force. Implemented in Airlock (one runner in `src/core/runner`, used by the CLI and the Durable Object). Not yet started in Vortex.
+Oct 9, `claude …dd9a0d9be`: "makes it ours, our DSL… improvements to airlock propagate through local dev / CLI and cloud". Status: in force. Implemented in Airlock (one runner in `packages/airlock/src/runner`, used by the CLI and the Durable Object). Not yet started in Vortex.
 
 ---
 
 ## 2. Kernel: effects, laws, Hold, Outbox, Ledger
 
 **K1. Every shell effect falls into four classes: observation, mutation, emission, computation.**
-Jul 28, `git 6153459` DESIGN.md. The Plan nodes Capture, Apply, RequestExternal and Invoke followed on Jul 29 (`git 4eff1d4`). Status: in force, implemented. On Oct 9 contracts declare `effect: capture | invoke | apply | request` from the same definition as the Plan nodes (`git 492b5b2`; `src/core/contract/ToolContract.ts`, `src/core/plan/Plan.ts`).
+Jul 28, `git 6153459` DESIGN.md. The Plan nodes Capture, Apply, RequestExternal and Invoke followed on Jul 29 (`git 4eff1d4`). Status: in force, implemented. On Oct 9 contracts declare `effect: capture | invoke | apply | request` from the same definition as the Plan nodes (`git 492b5b2`; `packages/airlock/src/contract/ToolContract.ts`, `packages/airlock/src/plan/Plan.ts`).
 
 **K2. Law 1: only the reaper unlinks.** Every mutation is a rename into Hold, and `Hold.reap` is the single deletion site.
 Jul 28, `git 6153459`. Status: in force, implemented (`src/Hold.ts` reap; `test/authority-sites.test.ts` "has exactly one physical deletion"). It lost its "law" label on Oct 5 (X7) but is still enforced by test. On Oct 9 the rule caught a naming collision (`fs.remove` in `FileApplies.ts`), and the code was renamed rather than the test relaxed (`git 6357347`).
@@ -117,25 +117,25 @@ Jul 28, `git 6153459`. Built as the daemon's hold-expiry flush (Aug 13, `prime �
 Jul 28, original `AGENTS.md`. Status: **superseded Oct 5** by K7. The operator, asked to rule on moving `fetch` out of `Outbox.commit`, answered: "I dont care about laws, please remove docs / laws whatever crap" (`claude …e487c7465`).
 
 **K7. The single network call lives in a host HTTP handler that acts only on a permit the kernel mints inside `commit`.** The permit is single-use and bound to the exact staged bytes.
-Oct 5, git `c11dadb`, `426aaf0`. Status: in force, implemented (`src/host/HttpDispatcher.ts:157`, `src/core/outbox/Outbox.ts`; tests `core-permit`, `authority-sites`, `security-dispatch-permit`). Extended Oct 9: tool implementations get one-use live wire tokens bound to the admitted request (git `da66f2a`, `bc1a6a3`, `f12545e`, `7536c79`).
+Oct 5, git `c11dadb`, `426aaf0`. Status: in force, implemented (`src/host/HttpDispatcher.ts:157`, `packages/airlock/src/outbox/Outbox.ts`; tests `core-permit`, `authority-sites`, `security-dispatch-permit`). Extended Oct 9: tool implementations get one-use live wire tokens bound to the admitted request (git `da66f2a`, `bc1a6a3`, `f12545e`, `7536c79`).
 
 **K8. `uncertain` is terminal: a dispatch that may have reached the wire is never retried.**
-Jul 29, git `3242783` ("crash-honest"). Status: in force, implemented (`src/core/outbox/Lifecycle.ts`).
+Jul 29, git `3242783` ("crash-honest"). Status: in force, implemented (`packages/airlock/src/outbox/Lifecycle.ts`).
 
-**K9. The kernel is storage-agnostic: `src/core` imports only `effect`, and hosts supply ports (OutboxStore, Ledger, Dispatcher, Crypto) that must pass conformance suites.**
-Oct 5, `claude …e487c7465`: "let's focus entirely on the storage agnostic core… powerful, type-safe". Status: in force, implemented (`src/core/**`, `src/core/testing/*Conformance.ts`, `test/core-boundary.test.ts`, `scripts/prove-core-portable.ts`).
+**K9. The kernel is storage-agnostic: `packages/airlock/src` imports only `effect`, and hosts supply ports (OutboxStore, Ledger, Dispatcher, Crypto) that must pass conformance suites.**
+Oct 5, `claude …e487c7465`: "let's focus entirely on the storage agnostic core… powerful, type-safe". Status: in force, implemented (`packages/airlock/src/**`, `packages/airlock/src/testing/*Conformance.ts`, `test/core-boundary.test.ts`, `scripts/prove-core-portable.ts`).
 
 **K10. The Ledger is append-only and converges: a lost append is repaired on the next touch, with no second dispatch.**
-Oct 5, git `cc26a15`. Status: in force, implemented (`src/core/ledger/Ledger.ts`, `src/host` FileLedger).
+Oct 5, git `cc26a15`. Status: in force, implemented (`packages/airlock/src/ledger/Ledger.ts`, `src/host` FileLedger).
 
 **K11. The Plan algebra is closed at four nodes.** Definitions, profiles and integrations extend admission and adapters, never add node kinds. Commit, cancel and reap must never become a fifth agent primitive.
-Jul 29, DESIGN.md (git `c4b4086`); restated Aug 2 (`claude …ad5eed8b7` law 5). Status: in force, implemented (`src/core/plan/Plan.ts`).
+Jul 29, DESIGN.md (git `c4b4086`); restated Aug 2 (`claude …ad5eed8b7` law 5). Status: in force, implemented (`packages/airlock/src/plan/Plan.ts`).
 
 **K12. Invoke takes a separate executable and argument atoms; there is no command-string form.**
 Jul 29, `codex …3fcbcb9f8`, git `44cc82b`, `6e5bf83`. Status: in force, implemented (`process.run` contract).
 
 **K13. A read granted `now` is recorded in one step (one settled record plus one ledger line). Other effects keep the full lifecycle. Bytes are not kept by default.**
-Oct 9, `claude …dd9a0d9be` ruling 8. Status: in force, implemented (git `08b90e0`, `4aa7563`, `e613c3b`, `0542347`; `src/core/outbox/Capture.ts`). The Oct 13 report says local reads measured 3.4–5.6 ms against a target under 5 ms.
+Oct 9, `claude …dd9a0d9be` ruling 8. Status: in force, implemented (git `08b90e0`, `4aa7563`, `e613c3b`, `0542347`; `packages/airlock/src/outbox/Capture.ts`). The Oct 13 report says local reads measured 3.4–5.6 ms against a target under 5 ms.
 
 **K14. Every local call is recorded like a cloud emission, and `maxDispatchesPerRun` is deleted.**
 Oct 9, `claude …dd9a0d9be` ruling 8. Status: in force, implemented (no `maxDispatchesPerRun` remains in `src/`).
@@ -147,13 +147,13 @@ Oct 9, `claude …dd9a0d9be` ruling 8. Status: in force, implemented. The operat
 Oct 9, `claude …dd9a0d9be` item 2 refinement. Status: in force, implemented (git `4f4da0b`, `b041c13`; ToolGrant refuses `now` for any request).
 
 **K17. When a grant expires, forward work stops; nothing is reversed. A run whose grant lapses mid-call ends as `grant_expired`.**
-Oct 9 (git `89fe681`, `63accdd`); the race was fixed Oct 11 (git `ab56aa0`, `cursor b88b7f01`). Status: in force, implemented (`src/core/session/ToolSession.ts`, `src/core/runner/ProgramRunner.ts`).
+Oct 9 (git `89fe681`, `63accdd`); the race was fixed Oct 11 (git `ab56aa0`, `cursor b88b7f01`). Status: in force, implemented (`packages/airlock/src/session/ToolSession.ts`, `packages/airlock/src/runner/ProgramRunner.ts`).
 
 **K18. Hold keeps replaced bytes for 7 days, and `airlock reap` refuses anything younger.**
 Oct 11, `cursor 391d7ece`. The agent added this unasked, reasoning that each receipt promises `heldUntil`. Status: in force, implemented (`src/cli.ts:109`, `:393-402`; git `14f1dd5`).
 
 **K19. Every call returns one receipt: `state: done | staged | refused`.** `result` comes only with done, `refusal` only with refused, and `wayBack` only with done. There is no automatic unwrapping, and a refusal is a branchable value.
-Oct 9, `claude …dd9a0d9be` ruling 12. Status: in force, implemented (`src/core/contract/Receipt.ts`, git `b4e0918`).
+Oct 9, `claude …dd9a0d9be` ruling 12. Status: in force, implemented (`packages/airlock/src/contract/Receipt.ts`, git `b4e0918`).
 
 **K20. Artifacts are host state named by the digest of their bytes.**
 Oct 9, ruling 10B; git `de78318`, `9a1d546`. Status: in force, implemented.
@@ -166,22 +166,22 @@ Oct 9, ruling 10B; git `de78318`, `9a1d546`. Status: in force, implemented.
 Jul 29, git `9f1bcf6`; Oct 9 ruling 5 ("confinement is the host's business"; an unsupported profile refuses). Status: in force, implemented (`src/host/FilesystemHost.ts:35-36`, `:249-252`; `vm-enclosed` is refused).
 
 **A2. Dispatch classes: the supervisor classes endpoint grants `read`, `mutate` or `irreversible-send`, and `read` + `commit: "auto"` auto-commits immediate API reads through `Outbox.commit`. A program can never select a class.**
-Aug 2, `claude …df95be6f2` (the assistant's pick, adopted into the plan) and `claude …ad5eed8b7` law 3. Implemented by git `522ab68` and `3b1ad17`. Status: **superseded Oct 9** by A3 and A5: remote reads are `capture` contracts, and no request is ever automatic. Residue: `dispatchClass: "read"` and `committedBy: "policy-auto"` remain in `src/core/outbox/Records.ts:26,45` and `src/core/session/ToolSession.ts:291-296`, now used for host-reversible `now` calls. `docs/security-model.md:460-466` still describes `commit: "auto"`. See C2.
+Aug 2, `claude …df95be6f2` (the assistant's pick, adopted into the plan) and `claude …ad5eed8b7` law 3. Implemented by git `522ab68` and `3b1ad17`. Status: **superseded Oct 9** by A3 and A5: remote reads are `capture` contracts, and no request is ever automatic. Residue: `dispatchClass: "read"` and `committedBy: "policy-auto"` remain in `packages/airlock/src/outbox/Records.ts:26,45` and `packages/airlock/src/session/ToolSession.ts:291-296`, now used for host-reversible `now` calls. `docs/security-model.md:460-466` still describes `commit: "auto"`. See C2.
 
 **A3. A remote read is a `capture`.**
 Oct 9, ruling 1. This reverses the Aug 2 view that "an API call is RequestExternal, full stop" (`claude …df95be6f2` assistant). `http.get` is a capture (GET only, no query, fragment or credentials; fixed accept headers). `http.stage` is a request. Status: in force, implemented (git `e3b2ef5`).
 
 **A4. One grant model.** Each tool gets its own grant under a shared `resources` ceiling per kind. Contracts mark resource fields. The host resolves each one to the real object before matching. A grant can only narrow. An unresolved resource is refused. Matchers are `within`, `subsetOf` and numeric `range`.
-Oct 9, contract item 3 (the operator deferred to the seats, who picked option 2). Status: in force, implemented (`src/core/admission/ToolGrant.ts`, `ResourcePolicy.ts`; git `57f5d45`, `219d1ae`, `ba37cf5`, `ca90e41`).
+Oct 9, contract item 3 (the operator deferred to the seats, who picked option 2). Status: in force, implemented (`packages/airlock/src/admission/ToolGrant.ts`, `ResourcePolicy.ts`; git `57f5d45`, `219d1ae`, `ba37cf5`, `ca90e41`).
 
 **A5. A grant says `when: "now" | "approved"`. No `request` is ever `now`, with or without compensation: "nothing leaves the system without a person". `now` is allowed only for captures and host-reversible apply or invoke.**
-Oct 9, contract item 2: "never allowed for irreversible send, it must always go through human in the loop approval". Status: in force, implemented. It is enforced in the type (`GrantTiming` in `src/core/admission/ToolGrant.ts:44-47`) and at policy load ("a request always requires approval, including a compensated request", `validateToolGrants`). Git `9463142`.
+Oct 9, contract item 2: "never allowed for irreversible send, it must always go through human in the loop approval". Status: in force, implemented. It is enforced in the type (`GrantTiming` in `packages/airlock/src/admission/ToolGrant.ts:44-47`) and at policy load ("a request always requires approval, including a compensated request", `validateToolGrants`). Git `9463142`.
 
 **A6. `process.run` may be `now` only under a confining profile. Under `compatibility` it always waits for approval. Compatibility itself is not removed.**
 Oct 9, ruling 2. Status: in force, implemented (`src/host/FilesystemHost.ts:252`).
 
 **A7. One `ToolPolicy` document per session. Old policy files and old sealed grants are refused, with no converter.**
-Oct 9, ruling 9. The operator asked "are we consolidating the three documents into one?", and it was decided with the team. Status: in force, implemented (`src/core/session/ToolPolicy.ts`; BoxGrant v2 embeds it).
+Oct 9, ruling 9. The operator asked "are we consolidating the three documents into one?", and it was decided with the team. Status: in force, implemented (`packages/airlock/src/session/ToolPolicy.ts`; BoxGrant v2 embeds it).
 
 **A8. JSON tool definitions exist: Airlock loads inert definitions from known locations, so extensions do not ship in Airlock.**
 Jul 29, `codex …3fcbcb9f8` (07:35, "OHHHHHHH THAT would allow for extensions"). Implemented as git `9fe8feb` and `25b91be`; v2 on Aug 2 (`928a41e`); pinned in the sealed catalog on Aug 13. Status: **superseded Oct 9** by A9.
@@ -190,13 +190,13 @@ Jul 29, `codex …3fcbcb9f8` (07:35, "OHHHHHHH THAT would allow for extensions")
 Oct 9, contract item 4. Status: in force, implemented (git `9a781d6`, `f80fb9b`, `cfb487c`; `docs/security-model.md` "No tool definitions").
 
 **A10. Credentials belong to the owner, outside Airlock. There is no key manager or secret resolver. Airlock refuses well-known credential names at staging, and the Secret template is deleted.**
-Oct 5, `claude …a787bc111`. The operator: "beyond Airlock's concerns… We can potentially block well-known secret headers". Status: in force, implemented (git `06ccafb`, `b362bc4`, `d8f73b3`, `ada5a01`, `b829b8f`; `src/core/outbox/HttpIntent.ts`). On Oct 7–9 the security seat narrowed `code` so that only `code` beside `state` is refused (`claude …dd9a0d9be`, first message).
+Oct 5, `claude …a787bc111`. The operator: "beyond Airlock's concerns… We can potentially block well-known secret headers". Status: in force, implemented (git `06ccafb`, `b362bc4`, `d8f73b3`, `ada5a01`, `b829b8f`; `packages/airlock/src/outbox/HttpIntent.ts`). On Oct 7–9 the security seat narrowed `code` so that only `code` beside `state` is refused (`claude …dd9a0d9be`, first message).
 
 **A11. The agent's binary has no command that decides.**
 Jul 29, git `eaa9dfe` (reduced agent surface); Aug 2 law 4 ("agent surface gains no terminal-authority verbs"). Status: in force, implemented (`src/cli.ts` `supervisorOnly`; `airlock-agent` lacks approve-plan, commit, cancel, undo and reap).
 
 **A12. Sealed box: one signed document (box grant) pins the policy, the verbs and the binary digest.** It is opt-in. The verify key is on the box and the signing key never is. The unsealed checkout stays as it is.
-Aug 13, `prime …539cc11c6`. Status: in force, implemented. It was rewritten on Oct 11 as `airlock/box-grant/v2` pinning a `ToolPolicy` (`src/core/admission/BoxGrant.ts`, git `b7cbd8a`, `cursor 0fab0de7`).
+Aug 13, `prime …539cc11c6`. Status: in force, implemented. It was rewritten on Oct 11 as `airlock/box-grant/v2` pinning a `ToolPolicy` (`packages/airlock/src/admission/BoxGrant.ts`, git `b7cbd8a`, `cursor 0fab0de7`).
 
 **A13. A daemon, running under a different uid from the agent, holds terminal authority: commit, reap, flush and hold-expiry.**
 Aug 13, `prime …539cc11c6`. The first brief said "Do not start with the daemon"; it was built the same day, and the polish brief made it same-user. Status: **superseded Oct 11**. The daemon was deleted (git `b7cbd8a`, `894e515`), and a person decides with the unsealed `airlock` instead. Open consequence: a root person committing into an agent-owned home leaves root-owned files (`cursor 391d7ece`).
@@ -205,10 +205,10 @@ Aug 13, `prime …539cc11c6`. The first brief said "Do not start with the daemon
 Oct 11, `cursor 391d7ece`, acting on `cursor 0fab0de7`'s finding. Status: in force, implemented. The BoxGrant verb schema lacks them (`BoxGrant.ts:16-26`; `cli.ts:95`; git `f547ac7`).
 
 **A15. Data and control roles of a value are authenticated per run (role witnesses). Transplanted, misattributed and replayed witnesses are refused.**
-Oct 9 (git `2a34008`, `df35d22`, `883b509`); attack tests landed Oct 11 (git `d157930`). Status: in force, implemented (`src/core/contract/RoleWitness.ts`).
+Oct 9 (git `2a34008`, `df35d22`, `883b509`); attack tests landed Oct 11 (git `d157930`). Status: in force, implemented (`packages/airlock/src/contract/RoleWitness.ts`).
 
 **A16. Information labels: a confidentiality/integrity lattice, failing closed.**
-Jul 29, git `fc246fa`. Oct 9 direction: data flow goes through `src/core/labels`. Status: in force, implemented. Review checks every argument against a sink policy (`src/core/review/Flow.ts`, `Review.ts`). `docs/security-model.md:388-391` still says labels are not enforced on the path. See C5.
+Jul 29, git `fc246fa`. Oct 9 direction: data flow goes through `packages/airlock/src/labels`. Status: in force, implemented. Review checks every argument against a sink policy (`packages/airlock/src/review/Flow.ts`, `Review.ts`). `docs/security-model.md:388-391` still says labels are not enforced on the path. See C5.
 
 **A17. The Cloudflare supervisor routes (approve, cancel) have no built-in login; putting one in front is the owner's job.**
 Oct 11–13, `cursor 391d7ece`. Status: unclear. It is described as a gap, not a ruling.
@@ -221,25 +221,25 @@ Oct 11–13, `cursor 391d7ece`. Status: unclear. It is described as a gap, not a
 Jul 28 roadmap, `git 6153459`. Status: superseded by R2/R3. It was realised as whole-program review.
 
 **R2. Whole-program review before running is in scope and "critical".**
-Oct 9, contract item 6: "Because we own it we must capitalize and push on what makes .air special as hard as possible". Status: in force, implemented Oct 11 (git `c18dc80`, `c7cf863`; `src/core/review/*`, `src/core/language/check.ts`). The runner goes parse → check → review → run.
+Oct 9, contract item 6: "Because we own it we must capitalize and push on what makes .air special as hard as possible". Status: in force, implemented Oct 11 (git `c18dc80`, `c7cf863`; `packages/airlock/src/review/*`, `packages/airlock/src/language/check.ts`). The runner goes parse → check → review → run.
 
 **R3. Plan is the reviewed form of a `.air` program on every host.** A run-time call is an instance of a Plan node. A call that fits no node ends the run (`plan_mismatch`). Never re-review or widen.
-Oct 9, contract item 7. The lead first proposed Plan as a local-only engine; the operator objected ("what's stopping cloud from using Plan and Runtime?"). Status: in force, implemented (`src/core/runner/ProgramRunner.ts`, `GuestRunner.ts` `plan_mismatch`). Gap: replay still matches calls by order in the run, not by Plan node (`cursor 391d7ece`, open).
+Oct 9, contract item 7. The lead first proposed Plan as a local-only engine; the operator objected ("what's stopping cloud from using Plan and Runtime?"). Status: in force, implemented (`packages/airlock/src/runner/ProgramRunner.ts`, `GuestRunner.ts` `plan_mismatch`). Gap: replay still matches calls by order in the run, not by Plan node (`cursor 391d7ece`, open).
 
 **R4. One human approval of a Plan covers captures, host-reversible applies, and requests whose content the program fully fixes. A request whose content is unknown at review is staged and approved as an exact batch, however well validated.**
-Oct 9, review decision A. The operator: you can't validate data that doesn't yet exist, but programs can chain decoders and validators. Status: in force, implemented (`src/core/session/ToolSession.ts:318` `committedBy: "reviewed-plan"`; `src/core/outbox/Outbox.ts:905`; `test/core-plan-approval.test.ts`).
+Oct 9, review decision A. The operator: you can't validate data that doesn't yet exist, but programs can chain decoders and validators. Status: in force, implemented (`packages/airlock/src/session/ToolSession.ts:318` `committedBy: "reviewed-plan"`; `packages/airlock/src/outbox/Outbox.ts:905`; `test/core-plan-approval.test.ts`).
 
 **R5. Decoder and validator chains (trusted schemas, proofs attached to exact values, required by sinks) are built, but never replace the person.**
-Oct 9, `claude …dd9a0d9be`. Status: in force, implemented (`src/core/contract/Decoder.ts`; git `088bde7`, `858d34a`).
+Oct 9, `claude …dd9a0d9be`. Status: in force, implemented (`packages/airlock/src/contract/Decoder.ts`; git `088bde7`, `858d34a`).
 
 **R6. Plan approvals are recorded in the Ledger and keyed by plan id; approving twice records once.**
-Oct 11, `cursor b88b7f01` (the agent's design choice). Status: in force, implemented (`approve-plan` in `src/cli.ts`; `approvePlan` in `src/cloudflare/AirlockObject.ts`).
+Oct 11, `cursor b88b7f01` (the agent's design choice). Status: in force, implemented (`approve-plan` in `src/cli.ts`; `approvePlan` in `packages/cloudflare/src/AirlockObject.ts`).
 
 **R7. Aim for a sound type system, much smaller than TypeScript's, over plain syntax. Do not add FP notation for its own sake.**
 Oct 9: the operator first asked for Effect/FP concepts, then: "I'm worried we're just making it FP just for the sake of making it FP… can we make its type system sound". Status: in force. Partly implemented: the checker types every program against the granted contracts before anything runs, and a seeded hostile corpus fuzzes the runner (`test/security-program-runner-fuzz.test.ts`, git `c345f6e`). No soundness claim has been stated yet. The language history is in [`language.md`](language.md).
 
 **R8. A runner is bounded: code size, steps, nesting depth, value nodes, loop iterations, wall time. It ends with a fixed reason; program text never becomes a failure message.**
-Oct 7–9, git `91bb0ac`, `51fc4c6`, `bda5bdb`. The Vortex question was whether `.air` is safe inside the Durable Object with no second isolate; the verdict was "safe with named hardening". Status: in force, implemented (`src/core/runner/Bounds.ts`, `GuestRunner.ts`).
+Oct 7–9, git `91bb0ac`, `51fc4c6`, `bda5bdb`. The Vortex question was whether `.air` is safe inside the Durable Object with no second isolate; the verdict was "safe with named hardening". Status: in force, implemented (`packages/airlock/src/runner/Bounds.ts`, `GuestRunner.ts`).
 
 **R9. Single-use Plan claim: a per-Plan claim file makes rerunning an admitted Plan fail closed.**
 Jul 29, git `dc0636a`. Status: **superseded Oct 11**. The old Runtime was deleted (git `6ba69a8`), and replay is now keyed by run id. `docs/security-model.md:99-111` still describes it. See C4.
@@ -264,7 +264,7 @@ Aug 2, `claude …ad5eed8b7`, git `9939fdc`. Status: **superseded Sep 4–5** by
 Sep 4, `amp …29f658359`: "fully implement airlock for Linux". Status: in force, implemented (git `02b0ce6`; `src/platform/linux/*`; `docs/linux-v1.md`).
 
 **H4. Airlock owns its Cloudflare story end to end with Alchemy. A user supplies only contracts, their implementations and a policy; to Vortex, targeting Airlock should feel "almost as if they were targeting JavaScript". Leave room for other clouds.**
-Oct 5, `claude …e487c7465` (operator answers at 23:12 and 23:14). Status: in force, implemented (`src/cloudflare/*`, `src/alchemy/*`, `examples/cloudflare/`; git `8e015bb`, `4d4bb39`, `0cd4d00`, `b521ddf`).
+Oct 5, `claude …e487c7465` (operator answers at 23:12 and 23:14). Status: in force, implemented (`packages/cloudflare/src/*`, `packages/cloudflare/src/alchemy/*`, `examples/cloudflare/`; git `8e015bb`, `4d4bb39`, `0cd4d00`, `b521ddf`).
 
 **H5. The CLI is a client of the kernel exactly like Cloudflare. It runs programs only; direct verbs (rm, write, send), `serve` and `runs` go away.**
 The client idea is from Oct 9, `claude …dd9a0d9be` ("let's consolidate this so that the CLI is like a 'client'"). The programs-only cut is from Oct 11, `cursor b88b7f01`; the agent wrote "Programs only, as you said", but the operator's own words for it were not found (unclear origin). Status: in force, implemented (git `b7cbd8a`, `6ba69a8`; about 28,000 lines of the old engine deleted).
@@ -337,11 +337,14 @@ Sep 7, `amp …e6de4fe89` and `amp …161d8b7ee`. Status: superseded by D4.
 **D4. Publish to git and npm. Set up GitHub CI and trusted publishing (OIDC, no token) right away.**
 Oct 13, `cursor 391d7ece`: "imperative to set up github ci and trusted publishing immediately". The agent chose one package, `@skastr0/airlock` 0.1.0, with entry points `./core`, `./core/testing`, `./cloudflare` and `./alchemy`; it ships TypeScript source, requires Bun ≥1.4, and leaves docs out of the tarball. Status: in force, in progress. `.github/workflows/release.yml` (OIDC, protected `release` environment), `CHANGELOG.md` and the `package.json` edits are committed as `d8bcd49`. As this document was written, nothing was published and `origin/main` still stopped at Oct 7.
 
-**D5. The kernel is consumable on its own as `@skastr0/airlock/core`, with conformance suites at `/core/testing`.**
-Oct 5, ARCHITECTURE. Status: in force, implemented (`package.json` exports; `test/core-exports.test.ts`).
+**D5. The kernel is consumable on its own as `@skastr0/airlock`, with conformance suites at `/testing`.**
+Oct 5, ARCHITECTURE; re-cut Oct 13 when the package split (D7). Status: in force, implemented (`package.json` exports; `test/core-exports.test.ts`).
 
 **D6. Pushing needs separate operator authorization.**
 Standing rule, reaffirmed Oct 9. The operator authorized specific pushes on Oct 3 and Oct 5. A push was blocked by the auto-mode classifier on Oct 9. Status: in force. About 128 commits are unpushed as of Oct 13; the Oct 13 session was authorized to push.
+
+**D7. One npm package becomes three: `@skastr0/airlock` (the kernel), `@skastr0/airlock-cloudflare` (the Workers adapter), `@skastr0/airlock-cli` (the binaries).**
+Oct 13, the operator, reviewing the 336 kB tarball: "how are you even supposed to use this? As a user?" One package made every consumer — including a program that only imports the kernel — install the CLI, its Bun requirement and its host code, and the single name said nothing about which half you were using. The kernel keeps the plain name: the kernel is the product, the CLI is one host of it. A guest imports `@skastr0/airlock` and nothing else; the CLI package is the only one that needs Bun. Versions move in lockstep (literal ranges, no workspace shims). Status: in force, implemented; nothing was published under the one-package shape, so no compatibility code exists.
 
 ---
 
@@ -410,13 +413,13 @@ Oct 9, `lead-oct09` first messages. Status: in force.
 
 **C1. The ratchet law against the CLI default.** `ARCHITECTURE.md:29-34` said "compatibility is the zero-configuration default and is Bash parity… the default never becomes stricter than Bash". The code's no-policy default (`src/cli.ts:114-127`) grants workspace file tools only; a process or the network needs a policy. No operator ruling retired the law; the change came from the Oct 11 agent and was reported afterwards. P12 and the Jul 29 deny-by-default framing (P3) support it. The Oct 13 documentation rewrite made the docs describe the code's default.
 
-**C2. Dispatch classes are still described as live.** `docs/security-model.md:458-466` describes "`read`-class `commit: "auto"`" auto-commit as implemented. The Oct 9 rulings removed it, and `ToolGrant.ts` refuses `now` for every request. The vocabulary survives in code: `DispatchAuthorization.dispatchClass: "read"` and `committedBy: "policy-auto"` (`src/core/outbox/Records.ts`, `ToolSession.ts:291-296`) now label host-reversible `now` calls, not reads of the outside world.
+**C2. Dispatch classes are still described as live.** `docs/security-model.md:458-466` describes "`read`-class `commit: "auto"`" auto-commit as implemented. The Oct 9 rulings removed it, and `ToolGrant.ts` refuses `now` for every request. The vocabulary survives in code: `DispatchAuthorization.dispatchClass: "read"` and `committedBy: "policy-auto"` (`packages/airlock/src/outbox/Records.ts`, `ToolSession.ts:291-296`) now label host-reversible `now` calls, not reads of the outside world.
 
 **C3. "Optional tool" against the operator.** `README.md:9` and `ARCHITECTURE.md:10` called Airlock "an optional tool". On Sep 26 the operator rejected that word, and the Oct 9 goal ("impossible for an agent to mess up alone") and the new `package.json` description ("nothing leaves without a person's approval") point the other way. The Oct 13 documentation rewrite removed the word from both files.
 
 **C4. The security model describes the deleted engine.** `docs/security-model.md:99-160` describes the Runtime run journal, the `.claims` single-use Plan claim, `RuntimeExecutionClaimRejected` and `ExecutionAuthority`. All were deleted on Oct 11 (git `6ba69a8`). Lines 113-127 ("the agent can author only the four Plan nodes") predate tool contracts and receipts.
 
-**C5. Labels.** `docs/security-model.md:388-391` says the Plan/Runtime/Outbox path does not propagate or enforce labels. Review now imports and checks them (`src/core/review/Flow.ts`, `Review.ts`). The doc understates what the code does; how complete end-to-end enforcement is was not verified here.
+**C5. Labels.** `docs/security-model.md:388-391` says the Plan/Runtime/Outbox path does not propagate or enforce labels. Review now imports and checks them (`packages/airlock/src/review/Flow.ts`, `Review.ts`). The doc understates what the code does; how complete end-to-end enforcement is was not verified here.
 
 **C6. Compatibility profile: "no profile any more" against the code.** The Oct 11 seal subagent (`cursor 0fab0de7`) wrote "there is no profile any more". In fact only the policy-wide compatibility flag was removed. `FilesystemProfile` still includes `compatibility`, and compatibility `process.run` always waits for approval (A6). Oct 9 ruling 2 said compatibility is not removed. The code agrees with Oct 9.
 

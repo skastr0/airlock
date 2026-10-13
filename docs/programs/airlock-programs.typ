@@ -818,7 +818,7 @@
   "Admission owns authority",
   "RUNNABLE",
   "One policy per session: tool grants under shared resource ceilings, a budget, and named flow rules.",
-  source: "src/core/session/ToolPolicy.ts  /  docs/usage.md",
+  source: "packages/airlock/src/session/ToolPolicy.ts  /  docs/usage.md",
 )
 
 #code-block(

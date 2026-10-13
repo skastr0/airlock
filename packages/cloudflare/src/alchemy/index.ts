@@ -10,7 +10,8 @@
  *   })
  *
  * This module is for the deploy script only. It imports Alchemy, which a
- * Worker must not bundle, so it is not part of `@skastr0/airlock/cloudflare`.
+ * Worker must not bundle, so it ships as the `./alchemy` subpath and the
+ * runtime entry point never imports it.
  */
 import * as Cloudflare from "alchemy/Cloudflare"
 

@@ -101,11 +101,11 @@ review. See [docs/changes.md](docs/changes.md).
 
 ## For a host or a cloud
 
-Airlock is a storage-agnostic kernel (`@skastr0/airlock/core`) plus a host
+Airlock is a storage-agnostic kernel (`@skastr0/airlock`) plus a host
 that supplies files, processes and the network. A new host writes the store,
 ledger, dispatcher and tool-host layers and runs the kernel's conformance
-suites. `@skastr0/airlock/cloudflare` runs the same programs inside a Durable
-Object, and `@skastr0/airlock/alchemy` deploys it. See
+suites. `@skastr0/airlock-cloudflare` runs the same programs inside a Durable
+Object, and its `alchemy` subpath deploys it. See
 [ARCHITECTURE.md](ARCHITECTURE.md).
 
 ## Documentation

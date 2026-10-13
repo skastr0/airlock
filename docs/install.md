@@ -11,7 +11,7 @@
 
 | | |
 | --- | --- |
-| operating system | macOS or Linux for the sandboxed CLI. The `@skastr0/airlock/core` and `@skastr0/airlock/cloudflare` libraries install anywhere. |
+| operating system | macOS or Linux for the sandboxed CLI. The `@skastr0/airlock` and `@skastr0/airlock/cloudflare` libraries install anywhere. |
 | runtime | Bun 1.4.0 or newer (`engines.bun`). |
 | architecture | macOS arm64/x64, or glibc Linux arm64/x64; Linux bundles are host builds. |
 | native runtime | macOS Seatbelt, or the probed Bubblewrap/Landlock/seccomp prerequisites in [`linux-v1.md`](linux-v1.md). |
@@ -49,10 +49,15 @@ evidence.
 ## Install from npm
 
 ```sh
-npm install --global @skastr0/airlock
+npm install --global @skastr0/airlock-cli
 airlock --version
 airlock-agent describe
 ```
+
+Airlock ships as three packages: `@skastr0/airlock-cli` holds the `airlock`
+and `airlock-agent` commands; `@skastr0/airlock` is the Effect-only kernel a
+new host builds on; `@skastr0/airlock-cloudflare` runs programs in a Durable
+Object. Only the CLI package needs Bun on the machine.
 
 The npm-installed commands are Bun scripts, not self-contained binaries: they
 need Bun 1.4.0 or newer on `PATH`. For the compiled pair — which embeds its own
@@ -90,7 +95,7 @@ $ bun scripts/prove-core-portable.ts
  "hostGuardsInBundle":false,"emission":{"id":"emi_7e7b41…","state":"committed","status":204}}
 $ bun scripts/prove-cloudflare-portable.ts
 {"proof":"airlock-cloudflare-portable-v1","ok":true,
- "bundleBytes":{"src/cloudflare/index.ts":1054814,
+ "bundleBytes":{"packages/cloudflare/src/index.ts":1054814,
                 "test/cloudflare/worker.ts":1191565,
                 "examples/cloudflare/src/worker.ts":1060913}}
 ```

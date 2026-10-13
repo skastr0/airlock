@@ -12,33 +12,33 @@ file is wrong.
 ## The pipeline
 
 Every run on every host goes through the same four gates
-(`src/core/runner/ProgramRunner.ts`):
+(`packages/airlock/src/runner/ProgramRunner.ts`):
 
 ```
 parse ──▶ check ──▶ review ──▶ run
 ```
 
-- **Parse** (`src/core/language/lexer.ts`, `parser.ts`): source text becomes
+- **Parse** (`packages/airlock/src/language/lexer.ts`, `parser.ts`): source text becomes
   an abstract syntax tree. A lexical error is a `LanguageDiagnostic`.
-- **Check** (`src/core/language/check.ts`): the tree is typed against the
+- **Check** (`packages/airlock/src/language/check.ts`): the tree is typed against the
   granted tool contracts. A program that does not check is `invalid_code`,
   with the line and column and a fixed `fault` word, and nothing runs.
-- **Review** (`src/core/review/`): the checked program is lowered to a
+- **Review** (`packages/airlock/src/review/`): the checked program is lowered to a
   `ReviewedPlan` and measured against the policy's grants, sink policies and
   flow rules. A plan the policy refuses ends the run as `review_refused`,
   with the reasons, and nothing runs.
-- **Run** (`src/core/language/run.ts`): the evaluator executes under the
+- **Run** (`packages/airlock/src/language/run.ts`): the evaluator executes under the
   plan guard. A call the Plan does not describe ends the run as
   `plan_mismatch`.
 
 A fixed list of stop reasons covers every way a run can end
-(`src/core/runner/GuestRunner.ts`); program text never becomes a failure
+(`packages/airlock/src/runner/GuestRunner.ts`); program text never becomes a failure
 message (`test/security-program-runner-fuzz.test.ts`).
 
 ## What the checker computes
 
 For every expression the checker computes a `Fact`
-(`src/core/language/check.ts`):
+(`packages/airlock/src/language/check.ts`):
 
 - **a type**: string, number, boolean, null, duration, a record with known
   fields (which are optional), a bounded list, a union of cases, a nullable
@@ -63,7 +63,7 @@ distinguishes `0` from `-0` because the contracts' exact-value checks do.
 ## Receipts narrow
 
 Every call returns one receipt with `state: "done" | "staged" | "refused"`
-(`src/core/contract/Receipt.ts`). A refused call is a value the program can
+(`packages/airlock/src/contract/Receipt.ts`). A refused call is a value the program can
 read and branch on; running out of budget, a deadline or a host fault still
 ends the run.
 
@@ -75,7 +75,7 @@ on literal equality over unions, on `null` tests, and through `!`, `&&` and
 
 ## Proofs: trusted decoders
 
-A **trusted decoder** (`src/core/contract/Decoder.ts`) is a named, versioned
+A **trusted decoder** (`packages/airlock/src/contract/Decoder.ts`) is a named, versioned
 validator the host supplies. Running a value through one attaches a proof to
 that exact value; a proof survives aliasing and projection and is lost by any
 transformation the checker cannot see. A sink that requires a proof refuses
@@ -85,11 +85,11 @@ runs (`test/core-decoders.test.ts`, `planGuard`'s `proof` failure).
 A decoded value that is not JSON — a date, a rich object — crosses as
 **opaque**: its validated JSON is retained, it can be handed whole to the same
 codec, and it exposes no field or arithmetic operations
-(`src/core/language/check.ts`, the `opaque` kind).
+(`packages/airlock/src/language/check.ts`, the `opaque` kind).
 
 ## Labels and flow
 
-Every value carries an information label (`src/core/labels/Labels.ts`): a
+Every value carries an information label (`packages/airlock/src/labels/Labels.ts`): a
 confidentiality (`public < project < private < secret`) and an integrity
 (`untrusted < project < operator < runtime`), plus the provenance of the
 origins it came from. Labels join conservatively: secrecy rises, integrity
@@ -100,13 +100,13 @@ receive data at or below its confidentiality ceiling and at or above its
 minimum integrity. Data and control roles are tracked separately — the index
 a program selected with stays a control influence on what it selected — and
 at run time each argument arrives with an authenticated **role witness**
-(`src/core/contract/RoleWitness.ts`) that the host issued; a copied, stale or
+(`packages/airlock/src/contract/RoleWitness.ts`) that the host issued; a copied, stale or
 misattributed witness never separates a role
 (`test/security-role-witness.test.ts`).
 
 When a flow is refused, review explains the edge and can suggest the rule
 that would allow it — an `allowWith` suggestion in the report. Installing it
-is always the supervisor's act: a flow rule (`src/core/contract/FlowRules.ts`)
+is always the supervisor's act: a flow rule (`packages/airlock/src/contract/FlowRules.ts`)
 is a named, monotone transition (a confidentiality release or an integrity
 endorsement) written into the policy by a person
 (`test/security-flow-rules.test.ts`).
@@ -114,7 +114,7 @@ endorsement) written into the policy by a person
 ## The Plan a supervisor reviews
 
 Review lowers the checked program into a `ReviewedPlan`
-(`airlock/plan/v1`, `src/core/review/Review.ts`): one node per call site,
+(`airlock/plan/v1`, `packages/airlock/src/review/Review.ts`): one node per call site,
 each with its tool, version, effect class, source offset, maximum occurrences,
 and one envelope per argument — the fixed value when it is constant, its data
 and control dependencies, its label, its required proofs, and its flow
@@ -139,7 +139,7 @@ mismatch ends the run (`test/core-plan-approval.test.ts`,
 
 ## Bounds
 
-A program runs inside limits every host sets (`src/core/runner/Bounds.ts`):
+A program runs inside limits every host sets (`packages/airlock/src/runner/Bounds.ts`):
 source size, steps, nesting depth, value nodes, total string units, loop
 iterations, tool calls, input and output bytes, plan size, and a wall-clock
 deadline that is checked between steps. Each exhausted bound is one fixed
