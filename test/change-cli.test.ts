@@ -20,7 +20,7 @@ const run = (home: string, args: ReadonlyArray<string>, agent = false) => {
   const environment: NodeJS.ProcessEnv = { ...process.env, AIRLOCK_HOME: home }
   delete environment.AIRLOCK_SEAL
   delete environment.AIRLOCK_AGENT_SURFACE
-  return spawnSync("bun", [agent ? "src/agent-cli.ts" : "src/cli.ts", "change", ...args], {
+  return spawnSync("bun", [agent ? "packages/cli/src/agent-cli.ts" : "packages/cli/src/cli.ts", "change", ...args], {
     cwd: repository,
     env: {
       ...environment,
@@ -117,7 +117,7 @@ describe("reviewed change CLI", () => {
     const staged = successful(run(home, ["stage", "--source", source, "--target", target]))
     const execute = promisify(execFile)
     const results = await Promise.all([0, 1, 2].map(() => execute("bun", [
-      "src/cli.ts", "change", "apply", staged.id, "--expect-digest", staged.proposalDigest
+      "packages/cli/src/cli.ts", "change", "apply", staged.id, "--expect-digest", staged.proposalDigest
     ], {
       cwd: repository,
       env: { ...process.env, AIRLOCK_HOME: home, AIRLOCK_SEAL: undefined, AIRLOCK_AGENT_SURFACE: undefined },
@@ -138,12 +138,12 @@ describe("reviewed change CLI", () => {
     const child = spawnSync("bun", ["-e", `
       import { BunServices } from "@effect/platform-bun"
       import { Effect, Layer, ManagedRuntime } from "effect"
-      import * as AirlockHome from "./src/AirlockHome.ts"
-      import { Change, ChangeLive } from "./src/change/Change.ts"
-      import { HoldLayer } from "./src/Hold.ts"
-      import { FileLedgerLive } from "./src/host/FileLedger.ts"
-      import { ExclusiveRename } from "./src/platform/ExclusiveRename.ts"
-      import { ExclusiveRenameTestLive } from "./test/support/ExclusiveRenameTestLive.ts"
+      import * as AirlockHome from "./packages/cli/src/AirlockHome.ts"
+      import { Change, ChangeLive } from "./packages/cli/src/change/Change.ts"
+      import { HoldLayer } from "./packages/cli/src/Hold.ts"
+      import { FileLedgerLive } from "./packages/cli/src/host/FileLedger.ts"
+      import { ExclusiveRename } from "./packages/cli/src/platform/ExclusiveRename.ts"
+      import { ExclusiveRenameTestLive } from "./packages/cli/test/support/ExclusiveRenameTestLive.ts"
       const moves = Layer.effect(ExclusiveRename, Effect.gen(function* () {
         const real = yield* ExclusiveRename
         return ExclusiveRename.of({ moveNoReplace: (source, target) => Effect.gen(function* () {

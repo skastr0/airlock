@@ -1,0 +1,42 @@
+{
+  "name": "@skastr0/airlock-cloudflare",
+  "version": "0.1.0",
+  "description": "Run the Airlock kernel from a Cloudflare Durable Object: the same checked-and-reviewed programs, durable on SQLite, with no loader, no second Worker and nothing that needs a paid plan.",
+  "keywords": [
+    "agents",
+    "code-mode",
+    "cloudflare",
+    "durable-objects",
+    "effect"
+  ],
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./alchemy": "./src/alchemy/index.ts"
+  },
+  "files": [
+    "src"
+  ],
+  "dependencies": {
+    "@skastr0/airlock": "0.1.0",
+    "effect": "4.0.0-rc.115"
+  },
+  "peerDependencies": {
+    "alchemy": ">=2.0.0-beta.79"
+  },
+  "peerDependenciesMeta": {
+    "alchemy": {
+      "optional": true
+    }
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/skastr0/airlock.git",
+    "directory": "packages/cloudflare"
+  },
+  "homepage": "https://github.com/skastr0/airlock#readme",
+  "bugs": {
+    "url": "https://github.com/skastr0/airlock/issues"
+  },
+  "license": "MIT"
+}

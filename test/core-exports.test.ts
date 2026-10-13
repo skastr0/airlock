@@ -1,5 +1,5 @@
-import * as Core from "@skastr0/airlock/core"
-import * as Testing from "@skastr0/airlock/core/testing"
+import * as Core from "@skastr0/airlock"
+import * as Testing from "@skastr0/airlock/testing"
 import { describe, expect, it } from "@effect/vitest"
 import { Effect, Layer, Schema } from "effect"
 
@@ -26,7 +26,7 @@ const kernel = AirlockOutbox.layer.pipe(
   Layer.provide(Core.WebCrypto.layer)
 )
 
-describe("@skastr0/airlock/core", () => {
+describe("@skastr0/airlock", () => {
   it.effect("stages, commits and replays with no host platform layer", () =>
     Effect.gen(function* () {
       const outbox = yield* AirlockOutbox.Outbox

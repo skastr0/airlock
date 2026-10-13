@@ -12,7 +12,7 @@ const fixture = () => {
   return { root, source, target, home }
 }
 const environment = (home: string) => ({ ...process.env, AIRLOCK_HOME: home, AIRLOCK_SEAL: undefined, AIRLOCK_AGENT_SURFACE: undefined })
-const run = (home: string, args: string[], agent = false) => spawnSync("bun", [agent ? "src/agent-cli.ts" : "src/cli.ts", "change", ...args], {
+const run = (home: string, args: string[], agent = false) => spawnSync("bun", [agent ? "packages/cli/src/agent-cli.ts" : "packages/cli/src/cli.ts", "change", ...args], {
   cwd: repository, env: environment(home), encoding: "utf8", timeout: 30_000
 })
 const json = (result: ReturnType<typeof run>) => {
@@ -28,7 +28,7 @@ import errno, json, os, pty, select, signal, sys, time
 data = json.loads(sys.argv[1])
 pid, fd = pty.fork()
 if pid == 0:
-    os.execvp("bun", ["bun", "src/cli.ts", "change", "approve", data["id"]])
+    os.execvp("bun", ["bun", "packages/cli/src/cli.ts", "change", "approve", data["id"]])
 output = bytearray()
 sent = False
 deadline = time.monotonic() + 25

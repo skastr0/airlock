@@ -16,11 +16,11 @@ import { fileURLToPath } from "node:url"
 import {
   LockContenderEvent,
   LockContenderResult
-} from "./fixtures/exclusive-file-lock-contract.ts"
+} from "../packages/cli/test/fixtures/exclusive-file-lock-contract.ts"
 
 const contenderFixture = fileURLToPath(
   new URL(
-    "./fixtures/exclusive-file-lock-contender.ts",
+    "../packages/cli/test/fixtures/exclusive-file-lock-contender.ts",
     import.meta.url
   )
 )

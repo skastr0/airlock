@@ -13,5 +13,11 @@
     "allowImportingTsExtensions": true,
     "verbatimModuleSyntax": true
   },
-  "include": ["src", "test", "examples"]
+  "paths": {
+    "@skastr0/airlock": ["./packages/airlock/src/index.ts"],
+    "@skastr0/airlock/testing": ["./packages/airlock/src/testing/index.ts"],
+    "@skastr0/airlock-cloudflare": ["./packages/cloudflare/src/index.ts"],
+    "@skastr0/airlock-cloudflare/alchemy": ["./packages/cloudflare/src/alchemy/index.ts"]
+  },
+  "include": ["packages/*/src", "packages/*/test", "test", "examples"]
 }

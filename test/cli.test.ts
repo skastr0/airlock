@@ -28,7 +28,7 @@ const cli = (
     writeFileSync(file, typeof options.policy === "string" ? options.policy : JSON.stringify(options.policy))
     environment["AIRLOCK_POLICY_FILE"] = file
   }
-  return spawnSync("bun", [join(repository, "src", `${options.entry ?? "cli"}.ts`), ...args], {
+  return spawnSync("bun", [join(repository, "packages", "cli", "src", `${options.entry ?? "cli"}.ts`), ...args], {
     cwd: at.workspace,
     env: environment,
     encoding: "utf8",

@@ -28,9 +28,9 @@ import {
 import { arch, release, tmpdir } from "node:os"
 import { join } from "node:path"
 import { fileURLToPath } from "node:url"
-import { ExclusiveRename } from "../src/platform/ExclusiveRename.ts"
-import { makeExclusiveFileLock } from "../src/platform/ExclusiveFileLock.ts"
-import { LinuxExclusiveRenameLive } from "../src/platform/linux/LinuxExclusiveRename.ts"
+import { ExclusiveRename } from "../packages/cli/src/platform/ExclusiveRename.ts"
+import { makeExclusiveFileLock } from "../packages/cli/src/platform/ExclusiveFileLock.ts"
+import { LinuxExclusiveRenameLive } from "../packages/cli/src/platform/linux/LinuxExclusiveRename.ts"
 import {
   LockContenderEvent,
   LockContenderResult

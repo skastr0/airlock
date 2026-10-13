@@ -4,19 +4,48 @@
   "workspaces": {
     "": {
       "name": "@skastr0/airlock",
-      "dependencies": {
-        "@effect/platform-bun": "4.0.0-rc.115",
-        "effect": "4.0.0-rc.115",
-      },
       "devDependencies": {
+        "@effect/platform-bun": "4.0.0-rc.115",
         "@effect/platform-node": "4.0.0-rc.115",
         "@effect/vitest": "4.0.0-rc.115",
+        "@skastr0/airlock": "workspace:*",
+        "@skastr0/airlock-cli": "workspace:*",
+        "@skastr0/airlock-cloudflare": "workspace:*",
         "@types/bun": "^1.4.2",
         "alchemy": "2.0.0-beta.79",
+        "effect": "4.0.0-rc.115",
         "esbuild": "0.25.12",
         "miniflare": "4.20260708.1",
         "typescript": "^6.0.3",
         "vitest": "^5.0.1",
+      },
+    },
+    "packages/airlock": {
+      "name": "@skastr0/airlock",
+      "version": "0.1.0",
+      "dependencies": {
+        "effect": "4.0.0-rc.115",
+      },
+    },
+    "packages/cli": {
+      "name": "@skastr0/airlock-cli",
+      "version": "0.1.0",
+      "bin": {
+        "airlock": "src/cli.ts",
+        "airlock-agent": "src/agent-cli.ts",
+      },
+      "dependencies": {
+        "@effect/platform-bun": "4.0.0-rc.115",
+        "@skastr0/airlock": "0.1.0",
+        "effect": "4.0.0-rc.115",
+      },
+    },
+    "packages/cloudflare": {
+      "name": "@skastr0/airlock-cloudflare",
+      "version": "0.1.0",
+      "dependencies": {
+        "@skastr0/airlock": "0.1.0",
+        "effect": "4.0.0-rc.115",
       },
       "peerDependencies": {
         "alchemy": ">=2.0.0-beta.79",
@@ -28,6 +57,7 @@
   },
   "overrides": {
     "@effect/platform-bun": "4.0.0-rc.115",
+    "@effect/platform-node": "4.0.0-rc.115",
     "@effect/platform-node-shared": "4.0.0-rc.115",
     "@effect/vitest": "4.0.0-rc.115",
     "effect": "4.0.0-rc.115",
@@ -386,6 +416,12 @@
     "@rolldown/pluginutils": ["@rolldown/pluginutils@1.0.1", "", {}, "sha512-2j9bGt5Jh8hj+vPtgzPtl72j0yRxHAyumoo6TNfAjsLB04UtpSvPbPcDcBMxz7n+9CYB0c1GxQFxYRg2jimqGw=="],
 
     "@sindresorhus/is": ["@sindresorhus/is@7.2.0", "", {}, "sha512-P1Cz1dWaFfR4IR+U13mqqiGsLFf1KbayybWwdd2vfctdV6hDpUkgCY0nKOLLTMSoRd/jJNjtbqzf13K8DCCXQw=="],
+
+    "@skastr0/airlock": ["@skastr0/airlock@workspace:packages/airlock"],
+
+    "@skastr0/airlock-cli": ["@skastr0/airlock-cli@workspace:packages/cli"],
+
+    "@skastr0/airlock-cloudflare": ["@skastr0/airlock-cloudflare@workspace:packages/cloudflare"],
 
     "@smithy/core": ["@smithy/core@3.35.2", "", { "dependencies": { "@smithy/types": "^4.19.0", "tslib": "^2.6.2" } }, "sha512-ejTukBuP/Pg3t9N8Ux+0zKsXeHWm7p6W3HbXFOyltKasSxZwCFmvTut7kBdZSCF3m9y1bXXyVu6p2xuMFcsTyQ=="],
 

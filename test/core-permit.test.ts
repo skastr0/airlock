@@ -7,15 +7,18 @@ import { describe, expect, it } from "vitest"
  * construction properties of the source: a second mint site, an exported
  * constructor, or a second handler call fails here before any behaviour does.
  */
-const root = resolve(import.meta.dirname, "..", "src")
-const kernel = "core/outbox/Outbox.ts"
+const packages = ["airlock", "cli", "cloudflare"]
+const kernel = join("airlock", "src", "outbox", "Outbox.ts")
 
 const withoutComments = (source: string) =>
   source.replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:])\/\/[^\n]*/g, "$1")
 
-const sources = readdirSync(root, { recursive: true, encoding: "utf8" })
-  .filter((file) => file.endsWith(".ts"))
-  .map((file) => ({ file, source: withoutComments(readFileSync(join(root, file), "utf8")) }))
+const sources = packages.flatMap((pkg) => {
+  const root = resolve(import.meta.dirname, "..", "packages", pkg, "src")
+  return readdirSync(root, { recursive: true, encoding: "utf8" })
+    .filter((file) => file.endsWith(".ts"))
+    .map((file) => ({ file: join(pkg, "src", file), source: withoutComments(readFileSync(join(root, file), "utf8")) }))
+})
 
 const occurrences = (pattern: RegExp) =>
   sources.flatMap(({ file, source }) => [...source.matchAll(pattern)].map(() => file))
@@ -78,7 +81,7 @@ describe("core: the dispatch permit has one origin", () => {
     expect(capturePath).toContain('checked.success.execution.version !== kind.version')
     expect(calls[1]).toBeGreaterThan(capture)
     expect(calls[1]).toBeLessThan(cancel)
-    const admission = sources.find(({ file }) => file === "core/outbox/Capture.ts")!.source
+    const admission = sources.find(({ file }) => file === "airlock/src/outbox/Capture.ts")!.source
     expect(admission).toContain('effect: Schema.Literal("capture")')
     expect(admission).toContain('when: Schema.Literal("now")')
   })

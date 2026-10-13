@@ -1,0 +1,82 @@
+import { describe, expect, it } from "@effect/vitest"
+import { Effect, Layer, Result } from "effect"
+import { defineOutbox, HttpIntent, IdempotencyKey, Ledger, OutboxStore, WebCrypto } from "../src/index.ts"
+import { makeMemoryLedgerState, makeMemoryOutboxState, memoryLedger, memoryOutboxStore } from "../src/testing/index.ts"
+
+const http = defineOutbox({ http: HttpIntent })
+const request = (parameter: string) => ({
+  url: `https://account.blob.core.windows.net/container/blob?sv=2026-04-06&sp=r&${parameter}=sas-canary-secret`,
+  method: "GET" as const, headers: {}
+})
+
+describe("security: standard HTTP credential aliases", () => {
+  it.each(["sig", "SIG", "%73ig"])("refuses a SAS signature under %s without repeating its value", (parameter) => {
+    const result = HttpIntent.summarize(request(parameter))
+    expect(Result.isFailure(result)).toBe(true)
+    expect(JSON.stringify(result)).not.toContain("sas-canary-secret")
+  })
+
+  it.effect("stores no SAS signature in the sealed dispatch or ledger", () => Effect.gen(function* () {
+    const storeState = makeMemoryOutboxState()
+    const ledgerState = makeMemoryLedgerState()
+    const outcome = yield* Effect.gen(function* () {
+      const outbox = yield* http.Outbox
+      return yield* Effect.result(outbox.stage({
+        key: IdempotencyKey.make("sas-1"), intent: { kind: "http", dispatch: request("sig") }, holdMillis: 0
+      }))
+    }).pipe(Effect.provide(http.layer.pipe(Layer.provideMerge(Layer.mergeAll(
+      memoryOutboxStore(storeState, ledgerState), memoryLedger(ledgerState), WebCrypto.layer,
+      Layer.succeed(http.Dispatcher, { http: () => Effect.die("staging must not dispatch") })
+    )))))
+    const records = yield* Effect.flatMap(OutboxStore, (store) => store.list()).pipe(Effect.provide(memoryOutboxStore(storeState, ledgerState)))
+    const entries = yield* Effect.flatMap(Ledger, (ledger) => ledger.entries).pipe(Effect.provide(memoryLedger(ledgerState)))
+    expect({
+      state: outcome._tag, records: records.length, entries: entries.length,
+      dispatches: storeState.dispatches.size,
+      storesSignature: [...storeState.dispatches.values()].some((sealed) => sealed.canonical.includes("sas-canary-secret"))
+    }).toEqual({ state: "Failure", records: 0, entries: 0, dispatches: 0, storesSignature: false })
+  }))
+
+  it("accepts unrelated names containing short credential aliases", () => {
+    const result = HttpIntent.summarize({
+      url: "https://example.test/?design=one&signal=two&assign=three&codepage=utf8&client_assertion_type=public", method: "GET", headers: {}
+    })
+    expect(Result.isSuccess(result)).toBe(true)
+  })
+
+  it.each(["pwd", "jwt", "bearer", "assertion", "client_assertion"])(
+    "refuses the well-known credential alias %s", (parameter) => {
+      expect(Result.isFailure(HttpIntent.summarize(request(parameter)))).toBe(true)
+    }
+  )
+
+  it.each(["pass", "sas", "code"])("keeps the ambiguous data name %s usable", (parameter) => {
+    expect(Result.isSuccess(HttpIntent.summarize(request(parameter)))).toBe(true)
+  })
+
+  it.each(["code&state=s", "cOdE&StAtE=s", "%63ode&%73tate=s"])(
+    "refuses an OAuth callback code after decoding (%s)", (parameters) => {
+      const [code, state] = parameters.split("&")
+      const dispatch = request(code!)
+      const result = HttpIntent.summarize({ ...dispatch, url: `${dispatch.url}&${state}` })
+      expect(Result.isFailure(result)).toBe(true)
+      expect(JSON.stringify(result)).not.toContain("sas-canary-secret")
+    }
+  )
+
+  it.each([
+    "X-Amz-Signature", "X-Amz-Credential", "X-Amz-Security-Token", "X-Goog-Signature",
+    "signature", "api_key", "apikey", "access_token", "authorization", "password", "session", "cookie"
+  ])("matches percent-decoded mixed-case query names once (%s)", (name) => {
+    const mixed = [...name].map((letter, index) => index % 2 === 0 ? letter.toUpperCase() : letter.toLowerCase()).join("")
+    const encoded = [...mixed].map((letter) => `%${letter.charCodeAt(0).toString(16)}`).join("")
+    const result = HttpIntent.summarize(request(encoded))
+    expect(Result.isFailure(result)).toBe(true)
+    expect(JSON.stringify(result)).not.toContain("sas-canary-secret")
+  })
+
+  it("does not reinterpret double-encoded text as a credential parameter", () => {
+    // The server sees the literal name `%73ig`, not `sig`, after one URL decode.
+    expect(Result.isSuccess(HttpIntent.summarize(request("%2573ig")))).toBe(true)
+  })
+})

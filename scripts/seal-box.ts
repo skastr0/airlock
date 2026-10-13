@@ -43,10 +43,10 @@ import {
   sep
 } from "node:path"
 import { Effect, Schema } from "effect"
-import { BoxGrant, decodeBoxGrant } from "../src/core/admission/BoxGrant.ts"
-import { toolGrant } from "../src/core/admission/ToolGrant.ts"
-import { ToolPolicy, toolPolicy } from "../src/core/session/ToolPolicy.ts"
-import { FileGlob, FileInspect, FileList, FileRead, FileStat } from "../src/native/index.ts"
+import { BoxGrant, decodeBoxGrant } from "@skastr0/airlock"
+import { toolGrant } from "@skastr0/airlock"
+import { ToolPolicy, toolPolicy } from "@skastr0/airlock"
+import { FileGlob, FileInspect, FileList, FileRead, FileStat } from "../packages/cli/src/native/index.ts"
 import {
   BOX_GRANT_FILE,
   BOX_GRANT_SIGNATURE_FILE,
@@ -54,7 +54,7 @@ import {
   OPERATOR_PUBLIC_KEY_FILE,
   boxGrantSigningPayload,
   verifySealAtPath
-} from "../src/seal/index.ts"
+} from "../packages/cli/src/seal/index.ts"
 
 const usage = `usage: bun scripts/seal-box.ts <command> [options]
 

@@ -27,7 +27,6 @@ const bundle = (entry: string) =>
     // The one module the Workers runtime provides.
     external: ["cloudflare:workers"],
     // The example imports the package by name; here that is this repository.
-    alias: { "@skastr0/airlock/cloudflare": resolve(repository, "src/cloudflare/index.ts") },
     logLevel: "silent"
   }).catch((failure: {
     readonly errors?: ReadonlyArray<{ readonly text: string; readonly location?: { readonly file: string } | null }>
@@ -41,7 +40,7 @@ const bundle = (entry: string) =>
 
 const hostReference = /\b(?:require\s*\(|process\.(?:env|versions|platform|argv)|Bun\.)/
 const sizes: Record<string, number> = {}
-for (const entry of ["src/cloudflare/index.ts", "test/cloudflare/worker.ts", "examples/cloudflare/src/worker.ts"]) {
+for (const entry of ["packages/cloudflare/src/index.ts", "packages/cloudflare/test/cloudflare/worker.ts", "examples/cloudflare/src/worker.ts"]) {
   const source = (await bundle(entry)).outputFiles[0]!.text
   if (hostReference.test(source)) {
     console.error(`${entry} bundles a reference to a host global`)

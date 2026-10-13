@@ -14,12 +14,12 @@ import {
 } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { Cell, CellLive, CellRequest } from "../src/cell/index.ts"
-import { MacosPlatformLive } from "../src/platform/macos/index.ts"
+import { Cell, CellLive, CellRequest } from "../packages/cli/src/cell/index.ts"
+import { MacosPlatformLive } from "../packages/cli/src/platform/macos/index.ts"
 import {
   ProcessRequest,
   ProcessRunnerLive
-} from "../src/process/Process.ts"
+} from "../packages/cli/src/process/Process.ts"
 
 const CellProofLive = CellLive.pipe(
   Layer.provide(Layer.merge(MacosPlatformLive, ProcessRunnerLive))

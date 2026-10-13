@@ -10,9 +10,9 @@ import { Effect, Layer } from "effect"
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { Cell, CellLive, CellRequest } from "../src/cell/index.ts"
-import { MacosPlatformLive } from "../src/platform/macos/index.ts"
-import { ProcessRequest, ProcessRunnerLive } from "../src/process/Process.ts"
+import { Cell, CellLive, CellRequest } from "../packages/cli/src/cell/index.ts"
+import { MacosPlatformLive } from "../packages/cli/src/platform/macos/index.ts"
+import { ProcessRequest, ProcessRunnerLive } from "../packages/cli/src/process/Process.ts"
 
 const CellTestLive = CellLive.pipe(Layer.provide(Layer.merge(MacosPlatformLive, ProcessRunnerLive)))
 

@@ -5,13 +5,13 @@ import { describe, expect, it } from "vitest"
 /**
  * The kernel boundary, enforced by construction.
  *
- * `src/core` is the storage-agnostic kernel. It may depend on `effect` and on
- * itself, and on nothing that names a host: no Node or Bun module, no platform
- * package, no host global, and no file outside `src/core`. A host adapter is
- * a Layer that lives outside this directory.
+ * `packages/airlock/src` is the storage-agnostic kernel. It may depend on
+ * `effect` and on itself, and on nothing that names a host: no Node or Bun
+ * module, no platform package, no host global, and no file outside the kernel
+ * package. A host adapter is a Layer that lives outside it.
  */
 const repository = resolve(import.meta.dirname, "..")
-const coreRoot = join(repository, "src", "core")
+const coreRoot = join(repository, "packages", "airlock", "src")
 
 const coreFiles = (existsSync(coreRoot)
   ? readdirSync(coreRoot, { recursive: true, encoding: "utf8" })
@@ -55,13 +55,13 @@ describe("core kernel boundary", () => {
     expect(existsSync(join(coreRoot, "testing", "index.ts"))).toBe(true)
   })
 
-  it("imports only effect and files inside src/core", () => {
+  it("imports only effect and files inside the kernel package", () => {
     const violations = coreFiles.flatMap(({ file, path, source }) =>
       moduleSpecifiers(source).flatMap((specifier) => {
         if (isRelative(specifier)) {
           const target = resolve(dirname(path), specifier)
           return relative(coreRoot, target).startsWith("..")
-            ? [{ file, specifier, reason: "leaves src/core" }]
+            ? [{ file, specifier, reason: "leaves the kernel package" }]
             : []
         }
         return allowedPackage(specifier)
@@ -84,13 +84,13 @@ describe("core kernel boundary", () => {
     expect(violations).toEqual([])
   })
 
-  it("is exported as ./core and ./core/testing", () => {
+  it("is exported as . and ./testing of the kernel package", () => {
     const manifest = JSON.parse(
-      readFileSync(join(repository, "package.json"), "utf8")
+      readFileSync(join(repository, "packages", "airlock", "package.json"), "utf8")
     ) as { readonly exports?: Record<string, string> }
-    expect(manifest.exports?.["./core"]).toBe("./src/core/index.ts")
-    expect(manifest.exports?.["./core/testing"]).toBe(
-      "./src/core/testing/index.ts"
+    expect(manifest.exports?.["."]).toBe("./src/index.ts")
+    expect(manifest.exports?.["./testing"]).toBe(
+      "./src/testing/index.ts"
     )
   })
 })

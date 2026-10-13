@@ -1,0 +1,35 @@
+{
+  "name": "@skastr0/airlock",
+  "version": "0.1.0",
+  "description": "The Airlock kernel: a small typed language for agent code mode whose programs are checked and reviewed before they run, its outbox, Hold, receipts and host ports. Storage-agnostic and portable: it names no file, process or operating system.",
+  "keywords": [
+    "agents",
+    "code-mode",
+    "approval",
+    "human-in-the-loop",
+    "effect",
+    "outbox",
+    "receipts"
+  ],
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./testing": "./src/testing/index.ts"
+  },
+  "files": [
+    "src"
+  ],
+  "dependencies": {
+    "effect": "4.0.0-rc.115"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/skastr0/airlock.git",
+    "directory": "packages/airlock"
+  },
+  "homepage": "https://github.com/skastr0/airlock#readme",
+  "bugs": {
+    "url": "https://github.com/skastr0/airlock/issues"
+  },
+  "license": "MIT"
+}

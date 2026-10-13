@@ -1,4 +1,4 @@
-import { airlockBindings, airlockCompatibility } from "@skastr0/airlock/alchemy"
+import { airlockBindings, airlockCompatibility } from "@skastr0/airlock-cloudflare/alchemy"
 import * as Alchemy from "alchemy"
 import * as Cloudflare from "alchemy/Cloudflare"
 import { Config, Effect, Redacted } from "effect"

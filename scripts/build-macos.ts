@@ -8,7 +8,7 @@
 import { createHash } from "node:crypto"
 import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs"
 import { basename, resolve } from "node:path"
-import { AIRLOCK_VERSION } from "../src/version.ts"
+import { AIRLOCK_VERSION } from "../packages/cli/src/version.ts"
 
 const usage = `usage: bun scripts/build-macos.ts [--out <directory>] [--target <bun-target>]
 
@@ -53,8 +53,8 @@ if (target === undefined || !/^bun-darwin-(arm64|x64)$/.test(target)) {
   )
 }
 const executables = [
-  { name: "airlock", source: "./src/cli.ts", path: resolve(out, "airlock") },
-  { name: "airlock-agent", source: "./src/agent-cli.ts", path: resolve(out, "airlock-agent") }
+  { name: "airlock", source: "./packages/cli/src/cli.ts", path: resolve(out, "airlock") },
+  { name: "airlock-agent", source: "./packages/cli/src/agent-cli.ts", path: resolve(out, "airlock-agent") }
 ] as const
 
 const outputs = [

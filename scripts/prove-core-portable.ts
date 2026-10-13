@@ -17,8 +17,8 @@ const repository = resolve(import.meta.dir, "..")
 
 const entry = `
 import { Effect, Layer, Schema } from "effect"
-import * as Core from "./src/core/index.ts"
-import * as Testing from "./src/core/testing/index.ts"
+import * as Core from "./packages/airlock/src/index.ts"
+import * as Testing from "./packages/airlock/src/testing/index.ts"
 
 const AirlockOutbox = Core.defineOutbox({ http: Core.HttpIntent })
 const handlers = Layer.succeed(AirlockOutbox.Dispatcher, AirlockOutbox.Dispatcher.of({

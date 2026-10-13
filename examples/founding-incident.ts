@@ -15,10 +15,10 @@
 
 import { Console, Effect, FileSystem, Layer, Path } from "effect"
 import { BunServices, BunRuntime } from "@effect/platform-bun"
-import * as AirlockHome from "../src/AirlockHome.ts"
-import { Hold } from "../src/Hold.ts"
-import { HoldLive } from "../src/HoldLive.ts"
-import { FileLedgerLive } from "../src/host/FileLedger.ts"
+import * as AirlockHome from "../packages/cli/src/AirlockHome.ts"
+import { Hold } from "../packages/cli/src/Hold.ts"
+import { HoldLive } from "../packages/cli/src/HoldLive.ts"
+import { FileLedgerLive } from "../packages/cli/src/host/FileLedger.ts"
 
 const original = "one canvas, three boxes, hours of real work"
 

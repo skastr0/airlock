@@ -15,8 +15,8 @@ const script = (await build({
     resolveDir: resolve(import.meta.dirname, ".."),
     contents: `
       import { Effect, Schema } from "effect";
-      import { defineToolContract, GuestRunner, programRunner } from "./src/core/index.ts";
-      import { reviewContext } from "./test/support/ReviewContext.ts";
+      import { defineToolContract, GuestRunner, programRunner } from "./packages/airlock/src/index.ts";
+      import { reviewContext } from "./packages/airlock/test/support/ReviewContext.ts";
       let reached = 0;
       // Exact shapes: an optional "constructor" key would be satisfied by the prototype's own.
       const Echoed = Schema.Union([

@@ -15,7 +15,7 @@ import { join, resolve } from "node:path"
 import { Schema } from "effect"
 
 const repository = resolve(import.meta.dirname, "..")
-const helperSource = join(repository, "test", "fixtures", "hostile-macos-helper.c")
+const helperSource = join(repository, "packages", "cli", "test", "fixtures", "hostile-macos-helper.c")
 const supported =
   process.platform === "darwin" &&
   existsSync("/usr/bin/sandbox-exec") &&
@@ -99,7 +99,7 @@ const environmentFor = (fixture: Fixture) => {
 }
 
 const runAgent = (args: ReadonlyArray<string>, fixture: Fixture) =>
-  spawnSync("bun", ["src/agent-cli.ts", ...args], {
+  spawnSync("bun", ["packages/cli/src/agent-cli.ts", ...args], {
     cwd: repository,
     env: environmentFor(fixture),
     encoding: "utf8",
@@ -108,7 +108,7 @@ const runAgent = (args: ReadonlyArray<string>, fixture: Fixture) =>
 
 const runAgentAsync = (args: ReadonlyArray<string>, fixture: Fixture) =>
   new Promise<{ readonly status: number | null; readonly stdout: string; readonly stderr: string }>((resolveRun, rejectRun) => {
-    const child = spawn("bun", ["src/agent-cli.ts", ...args], {
+    const child = spawn("bun", ["packages/cli/src/agent-cli.ts", ...args], {
       cwd: repository,
       env: environmentFor(fixture),
       stdio: ["ignore", "pipe", "pipe"]

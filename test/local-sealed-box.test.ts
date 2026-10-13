@@ -354,7 +354,7 @@ describe.skipIf(!isNonRootDarwin)("same-user local sealed generation", () => {
 
   it("keeps a source loader outside the compiled sealed identity", () => {
     const sourceHome = join(root, "source-mode-home")
-    const refused = spawnSync("bun", ["run", "src/cli.ts", "doctor"], {
+    const refused = spawnSync("bun", ["run", "packages/cli/src/cli.ts", "doctor"], {
       cwd: repository,
       encoding: "utf8",
       env: cleanEnvironment({

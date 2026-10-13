@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFi
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
 import { describe, expect, it } from "vitest"
-import { nativeContainmentSupported } from "./support/NativeContainmentTest.ts"
+import { nativeContainmentSupported } from "../packages/cli/test/support/NativeContainmentTest.ts"
 
 const repository = resolve(import.meta.dirname, "..")
 const supported = nativeContainmentSupported && existsSync("/usr/bin/touch") && existsSync("/bin/rm")
@@ -28,7 +28,7 @@ const fixture = (executables: ReadonlyArray<string>): Fixture => {
 const invoke = (entry: "cli" | "agent-cli", args: ReadonlyArray<string>, at: Fixture) => {
   const environment: Record<string, string | undefined> = { ...process.env, AIRLOCK_HOME: at.home, AIRLOCK_POLICY_FILE: at.policy }
   delete environment["AIRLOCK_SEAL"]
-  return spawnSync("bun", [`src/${entry}.ts`, ...args], { cwd: repository, env: environment, encoding: "utf8", timeout: 30_000 })
+  return spawnSync("bun", [`packages/cli/src/${entry}.ts`, ...args], { cwd: repository, env: environment, encoding: "utf8", timeout: 30_000 })
 }
 
 /** Runs one process from the agent's binary and returns its done receipt. */

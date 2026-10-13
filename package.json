@@ -1,67 +1,14 @@
 {
-  "name": "@skastr0/airlock",
+  "name": "airlock",
   "version": "0.1.0",
-  "description": "A small typed language for agent code mode: every program is reviewed before it runs, and nothing leaves without a person's approval. Runs from a local CLI or a Cloudflare Durable Object.",
-  "keywords": [
-    "agents",
-    "code-mode",
-    "sandbox",
-    "approval",
-    "human-in-the-loop",
-    "effect",
-    "cloudflare",
-    "durable-objects",
-    "bun"
-  ],
+  "private": true,
   "type": "module",
   "packageManager": "bun@1.4.2",
-  "repository": {
-    "type": "git",
-    "url": "git+https://github.com/skastr0/airlock.git"
-  },
-  "homepage": "https://github.com/skastr0/airlock#readme",
-  "bugs": {
-    "url": "https://github.com/skastr0/airlock/issues"
-  },
-  "bin": {
-    "airlock": "src/cli.ts",
-    "airlock-agent": "src/agent-cli.ts"
-  },
-  "exports": {
-    "./core": "./src/core/index.ts",
-    "./core/testing": "./src/core/testing/index.ts",
-    "./cloudflare": "./src/cloudflare/index.ts",
-    "./alchemy": "./src/alchemy/index.ts",
-    "./package.json": "./package.json"
-  },
-  "files": [
-    "src",
-    "examples",
-    "scripts/build-macos.ts",
-    "scripts/build-linux.ts",
-    "scripts/build-linux-launcher.sh",
-    "scripts/build-box.ts",
-    "scripts/seal-box.ts",
-    "scripts/prove-core-portable.ts",
-    "scripts/prove-cloudflare-portable.ts",
-    "scripts/prove-sealed-box-macos.sh",
-    "scripts/install-macos.sh",
-    "scripts/uninstall-macos.sh",
-    "scripts/install-linux.sh",
-    "scripts/uninstall-linux.sh",
-    "ARCHITECTURE.md",
-    "CHANGELOG.md",
-    "README.md",
-    "LICENSE"
+  "workspaces": [
+    "packages/*"
   ],
-  "engines": {
-    "bun": ">=1.4.0"
-  },
-  "publishConfig": {
-    "access": "public"
-  },
   "scripts": {
-    "dev": "bun run ./src/cli.ts",
+    "dev": "bun run ./packages/cli/src/cli.ts",
     "build:macos": "bun scripts/build-macos.ts",
     "build:linux": "bun scripts/build-linux.ts",
     "build:linux-launcher": "sh scripts/build-linux-launcher.sh",
@@ -78,31 +25,28 @@
     "prove:cloudflare": "bun scripts/prove-cloudflare-portable.ts",
     "verify": "bun run typecheck && bun run test && bun run test:bun && bun run prove:core && bun run prove:cloudflare"
   },
-  "dependencies": {
-    "@effect/platform-bun": "4.0.0-rc.115",
-    "effect": "4.0.0-rc.115"
-  },
-  "peerDependencies": {
-    "alchemy": ">=2.0.0-beta.79"
-  },
-  "peerDependenciesMeta": {
-    "alchemy": {
-      "optional": true
-    }
-  },
   "devDependencies": {
+    "@effect/platform-bun": "4.0.0-rc.115",
     "@effect/platform-node": "4.0.0-rc.115",
     "@effect/vitest": "4.0.0-rc.115",
+    "@skastr0/airlock": "workspace:*",
+    "@skastr0/airlock-cli": "workspace:*",
+    "@skastr0/airlock-cloudflare": "workspace:*",
     "@types/bun": "^1.4.2",
     "alchemy": "2.0.0-beta.79",
+    "effect": "4.0.0-rc.115",
     "esbuild": "0.25.12",
     "miniflare": "4.20260708.1",
     "typescript": "^6.0.3",
     "vitest": "^5.0.1"
   },
+  "engines": {
+    "bun": ">=1.4.0"
+  },
   "overrides": {
     "@effect/platform-bun": "4.0.0-rc.115",
     "@effect/platform-node-shared": "4.0.0-rc.115",
+    "@effect/platform-node": "4.0.0-rc.115",
     "@effect/vitest": "4.0.0-rc.115",
     "effect": "4.0.0-rc.115"
   },

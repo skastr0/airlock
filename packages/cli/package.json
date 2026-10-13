@@ -1,0 +1,41 @@
+{
+  "name": "@skastr0/airlock-cli",
+  "version": "0.1.0",
+  "description": "The Airlock command pair: `airlock` for the person who decides, `airlock-agent` for the agent that may only run reviewed programs. Runs `.air` programs against the local filesystem host inside a native sandbox.",
+  "keywords": [
+    "agents",
+    "code-mode",
+    "sandbox",
+    "approval",
+    "human-in-the-loop",
+    "cli",
+    "effect",
+    "bun"
+  ],
+  "type": "module",
+  "bin": {
+    "airlock": "src/cli.ts",
+    "airlock-agent": "src/agent-cli.ts"
+  },
+  "files": [
+    "src"
+  ],
+  "dependencies": {
+    "@effect/platform-bun": "4.0.0-rc.115",
+    "@skastr0/airlock": "0.1.0",
+    "effect": "4.0.0-rc.115"
+  },
+  "engines": {
+    "bun": ">=1.4.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/skastr0/airlock.git",
+    "directory": "packages/cli"
+  },
+  "homepage": "https://github.com/skastr0/airlock#readme",
+  "bugs": {
+    "url": "https://github.com/skastr0/airlock/issues"
+  },
+  "license": "MIT"
+}

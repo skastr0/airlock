@@ -8,7 +8,7 @@
  * `alchemy.run.ts` deploys with, so what runs here is what would be deployed.
  * This file is tooling for the example, not part of what a user writes.
  */
-import { airlockBindings, airlockCompatibility } from "@skastr0/airlock/alchemy"
+import { airlockBindings, airlockCompatibility } from "@skastr0/airlock-cloudflare/alchemy"
 import { build } from "esbuild"
 import { Miniflare } from "miniflare"
 import { join, resolve } from "node:path"
@@ -27,7 +27,7 @@ export const startLocal = async (options: { readonly port?: number } = {}): Prom
     conditions: ["worker", "browser", "import"],
     target: "es2022",
     // The example imports the package by name; inside this repository that is this file.
-    alias: { "@skastr0/airlock/cloudflare": join(repository, "src", "cloudflare", "index.ts") },
+    alias: { "@skastr0/airlock-cloudflare": join(repository, "packages", "cloudflare", "src", "index.ts"), "@skastr0/airlock": join(repository, "packages", "airlock", "src", "index.ts") },
     external: ["cloudflare:workers"],
     logLevel: "silent"
   })).outputFiles[0]!.text

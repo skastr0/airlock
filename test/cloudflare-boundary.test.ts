@@ -3,17 +3,23 @@ import { dirname, join, relative, resolve } from "node:path"
 import { describe, expect, it } from "vitest"
 
 /**
- * The cloud adapters' boundary, enforced by construction. `src/cloudflare` may
- * depend on `effect`, on the kernel, on itself, and on `cloudflare:workers`. It names no host: no Node
- * or Bun module, no platform package, no host global, and nothing under
- * `src/host` or anywhere else in the repository.
+ * The cloud adapters' boundary, enforced by construction. `packages/cloudflare/src`
+ * may depend on `effect`, on the kernel package, on itself, and on
+ * `cloudflare:workers`. It names no host: no Node or Bun module, no platform
+ * package, no host global, and nothing under the file host or anywhere else in
+ * the repository.
  */
 const repository = resolve(import.meta.dirname, "..")
-const cloudRoot = join(repository, "src", "cloudflare")
-const coreRoot = join(repository, "src", "core")
+const cloudRoot = join(repository, "packages", "cloudflare", "src")
+const coreRoot = join(repository, "packages", "airlock", "src")
 
+// The runtime boundary covers the adapter itself. `src/alchemy` is the
+// `./alchemy` subpath: recipe helpers that run under Node with `alchemy run`,
+// never inside a Worker, so the alchemy package may appear there and the
+// boundary does not judge it.
 const files = readdirSync(cloudRoot, { recursive: true, encoding: "utf8" })
   .filter((file) => file.endsWith(".ts"))
+  .filter((file) => !file.startsWith("alchemy/"))
   .map((file) => ({ file, path: join(cloudRoot, file), source: readFileSync(join(cloudRoot, file), "utf8") }))
 
 const code = (source: string) =>
@@ -42,11 +48,12 @@ describe("cloud adapter boundary", () => {
           const target = resolve(dirname(path), specifier)
           return inside(cloudRoot, target) || inside(coreRoot, target)
             ? []
-            : [{ file, specifier, reason: "leaves src/cloudflare and src/core" }]
+            : [{ file, specifier, reason: "leaves packages/cloudflare/src and packages/airlock/src" }]
         }
         // `cloudflare:workers` is the one module the Workers runtime itself
-        // provides: the bases for RPC objects and Durable Objects.
-        return specifier === "effect" || specifier.startsWith("effect/") || specifier === "cloudflare:workers"
+        // provides: the bases for RPC objects and Durable Objects. The kernel
+        // enters only as its published package name.
+        return specifier === "effect" || specifier.startsWith("effect/") || specifier === "cloudflare:workers" || specifier === "@skastr0/airlock"
           ? []
           : [{ file, specifier, reason: "not effect or the Workers runtime module" }]
       })

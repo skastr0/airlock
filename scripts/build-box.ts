@@ -62,7 +62,7 @@ const command = [
   "--define", `AIRLOCK_OPERATOR_KEY_SHA256=${JSON.stringify(digest)}`,
   "--define", `AIRLOCK_BOX_MODE=${JSON.stringify(mode)}`,
   ...(target === undefined ? [] : ["--target", target]),
-  "src/box-cli.ts"
+  "packages/cli/src/box-cli.ts"
 ]
 const built = Bun.spawnSync({
   cmd: command,

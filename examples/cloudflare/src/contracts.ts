@@ -1,4 +1,4 @@
-import { defineToolContract, Schema } from "@skastr0/airlock/cloudflare"
+import { defineToolContract, Schema } from "@skastr0/airlock-cloudflare"
 
 /*
  * Virtual tools: no filesystem behind them, only the implementations in

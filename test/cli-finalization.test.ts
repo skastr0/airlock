@@ -47,7 +47,7 @@ describe("CLI failure finalization", () => {
       [
         "--preload",
         preload,
-        "src/cli.ts",
+        "packages/cli/src/cli.ts",
         "undo",
         "../invalid-act-id",
         "--workspace",

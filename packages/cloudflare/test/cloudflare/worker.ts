@@ -1,0 +1,431 @@
+/**
+ * The test Worker. It is bundled and run inside real workerd by
+ * `test/cloudflare-durable.test.ts`; nothing here runs in the test process.
+ *
+ * One Durable Object class serves every route. Each conformance test runs in
+ * its own object, so it has its own SQLite database, and reaches the adapters
+ * only through `ctx.storage`.
+ */
+import { DateTime, Effect, Layer, Result, Schema, type Scope } from "effect"
+import {
+  airlockClient,
+  airlockDurableObject,
+  AirlockError,
+  durableLedger,
+  durableOutboxStore,
+  type DurableStorage
+} from "../../src/index.ts"
+import {
+  Admission,
+  defineAirlock,
+  defineOutbox,
+  defineToolContract,
+  DispatchProvenance,
+  type EmissionId,
+  IdempotencyKey,
+  programRunner,
+  refused,
+  toolPolicy,
+  WebCrypto
+} from "@skastr0/airlock"
+import { portableToolHost } from "@skastr0/airlock"
+import type { ToolHost } from "@skastr0/airlock"
+import {
+  exampleContracts,
+  guestRunnerConformance,
+  LabelAdd,
+  LabelRemove,
+  ledgerConformance,
+  MailList,
+  MailSend,
+  outboxConformance,
+  outboxStoreConformance,
+  type Runner,
+  runWorkedExample
+} from "@skastr0/airlock/testing"
+
+interface ObjectState {
+  readonly storage: DurableStorage
+}
+interface Stub {
+  fetch(request: Request): Promise<Response>
+}
+interface Namespace {
+  idFromName(name: string): unknown
+  get(id: unknown): Stub
+}
+interface Env {
+  readonly CONFORMANCE: Namespace
+  readonly AIRLOCK: Namespace
+  readonly ALARMED: Namespace
+  readonly QUEUED: Namespace
+  readonly SOLO: Namespace
+  readonly HELD: Namespace
+  readonly EXPIRED: Namespace
+  readonly MAIL_TOKEN: string
+}
+
+type Test = { readonly name: string; readonly body: () => Effect.Effect<void, unknown, Scope.Scope> }
+
+const json = (value: unknown, status = 200) =>
+  new Response(JSON.stringify(value), { status, headers: { "content-type": "application/json" } })
+
+/** A world over this object's database. Asking for a world again starts from an empty one. */
+const worlds = (storage: DurableStorage) => {
+  const fresh = () => {
+    storage.sql.exec("DROP TABLE IF EXISTS airlock_emission")
+    storage.sql.exec("DROP TABLE IF EXISTS airlock_ledger")
+  }
+  // What a hostile or failing writer could do to the rows.
+  const faults = {
+    corruptRecord: (id: EmissionId) =>
+      Effect.sync(() => void storage.sql.exec("UPDATE airlock_emission SET record = '{not json' WHERE id = ?", id)),
+    tamperDispatch: (id: EmissionId) =>
+      Effect.sync(() =>
+        void storage.sql.exec("UPDATE airlock_emission SET dispatch = dispatch || ' ' WHERE id = ?", id))
+  }
+  return {
+    store: Effect.sync(() => {
+      fresh()
+      return { store: durableOutboxStore(storage), ledger: durableLedger(storage), ...faults }
+    }),
+    ledger: Effect.sync(() => {
+      fresh()
+      return { ledger: durableLedger(storage) }
+    }),
+    outbox: Effect.sync(() => {
+      fresh()
+      return {
+        store: durableOutboxStore(storage),
+        ledger: durableLedger(storage),
+        crypto: WebCrypto.layer,
+        ...faults
+      }
+    })
+  }
+}
+
+/** Collects the suites' tests instead of running them, so each can be run by name. */
+const collect = (storage: DurableStorage): ReadonlyArray<Test> => {
+  const tests: Array<Test> = []
+  const path: Array<string> = []
+  const runner: Runner = {
+    describe: (name, body) => {
+      path.push(name)
+      body()
+      path.pop()
+    },
+    test: (name, body) => void tests.push({ name: [...path, name].join(" > "), body })
+  }
+  const world = worlds(storage)
+  outboxStoreConformance(runner, "Durable Object SQLite", world.store)
+  ledgerConformance(runner, "Durable Object SQLite", world.ledger)
+  outboxConformance(runner, "Durable Object SQLite", world.outbox)
+  guestRunnerConformance(
+    runner,
+    "Airlock programs in a Durable Object",
+    Effect.map(world.outbox, (adapters) => ({
+      store: adapters.store,
+      ledger: adapters.ledger,
+      crypto: adapters.crypto,
+      runner: programRunner
+    }))
+  )
+  return tests
+}
+
+// ── a recorded read, split across two workerd processes ─────────────────────
+
+const mail = defineOutbox(exampleContracts)
+/** Module state: it is lost when the process ends, which is how a restart is observed. */
+let dispatchedInThisProcess = 0
+const encoder = new TextEncoder()
+const handlers = Layer.succeed(mail.Dispatcher, {
+  "mail.list": () =>
+    Effect.sync(() => {
+      dispatchedInThisProcess += 1
+      return {
+        outcome: { ids: [`listed-${crypto.randomUUID()}`] },
+        response: encoder.encode(`bytes-${crypto.randomUUID()}`),
+        truncated: false
+      }
+    }),
+  "mail.send": () => Effect.die("unused"),
+  "label.add": () => Effect.die("unused"),
+  "label.remove": () => Effect.die("unused")
+})
+
+const recordedRead = (storage: DurableStorage) =>
+  Effect.gen(function* () {
+    const outbox = yield* mail.Outbox
+    const performed = yield* outbox.perform(
+      {
+        key: IdempotencyKey.make("restart-proof/read-1"),
+        intent: { kind: "mail.list", dispatch: { mailbox: "inbox", query: "is:unread" } },
+        holdMillis: 0
+      },
+      // Policy-auto now needs an admitted grant; what this proves is the store, so a supervisor performs it.
+      new DispatchProvenance({ committedBy: "supervisor" })
+    )
+    return {
+      id: performed.emission.id,
+      ids: performed.emission.outcome.ids,
+      response: new TextDecoder().decode(performed.response),
+      dispatchedInThisProcess
+    }
+  }).pipe(
+    Effect.provide(
+      mail.layer.pipe(
+        Layer.provide(
+          Layer.mergeAll(durableOutboxStore(storage), durableLedger(storage), WebCrypto.layer, handlers)
+        )
+      )
+    )
+  )
+
+export class ConformanceObject {
+  constructor(private readonly state: ObjectState, private readonly env: Env) {}
+
+  async fetch(request: Request): Promise<Response> {
+    const url = new URL(request.url)
+    const storage = this.state.storage
+    try {
+      if (url.pathname === "/tests") return json(collect(storage).map((test) => test.name))
+      if (url.pathname === "/run") {
+        const test = collect(storage)[Number(url.searchParams.get("index"))]
+        if (test === undefined) return json({ ok: false, error: "no such test" }, 404)
+        return await Effect.runPromise(Effect.scoped(test.body())).then(
+          () => json({ ok: true, name: test.name }),
+          (error: unknown) => json({ ok: false, name: test.name, error: String(error) })
+        )
+      }
+      if (url.pathname === "/worked-example") {
+        const adapters = {
+          store: durableOutboxStore(storage),
+          ledger: durableLedger(storage),
+          crypto: WebCrypto.layer
+        }
+        return json(await Effect.runPromise(runWorkedExample(adapters)))
+      }
+      if (url.pathname === "/recorded-read") return json(await Effect.runPromise(recordedRead(storage)))
+      return json({ error: "unknown route" }, 404)
+    } catch (error) {
+      return json({ ok: false, error: String(error) }, 500)
+    }
+  }
+}
+
+// ── a user's Airlock, as they would write it ───────────────────────────────
+
+/** What the remote side saw, kept in module memory so a restart is observable. */
+const remote: Array<{ readonly tool: string; readonly detail: string }> = []
+
+const userAirlock = defineAirlock({
+  contracts: [MailList, MailSend, LabelAdd, LabelRemove],
+  implement: {
+    "mail.list": async ({ mailbox }) => {
+      // A slow provider, so a test can have one program running while others arrive.
+      if (mailbox === "slow") {
+        remote.push({ tool: "mail.list", detail: "slow started" })
+        await new Promise((resolve) => setTimeout(resolve, 400))
+      }
+      remote.push({ tool: "mail.list", detail: mailbox })
+      return { ids: [`${mailbox}-1`, `${mailbox}-2`] }
+    },
+    "mail.send": ({ to }, { env, idempotencyKey }: { env: Env; idempotencyKey: string }) => {
+      if (env.MAIL_TOKEN === "") return refused("mail connection is not configured")
+      // A provider that never answers, so a test can kill the object mid-dispatch.
+      if (to === "hang@example.com") return new Promise<never>(() => {})
+      remote.push({ tool: "mail.send", detail: `${to} with ${env.MAIL_TOKEN} as ${idempotencyKey}` })
+      return { messageId: `sent-${remote.length}` }
+    },
+    "label.add": ({ label }) => {
+      remote.push({ tool: "label.add", detail: label })
+      return { added: true }
+    },
+    "label.remove": ({ label }) => {
+      remote.push({ tool: "label.remove", detail: label })
+      return { removed: true }
+    }
+  },
+  policy: toolPolicy({
+    budget: { maxCalls: 8, maxInputBytes: 4_096 },
+    toolGrants: [
+      // Kept, so a replayed run is answered from the record and the provider is not asked again.
+      Admission.toolGrant(MailList, { id: "read-inbox", when: "now", retention: "keep" }),
+      Admission.toolGrant(MailSend, { id: "support-replies", where: { to: { endsWith: "@example.com" } } }),
+      Admission.toolGrant(LabelAdd, { id: "labels", when: "approved" })
+    ]
+  })
+})
+
+export const ExampleAirlock = airlockDurableObject(userAirlock)
+
+/** The same tools under grants whose time has already run out. */
+export const ExpiredAirlock = airlockDurableObject(defineAirlock({
+  contracts: [MailList, MailSend],
+  implement: {
+    "mail.list": ({ mailbox }) => {
+      remote.push({ tool: "mail.list", detail: `expired ${mailbox}` })
+      return { ids: [] }
+    },
+    "mail.send": () => {
+      remote.push({ tool: "mail.send", detail: "expired" })
+      return { messageId: "never" }
+    }
+  },
+  policy: toolPolicy({
+    budget: { maxCalls: 8, maxInputBytes: 4_096 },
+    toolGrants: [
+      Admission.toolGrant(MailList, { id: "read-once", when: "now", validUntil: DateTime.makeUnsafe("2020-01-01T00:00:00Z") }),
+      Admission.toolGrant(MailSend, { id: "send-once", when: "approved", validUntil: DateTime.makeUnsafe("2020-01-01T00:00:00Z") })
+    ]
+  })
+}))
+
+/** The same Airlock with room for one program to wait behind the one running. */
+export const QueuedAirlock = airlockDurableObject(userAirlock, { maxWaitingPrograms: 1 })
+
+/** The same Airlock with no line at all: one program runs and nothing waits. */
+export const SoloAirlock = airlockDurableObject(userAirlock, { maxWaitingPrograms: 0 })
+
+// ── a host that holds the way back ─────────────────────────────────────────
+
+const NoteWrite = defineToolContract({
+  name: "note.write",
+  version: "1",
+  effect: "apply",
+  input: Schema.Struct({ body: Schema.String }),
+  output: Schema.Struct({ written: Schema.Boolean })
+})
+
+/** What the host was asked to do, in order, so a test can see who reached it. */
+const held: Array<{ readonly did: string; readonly callId: string }> = []
+const holdingHost: ToolHost = {
+  ...portableToolHost,
+  validateGrant: () => Result.succeed(undefined),
+  recovery: {
+    prepare: (call) =>
+      Effect.sync(() => {
+        held.push({ did: "prepared", callId: call.callId })
+        return { callId: call.callId, recoveryId: `held-${held.length}`, heldUntil: DateTime.makeUnsafe("2099-01-01T00:00:00Z") }
+      }),
+    inspect: (reference) => Effect.succeed({ state: "done", reference }),
+    restore: (reference) =>
+      Effect.sync(() => {
+        held.push({ did: "restored", callId: reference.callId })
+        return { state: "restored", reference }
+      })
+  }
+}
+
+/** Its `fetch` fires the platform's wake-up by hand, so a test can see what an alarm reaches. */
+export class HeldAirlock extends airlockDurableObject(defineAirlock({
+  contracts: [NoteWrite],
+  host: holdingHost,
+  implement: {
+    "note.write": (_input, context) => {
+      held.push({ did: "written", callId: context.held?.callId ?? "not held" })
+      return { written: true }
+    }
+  },
+  policy: toolPolicy({
+    budget: { maxCalls: 4, maxInputBytes: 4_096 },
+    toolGrants: [Admission.toolGrant(NoteWrite, { id: "notes", when: "now" })]
+  })
+})) {
+  async fetch(): Promise<Response> {
+    await this.alarm()
+    return json({ alarmed: true })
+  }
+}
+
+/**
+ * The same Airlock with a short recovery alarm, plus a way to look at the
+ * stored states without opening the Airlock: opening it is itself recovery,
+ * so a test of the alarm must not do that.
+ */
+export class AlarmedAirlock extends airlockDurableObject(userAirlock, {
+  recoveryAlarmMillis: 1_500
+}) {
+  readonly #storage: DurableStorage
+  constructor(state: { readonly storage: DurableStorage }, env: Env) {
+    super(state as never, env)
+    this.#storage = state.storage
+  }
+  async fetch(): Promise<Response> {
+    const rows = this.#storage.sql.exec("SELECT state FROM airlock_emission ORDER BY state").toArray()
+    return json(rows.map((row) => row["state"]))
+  }
+}
+
+/** The trusted side of the example, driven over HTTP by the test. */
+const trusted = async (request: Request, env: Env): Promise<Response> => {
+  const url = new URL(request.url)
+  const airlock = airlockClient(env.AIRLOCK, url.searchParams.get("object") ?? "default")
+  const body = request.method === "POST" ? await request.json().catch(() => ({})) as Record<string, unknown> : {}
+  try {
+    switch (url.pathname) {
+      case "/airlock/run":
+        return json(await airlock.run({
+          runId: String(body["runId"]),
+          source: String(body["source"]),
+          ...(body["plan"] === undefined ? {} : { plan: String(body["plan"]) })
+        }))
+      case "/airlock/review": return json(await airlock.review({ source: String(body["source"]) }))
+      case "/airlock/approve-plan": return json(await airlock.approvePlan(String(body["plan"])))
+      case "/airlock/describe": return json(await airlock.describe())
+      case "/airlock/pending": return json(await airlock.pending())
+      case "/airlock/inspect": return json(await airlock.inspect(String(body["id"])))
+      case "/airlock/commit": return json(await airlock.commit(String(body["id"])))
+      case "/airlock/cancel": return json(await airlock.cancel(String(body["id"])))
+      case "/airlock/compensate": return json(await airlock.compensate(String(body["id"])))
+      case "/airlock/restore": return json(await airlock.restore(String(body["id"])))
+      case "/airlock/held": return json(held)
+      case "/airlock/remote": return json(remote)
+      default: return json({ error: "unknown route" }, 404)
+    }
+  } catch (error) {
+    return error instanceof AirlockError
+      ? json({ failed: true, code: error.code, message: error.message })
+      : json({ failed: true, code: "crashed", message: String(error) }, 500)
+  }
+}
+
+export default {
+  fetch(request: Request, env: Env): Promise<Response> {
+    const url = new URL(request.url)
+    if (url.pathname.startsWith("/airlock/")) return trusted(request, env)
+    if (url.pathname.startsWith("/queued/")) {
+      const rewritten = new URL(request.url)
+      rewritten.pathname = rewritten.pathname.replace("/queued/", "/airlock/")
+      return trusted(new Request(rewritten.toString(), request), { ...env, AIRLOCK: env.QUEUED })
+    }
+    if (url.pathname.startsWith("/solo/")) {
+      const rewritten = new URL(request.url)
+      rewritten.pathname = rewritten.pathname.replace("/solo/", "/airlock/")
+      return trusted(new Request(rewritten.toString(), request), { ...env, AIRLOCK: env.SOLO })
+    }
+    if (url.pathname.startsWith("/expired/")) {
+      const rewritten = new URL(request.url)
+      rewritten.pathname = rewritten.pathname.replace("/expired/", "/airlock/")
+      return trusted(new Request(rewritten.toString(), request), { ...env, AIRLOCK: env.EXPIRED })
+    }
+    if (url.pathname === "/held/alarm") {
+      return env.HELD.get(env.HELD.idFromName(url.searchParams.get("object") ?? "default")).fetch(request)
+    }
+    if (url.pathname.startsWith("/held/")) {
+      const rewritten = new URL(request.url)
+      rewritten.pathname = rewritten.pathname.replace("/held/", "/airlock/")
+      return trusted(new Request(rewritten.toString(), request), { ...env, AIRLOCK: env.HELD })
+    }
+    if (url.pathname.startsWith("/alarmed/")) {
+      if (url.pathname === "/alarmed/states") return env.ALARMED.get(env.ALARMED.idFromName("alarmed")).fetch(request)
+      const rewritten = new URL(request.url)
+      rewritten.pathname = rewritten.pathname.replace("/alarmed/", "/airlock/")
+      return trusted(new Request(rewritten.toString(), request), { ...env, AIRLOCK: env.ALARMED })
+    }
+    const name = url.searchParams.get("object") ?? "default"
+    return env.CONFORMANCE.get(env.CONFORMANCE.idFromName(name)).fetch(request)
+  }
+}
