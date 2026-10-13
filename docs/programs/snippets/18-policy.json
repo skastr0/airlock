@@ -1,11 +1,14 @@
 {
-  "schemaVersion": "airlock/admission-policy/v2",
-  "profile": "native-contained",
-  "principal": "agent:example",
-  "realm": "local",
-  "admittedBy": "operator:example",
-  "pathAllowlist": ["/absolute/workspace/**"],
-  "executableAllowlist": ["/usr/bin/touch"],
-  "executableEdges": [],
-  "endpointGrants": []
+  "schemaVersion": "airlock/tool-policy/v1",
+  "toolGrants": [
+    { "id": "write", "tool": "file.write", "when": "now" },
+    { "id": "build", "tool": "process.run", "when": "now", "host": { "profile": "native-contained" } },
+    { "id": "hook", "tool": "http.stage" }
+  ],
+  "resources": {
+    "path": ["/absolute/workspace"],
+    "executable": { "roots": ["/usr/bin/touch"], "edges": [] },
+    "endpoint": ["https://hooks.example.com/build"]
+  },
+  "budget": { "maxCalls": 64, "maxInputBytes": 1000000 }
 }

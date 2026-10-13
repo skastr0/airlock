@@ -751,10 +751,10 @@
 
 #page-heading(
   "11",
-  "Turn the ratchet",
+  "Profiles narrow",
   "CAVEAT",
-  "Zero configuration stays broad. A supervisor-selected profile may narrow authority; agent code cannot select a weaker profile.",
-  source: "DESIGN.md: The ratchet law  /  docs/macos-v1.md",
+  "With no policy a program works in its workspace and nowhere else. A supervisor's policy opens more, and a grant can only narrow the ceilings it sets; agent code cannot select a profile.",
+  source: "src/host/FilesystemHost.ts  /  docs/usage.md",
 )
 
 #grid(
@@ -762,13 +762,13 @@
   column-gutter: 9pt,
   profile-card(
     "Compatibility",
-    "Broad zero-config capability",
-    "Existing host authority, configuration, descendants, descriptors, filesystem, and network remain available. No containment claim.",
+    "Broad, never self-selected",
+    "Existing host authority, configuration, descendants, descriptors, filesystem, and network remain available. A compatibility process is not confined, so it may only run when a person approves it.",
     "IMPLEMENTED",
   ),
   profile-card(
     "Native-contained",
-    "Explicit macOS narrowing",
+    "Explicit confinement",
     "Private workspace, live-write denial, network denial, delta generation, and Hold-backed Apply for the supported subset.",
     "IMPLEMENTED",
   ),
@@ -785,8 +785,8 @@
 
 #v(12pt)
 #inline-code-block(
-  "airlock exec \\\n  --executable /bin/echo \\\n  --arg \"hello world\" \\\n  --cwd /tmp\n\nairlock run create.air \\\n  --workspace /absolute/workspace \\\n  --profile native-contained",
-  "THE RATCHET IS EXPLICIT",
+  "airlock-agent describe --workspace .\n\nairlock review job.air\nairlock approve-plan <plan id>\n\nairlock-agent run job.air \\\n  --workspace /absolute/workspace \\\n  --plan <plan id>",
+  "THE POLICY CARRIES THE PROFILE",
   status: "RUNNABLE",
   size: 7.6pt,
 )
@@ -794,8 +794,8 @@
 #v(11pt)
 #two-notes(
   callout(
-    "Law 02",
-    "Restrictions are opt-in. Once selected, missing enforcement fails closed; an Airlock program cannot widen the profile.",
+    "Deny by default",
+    "With no policy, a program reads and changes files in its workspace only; a process or the network needs a policy that grants it. Missing enforcement fails closed.",
   ),
   callout(
     "Native is not confidential",
@@ -805,7 +805,7 @@
 )
 
 #v(1fr)
-#source-line("Curation improves precision but never gates compatibility capability.")
+#source-line("A confined process merges back through Hold; an unconfined one always waits for a person.")
 
 #pagebreak()
 
@@ -817,8 +817,8 @@
   "12",
   "Admission owns authority",
   "RUNNABLE",
-  "A supervisor-owned policy binds paths, executable identities, endpoint selectors, profile, and principal.",
-  source: "src/admission/Admission.ts  /  README.md quickstart",
+  "One policy per session: tool grants under shared resource ceilings, a budget, and named flow rules.",
+  source: "src/core/session/ToolPolicy.ts  /  docs/usage.md",
 )
 
 #code-block(
@@ -966,7 +966,7 @@
 )
 
 #v(1fr)
-#source-line("A direct supervisor commit can cross before holdUntil; flush is the operation that honors the waiting window.")
+#source-line("A person commits or cancels; nothing crosses the wire without that decision. There is no flush and no daemon.")
 
 #pagebreak()
 
@@ -1302,8 +1302,8 @@
 #v(11pt)
 #two-notes(
   callout(
-    "Replay is sealed",
-    "A persistent run journal claims Plan identity before world work. Prior or concurrent execution rejects replay.",
+    "Replay returns receipts",
+    "Running the same run id again returns the recorded receipt for each call that already ran, instead of making it again. A file changed since stops the run.",
     tone: "cyan",
   ),
   callout(
