@@ -1,6 +1,7 @@
-# Publishes @skastr0/airlock to npm through trusted publishing (OIDC): no npm
-# token exists anywhere. A `v*` tag runs both platform gates; the publish job
-# then waits in the protected `release` environment for a maintainer.
+# Publishes the three @skastr0/airlock* packages to npm through trusted
+# publishing (OIDC): no npm token exists anywhere. A `v*` tag runs both
+# platform gates; the publish job then waits in the protected `release`
+# environment for a maintainer.
 name: release
 
 on:
@@ -47,28 +48,40 @@ jobs:
 
       - run: bun install --frozen-lockfile
 
-      - name: The tag names the package version
+      - name: The tag names every package version
         shell: bash
         run: |
           set -euo pipefail
-          version="$(node -p 'require("./package.json").version')"
-          test "${GITHUB_REF_NAME}" = "v${version}" || {
-            echo "tag ${GITHUB_REF_NAME} does not match package.json version ${version}" >&2
-            exit 1
-          }
-          echo "VERSION=${version}" >> "$GITHUB_ENV"
+          for pkg in airlock cloudflare cli; do
+            version="$(node -p "require('./packages/${pkg}/package.json').version")"
+            test "${GITHUB_REF_NAME}" = "v${version}" || {
+              echo "tag ${GITHUB_REF_NAME} does not match packages/${pkg}/package.json version ${version}" >&2
+              exit 1
+            }
+          done
+          echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
 
-      - run: npm pack --dry-run
+      - name: Pack check
+        shell: bash
+        run: |
+          set -euo pipefail
+          for pkg in airlock cloudflare cli; do
+            (cd "packages/${pkg}" && npm pack --dry-run)
+          done
 
       - name: Publish
         shell: bash
         run: |
           set -euo pipefail
-          if npm view "@skastr0/airlock@${VERSION}" version --prefer-online >/dev/null 2>&1; then
-            echo "@skastr0/airlock@${VERSION} is already published."
-          else
-            npm publish --access public
-          fi
+          for pair in "airlock:@skastr0/airlock" "cloudflare:@skastr0/airlock-cloudflare" "cli:@skastr0/airlock-cli"; do
+            pkg="${pair%%:*}"
+            name="${pair#*:}"
+            if npm view "${name}@${VERSION}" version --prefer-online >/dev/null 2>&1; then
+              echo "${name}@${VERSION} is already published."
+            else
+              (cd "packages/${pkg}" && npm publish --access public)
+            fi
+          done
 
       - name: GitHub release
         shell: bash

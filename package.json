@@ -1,7 +1,6 @@
 {
-  "name": "airlock",
-  "version": "0.1.0",
-  "private": true,
+ "name": "airlock",
+ "private": true,
   "type": "module",
   "packageManager": "bun@1.4.2",
   "workspaces": [
