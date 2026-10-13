@@ -1,0 +1,87 @@
+# Publishes @skastr0/airlock to npm through trusted publishing (OIDC): no npm
+# token exists anywhere. A `v*` tag runs both platform gates; the publish job
+# then waits in the protected `release` environment for a maintainer.
+name: release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  linux:
+    uses: ./.github/workflows/linux.yml
+
+  macos:
+    uses: ./.github/workflows/macos.yml
+
+  publish:
+    name: publish to npm
+    needs: [linux, macos]
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      contents: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.2
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+          registry-url: 'https://registry.npmjs.org'
+          package-manager-cache: false
+
+      # Trusted publishing needs npm 11.5.1 or later.
+      - run: npm install -g npm@latest
+
+      - run: bun install --frozen-lockfile
+
+      - name: The tag names the package version
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(node -p 'require("./package.json").version')"
+          test "${GITHUB_REF_NAME}" = "v${version}" || {
+            echo "tag ${GITHUB_REF_NAME} does not match package.json version ${version}" >&2
+            exit 1
+          }
+          echo "VERSION=${version}" >> "$GITHUB_ENV"
+
+      - run: npm pack --dry-run
+
+      - name: Publish
+        shell: bash
+        run: |
+          set -euo pipefail
+          if npm view "@skastr0/airlock@${VERSION}" version --prefer-online >/dev/null 2>&1; then
+            echo "@skastr0/airlock@${VERSION} is already published."
+          else
+            npm publish --access public
+          fi
+
+      - name: GitHub release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          awk -v v="${VERSION}" '
+            $0 ~ "^## " v "( |$)" { found = 1; next }
+            found && /^## / { exit }
+            found { print }
+          ' CHANGELOG.md > release-notes.md
+          test -s release-notes.md
+          gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1 \
+            || gh release create "${GITHUB_REF_NAME}" --verify-tag \
+                 --title "${GITHUB_REF_NAME}" --notes-file release-notes.md

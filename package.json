@@ -1,9 +1,20 @@
 {
   "name": "@skastr0/airlock",
   "version": "0.1.0",
+  "description": "A small typed language for agent code mode: every program is reviewed before it runs, and nothing leaves without a person's approval. Runs from a local CLI or a Cloudflare Durable Object.",
+  "keywords": [
+    "agents",
+    "code-mode",
+    "sandbox",
+    "approval",
+    "human-in-the-loop",
+    "effect",
+    "cloudflare",
+    "durable-objects",
+    "bun"
+  ],
   "type": "module",
   "packageManager": "bun@1.4.2",
-  "description": "Optional tools for reviewed local changes, checked undo, staged external intent, and durable receipts alongside Bash and Python.",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/skastr0/airlock.git"
@@ -25,7 +36,6 @@
   },
   "files": [
     "src",
-    "docs",
     "examples",
     "scripts/build-macos.ts",
     "scripts/build-linux.ts",
@@ -40,16 +50,13 @@
     "scripts/install-linux.sh",
     "scripts/uninstall-linux.sh",
     "ARCHITECTURE.md",
+    "CHANGELOG.md",
     "README.md",
     "LICENSE"
   ],
   "engines": {
     "bun": ">=1.4.0"
   },
-  "os": [
-    "darwin",
-    "linux"
-  ],
   "publishConfig": {
     "access": "public"
   },
