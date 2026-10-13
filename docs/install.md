@@ -11,7 +11,7 @@
 
 | | |
 | --- | --- |
-| operating system | macOS or Linux. `package.json` declares both. |
+| operating system | macOS or Linux for the sandboxed CLI. The `@skastr0/airlock/core` and `@skastr0/airlock/cloudflare` libraries install anywhere. |
 | runtime | Bun 1.4.0 or newer (`engines.bun`). |
 | architecture | macOS arm64/x64, or glibc Linux arm64/x64; Linux bundles are host builds. |
 | native runtime | macOS Seatbelt, or the probed Bubblewrap/Landlock/seccomp prerequisites in [`linux-v1.md`](linux-v1.md). |
@@ -48,29 +48,16 @@ evidence.
 
 ## Install from npm
 
-**Not executed in this environment** — there is nothing to install. The
-registry has no `@skastr0/airlock` package:
-
-```sh
-npm view @skastr0/airlock version
-```
-
-```text
-npm error code E404
-npm error 404 Not Found - GET https://registry.npmjs.org/@skastr0%2fairlock - Not found
-```
-
-When a release exists, the paired command surface installs with:
-
 ```sh
 npm install --global @skastr0/airlock
 airlock --version
 airlock-agent describe
 ```
 
-Until then, **a checkout is the only way to get Airlock** and the commands
-documented in [`usage.md`](usage.md). Do not read the npm block above as an
-available path.
+The npm-installed commands are Bun scripts, not self-contained binaries: they
+need Bun 1.4.0 or newer on `PATH`. For the compiled pair — which embeds its own
+runtime and needs nothing on `PATH` — build and install from a checkout as
+shown below.
 
 ## Install from a checkout
 
@@ -79,38 +66,33 @@ bun install
 bun run verify
 ```
 
-> **`bun install` rewrites `bun.lock` on a clean checkout.** The committed
-> lockfile's workspace-manifest section lists all seven packages under
-> `devDependencies`, while `package.json` splits four of them (`effect`,
-> `@effect/cli`, `@effect/platform`, `@effect/platform-bun`) into
-> `dependencies`. A plain `bun install` reconciles the lockfile to
-> `package.json` and reports `Saved lockfile`; resolution is otherwise identical
-> (`Checked 83 installs across 130 packages (no changes)`). Both were executed
-> here. If you must not touch a tracked file, use:
->
-> ```sh
-> bun install --frozen-lockfile
-> ```
->
-> which succeeds against the committed lockfile and leaves it byte-identical.
-
 `bun run verify` is the repository gate: `tsc --noEmit`, the complete
-platform-selected Vitest suite, and explicit Bun/host-native boundary evidence.
-The historical macOS run recorded below predates the Linux backend:
+platform-selected Vitest suite, explicit Bun/host-native boundary evidence,
+and the core and Cloudflare portability proofs. A current run on this
+repository (macOS 26.5.2 arm64, Bun 1.4.3):
 
 ```text
 $ tsc --noEmit
-$ vitest run --testTimeout 30000 --hookTimeout 30000
+$ bun scripts/run-tests.ts
 
- Test Files  54 passed | 1 skipped (55)
-      Tests  283 passed | 16 skipped (299)
-   Duration  61.33s
+ Test Files  105 passed | 5 skipped (110)
+      Tests  916 passed | 42 skipped (958)
+   Duration  171.81s
 
 $ bun run scripts/verify-bun-integrations.ts
 {"gate":"bun-process-runner","status":"passed","tests":11}
+{"gate":"process-run-tool","status":"passed","tests":8}
 {"gate":"macos-native-cell","status":"passed","assertions":8}
 {"gate":"macos-executable-edges","status":"passed","assertions":7}
 {"gate":"macos-inprocess-boundary","status":"passed","assertions":9}
+$ bun scripts/prove-core-portable.ts
+{"proof":"airlock-core-portable-v1","ok":true,"bundleBytes":1097437,
+ "hostGuardsInBundle":false,"emission":{"id":"emi_7e7b41…","state":"committed","status":204}}
+$ bun scripts/prove-cloudflare-portable.ts
+{"proof":"airlock-cloudflare-portable-v1","ok":true,
+ "bundleBytes":{"src/cloudflare/index.ts":1054814,
+                "test/cloudflare/worker.ts":1191565,
+                "examples/cloudflare/src/worker.ts":1060913}}
 ```
 
 ### Build the paired binaries
@@ -381,14 +363,16 @@ gate on Bun 1.4.0 and 1.4.2.
 ## What actually ran
 
 The macOS command transcripts earlier in this document were recorded on macOS
-26.5.2 arm64 with Bun 1.3.14 on 2026-08-03. The Linux implementation was
+26.5.2 arm64 with Bun 1.4.3 on 2026-10-13. The Linux implementation was
 executed directly on 2026-09-04 in a Debian 12 x86-64 orb (Linux 6.1.158+,
 glibc 2.36, Bun 1.3.11, Bubblewrap 0.12.0, Landlock ABI 2). Its native,
 distribution, shared workload, and Vouch evidence is recorded in
 [`evidence/linux-beachhead.md`](evidence/linux-beachhead.md).
 
-No npm package, hosted GitHub Actions result, Developer ID/notarized macOS
-artifact, or public Linux artifact is claimed here.
+The npm package publishes from the `v*` tag release workflow on GitHub
+Actions, with provenance attestations through npm trusted publishing.
+Developer ID/notarized macOS artifacts and public Linux artifacts are not
+claimed here.
 
 ## Next
 
