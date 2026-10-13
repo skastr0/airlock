@@ -33,7 +33,7 @@ const run = (args: ReadonlyArray<string>) => {
   return { stdout, stderr }
 }
 
-const processResult = run(["test", "test/process.test.ts"])
+const processResult = run(["test", "packages/cli/test/process.test.ts"])
 const processOutput = `${processResult.stdout}\n${processResult.stderr}`
 const processSummary = new RegExp(
   `(?:^|\\n)\\s*${expectedProcessTests} pass\\s*(?:\\n|$)`
@@ -62,7 +62,7 @@ if (process.platform === "linux") {
   const reportFile = join(reportDirectory, "report.json")
   const nativeResult = run([
     "scripts/run-tests.ts",
-    "test/linux-native.test.ts",
+    "packages/cli/test/linux-native.test.ts",
     "--reporter=json",
     `--outputFile=${reportFile}`
   ])
@@ -112,7 +112,7 @@ if (!existsSync("/usr/bin/sandbox-exec")) {
   const expectedProcessRunTests = 8
   const reportFile = join(mkdtempSync(join(tmpdir(), "airlock-process-run-")), "report.json")
   const result = run([
-    "--bun", "vitest", "run", "test/native-process-run.test.ts", "test/cli-native.test.ts",
+    "--bun", "vitest", "run", "packages/cli/test/native-process-run.test.ts", "test/cli-native.test.ts",
     "--reporter=json", `--outputFile=${reportFile}`
   ])
   const report = Schema.decodeUnknownSync(Schema.fromJsonString(Schema.Struct({

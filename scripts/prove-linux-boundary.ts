@@ -7,7 +7,7 @@
  * through the shipped adapters — never a reimplementation — and reports the
  * observed evidence as one Schema-encoded JSON value.
  *
- * The sixteen contenders are the same `test/fixtures` process fixture the macOS
+ * The sixteen contenders are the same `packages/cli/test/fixtures` process fixture the macOS
  * cross-process test drives, so the two platforms are held to one mechanism.
  *
  * What this does NOT prove: nothing here is a containment claim. The Linux
@@ -34,7 +34,7 @@ import { LinuxExclusiveRenameLive } from "../packages/cli/src/platform/linux/Lin
 import {
   LockContenderEvent,
   LockContenderResult
-} from "../test/fixtures/exclusive-file-lock-contract.ts"
+} from "../packages/cli/test/fixtures/exclusive-file-lock-contract.ts"
 
 const ProofId = Schema.Literal("airlock-linux-beachhead-v1")
 const BoundaryStatement = Schema.Literal(
@@ -159,7 +159,7 @@ const nonClaims = [
 
 const contenderFixture = fileURLToPath(
   new URL(
-    "../test/fixtures/exclusive-file-lock-contender.ts",
+    "../packages/cli/test/fixtures/exclusive-file-lock-contender.ts",
     import.meta.url
   )
 )
