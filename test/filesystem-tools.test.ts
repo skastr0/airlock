@@ -207,8 +207,12 @@ describe("filesystem tools", () => {
   )
 
   it.effect("confine a process exactly when the grant names a profile this machine provides", () =>
-    world(({ host, tools, context, unconfinedRuns }) =>
+    world(({ fs, host, tools, context, unconfinedRuns }) =>
       Effect.gen(function* () {
+        // The plain runner receives the file the binding reached, not the
+        // call's spelling of it: on merged-/usr systems `/bin/bash` binds as
+        // `/usr/bin/bash`.
+        const bash = yield* fs.realPath("/bin/bash")
         const input = Schema.decodeUnknownSync(ProcessRun.input)({ executable: "/bin/bash", args: ["-c", "true"], cwd: "." })
         const resources = [
           yield* host.resources.bind({ kind: "executable", selector: "/bin/bash", rights: ["invoke"], field: "executable" }).pipe(Effect.orDie),
@@ -223,7 +227,7 @@ describe("filesystem tools", () => {
         for (const parameters of others) {
           yield* tools["process.run"](input, yield* context(resources, { host: parameters }))
         }
-        expect(unconfinedRuns).toEqual(["/bin/bash", "/bin/bash", "/bin/bash"])
+        expect(unconfinedRuns).toEqual([bash, bash, bash])
         expect(yield* tools["process.run"](input, yield* context([resources[1]!]))).toBeInstanceOf(Refused)
       })
     )
