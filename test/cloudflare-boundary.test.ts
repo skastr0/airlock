@@ -13,10 +13,9 @@ const repository = resolve(import.meta.dirname, "..")
 const cloudRoot = join(repository, "packages", "cloudflare", "src")
 const coreRoot = join(repository, "packages", "airlock", "src")
 
-// The runtime boundary covers the adapter itself. `src/alchemy` is the
-// `./alchemy` subpath: recipe helpers that run under Node with `alchemy run`,
-// never inside a Worker, so the alchemy package may appear there and the
-// boundary does not judge it.
+// The runtime boundary covers the adapter itself. `alchemy/` in the source
+// tree is the `./alchemy` subpath: recipe helpers that run under Node with
+// `alchemy run`, never inside a Worker, so the boundary does not judge it.
 const files = readdirSync(cloudRoot, { recursive: true, encoding: "utf8" })
   .filter((file) => file.endsWith(".ts"))
   .filter((file) => !file.startsWith("alchemy/"))

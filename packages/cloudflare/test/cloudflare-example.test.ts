@@ -3,7 +3,7 @@ import { readFile } from "node:fs/promises"
 import { join } from "node:path"
 import { afterAll, describe, expect, it } from "vitest"
 import { startLocal } from "../../../examples/cloudflare/local.ts"
-import { airlockBindings, airlockCompatibility } from "../packages/cloudflare/src/alchemy/index.ts"
+import { airlockBindings, airlockCompatibility } from "../src/alchemy/index.ts"
 
 /**
  * `examples/cloudflare`, exactly as a user would write it, run in real
