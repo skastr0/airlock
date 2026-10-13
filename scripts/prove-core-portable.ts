@@ -2,7 +2,7 @@
 /**
  * Portability proof for the kernel.
  *
- * Bundles `src/core` the way a Workers-style runtime would load it: no Node
+ * Bundles `packages/airlock/src` the way a Workers-style runtime would load it: no Node
  * built-ins, no Bun, no `nodejs_compat`. Every import must resolve to code
  * that runs in a plain isolate, so a `node:` or `bun:` import anywhere in the
  * kernel's graph fails this build. The bundle is then loaded in a context

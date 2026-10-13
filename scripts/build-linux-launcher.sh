@@ -23,7 +23,7 @@ if [ "$(uname -s)" != "Linux" ]; then
 fi
 
 OUTPUT=${1:-dist/airlock-linux-launcher}
-SOURCE=${AIRLOCK_LINUX_LAUNCHER_SOURCE:-src/platform/linux/native/airlock-linux-launcher.c}
+SOURCE=${AIRLOCK_LINUX_LAUNCHER_SOURCE:-packages/cli/src/platform/linux/native/airlock-linux-launcher.c}
 
 if [ -e "$OUTPUT" ] || [ -L "$OUTPUT" ]; then
   echo "airlock linux launcher: refusing to replace existing artifact: $OUTPUT" >&2

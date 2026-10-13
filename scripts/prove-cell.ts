@@ -2,7 +2,7 @@
  * A runnable construction proof for the native-contained macOS Cell.
  *
  * This is deliberately an integration artifact, not a second Cell API: the
- * contracts and invariants remain in `src/cell`. The script creates only
+ * contracts and invariants remain in the kernel and CLI sources. The script creates only
  * disposable OS-temporary state and reports the observed boundary evidence as
  * one JSON value so CI and a human can independently inspect the claim.
  */
