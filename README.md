@@ -1,124 +1,132 @@
 <p align="center">
-  <img src="docs/assets/airlock-icon.png" width="128" alt="Airlock icon">
+  <img src="https://raw.githubusercontent.com/skastr0/airlock/main/docs/assets/airlock-icon.png" width="128" alt="Airlock icon">
 </p>
 
 # Airlock
 
-**Review, apply, and undo consequential local changes. Keep Bash and Python.**
+**A small typed language for agent code mode. Every program is reviewed before
+it runs, and nothing leaves without a person's approval.**
 
-Airlock is an optional tool for work where replacing the wrong file or directory
-would be expensive. Generate a candidate with the tools you already use; stage
-it against one target; review it; let a supervisor apply exactly the approved
-digest. Keep a receipt for checked undo and durable recovery.
+An agent writes a short `.air` program. It cannot touch anything directly:
+each thing it wants done is a call to a granted tool — files, processes,
+HTTP — and each call either runs at once, waits for a person, or is refused.
+The whole program is checked and reviewed before anything runs, every call
+returns a receipt, and a person can undo what a completed call changed.
 
-**Developer preview · macOS + Linux · MIT.** The `change` workflow is implemented
-with [executed Linux integration and recovery evidence](docs/evidence/repeated-use.md).
-This is not production certification or macOS execution evidence. Existing
-compatibility, `.air`, Cell, Hold, and Outbox features remain available; they
-are not prerequisites for this first journey.
+The same kernel runs the same way as a local CLI and as a Cloudflare Durable
+Object, so agent code mode has one design on every host.
 
-## First journey: a reviewed directory replacement
+**Developer preview · macOS + Linux · MIT.** Requires
+[Bun](https://bun.sh) 1.4 or newer.
 
-With `airlock` and `airlock-agent` installed and on PATH, prepare a disposable
-fixture from this checkout (Bash and Python 3 required):
+## A first program
 
-```sh
-DEMO="$(bash examples/changes/prepare.sh)"
-export AIRLOCK_HOME="$DEMO/airlock-home"
-airlock-agent change stage --source "$DEMO/candidate" --target "$DEMO/live"
-```
-
-Copy the proposal ID from the JSON response into `ID`. Review the target,
-baseline, candidate, and full digest before approval:
+Ask what a workspace allows and how to write a program:
 
 ```sh
-airlock-agent change review "$ID"
-airlock-agent change review "$ID" --diff
+airlock-agent describe --workspace .
 ```
 
-As the supervisor, set `DIGEST` to the reviewed `sha256:` value with all 64 hex
-digits, then apply it. Set `RECEIPT_ID` from the successful apply response:
+`actions` lists each tool a program may call, the one record it takes, what it
+returns, and whether a call runs at once. `description` is the agent's
+briefing, generated from the policy, so it is always current.
+
+```text
+let note = file.read({ path: "notes.md", format: "text" })
+assert note.state == "done", "could not read notes.md"
+let w = file.write({ path: "notes.bak", content: "backed up" })
+return { wrote: w.state }
+```
 
 ```sh
-airlock change apply "$ID" --expect-digest "$DIGEST"
-airlock change status "$ID"
-airlock change undo "$RECEIPT_ID"
+airlock-agent run backup.air --workspace .
 ```
 
-Apply runs no arbitrary command: it installs the immutable staged candidate
-only if the target still matches its recorded baseline. Editing the original
-source after staging cannot alter the approved proposal. Undo refuses drift;
-it is not an unconditional restore. Output is JSON; bounded per-path text
-previews are opt-in with `--diff`. No `.air` program or native-contained setup
-is needed. Try the scratch-only interactive demo directly from this checkout:
+Every call returns one receipt:
+
+| `state` | Meaning |
+| --- | --- |
+| `done` | It ran. `result` is what it returned; `id` names the call. |
+| `staged` | It was recorded and waits for a person. `id` names it. |
+| `refused` | Nothing happened. `refusal.code` and `refusal.message` say why. |
+
+A program may read `receipt.result` only where the state is known to be
+`done`. The full language, the run report and every stop reason are in
+[docs/usage.md](docs/usage.md).
+
+## What a person decides
+
+With no policy file, a program may read and change files in its workspace and
+nothing else. A policy grants more: which tools, with which resource ceilings
+and budget, and which calls run at once.
+
+`now` is accepted only where the machine can put things back: reads, file
+changes through Hold, and a `process.run` confined in a private workspace.
+A request that leaves the machine — `http.stage` — **never** runs without a
+person. A person commits, cancels or undoes:
 
 ```sh
-bash examples/changes/demo.sh
+airlock pending                 # calls waiting for a decision
+airlock commit <id>             # approve it and carry it out now
+airlock undo <id>               # put back what a completed call changed
 ```
 
-Read the [complete walkthrough and command contract](docs/changes.md), including
-cancel, recovery, and deliberate drift checks.
+A person can also approve a program's plan before it runs, so reads and fully
+fixed requests never wait again; anything whose content is not known until the
+run is approved as an exact batch, after it exists. See
+[docs/usage.md](docs/usage.md#3-the-persons-commands).
 
-For repeated work, use `airlock change inbox --human` to find proposals and
-`airlock change approve ID` for interactive approval of the displayed digest.
-Read beyond truncated previews with `change content`; explicitly retire and
-collect review snapshots when finished. The [configuration handoff example](examples/config-publish/README.md)
-keeps one target and home across submissions and never approves on the agent's
-behalf. See the [action plan and acceptance gates](docs/repeated-use-plan.md).
+## Reviewed local changes
+
+For work without a program, `airlock change` stages a candidate directory
+against a target, reviews it as a full diff, and applies exactly the approved
+digest — with checked undo and durable recovery. The agent can only stage and
+review. See [docs/changes.md](docs/changes.md).
 
 ## Where the guarantee stops
 
-- **Optional is not enforced.** An agent with ambient direct access can bypass
-  Airlock. Enforcement requires external ownership of production authority;
-  the reduced CLI alone is not a security boundary.
-- **Local replacement, not deployment.** Use quiescent, ordinary user-owned
-  regular files or directory trees: no symlinks, hardlinks, or special files.
-  Only bytes and ordinary POSIX modes are covered—not ACLs, xattrs, ownership,
-  or timestamps. No live database safety or service restart is provided.
-- **A directory is replaced whole.** Entries absent from the candidate leave
-  the live target through Hold. Moving the old target aside and installing the
-  candidate takes two renames, not an atomic swap or zero-downtime update.
-- **Recovery has limits.** No confidentiality or same-UID malicious-tamper
-  defense; no force or replay. Undo refuses changes made since apply. Review
-  snapshots require explicit retirement and collection; receipts and world
-  recovery payloads remain separately retained. Snapshot reservations are not
-  a total disk cap. Do not treat this as an unlimited backup system.
+- **Enforcement needs ownership.** An agent with ambient direct access can
+  bypass Airlock; enforcement requires external ownership of production
+  authority.
+- **Local replacement, not deployment.** Reviewed changes cover ordinary
+  user-owned files and directory trees: bytes and POSIX modes, not ACLs,
+  xattrs, ownership or timestamps. No live-database safety or service restart.
+- **Containment is not confidentiality.** `native-contained` fences live
+  writes and network and is platform-dependent (`airlock doctor` reports what
+  a machine enforces); it does not claim VM isolation.
+- **Honest uncertainty.** A dispatch that may have reached the wire is never
+  retried; it ends `uncertain`.
 
-## Existing tools, still optional
+[docs/security-model.md](docs/security-model.md) states the full model.
 
-Airlock also supports structured `.air` programs and four effect classes:
-`Capture`, `Invoke`, `Apply`, and `RequestExternal`. Hold retains displaced local
-state; Outbox stages external requests for separate supervisor dispatch.
-These features complement ordinary shell work rather than require replacing it.
+## For a host or a cloud
 
-The zero-config **compatibility** profile keeps broad Bash-like host authority;
-child writes and network sends do not acquire Hold or Outbox guarantees.
-**Native-contained** is an explicit, platform-dependent restriction for private
-workspace computation. Its Linux prerequisites belong to that feature, not to
-the new direct `change` journey. **VM-enclosed** remains future direction.
+Airlock is a storage-agnostic kernel (`@skastr0/airlock/core`) plus a host
+that supplies files, processes and the network. A new host writes the store,
+ledger, dispatcher and tool-host layers and runs the kernel's conformance
+suites. `@skastr0/airlock/cloudflare` runs the same programs inside a Durable
+Object, and `@skastr0/airlock/alchemy` deploys it. See
+[ARCHITECTURE.md](ARCHITECTURE.md).
 
-Airlock is built as a storage-agnostic kernel (`src/core`, published as
-`@skastr0/airlock/core`) and a host that supplies files, processes and the
-network. Its guarantees are enforced by types and tests rather than by
-convention; [ARCHITECTURE.md](ARCHITECTURE.md) describes the design as built.
+## Documentation
 
-## Documentation and development
+- [docs/usage.md](docs/usage.md) — writing and running `.air`, the policy, the person's commands
+- [docs/language.md](docs/language.md) — the type system and its roadmap
+- [docs/decisions.md](docs/decisions.md) — the decision log
+- [docs/install.md](docs/install.md) — install, build and platform requirements
+- [ARCHITECTURE.md](ARCHITECTURE.md) — the design as built
+- [docs/security-model.md](docs/security-model.md) — what is and is not defended
+- [docs/macos-v1.md](docs/macos-v1.md) · [docs/linux-v1.md](docs/linux-v1.md) — the platform sandboxes
 
-- [Changes: walkthrough and boundaries](docs/changes.md)
-- [Example fixture](examples/changes/README.md)
-- [Existing installation and build guide](docs/install.md)
-- [Existing language and harness usage](docs/usage.md)
-- [Security model](docs/security-model.md)
-- [Architecture](ARCHITECTURE.md)
-- [macOS profiles](docs/macos-v1.md) · [Linux profiles](docs/linux-v1.md)
-- [Executed evidence](docs/evidence/) — bounded claims, distinct from targets
-
-For checkout development:
+## Development
 
 ```sh
 bun install --frozen-lockfile
 bun run verify
 ```
+
+`bun run verify` runs the typecheck, the test suite, the Bun and platform
+integration gates, and the portability proofs.
 
 ## License
 
