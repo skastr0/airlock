@@ -5,8 +5,18 @@ import { airlock, type Env, mailbox } from "./airlock.ts"
  * The Durable Object: this one export is the whole server side of Airlock. It
  * runs Airlock programs (.air), admits every action they call against the
  * policy, and holds what they stage until a supervisor decides.
+ *
+ * `mailbox()` is only for the stand-in mail service: the object runs the
+ * implementations, so only the object sees what they did.
  */
-export const Airlock = airlockDurableObject(airlock)
+export class Airlock extends airlockDurableObject(airlock) {
+  mailbox() {
+    return mailbox
+  }
+}
+
+const mailboxOf = (env: Env, session: string) =>
+  (env.AIRLOCK.get(env.AIRLOCK.idFromName(session)) as { mailbox(): Promise<typeof mailbox> }).mailbox()
 
 const json = (value: unknown, status = 200) =>
   new Response(JSON.stringify(value, null, 2), { status, headers: { "content-type": "application/json" } })
@@ -21,7 +31,8 @@ const json = (value: unknown, status = 200) =>
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url)
-    const session = airlockClient(env.AIRLOCK, url.searchParams.get("session") ?? "demo")
+    const name = url.searchParams.get("session") ?? "demo"
+    const session = airlockClient(env.AIRLOCK, name)
     const body = request.method === "POST"
       ? await request.json().catch(() => ({})) as { runId?: string; source?: string; id?: string; plan?: string }
       : {}
@@ -39,7 +50,7 @@ export default {
         case "POST /commit": return json(await session.commit(body.id ?? ""))
         case "POST /cancel": return json(await session.cancel(body.id ?? ""))
         case "POST /compensate": return json(await session.compensate(body.id ?? ""))
-        case "GET /mailbox": return json(mailbox)
+        case "GET /mailbox": return json(await mailboxOf(env, name))
         default: return json({ error: "not found" }, 404)
       }
     } catch (error) {

@@ -13,15 +13,21 @@ import { airlockBindings, airlockCompatibility } from "../src/alchemy/index.ts"
  * `examples/cloudflare/local.ts` starts workerd with the binding read off the
  * Alchemy recipe the example deploys with, so the recipe and what is proven
  * here cannot drift apart.
+ *
+ * `AIRLOCK_EXAMPLE_URL` points the same checks at a fresh deployment instead;
+ * a used one fails them, since the mailbox and the Outbox keep earlier runs.
  */
-const workerd = await startLocal()
-afterAll(() => workerd.dispose())
+const deployed = process.env.AIRLOCK_EXAMPLE_URL
+const workerd = deployed === undefined ? await startLocal() : undefined
+afterAll(() => workerd?.dispose())
 
-const request = async <Result>(method: "GET" | "POST", path: string, body?: unknown): Promise<Result> =>
-  (await (await workerd.dispatchFetch(`http://example.test${path}`, {
-    method,
-    ...(body === undefined ? {} : { body: JSON.stringify(body) })
-  })).json()) as Result
+const request = async <Result>(method: "GET" | "POST", path: string, body?: unknown): Promise<Result> => {
+  const init = { method, ...(body === undefined ? {} : { body: JSON.stringify(body) }) }
+  const response = workerd === undefined
+    ? await fetch(`${deployed}${path}`, init)
+    : await workerd.dispatchFetch(`http://example.test${path}`, init)
+  return (await response.json()) as Result
+}
 
 const triage = await readFile(join(import.meta.dirname, "..", "examples", "cloudflare", "triage.air"), "utf8")
 
@@ -55,7 +61,7 @@ describe("examples/cloudflare in workerd", () => {
     readonly reason?: string
     readonly toolCalls: number
   }
-  const did = async () => (await request<ReadonlyArray<Entry>>("GET", "/mailbox")).map((entry) => entry.did)
+  const did = async (session: string) => (await request<ReadonlyArray<Entry>>("GET", `/mailbox?session=${session}`)).map((entry) => entry.did)
   const run = (session: string, runId: string, source: string) =>
     request<Outcome>("POST", `/run?session=${session}`, { runId, source })
 
@@ -121,7 +127,7 @@ describe("examples/cloudflare in workerd", () => {
   })
 
   it("refuses before the run a program whose fixed call the policy does not grant, naming the call and why", async () => {
-    const before = await did()
+    const before = await did("other")
     const outcome = await run("other", "run-2", `
       let sent = mail.send({ to: "eve@elsewhere.test", subject: "s", body: "b" })
       if sent.state == "refused" { return sent.refusal }
@@ -133,21 +139,31 @@ describe("examples/cloudflare in workerd", () => {
       refusals: [{ nodeId: "call:1", field: "$", reason: "grant" }]
     })
     // Nothing was done and nothing waits for approval.
-    expect(await did()).toEqual(before)
+    expect(await did("other")).toEqual(before)
     expect(await request("GET", "/pending?session=other")).toEqual([])
   })
 
   it("stops a program at the policy's call budget, and refuses before the run one whose loops could pass the loop budget", async () => {
-    const before = (await did()).length
+    const before = (await did("budget")).length
     const calls = await run("budget", "run-3", `
       for index in 0..9 { mail.list({ mailbox: "inbox" }) }
       return "finished"`)
     expect(calls).toEqual({ ok: false, reason: "tool_call_limit", toolCalls: 9 })
-    expect((await did()).length).toBe(before + 8)
+    expect((await did("budget")).length).toBe(before + 8)
     const loop = await run("budget", "run-4", `
       for index in 0..5000 { let twice = index * 2 }
       return mail.list({ mailbox: "inbox" })`)
     expect(loop).toEqual({ ok: false, reason: "review_refused", toolCalls: 0, refusals: [{ nodeId: "$", field: "$", reason: "bound" }] })
-    expect((await did()).length).toBe(before + 8)
+    expect((await did("budget")).length).toBe(before + 8)
+  })
+
+  it("stops a program that only computes at its step budget, which deployed Workers need: their clock stands still while it runs", async () => {
+    const before = await did("compute")
+    const heavy = Array.from({ length: 119 }, (_, index) => `index * ${index + 1}`).join(" + ")
+    const outcome = await run("compute", "run-5", `
+      for index in 0..999 { let heavy = ${heavy} }
+      return mail.list({ mailbox: "inbox" })`)
+    expect(outcome).toMatchObject({ ok: false, reason: "step_limit", toolCalls: 0 })
+    expect(await did("compute")).toEqual(before)
   })
 })

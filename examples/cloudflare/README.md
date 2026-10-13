@@ -26,7 +26,7 @@ You write four files:
 | --- | --- | --- |
 | `src/contracts.ts` | What each tool takes and returns | 61 |
 | `src/airlock.ts` | What each tool does, and what a program may do | 72 |
-| `src/worker.ts` | The Durable Object export and your trusted routes | 44 |
+| `src/worker.ts` | The Durable Object export and your trusted routes | 61 |
 | `alchemy.run.ts` | The Worker and its binding on Cloudflare | 24 |
 
 The three Worker files import from `@skastr0/airlock/cloudflare` and nothing
@@ -110,17 +110,23 @@ bun --bun ../../node_modules/alchemy/bin/cli.js profile edit --profile default -
 MAIL_TOKEN=... bun --bun ../../node_modules/alchemy/bin/cli.js deploy
 ```
 
-The Cloudflare login is OAuth in the browser; no API token is needed. The
-repository's `mise.toml` sets `ALCHEMY_HOME` to `.alchemy-home` in the checkout,
-so the profile and its credentials stay with this repository instead of the
-`~/.alchemy` shared by other projects. Without mise, prefix each command with
-`ALCHEMY_HOME="$(git rev-parse --show-toplevel)/.alchemy-home"`.
+The Cloudflare login is OAuth in the browser; no API token is needed. Choose
+**Basic Scopes**: Cloudflare refuses Alchemy's "All Scopes" with
+`invalid_scope` (`workers-scripts.bind`) before it shows a consent page. The
+login asks its questions only in a terminal that no coding agent runs, since
+Alchemy treats `CURSOR_AGENT`, `CLAUDECODE` and the like as non-interactive.
+The repository's `mise.toml` sets `ALCHEMY_HOME` to `.alchemy-home` in the
+checkout, so the profile and its credentials stay with this repository instead
+of the `~/.alchemy` shared by other projects. Without mise, prefix each command
+with `ALCHEMY_HOME="$(git rev-parse --show-toplevel)/.alchemy-home"`.
 
 Alchemy needs a Cloudflare account for `deploy` and for its own `dev`
-command, which is why the local run above does not go through it. This
-repository has never deployed the example: the recipe is checked by loading
-the stack and by starting workerd from the same bindings, not against a live
-account.
+command, which is why the local run above does not go through it. The test
+that walks the local run also walks a deployment: point it at a fresh one with
+`AIRLOCK_EXAMPLE_URL=<the deploy's url> bunx vitest run test/cloudflare-example.test.ts`.
+A fresh one, because the Durable Objects keep every earlier run. On a deployed
+Worker the clock stands still while a program computes, so only the step budget
+stops a program that never calls anything; the test checks that too.
 
 ## The flow
 
